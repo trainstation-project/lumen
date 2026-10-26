@@ -1,3 +1,5 @@
+"""Benchmarks single lumen ops against PyTorch on one device and saves the results for the dashboard."""
+
 import datetime
 import json
 import math
@@ -21,13 +23,16 @@ try:
 except ImportError:
     torch = None
 
+# Device benchmarked and where its results are saved; ``use`` switches both.
 DEVICE = "mps"
 DATA = pathlib.Path(__file__).parent / "data" / "elementwise_mps"
 GPUS = ("A100", "H100", "H200", "B200", "B300", "R200")
+# Element counts each op is measured at.
 SIZES = tuple(1 << k for k in range(12, 27, 2))
 SQUARE_SIZES = tuple(1 << k for k in range(12, 25, 2))
 FLOATS = ("float32", "bfloat16")
 INTEGERS = ("int32",)
+# Published peak memory bandwidth (GB/s) and float32 TFLOPS of known devices.
 SPEC_MEMORY_GBS = {
     "Apple M4 Pro": 273,
     "NVIDIA A100-SXM4-80GB": 2039,
@@ -36,14 +41,20 @@ SPEC_MEMORY_GBS = {
     "NVIDIA B200": 8000,
 }
 SPEC_TFLOPS = {"NVIDIA A100-SXM4-80GB": 19.5, "NVIDIA H100 80GB HBM3": 66.9, "NVIDIA H200": 66.9, "NVIDIA B200": 80}
+# GPU clocks (GHz) for estimating peak TFLOPS of devices without a published figure.
 GPU_GHZ = {"Apple M4 Pro": 1.578}
 LANES_PER_CORE = 128
+# Row length of the matrix inputs; ``EMBEDDING`` is the feature size of the linear cross entropy.
 ROW = 1024
 EMBEDDING = 512
 DOT = (((1,), (0,)), ((), ()))
 
 
 class Op(NamedTuple):
+    """A benchmarked op: its ``lumen`` and ``torch`` functions (for ``sized`` ops, functions of n
+    returning them), an ``inputs(n, dtype, rng)`` maker of ``(array, dtype)`` pairs, the dtypes and
+    sizes it runs at, and ``flops(n)`` for compute-bound ops (None: memory-bound)."""
+
     kind: str
     formula: str
     lumen: Callable
@@ -56,23 +67,30 @@ class Op(NamedTuple):
 
 
 def in_float32(op):
+    """``op`` computed in float32 and cast back to its first input's dtype."""
     return lambda *xs: op(*[x.to(dtype="float32") for x in xs]).to(dtype=xs[0].dtype)
 
 
 def rows(n):
+    """Rows of ``ROW`` elements in ``n`` elements."""
     return n // ROW
 
 
 def side(n):
+    """Side of a square matrix of ``n`` elements."""
     return math.isqrt(n)
 
 
 def uniform(lo, hi, arity=1):
+    """Input maker of ``arity`` uniform ``[lo, hi)`` vectors."""
     return lambda n, dtype, rng: [(rng.uniform(lo, hi, n).astype(np.float32), dtype) for _ in range(arity)]
 
 
 def ints(arity=1, shift=False):
+    """Input maker of ``arity`` int32 vectors in ``[-1000, 1000)``, plus shift amounts in ``[0, 32)`` with ``shift``."""
+
     def inputs(n, dtype, rng):
+        """The inputs of size ``n``."""
         xs = [(rng.integers(-1000, 1000, n).astype(np.int32), dtype) for _ in range(arity)]
         return xs + ([(rng.integers(0, 32, n).astype(np.int32), dtype)] if shift else [])
 
@@ -80,22 +98,28 @@ def ints(arity=1, shift=False):
 
 
 def matrix(n, dtype, rng):
+    """One uniform ``[n / ROW, ROW]`` matrix."""
     return [(rng.uniform(-1, 1, (rows(n), ROW)).astype(np.float32), dtype)]
 
 
 def square(n, dtype, rng):
+    """Two square matrices scaled so their product's entries stay near unit size."""
     scale = np.sqrt(3 / side(n))
     return [((rng.uniform(-1, 1, (side(n), side(n))) * scale).astype(np.float32), dtype) for _ in range(2)]
 
 
 def vocabulary(n, dtype, rng):
+    """Hidden states and weights of ``side(n)`` rows by ``EMBEDDING`` features, and a class per row."""
     s = side(n)
     h, w = (rng.uniform(-1, 1, (s, EMBEDDING)).astype(np.float32) for _ in range(2))
     return [(h, dtype), (w, dtype), (rng.integers(0, s, s).astype(np.int32), "int32")]
 
 
 def lookup(updates=False):
+    """Input maker of a ``[4k, ROW]`` table and ``k`` distinct row indices (plus ``[k, ROW]`` updates with ``updates``)."""
+
     def inputs(n, dtype, rng):
+        """The inputs of size ``n``."""
         k = rows(n)
         x = (rng.uniform(-1, 1, (4 * k, ROW)).astype(np.float32), dtype)
         index = (rng.permutation(4 * k)[:k].astype(np.int32), "int32")
@@ -106,15 +130,20 @@ def lookup(updates=False):
 
 
 def along(n, dtype, rng):
+    """A matrix and an in-row column index for each of its elements."""
     return matrix(n, dtype, rng) + [(rng.integers(0, ROW, (rows(n), ROW)).astype(np.int32), "int32")]
 
 
 def halves(n, dtype, rng):
+    """Two vectors of ``n / 2`` elements."""
     return [(rng.uniform(-1, 1, n // 2).astype(np.float32), dtype) for _ in range(2)]
 
 
 def at_one(update=False):
+    """Input maker of a vector, optionally an ``n / 2`` update, and the index 1."""
+
     def inputs(n, dtype, rng):
+        """The inputs of size ``n``."""
         x = [(rng.uniform(-1, 1, n).astype(np.float32), dtype)]
         u = [(rng.uniform(-1, 1, n // 2).astype(np.float32), dtype)] if update else []
         return x + u + [(np.array(1, np.int32), "int32")]
@@ -123,33 +152,40 @@ def at_one(update=False):
 
 
 def nothing(n, dtype, rng):
+    """No inputs (factory ops)."""
     return []
 
 
 def seeds(n, dtype, rng):
+    """A random-bits seed and start counter."""
     return [(np.array(7, np.uint64), "uint64"), (np.array(0, np.uint64), "uint64")]
 
 
 def unary(formula, lf, tf, lo=-1.0, hi=1.0, dtypes=FLOATS):
+    """An elementwise op of one float input."""
     return Op("unary", formula, lf, tf, uniform(lo, hi), dtypes)
 
 
 def binary(formula, lf, tf, lo=-1.0, hi=1.0, kind="binary"):
+    """An elementwise op of two float inputs."""
     return Op(kind, formula, lf, tf, uniform(lo, hi, 2))
 
 
 def bitwise(formula, lf, tf, arity=1, shift=False):
+    """An elementwise op of one or two int32 inputs (the second a shift amount with ``shift``)."""
     kind = "unary" if arity == 1 and not shift else "binary"
     return Op(kind, formula, lf, tf, ints(arity, shift), INTEGERS)
 
 
 def lce(h, w, target):
+    """PyTorch reference of ``linear_cross_entropy``: each row's loss stacked over its log-sum-exp."""
     logits = h.float() @ w.float().T
     lse = torch.logsumexp(logits, -1)
     return torch.stack([lse - logits.gather(1, target.long()[:, None])[:, 0], lse])
 
 
 def updated(x, u, i):
+    """``x`` with ``u`` written from index 1 (the dynamic_update_slice reference)."""
     y = x.clone()
     y[1 : 1 + u.shape[0]] = u
     return y
@@ -363,6 +399,7 @@ OPS = {
 
 
 def gpu_cores():
+    """GPU core count of this Mac, or None elsewhere."""
     if platform.system() != "Darwin":
         return None
     out = subprocess.run(["system_profiler", "SPDisplaysDataType"], capture_output=True, text=True).stdout
@@ -371,6 +408,7 @@ def gpu_cores():
 
 
 def peak_tflops(device):
+    """Peak float32 TFLOPS of ``device``: published, or cores × 128 lanes × 2 × clock."""
     if device in SPEC_TFLOPS:
         return SPEC_TFLOPS[device]
     cores, ghz = gpu_cores(), GPU_GHZ.get(device)
@@ -392,10 +430,12 @@ def use(device):
 
 
 def synchronize(module):
+    """The device's synchronize function in ``module`` (lumen or torch)."""
     return getattr(module, DEVICE).synchronize
 
 
 def device_name():
+    """Name of the benchmarked GPU (CUDA) or this machine's chip."""
     if DEVICE == "cuda":
         query = ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"]
         return subprocess.run(query, capture_output=True, text=True).stdout.splitlines()[0].strip()
@@ -405,11 +445,13 @@ def device_name():
     return platform.processor() or platform.machine()
 
 
+# Rotated input sets cover at least this many bytes so runs don't hit in cache; best of ROUNDS rounds.
 ROTATION_BYTES = 512 << 20
 ROUNDS = 3
 
 
 def per_call(run, sets, sync, batches=3):
+    """Best mean microseconds per call over ``batches`` timed batches, cycling through ``sets`` after a warm-up."""
     reps = max(len(sets), 20)
     for args in sets:
         run(*args)
@@ -426,18 +468,22 @@ def per_call(run, sets, sync, batches=3):
 
 
 def rotating(run, sets):
+    """A call taking a set index, each set with its own output, and the index sets to cycle."""
     outs = [None] * len(sets)
 
     def call(k):
+        """Runs set ``k``."""
         outs[k] = run(k, *sets[k])
 
     return call, [[k] for k in range(len(sets))]
 
 
 def chained(run, sets):
+    """Like :func:`rotating`, but each call takes the previous call's output as its first input."""
     last = [None]
 
     def call(k):
+        """Runs set ``k`` on the last output."""
         args = sets[k] if last[0] is None else [last[0], *sets[k][1:]]
         last[0] = outputs(run(k, *args))[0]
 
@@ -445,13 +491,16 @@ def chained(run, sets):
 
 
 def rotation(per_call):
+    """Input sets to rotate so they total at least ``ROTATION_BYTES`` (2 to 4096)."""
     return min(max(-(-ROTATION_BYTES // per_call), 2), 4096)
 
 
 def kernel_code(f, args):
+    """The first launched kernel's source and the plan text of compiled ``f`` on ``args``."""
     with tempfile.TemporaryDirectory() as d:
         f.dump_code(d, *args)
         files = {p.name: p.read_text() for p in pathlib.Path(d).rglob("*") if p.is_file()}
+    # Dumped kernels are named by launch order (``0000-...``); Pallas sources are skipped.
     launched = (v for k, v in sorted(files.items()) if re.match(r"\d{4}-", k) and not k.endswith(".pallas.py"))
     kernel = next(launched, "")
     kernel = "\n".join(line for line in kernel.splitlines() if not line.startswith("// /")).strip()
@@ -459,6 +508,7 @@ def kernel_code(f, args):
 
 
 def code_of(name):
+    """Kernel code of op ``name`` at its first size of at least 2^20 elements, without timing it."""
     op = OPS[name]
     n = next(n for n in op.sizes if n >= 1 << 20)
     lf = op.lumen(n) if op.sized else op.lumen
@@ -469,26 +519,31 @@ def code_of(name):
 
 
 def to_lumen(array, dtype):
+    """``array`` as a lumen tensor of ``dtype`` on the benchmarked device."""
     t = lumen.from_numpy(np.ascontiguousarray(array) if array.ndim else array).to(DEVICE)
     return t if t.dtype == dtype else t.to(dtype=dtype)
 
 
 def to_torch(array, dtype):
+    """``array`` as a torch tensor on the benchmarked device, cast for float dtypes."""
     t = torch.from_numpy(np.ascontiguousarray(array) if array.ndim else array).to(DEVICE)
     return t.to(getattr(torch, dtype)) if dtype in ("float32", "bfloat16", "float16") else t
 
 
 def nbytes(t):
+    """Bytes of lumen tensor ``t``."""
     return math.prod(t.shape) * {"bool": 1, "uint8": 1, "bfloat16": 2, "float16": 2, "uint64": 8, "int64": 8}.get(
         t.dtype, 4
     )
 
 
 def outputs(out):
+    """``out`` as a tuple of outputs."""
     return out if isinstance(out, (tuple, list)) else (out,)
 
 
 def matches(got, want):
+    """Whether lumen output ``got`` is close to torch output ``want``."""
     a = lumen.to_numpy(got.to("cpu").to(dtype="float32") if got.dtype in ("bfloat16", "float16") else got.to("cpu"))
     b = want.to("cpu")
     b = (b.float() if b.dtype in (torch.bfloat16, torch.float16) else b).numpy()
@@ -498,6 +553,8 @@ def matches(got, want):
 
 
 def measure(name, measured=lambda row: None):
+    """Times op ``name`` at each dtype and size against torch, calling ``measured`` with each row;
+    returns the rows and its kernel code."""
     op = OPS[name]
     rng = np.random.default_rng(0)
     rows, code = [], None
@@ -514,6 +571,7 @@ def measure(name, measured=lambda row: None):
                 rows.append({"op": name, "dtype": dtype, "n": n, "error": str(e).splitlines()[0][:200]})
                 measured(rows[-1])
                 continue
+            # Compute-bound ops whose output can feed back in are chained so each call depends on the last.
             chain = op.flops is not None and list(out[0].shape) == list(lt[0].shape) and out[0].dtype == lt[0].dtype
             calls = chained if chain else rotating
             loaded = sum(nbytes(t) for t in lt)
@@ -539,6 +597,7 @@ def measure(name, measured=lambda row: None):
                 "rotation": sets,
                 "chained": chain,
             }
+            # Time the precompiled plan directly, with a workspace per input set.
             graph = lumen.make_graph(lf)(*lt)
             plan = lumen.graph_compiler.Plan(graph, DEVICE, parameters=list(range(len(lt))))
             workspaces = [
@@ -581,6 +640,7 @@ def measure(name, measured=lambda row: None):
 
 
 def update(data, name, measured=lambda row: None):
+    """``data`` with op ``name`` re-measured, its rows, code and device info replaced."""
     rows, code = measure(name, measured)
     order = list(OPS)
     kept = [r for r in data.get("rows", []) if r["op"] != name] + rows
@@ -598,6 +658,7 @@ def update(data, name, measured=lambda row: None):
 
 
 def load():
+    """Saved results: ``meta.json`` merged with every op's file."""
     meta = DATA / "meta.json"
     data = {**(json.loads(meta.read_text()) if meta.exists() else {}), "rows": [], "code": {}, "measured_at": {}}
     for name in OPS:
@@ -614,12 +675,14 @@ def load():
 
 
 def write(path, value):
+    """Writes ``value`` as JSON to ``path`` atomically via a temporary file."""
     tmp = path.with_suffix(".tmp")
     tmp.write_text(json.dumps(value, indent=1, ensure_ascii=False) + "\n")
     shutil.move(tmp, path)
 
 
 def save(data, names=None):
+    """Writes ``meta.json`` and the files of ops ``names`` (all by default)."""
     data["ops"] = {
         name: {"formula": op.formula, "kind": op.kind, "dtypes": list(op.dtypes), "sizes": list(op.sizes)}
         for name, op in OPS.items()
