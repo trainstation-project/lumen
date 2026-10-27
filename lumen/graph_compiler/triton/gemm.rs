@@ -33,6 +33,9 @@ pub struct Epilogue<'a> {
     pub flags: codegen::EpilogueFlags,
 }
 
+/// Name of a fusion of a matmul and the normalization row reading its product.
+const DOT_ROW: &str = "dot_row";
+
 /// The GEMM launcher installed from Python.
 static GEMM: OnceLock<Gemm> = OnceLock::new();
 
@@ -47,19 +50,20 @@ fn layout(t: &Tensor) -> (&[usize], &[usize]) {
     (t.shape(), t.strides())
 }
 
-/// Runs a dot or GEMM-epilogue fusion `step` with tile `config`, generating its strided prologues and
-/// epilogue; secondary fusion outputs go in `outs`.
+/// Runs a dot or GEMM-epilogue fusion `step` with tile `config` (the untuned one when `None`),
+/// generating its strided prologues and epilogue; secondary fusion outputs go in `outs`.
 fn gemm(
     step: &Step,
     inputs: &[Tensor],
     out: &Tensor,
     outs: &[Tensor],
-    config: &Config,
+    tuned: Option<&Config>,
 ) -> Result<(), String> {
+    let config = tuned.unwrap_or(&CONFIGS[UNTUNED]);
     let launch = GEMM
         .get()
         .ok_or("the Triton backend's GEMM is Python's (lumen.kernels.dot_general.triton): none is installed")?;
-    let Primitive::Fusion { body, .. } = &step.primitive else {
+    let Primitive::Fusion { name, body, .. } = &step.primitive else {
         let code = codegen::gemm(
             &step.primitive,
             layout(&inputs[0]),
@@ -106,7 +110,24 @@ fn gemm(
     let layouts: Vec<_> = inputs.iter().map(layout).collect();
     let [_, rows, _, cols] = code.sizes;
     let outputs: Vec<_> = std::iter::once(out).chain(outs).map(layout).collect();
-    let epilogue = codegen::epilogue(body, &by_value, dot, &layouts, &outputs, [rows, cols]);
+    // A row epilogue needs whole rows in each program's tile.
+    let rowed = name == DOT_ROW;
+    let whole;
+    let (epilogue, config) = match rowed {
+        true => {
+            whole = match tuned {
+                Some(c) => *c,
+                None => codegen::untuned_row_gemm(cols),
+            };
+            let code =
+                codegen::row_epilogue(body, &by_value, dot, &layouts, &outputs, [rows, cols]);
+            (code, &whole)
+        }
+        false => {
+            let code = codegen::epilogue(body, &by_value, dot, &layouts, &outputs, [rows, cols]);
+            (code, config)
+        }
+    };
     let functions = [
         Function::new("PROLOGUE_A", code.prologue_a),
         Function::new("PROLOGUE_B", code.prologue_b),
@@ -119,7 +140,13 @@ fn gemm(
     let fused = Epilogue {
         tensors: &extra,
         scalars: &scalars,
-        flags: codegen::gemm_flags(body, dot),
+        flags: match rowed {
+            true => codegen::EpilogueFlags {
+                group: 1,
+                ..codegen::EpilogueFlags::default()
+            },
+            false => codegen::gemm_flags(body, dot),
+        },
     };
     launch(tensors, code.sizes, accum, config, &functions, &fused)
 }
@@ -155,7 +182,7 @@ pub(crate) fn run(
 ) -> Result<(), String> {
     match step.launch::<Run>() {
         Some(run) => run(step, inputs, out, outs),
-        None => gemm(step, inputs, out, outs, &CONFIGS[UNTUNED]),
+        None => gemm(step, inputs, out, outs, None),
     }
 }
 
@@ -165,18 +192,21 @@ pub(crate) struct Gemms;
 impl Kernels for Gemms {
     type Config = Config;
 
-    /// Every GEMM config for a GEMM step, none otherwise.
+    /// Every GEMM config for a GEMM step (whole-row tiles for a row epilogue), none otherwise.
     fn configs(&self, step: &Step) -> Vec<Config> {
-        match is_gemm(step) {
-            true => CONFIGS.to_vec(),
-            false => Vec::new(),
+        match &step.primitive {
+            Primitive::Fusion { name, .. } if name == DOT_ROW => {
+                codegen::row_gemm_configs(step.output.1.shape.last().copied().unwrap_or(1))
+            }
+            _ if is_gemm(step) => CONFIGS.to_vec(),
+            _ => Vec::new(),
         }
     }
 
     /// A launch of `step` with `config`.
     fn build(&mut self, _: &Step, config: Config) -> Tuned {
         let run: Run =
-            Box::new(move |step, inputs, out, outs| gemm(step, inputs, out, outs, &config));
+            Box::new(move |step, inputs, out, outs| gemm(step, inputs, out, outs, Some(&config)));
         Tuned::new(format!("{config:?}"), run)
     }
 }

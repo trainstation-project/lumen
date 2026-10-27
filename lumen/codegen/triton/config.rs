@@ -175,3 +175,51 @@ pub(crate) fn untuned_loop(lanes: usize) -> LoopConfig {
         ..config
     }
 }
+
+/// Widest row a GEMM's tile holds whole for a row epilogue (`BLOCK_SIZE_N`); wider products are written
+/// and normalized by a row kernel. On an H100 (bf16, autotuned) the fused kernel matches a GEMM and a
+/// row kernel at 256 but is slower at 512 (121 vs 112 µs) and 1024 (252 vs 132 µs): a tile of whole
+/// wide rows leaves too few programs.
+pub(super) const MOST_GEMM_ROW: usize = 256;
+
+/// Most accumulator elements a row-epilogue GEMM tile holds (`BLOCK_SIZE_M x BLOCK_SIZE_N`).
+const ROW_TILE_ELEMENTS: usize = 32 << 10;
+
+/// GEMM candidates for a row epilogue over rows `n` wide: the tile's `BLOCK_SIZE_N` covers the row, each
+/// program owning `block_m` whole rows, as many as the accumulator budget allows.
+pub(crate) fn row_gemm_configs(n: usize) -> Vec<Config> {
+    let block_n = n.next_power_of_two().max(16);
+    let mut configs = Vec::new();
+    for block_m in [16, 32, 64] {
+        if block_m > 16 && block_m * block_n > ROW_TILE_ELEMENTS {
+            continue;
+        }
+        for block_k in [32, 64] {
+            for warps in [4, 8] {
+                configs.push(Config {
+                    block_m,
+                    block_n,
+                    block_k,
+                    group_m: 1,
+                    stages: 2,
+                    warps,
+                });
+            }
+        }
+    }
+    configs
+}
+
+/// The row-epilogue GEMM config used when autotuning is off: the most rows the accumulator budget
+/// allows (at least 16), `BLOCK_SIZE_K` 32, two stages, 8 warps.
+pub(crate) fn untuned_row_gemm(n: usize) -> Config {
+    let block_n = n.next_power_of_two().max(16);
+    Config {
+        block_m: (ROW_TILE_ELEMENTS / block_n).clamp(16, 64),
+        block_n,
+        block_k: 32,
+        group_m: 1,
+        stages: 2,
+        warps: 8,
+    }
+}

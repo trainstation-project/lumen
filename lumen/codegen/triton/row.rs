@@ -6,7 +6,7 @@
 
 use indoc::writedoc;
 
-use super::config::MOST_WHOLE_ROW;
+use super::config::{MOST_GEMM_ROW, MOST_WHOLE_ROW};
 use super::reduction::{Reduction, combine, lowest, reduce_along};
 use super::*;
 use crate::graph_compiler::elementwise;
@@ -151,6 +151,39 @@ fn identity(node: &Node, dtype: DType) -> String {
     }
 }
 
+/// Appends `NAME_combine{k}`, the elementwise combine of reduction `node` accumulating in `dtype`.
+fn combined(combines: &mut String, k: usize, node: &Node, dtype: DType) {
+    let sum = matches!(node.primitive, Primitive::ReduceSum { .. });
+    writedoc!(
+        combines,
+        "
+        @triton.jit
+        def NAME_combine{k}(a, b):
+            return ({}).to(a.dtype)
+
+
+        ",
+        combine(sum, dtype)
+    )
+    .unwrap();
+}
+
+/// Reduces reduction `k`, `node`, over whole rows of the tile (`mask`) and binds its per-row value.
+fn whole(emitter: &mut Emitter, k: usize, node: &Node, combines: &mut String) {
+    let sum = matches!(node.primitive, Primitive::ReduceSum { .. });
+    let (x, a, acc) = operand(emitter, node);
+    let masked = format!(
+        "tl.where(mask, {x}, tl.full([], {}, {acc}))",
+        identity(node, a)
+    );
+    let call = reduce_along(&masked, 1, sum, a, &format!("NAME_combine{k}"));
+    let value = emitter.local(format!("{call}[:, None]"));
+    emitter.reduced.insert(node.output, value);
+    if call.starts_with("tl.reduce") {
+        combined(combines, k, node, a);
+    }
+}
+
 /// A loop over a row's chunks whose body is `emit`'s statements; values computed inside stay there.
 fn chunks(emitter: &mut Emitter, n: usize, emit: impl FnOnce(&mut Emitter)) -> String {
     emitter.values.clear();
@@ -186,38 +219,13 @@ pub(crate) fn row(body: &Graph, by_value: &[bool]) -> Reduction {
     let mut emitter = Emitter::new(body, by_value);
     let mut combines = String::new();
     let mut code = String::new();
-    let combined = |combines: &mut String, k: usize, node: &Node, dtype: DType| {
-        let sum = matches!(node.primitive, Primitive::ReduceSum { .. });
-        writedoc!(
-            combines,
-            "
-            @triton.jit
-            def NAME_combine{k}(a, b):
-                return ({}).to(a.dtype)
-
-
-            ",
-            combine(sum, dtype)
-        )
-        .unwrap();
-    };
     let reductions = reductions(body);
     let mut k = 0;
     while k < reductions.len() {
         let node = reductions[k];
         let sum = matches!(node.primitive, Primitive::ReduceSum { .. });
         if !looped {
-            let (x, a, acc) = operand(&mut emitter, node);
-            let masked = format!(
-                "tl.where(mask, {x}, tl.full([], {}, {acc}))",
-                identity(node, a)
-            );
-            let call = reduce_along(&masked, 1, sum, a, &format!("NAME_combine{k}"));
-            let value = emitter.local(format!("{call}[:, None]"));
-            emitter.reduced.insert(node.output, value);
-            if call.starts_with("tl.reduce") {
-                combined(&mut combines, k, node, a);
-            }
+            whole(&mut emitter, k, node, &mut combines);
             k += 1;
             continue;
         }
@@ -356,4 +364,116 @@ pub(crate) fn row(body: &Graph, by_value: &[bool]) -> Reduction {
         lanes,
         splits: 1,
     }
+}
+
+/// Generates the GEMM epilogue of a `dot_row` fusion: its program's tile holds whole output rows, so
+/// the row's reductions run over the accumulator `value` and its outputs are written from registers,
+/// the product never reaching memory. `inputs` and `outputs` are the fusion's layouts; `rows` and
+/// `cols` the product's.
+pub(crate) fn row_epilogue(
+    body: &Graph,
+    by_value: &[bool],
+    dot: &Node,
+    inputs: &[(&[usize], &[usize])],
+    outputs: &[(&[usize], &[usize])],
+    [rows, cols]: [usize; 2],
+) -> (String, String) {
+    let t = triton_type(body.type_of(dot.output).dtype).expect("a Triton dtype");
+    let loads: String = inputs
+        .iter()
+        .enumerate()
+        .filter(|&(k, _)| !by_value[k])
+        .map(|(k, &(shape, strides))| {
+            let (name, source) = load(shape, strides);
+            source.replace(&format!("def {name}("), &format!("def LOAD{k}(")) + "\n\n"
+        })
+        .collect();
+    // Extra inputs and secondary output pointers arrive packed in the `EXTRA` tuple.
+    let mut code: String = (0..inputs.len())
+        .map(|k| format!("    in{k} = EXTRA[{k}]\n"))
+        .collect();
+    let pointers: Vec<String> = (0..outputs.len())
+        .map(|o| match o {
+            0 => "ptr".to_string(),
+            _ => {
+                writeln!(code, "    out{o} = EXTRA[{}]", inputs.len() + o - 1).unwrap();
+                format!("out{o}")
+            }
+        })
+        .collect();
+    writeln!(
+        code,
+        "    j = m * {cols} + n\n    row_mask = m < {rows}\n    product = value.to({t})"
+    )
+    .unwrap();
+    let mut emitter = Emitter::new(body, by_value);
+    emitter
+        .values
+        .insert((dot.output, "j".into()), "product".into());
+    let mut combines = String::new();
+    for (k, node) in reductions(body).into_iter().enumerate() {
+        whole(&mut emitter, k, node, &mut combines);
+    }
+    for (o, &v) in body.outputs().iter().enumerate() {
+        let (index, mask) = match body.type_of(v).numel() == rows {
+            true => ("m", "row_mask"),
+            false => ("j", "mask"),
+        };
+        emitter.mask = mask.into();
+        let value = emitter.value(v, index.into());
+        let (shape, strides) = outputs[o];
+        writeln!(
+            emitter.lines,
+            "    tl.store({} + {}, {value}, mask={mask})",
+            pointers[o],
+            at(index, shape, strides)
+        )
+        .unwrap();
+    }
+    code += &emitter.lines;
+    named(
+        "row_epilogue",
+        formatdoc!(
+            "
+            {loads}{combines}@triton.jit
+            def NAME(ptr, EXTRA, l, m, n, value, mask):
+            {code}"
+        ),
+    )
+}
+
+/// Whether a `dot_row` fusion's `body` runs as one Triton GEMM with a row epilogue: an unbatched
+/// float matmul whose product is the row's operand, rows of at most `MOST_GEMM_ROW`.
+pub(crate) fn dot_row_fits(body: &Graph) -> bool {
+    let Some(dot) = gemm_dot(body) else {
+        return false;
+    };
+    let float = |v: Var| matches!(body.type_of(v).dtype, DType::F16 | DType::BF16 | DType::F32);
+    let Primitive::DotGeneral { lhs_batch, .. } = &dot.primitive else {
+        return false;
+    };
+    lhs_batch.is_empty()
+        && body.type_of(dot.output).shape == body.type_of(body.outputs()[0]).shape
+        && dot.inputs.iter().all(|&v| float(v))
+        && width(body) <= MOST_GEMM_ROW
+        && row_fits(body)
+}
+
+/// Whether row body `body` reads its input `at` as whole rows at each element's own index: the root's
+/// shape, read only by elementwise ops and its rows' reductions.
+pub(crate) fn joins_rows(body: &Graph, at: usize) -> bool {
+    let v = body.inputs()[at];
+    body.type_of(v).shape == body.type_of(body.outputs()[0]).shape
+        && !body.outputs().contains(&v)
+        && body
+            .nodes()
+            .iter()
+            .filter(|n| n.inputs.contains(&v))
+            .all(|n| {
+                elementwise(&n.primitive)
+                    || matches!(
+                        n.primitive,
+                        Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. }
+                    )
+            })
 }

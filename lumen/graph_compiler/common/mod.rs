@@ -6,6 +6,7 @@ pub(crate) mod attention;
 pub(crate) mod autotune;
 pub(crate) mod cse;
 pub(crate) mod diamonds;
+pub(crate) mod dot_rows;
 pub(crate) mod fold_dot_reshapes;
 pub(crate) mod horizontal;
 pub(crate) mod loops;
