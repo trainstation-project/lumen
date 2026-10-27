@@ -445,9 +445,9 @@ pub(crate) fn joins_rows(body: &Graph, at: usize) -> bool {
             })
 }
 
-/// Generates the GEMM epilogue of a `dot_partials` fusion: the tile (`tile` columns wide) writes the
-/// value the row reads, its first output, and each later output, a reduction over `tile`-column blocks
-/// of the rows, as the tile's partial of it.
+/// Generates the GEMM epilogue of a `dot_partials` fusion: the tile, any multiple of `tile` columns wide,
+/// writes the value the row reads, its first output, and each later output, a reduction over
+/// `tile`-column blocks of the rows, as the partial of each block it covers.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn partials_epilogue(
     body: &Graph,
@@ -468,7 +468,7 @@ pub(crate) fn partials_epilogue(
     let (shape, strides) = outputs[0];
     writeln!(
         emitter.lines,
-        "    tl.store(ptr + {}, {value}, mask=mask)\n    block = tl.max(n, 1)[:, None] // {tile}",
+        "    tl.store(ptr + {}, {value}, mask=mask)\n    blocks = tl.min(n, 1)[:, None] // {tile} + tl.arange(0, value.shape[1] // {tile})[None, :]",
         at("j", shape, strides)
     )
     .unwrap();
@@ -484,20 +484,22 @@ pub(crate) fn partials_epilogue(
             true => x,
             false => format!("{x}.to({acc})"),
         };
-        let masked = format!(
-            "tl.where(mask, {x}, tl.full([], {}, {acc}))",
+        // The tile's columns split into `tile`-wide blocks, each reduced to its partial.
+        let masked = emitter.local(format!(
+            "tl.reshape(tl.where(mask, {x}, tl.full([], {}, {acc})), (value.shape[0], value.shape[1] // {tile}, {tile}))",
             identity(reduction, a)
-        );
-        let call = reduce_along(&masked, 1, sum, a, &format!("NAME_combine{k}"));
+        ));
+        let call = reduce_along(&masked, 2, sum, a, &format!("NAME_combine{k}"));
         if call.starts_with("tl.reduce") {
             combined(&mut combines, k, reduction, a);
         }
-        let partial = emitter.local(format!("{call}[:, None]"));
+        let partial = emitter.local(call);
         let (shape, strides) = outputs[k];
-        let index = format!("m * {} + block", cols / tile);
+        let tiles = cols / tile;
+        let index = format!("m * {tiles} + blocks");
         writeln!(
             emitter.lines,
-            "    tl.store({} + {}, {partial}, mask=row_mask)",
+            "    tl.store({} + {}, {partial}, mask=row_mask & (blocks < {tiles}))",
             pointers[k],
             at(&index, shape, strides)
         )
