@@ -9,10 +9,11 @@ pub type WaitKernel = fn(&Tensor);
 /// The registered `lumen::wait` op.
 pub static WAIT: Op<WaitKernel> = Op::new(op_name!("wait"), kernels);
 
-/// Returns the wait kernel for a dispatch key; CPU and Meta have nothing to wait for.
+/// Returns the wait kernel for a dispatch key; CPU, Meta and Trainium (nothing runs there yet)
+/// have nothing to wait for.
 fn kernels(key: DispatchKey) -> Option<WaitKernel> {
     match key {
-        DispatchKey::Cpu | DispatchKey::Meta => Some(|_| {}),
+        DispatchKey::Cpu | DispatchKey::Meta | DispatchKey::Trainium => Some(|_| {}),
         #[cfg(lumen_tpu_linked)]
         DispatchKey::Tpu => Some(|t| {
             let crate::Device::Tpu(index) = t.device() else {

@@ -73,11 +73,14 @@ impl PyCompilerConfigs {
         PyTpuConfig::object(py)
     }
 
-    /// Compiler config for the device type of `device`; meta devices share the CPU config.
+    /// Compiler config for the device type of `device`; meta and Trainium devices (which have no
+    /// compiler yet) share the CPU config.
     fn of<'py>(&self, device: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
         let py = device.py();
         Ok(match parse_device(Some(device))? {
-            Device::Cpu(_) | Device::Meta(_) => PyCpuConfig::object(py)?.into_bound(py).into_any(),
+            Device::Cpu(_) | Device::Meta(_) | Device::Trainium(_) => {
+                PyCpuConfig::object(py)?.into_bound(py).into_any()
+            }
             Device::Cuda(_) => PyCudaConfig::object(py)?.into_bound(py).into_any(),
             Device::Mps(_) => PyMpsConfig::object(py)?.into_bound(py).into_any(),
             Device::Tpu(_) => PyTpuConfig::object(py)?.into_bound(py).into_any(),

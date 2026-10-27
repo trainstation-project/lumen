@@ -39,6 +39,7 @@ pub enum DispatchKey {
     Cuda,
     Mps,
     Tpu,
+    Trainium,
     Meta,
 }
 
@@ -50,6 +51,7 @@ impl DispatchKey {
             Device::Cuda(_) => DispatchKey::Cuda,
             Device::Mps(_) => DispatchKey::Mps,
             Device::Tpu(_) => DispatchKey::Tpu,
+            Device::Trainium(_) => DispatchKey::Trainium,
             Device::Meta(_) => DispatchKey::Meta,
         }
     }

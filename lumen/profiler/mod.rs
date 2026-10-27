@@ -231,7 +231,7 @@ pub(crate) fn memory_enabled() -> bool {
 )]
 pub(crate) fn device_enabled(device: Device) -> bool {
     let bit = match device {
-        Device::Cpu(_) | Device::Meta(_) => return false,
+        Device::Cpu(_) | Device::Meta(_) | Device::Trainium(_) => return false,
         Device::Cuda(_) => CUDA,
         Device::Mps(_) => MPS,
         Device::Tpu(_) => TPU,

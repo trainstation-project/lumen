@@ -17,6 +17,8 @@ from lumen.device import _C
         ("cuda", "cuda", None),
         ("cuda:0", "cuda", 0),
         ("cuda:3", "cuda", 3),
+        ("trainium", "trainium", None),
+        ("trainium:1", "trainium", 1),
     ],
 )
 def test_parse(spec, type_, index):
@@ -75,7 +77,7 @@ def test_invalid_strings(spec):
         lumen.device(spec)
 
 
-@pytest.mark.parametrize("spec", ["cpu:1", "mps:1", "meta:1"])
+@pytest.mark.parametrize("spec", ["cpu:1", "mps:1", "meta:1", "trainium:1"])
 def test_every_device_is_numbered(spec):
     """Any device type takes an index, and placing a tensor on a missing one raises `RuntimeError`."""
     assert lumen.device(spec).index == 1
@@ -110,7 +112,7 @@ def test_is_available():
     assert lumen.cpu.device_count() == lumen.meta.device_count() == 1
     with pytest.raises(ValueError, match="not a cuda device"):
         lumen.cuda.synchronize("cpu")
-    for module in [lumen.cpu, lumen.meta, lumen.cuda, lumen.mps]:
+    for module in [lumen.cpu, lumen.meta, lumen.cuda, lumen.mps, lumen.trainium]:
         try:
             lumen.zeros([1], device=module.__name__.split(".")[-1])
             placed = True

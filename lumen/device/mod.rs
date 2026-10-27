@@ -1,4 +1,4 @@
-//! Devices (`cpu`, `mps`, `cuda`, `tpu`, `meta`) and the backend trait each implements.
+//! Devices (`cpu`, `mps`, `cuda`, `tpu`, `trainium`, `meta`) and the backend trait each implements.
 
 pub mod cpu;
 pub mod cuda;
@@ -7,6 +7,7 @@ pub mod mps;
 #[cfg(feature = "python")]
 pub(crate) mod python;
 pub mod tpu;
+pub mod trainium;
 
 use std::fmt;
 
@@ -44,6 +45,7 @@ pub enum Device {
     Mps(usize),
     Cuda(usize),
     Tpu(usize),
+    Trainium(usize),
     Meta(usize),
 }
 
@@ -55,6 +57,7 @@ impl Device {
             "mps" => Some(Device::Mps(index)),
             "cuda" => Some(Device::Cuda(index)),
             "tpu" => Some(Device::Tpu(index)),
+            "trainium" => Some(Device::Trainium(index)),
             "meta" => Some(Device::Meta(index)),
             _ => None,
         }
@@ -67,6 +70,7 @@ impl Device {
             Device::Mps(_) => mps::MPS,
             Device::Cuda(_) => cuda::CUDA,
             Device::Tpu(_) => tpu::TPU,
+            Device::Trainium(_) => trainium::TRAINIUM,
             Device::Meta(_) => meta::META,
         }
     }
@@ -78,6 +82,7 @@ impl Device {
             | Device::Mps(index)
             | Device::Cuda(index)
             | Device::Tpu(index)
+            | Device::Trainium(index)
             | Device::Meta(index) => index,
         }
     }

@@ -49,10 +49,10 @@ pub struct Configs {
 }
 
 impl Configs {
-    /// Config for `device`'s type; meta devices use the CPU config.
+    /// Config for `device`'s type; meta and Trainium devices (no compiler yet) use the CPU config.
     pub fn of(&self, device: Device) -> &dyn CompilerConfig {
         match device {
-            Device::Cpu(_) | Device::Meta(_) => &self.cpu,
+            Device::Cpu(_) | Device::Meta(_) | Device::Trainium(_) => &self.cpu,
             Device::Cuda(_) => &self.cuda,
             Device::Mps(_) => &self.mps,
             Device::Tpu(_) => &self.tpu,
@@ -171,7 +171,7 @@ macro_rules! shared_flags {
                 fn $flag(&self) -> $ty {
                     let c = configs();
                     match self.device {
-                        Device::Cpu(_) | Device::Meta(_) => c.cpu.$flag,
+                        Device::Cpu(_) | Device::Meta(_) | Device::Trainium(_) => c.cpu.$flag,
                         Device::Cuda(_) => c.cuda.$flag,
                         Device::Mps(_) => c.mps.$flag,
                         Device::Tpu(_) => c.tpu.$flag,
@@ -181,7 +181,7 @@ macro_rules! shared_flags {
                 #[setter]
                 fn $set(&self, value: $ty) {
                     update(|c| match self.device {
-                        Device::Cpu(_) | Device::Meta(_) => c.cpu.$flag = value,
+                        Device::Cpu(_) | Device::Meta(_) | Device::Trainium(_) => c.cpu.$flag = value,
                         Device::Cuda(_) => c.cuda.$flag = value,
                         Device::Mps(_) => c.mps.$flag = value,
                         Device::Tpu(_) => c.tpu.$flag = value,
@@ -192,7 +192,9 @@ macro_rules! shared_flags {
             /// Restores this device type's config to its defaults.
             fn reset(&self) {
                 update(|c| match self.device {
-                    Device::Cpu(_) | Device::Meta(_) => c.cpu = CpuConfig::default(),
+                    Device::Cpu(_) | Device::Meta(_) | Device::Trainium(_) => {
+                        c.cpu = CpuConfig::default()
+                    }
                     Device::Cuda(_) => c.cuda = CudaConfig::default(),
                     Device::Mps(_) => c.mps = MpsConfig::default(),
                     Device::Tpu(_) => c.tpu = TpuConfig::default(),

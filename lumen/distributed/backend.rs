@@ -152,7 +152,9 @@ impl MeshBackend for Mps {
 /// Returns the mesh backend for a device type name such as `"tpu"`.
 pub fn mesh_backend(device_type: &str) -> Result<&'static dyn MeshBackend, String> {
     let device = Device::of_type(device_type, 0).ok_or_else(|| {
-        format!("device_type must be one of cpu, mps, cuda, tpu, meta, got '{device_type}'")
+        format!(
+            "device_type must be one of cpu, mps, cuda, tpu, trainium, meta, got '{device_type}'"
+        )
     })?;
     Ok(match device {
         Device::Cpu(_) => &Cpu,
@@ -160,5 +162,6 @@ pub fn mesh_backend(device_type: &str) -> Result<&'static dyn MeshBackend, Strin
         Device::Cuda(_) => &Cuda,
         Device::Tpu(_) => &Tpu,
         Device::Meta(_) => &Meta,
+        Device::Trainium(_) => return Err("Trainium has no device mesh backend yet".into()),
     })
 }

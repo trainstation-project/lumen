@@ -37,7 +37,7 @@ fn h2d_kernels(key: DispatchKey) -> Option<CopyKernel> {
         DispatchKey::Tpu => Some(tpu::copy_h2d),
         #[cfg(not(lumen_tpu_linked))]
         DispatchKey::Tpu => None,
-        DispatchKey::Meta => None,
+        DispatchKey::Trainium | DispatchKey::Meta => None,
     }
 }
 
@@ -58,7 +58,7 @@ fn d2h_kernels(key: DispatchKey) -> Option<CopyKernel> {
         DispatchKey::Tpu => Some(tpu::copy_d2h),
         #[cfg(not(lumen_tpu_linked))]
         DispatchKey::Tpu => None,
-        DispatchKey::Meta => None,
+        DispatchKey::Trainium | DispatchKey::Meta => None,
     }
 }
 

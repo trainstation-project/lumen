@@ -95,6 +95,7 @@ fn device_compile(graph: &Graph, device: Device, options: &Options) -> Result<Pl
         #[cfg(lumen_mps_linked)]
         Device::Mps(_) => mps::compile(graph, options),
         Device::Tpu(_) => tpu::compile(graph, options),
+        Device::Trainium(_) => Err(format!("{device}: Trainium has no compiler yet")),
         _ => cpu::compile(graph, device, options),
     }
 }

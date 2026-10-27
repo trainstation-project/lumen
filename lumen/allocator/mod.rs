@@ -10,6 +10,8 @@ mod mps;
 mod tests;
 #[cfg(lumen_tpu_linked)]
 pub(crate) mod tpu;
+#[cfg(any(test, lumen_trainium_linked))]
+pub(crate) mod trainium;
 
 pub use cpu::CpuAllocator;
 #[cfg(lumen_cuda_linked)]
@@ -131,6 +133,8 @@ pub fn allocator_for(device: Device) -> Result<Arc<dyn Allocator>, String> {
         Device::Cuda(index) => cuda::allocator(index),
         #[cfg(lumen_tpu_linked)]
         Device::Tpu(index) => tpu::allocator(index),
+        #[cfg(lumen_trainium_linked)]
+        Device::Trainium(index) => trainium::allocator(index),
         #[allow(unreachable_patterns)]
         _ => unreachable!("{device} is never available without its backend"),
     })
@@ -141,7 +145,12 @@ pub const ALIGNMENT: usize = 256;
 
 /// First-fit sub-allocator over one contiguous device range reserved on first use.
 #[cfg_attr(
-    not(any(lumen_mps_linked, lumen_cuda_linked, lumen_tpu_linked)),
+    not(any(
+        lumen_mps_linked,
+        lumen_cuda_linked,
+        lumen_tpu_linked,
+        lumen_trainium_linked
+    )),
     allow(dead_code)
 )]
 pub(crate) struct Region {
@@ -152,7 +161,12 @@ pub(crate) struct Region {
 }
 
 #[cfg_attr(
-    not(any(lumen_mps_linked, lumen_cuda_linked, lumen_tpu_linked)),
+    not(any(
+        lumen_mps_linked,
+        lumen_cuda_linked,
+        lumen_tpu_linked,
+        lumen_trainium_linked
+    )),
     allow(dead_code)
 )]
 /// Bookkeeping of a `Region`; offsets are relative to the reserved base.
@@ -168,7 +182,12 @@ struct State {
 
 /// Base pointer of a reserved device range.
 #[cfg_attr(
-    not(any(lumen_mps_linked, lumen_cuda_linked, lumen_tpu_linked)),
+    not(any(
+        lumen_mps_linked,
+        lumen_cuda_linked,
+        lumen_tpu_linked,
+        lumen_trainium_linked
+    )),
     allow(dead_code)
 )]
 struct Base(NonNull<u8>);
@@ -176,7 +195,12 @@ struct Base(NonNull<u8>);
 unsafe impl Send for Base {}
 
 #[cfg_attr(
-    not(any(lumen_mps_linked, lumen_cuda_linked, lumen_tpu_linked)),
+    not(any(
+        lumen_mps_linked,
+        lumen_cuda_linked,
+        lumen_tpu_linked,
+        lumen_trainium_linked
+    )),
     allow(dead_code)
 )]
 impl Region {
@@ -215,7 +239,10 @@ impl Region {
         self.lock().live_bytes
     }
 
-    #[cfg_attr(not(any(lumen_mps_linked, lumen_cuda_linked)), allow(dead_code))]
+    #[cfg_attr(
+        not(any(lumen_mps_linked, lumen_cuda_linked, lumen_trainium_linked)),
+        allow(dead_code)
+    )]
     /// Takes an `ALIGNMENT`-aligned block, see `take_aligned`.
     pub(crate) fn take(
         &self,

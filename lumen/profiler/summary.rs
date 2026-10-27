@@ -264,7 +264,7 @@ impl Profile {
                     Device::Cuda(_) => cuda = true,
                     Device::Mps(_) => mps = true,
                     Device::Tpu(_) => tpu = true,
-                    Device::Cpu(_) | Device::Meta(_) => {}
+                    Device::Cpu(_) | Device::Meta(_) | Device::Trainium(_) => {}
                 }
             }
         }
