@@ -223,3 +223,14 @@ pub(crate) fn untuned_row_gemm(n: usize) -> Config {
         warps: 8,
     }
 }
+
+/// Partial tile widths (`BLOCK_SIZE_N`) a GEMM can reduce a wide row's blocks over, largest first.
+const PARTIAL_TILES: [usize; 3] = [128, 64, 32];
+
+/// The partial tile width for a GEMM whose product rows are `n` wide and normalized after it: rows too
+/// wide for one tile (past `MOST_GEMM_ROW`) take the widest of `PARTIAL_TILES` dividing them.
+pub(crate) fn partial_tile(n: usize) -> Option<usize> {
+    (n > MOST_GEMM_ROW)
+        .then(|| PARTIAL_TILES.into_iter().find(|&t| n.is_multiple_of(t)))
+        .flatten()
+}

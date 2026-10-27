@@ -36,6 +36,9 @@ pub struct Epilogue<'a> {
 /// Name of a fusion of a matmul and the normalization row reading its product.
 const DOT_ROW: &str = "dot_row";
 
+/// Name of a matmul writing its product and partials of the normalization row reading it.
+const DOT_PARTIALS: &str = "dot_partials";
+
 /// The GEMM launcher installed from Python.
 static GEMM: OnceLock<Gemm> = OnceLock::new();
 
@@ -110,10 +113,27 @@ fn gemm(
     let layouts: Vec<_> = inputs.iter().map(layout).collect();
     let [_, rows, _, cols] = code.sizes;
     let outputs: Vec<_> = std::iter::once(out).chain(outs).map(layout).collect();
-    // A row epilogue needs whole rows in each program's tile.
-    let rowed = name == DOT_ROW;
+    // A row epilogue needs whole rows in each program's tile; a partials epilogue tiles of its width.
+    let rowed = name == DOT_ROW || name == DOT_PARTIALS;
     let whole;
     let (epilogue, config) = match rowed {
+        true if name == DOT_PARTIALS => {
+            let width = codegen::partial_tile(cols).expect("a partial tile width");
+            whole = Config {
+                block_n: width,
+                ..*config
+            };
+            let code = codegen::partials_epilogue(
+                body,
+                &by_value,
+                dot,
+                &layouts,
+                &outputs,
+                [rows, cols],
+                width,
+            );
+            (code, &whole)
+        }
         true => {
             whole = match tuned {
                 Some(c) => *c,
@@ -197,6 +217,25 @@ impl Kernels for Gemms {
         match &step.primitive {
             Primitive::Fusion { name, .. } if name == DOT_ROW => {
                 codegen::row_gemm_configs(step.output.1.shape.last().copied().unwrap_or(1))
+            }
+            // Partials span one tile's columns, so every candidate takes that width.
+            Primitive::Fusion { name, .. } if name == DOT_PARTIALS => {
+                let n = step.output.1.shape.last().copied().unwrap_or(1);
+                let width = codegen::partial_tile(n).expect("a partial tile width");
+                let mut configs: Vec<Config> = Vec::new();
+                for c in CONFIGS {
+                    let c = Config {
+                        block_n: width,
+                        ..c
+                    };
+                    if !configs.iter().any(|d| {
+                        (d.block_m, d.block_k, d.stages, d.warps)
+                            == (c.block_m, c.block_k, c.stages, c.warps)
+                    }) {
+                        configs.push(c);
+                    }
+                }
+                configs
             }
             _ if is_gemm(step) => CONFIGS.to_vec(),
             _ => Vec::new(),

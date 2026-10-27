@@ -9,6 +9,7 @@ use indoc::writedoc;
 use super::config::{MOST_GEMM_ROW, MOST_WHOLE_ROW};
 use super::reduction::{Reduction, combine, lowest, reduce_along};
 use super::*;
+use crate::graph_compiler::common::diamonds::softmax_pair;
 use crate::graph_compiler::elementwise;
 
 /// The body's last-axis reductions, in order.
@@ -82,54 +83,6 @@ pub(crate) fn row_fits(body: &Graph) -> bool {
 /// Whether a row fusion's `body` is too wide to hold a row whole, so its kernel walks rows in chunks.
 pub(crate) fn row_looped(body: &Graph) -> bool {
     width(body) > MOST_WHOLE_ROW
-}
-
-/// Whether `v` depends on value `on` in `body`.
-fn depends(body: &Graph, v: Var, on: Var) -> bool {
-    let producer: HashMap<Var, &Node> = body.nodes().iter().map(|n| (n.output, n)).collect();
-    let mut stack = vec![v];
-    while let Some(v) = stack.pop() {
-        if v == on {
-            return true;
-        }
-        if let Some(node) = producer.get(&v) {
-            stack.extend(&node.inputs);
-        }
-    }
-    false
-}
-
-/// Whether reductions `max` then `sum` can share one online pass: `sum` reduces `exp(g - m)`, `m`
-/// `max`'s value reshaped or broadcast, `g` independent of it (softmax's denominator).
-fn online(body: &Graph, max: &Node, sum: &Node) -> bool {
-    let producer: HashMap<Var, &Node> = body.nodes().iter().map(|n| (n.output, n)).collect();
-    let (Primitive::ReduceMax { .. }, Primitive::ReduceSum { .. }) =
-        (&max.primitive, &sum.primitive)
-    else {
-        return false;
-    };
-    let Some(exp) = producer
-        .get(&sum.inputs[0])
-        .filter(|n| n.primitive == Primitive::Exp)
-    else {
-        return false;
-    };
-    let Some(sub) = producer
-        .get(&exp.inputs[0])
-        .filter(|n| n.primitive == Primitive::Sub)
-    else {
-        return false;
-    };
-    let mut m = sub.inputs[1];
-    while let Some(node) = producer.get(&m).filter(|n| {
-        matches!(
-            n.primitive,
-            Primitive::Reshape { .. } | Primitive::BroadcastInDim { .. }
-        )
-    }) {
-        m = node.inputs[0];
-    }
-    m == max.output && !depends(body, sub.inputs[0], max.output)
 }
 
 /// Value of reduction `node`'s operand at `j`, in its accumulation dtype; the dtype and its Triton type.
@@ -230,7 +183,7 @@ pub(crate) fn row(body: &Graph, by_value: &[bool]) -> Reduction {
             continue;
         }
         let next = reductions.get(k + 1).copied();
-        if let Some(total) = next.filter(|s| online(body, node, s)) {
+        if let Some(total) = next.filter(|s| softmax_pair(body, node, s)) {
             // Lane-wise running max and sum of exp(x - max), rescaled as the max grows.
             let (m, s) = (format!("m{k}"), format!("s{k}"));
             let a = body.type_of(node.output).dtype;
@@ -366,18 +319,17 @@ pub(crate) fn row(body: &Graph, by_value: &[bool]) -> Reduction {
     }
 }
 
-/// Generates the GEMM epilogue of a `dot_row` fusion: its program's tile holds whole output rows, so
-/// the row's reductions run over the accumulator `value` and its outputs are written from registers,
-/// the product never reaching memory. `inputs` and `outputs` are the fusion's layouts; `rows` and
-/// `cols` the product's.
-pub(crate) fn row_epilogue(
+/// The shared start of a GEMM row epilogue: the input loads it defines, then its statements binding
+/// the inputs and output pointers packed in `EXTRA`, the product's flat index `j`, the rows' mask and
+/// the product `value` in the dot's dtype; with the output pointers' names.
+fn preamble(
     body: &Graph,
     by_value: &[bool],
     dot: &Node,
     inputs: &[(&[usize], &[usize])],
     outputs: &[(&[usize], &[usize])],
     [rows, cols]: [usize; 2],
-) -> (String, String) {
+) -> (String, String, Vec<String>) {
     let t = triton_type(body.type_of(dot.output).dtype).expect("a Triton dtype");
     let loads: String = inputs
         .iter()
@@ -388,7 +340,6 @@ pub(crate) fn row_epilogue(
             source.replace(&format!("def {name}("), &format!("def LOAD{k}(")) + "\n\n"
         })
         .collect();
-    // Extra inputs and secondary output pointers arrive packed in the `EXTRA` tuple.
     let mut code: String = (0..inputs.len())
         .map(|k| format!("    in{k} = EXTRA[{k}]\n"))
         .collect();
@@ -406,6 +357,22 @@ pub(crate) fn row_epilogue(
         "    j = m * {cols} + n\n    row_mask = m < {rows}\n    product = value.to({t})"
     )
     .unwrap();
+    (loads, code, pointers)
+}
+
+/// Generates the GEMM epilogue of a `dot_row` fusion: its program's tile holds whole output rows, so
+/// the row's reductions run over the accumulator `value` and its outputs are written from registers,
+/// the product never reaching memory. `inputs` and `outputs` are the fusion's layouts; `rows` and
+/// `cols` the product's.
+pub(crate) fn row_epilogue(
+    body: &Graph,
+    by_value: &[bool],
+    dot: &Node,
+    inputs: &[(&[usize], &[usize])],
+    outputs: &[(&[usize], &[usize])],
+    [rows, cols]: [usize; 2],
+) -> (String, String) {
+    let (loads, mut code, pointers) = preamble(body, by_value, dot, inputs, outputs, [rows, cols]);
     let mut emitter = Emitter::new(body, by_value);
     emitter
         .values
@@ -476,4 +443,74 @@ pub(crate) fn joins_rows(body: &Graph, at: usize) -> bool {
                         Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. }
                     )
             })
+}
+
+/// Generates the GEMM epilogue of a `dot_partials` fusion: the tile (`tile` columns wide) writes the
+/// value the row reads, its first output, and each later output, a reduction over `tile`-column blocks
+/// of the rows, as the tile's partial of it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn partials_epilogue(
+    body: &Graph,
+    by_value: &[bool],
+    dot: &Node,
+    inputs: &[(&[usize], &[usize])],
+    outputs: &[(&[usize], &[usize])],
+    [rows, cols]: [usize; 2],
+    tile: usize,
+) -> (String, String) {
+    let (loads, mut code, pointers) = preamble(body, by_value, dot, inputs, outputs, [rows, cols]);
+    let producer: HashMap<Var, &Node> = body.nodes().iter().map(|n| (n.output, n)).collect();
+    let mut emitter = Emitter::new(body, by_value);
+    emitter
+        .values
+        .insert((dot.output, "j".into()), "product".into());
+    let value = emitter.value(body.outputs()[0], "j".into());
+    let (shape, strides) = outputs[0];
+    writeln!(
+        emitter.lines,
+        "    tl.store(ptr + {}, {value}, mask=mask)\n    block = tl.max(n, 1)[:, None] // {tile}",
+        at("j", shape, strides)
+    )
+    .unwrap();
+    let mut combines = String::new();
+    for (k, &v) in body.outputs().iter().enumerate().skip(1) {
+        let reduction = producer[&v];
+        let blocks = producer[&reduction.inputs[0]];
+        let a = body.type_of(reduction.output).dtype;
+        let acc = triton_type(a).expect("a Triton dtype");
+        let sum = matches!(reduction.primitive, Primitive::ReduceSum { .. });
+        let x = emitter.value(blocks.inputs[0], "j".into());
+        let x = match body.type_of(blocks.inputs[0]).dtype == a {
+            true => x,
+            false => format!("{x}.to({acc})"),
+        };
+        let masked = format!(
+            "tl.where(mask, {x}, tl.full([], {}, {acc}))",
+            identity(reduction, a)
+        );
+        let call = reduce_along(&masked, 1, sum, a, &format!("NAME_combine{k}"));
+        if call.starts_with("tl.reduce") {
+            combined(&mut combines, k, reduction, a);
+        }
+        let partial = emitter.local(format!("{call}[:, None]"));
+        let (shape, strides) = outputs[k];
+        let index = format!("m * {} + block", cols / tile);
+        writeln!(
+            emitter.lines,
+            "    tl.store({} + {}, {partial}, mask=row_mask)",
+            pointers[k],
+            at(&index, shape, strides)
+        )
+        .unwrap();
+    }
+    code += &emitter.lines;
+    named(
+        "partials_epilogue",
+        formatdoc!(
+            "
+            {loads}{combines}@triton.jit
+            def NAME(ptr, EXTRA, l, m, n, value, mask):
+            {code}"
+        ),
+    )
 }
