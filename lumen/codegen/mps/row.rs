@@ -1,6 +1,7 @@
 //! Metal source for row kernels: bodies whose reductions run over the last axis (softmax, norms),
 //! computed one row per threadgroup or SIMD group with values kept in registers between passes.
 use super::*;
+use crate::graph_compiler::common::diamonds::{depends_on, softmax_pair};
 use crate::kernels::dot_general::mps::GemmConfig;
 
 /// Body reductions over the last axis, excluding the first output; empty for plain reductions.
@@ -572,60 +573,6 @@ pub(super) fn row_kernel(
         }}
         "
     ))
-}
-
-/// Whether `v` depends on any of `of` through the body's nodes.
-pub(super) fn depends_on(body: &Graph, v: Var, of: &[Var]) -> bool {
-    let producer: HashMap<Var, &Node> = body.nodes().iter().map(|n| (n.output, n)).collect();
-    let (mut stack, mut seen) = (vec![v], Vec::new());
-    while let Some(v) = stack.pop() {
-        if of.contains(&v) {
-            return true;
-        }
-        if !seen.contains(&v) {
-            seen.push(v);
-            stack.extend(producer.get(&v).map_or(&[][..], |n| &n.inputs[..]));
-        }
-    }
-    false
-}
-
-/// Whether `max` and `sum` form a softmax denominator: `sum(exp(x - broadcast(max(x))))` over the
-/// same axes and dtype.
-pub(super) fn softmax_pair(body: &Graph, max: &Node, sum: &Node) -> bool {
-    use Primitive::*;
-    let producer: HashMap<Var, &Node> = body.nodes().iter().map(|n| (n.output, n)).collect();
-    let node = |v: Var| producer.get(&v).copied();
-    let dtype = body.type_of(max.output).dtype;
-    let (
-        ReduceMax { axes: a },
-        ReduceSum {
-            axes: b,
-            accum_dtype,
-        },
-    ) = (&max.primitive, &sum.primitive)
-    else {
-        return false;
-    };
-    let of_max = |mut v: Var| loop {
-        if v == max.output {
-            return true;
-        }
-        match node(v) {
-            Some(n) if matches!(n.primitive, BroadcastInDim { .. } | Reshape { .. }) => {
-                v = n.inputs[0]
-            }
-            _ => return false,
-        }
-    };
-    let exp = node(sum.inputs[0]).filter(|n| matches!(n.primitive, Exp));
-    let sub = exp
-        .and_then(|e| node(e.inputs[0]))
-        .filter(|n| matches!(n.primitive, Sub));
-    a == b
-        && *accum_dtype == dtype
-        && body.type_of(sum.inputs[0]).dtype == dtype
-        && sub.is_some_and(|d| d.inputs[0] == max.inputs[0] && of_max(d.inputs[1]))
 }
 
 /// Values that later passes recompute from an earlier pass's inputs, each with the first pass

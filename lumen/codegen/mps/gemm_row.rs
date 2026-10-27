@@ -42,20 +42,7 @@ pub(crate) fn row_dot(body: &Graph) -> Option<&Node> {
 /// earlier one's result), or `None` if a softmax pair or a non-SIMD-reducible dtype prevents it.
 pub(super) fn tile_reductions(body: &Graph) -> Option<Vec<usize>> {
     let reductions = row_reductions(body);
-    if reductions
-        .windows(2)
-        .any(|w| softmax_pair(body, w[0], w[1]))
-    {
-        return None;
-    }
-    let mut first: Vec<usize> = Vec::new();
-    for (k, r) in reductions.iter().enumerate() {
-        let earlier: Vec<Var> = first.iter().map(|&i| reductions[i].output).collect();
-        if depends_on(body, r.inputs[0], &earlier) {
-            break;
-        }
-        first.push(k);
-    }
+    let first = crate::graph_compiler::common::diamonds::tile_reductions(body, &reductions)?;
     let simd = |&k: &usize| {
         matches!(
             body.type_of(reductions[k].output).dtype,

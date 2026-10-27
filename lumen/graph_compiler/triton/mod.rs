@@ -16,7 +16,7 @@ pub(crate) use crate::codegen::triton::Config;
 use attention::{FlashAttentionBackward, Tiles};
 #[cfg(feature = "python")]
 pub(crate) use attention::{Launch, set_attention};
-use diamonds::Diamonds;
+use diamonds::{Diamonds, DotRows};
 use fusion::LoopFusion;
 #[cfg(feature = "python")]
 pub(crate) use gemm::{Epilogue, set_gemm};
@@ -182,7 +182,7 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
         pipeline.add(SplitK);
     }
     if config.normalization_diamonds {
-        pipeline.add(Diamonds);
+        pipeline.add(Diamonds).add(DotRows);
     }
     pipeline.add(PlaceConcats);
     pipeline.add(LoopFusion {

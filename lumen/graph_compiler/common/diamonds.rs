@@ -2,6 +2,8 @@
 //! last-axis reduction, which a backend can run as one row kernel; and the rewrite replacing each row
 //! with a `row` fusion.
 
+use std::collections::HashMap;
+
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
 use crate::graph_compiler::{constant, elementwise};
 
@@ -973,4 +975,78 @@ fn emit(out: &mut Graph, map: &mut [Var], graph: &Graph, node: &Node, f: Fused) 
             .apply(Primitive::FusionOutput { index, ty }, &[fused])
             .expect("the row's output");
     }
+}
+
+/// Whether `v` depends on any of `of` through the body's nodes.
+pub(crate) fn depends_on(body: &Graph, v: Var, of: &[Var]) -> bool {
+    let producer: HashMap<Var, &Node> = body.nodes().iter().map(|n| (n.output, n)).collect();
+    let (mut stack, mut seen) = (vec![v], Vec::new());
+    while let Some(v) = stack.pop() {
+        if of.contains(&v) {
+            return true;
+        }
+        if !seen.contains(&v) {
+            seen.push(v);
+            stack.extend(producer.get(&v).map_or(&[][..], |n| &n.inputs[..]));
+        }
+    }
+    false
+}
+
+/// Whether `max` and `sum` form a softmax denominator: `sum(exp(x - broadcast(max(x))))` over the
+/// same axes and dtype.
+pub(crate) fn softmax_pair(body: &Graph, max: &Node, sum: &Node) -> bool {
+    use Primitive::*;
+    let producer: HashMap<Var, &Node> = body.nodes().iter().map(|n| (n.output, n)).collect();
+    let node = |v: Var| producer.get(&v).copied();
+    let dtype = body.type_of(max.output).dtype;
+    let (
+        ReduceMax { axes: a },
+        ReduceSum {
+            axes: b,
+            accum_dtype,
+        },
+    ) = (&max.primitive, &sum.primitive)
+    else {
+        return false;
+    };
+    let of_max = |mut v: Var| loop {
+        if v == max.output {
+            return true;
+        }
+        match node(v) {
+            Some(n) if matches!(n.primitive, BroadcastInDim { .. } | Reshape { .. }) => {
+                v = n.inputs[0]
+            }
+            _ => return false,
+        }
+    };
+    let exp = node(sum.inputs[0]).filter(|n| matches!(n.primitive, Exp));
+    let sub = exp
+        .and_then(|e| node(e.inputs[0]))
+        .filter(|n| matches!(n.primitive, Sub));
+    a == b
+        && *accum_dtype == dtype
+        && body.type_of(sum.inputs[0]).dtype == dtype
+        && sub.is_some_and(|d| d.inputs[0] == max.inputs[0] && of_max(d.inputs[1]))
+}
+
+/// The leading row reductions of `reductions` a tiled pass can take partially, by index (none reads
+/// an earlier one's result), or `None` when a softmax pair among them is combined online instead.
+pub(crate) fn tile_reductions(body: &Graph, reductions: &[&Node]) -> Option<Vec<usize>> {
+    if reductions
+        .windows(2)
+        .any(|w| softmax_pair(body, w[0], w[1]))
+    {
+        return None;
+    }
+    let mut first: Vec<usize> = Vec::new();
+    for (k, r) in reductions.iter().enumerate() {
+        let earlier: Vec<Var> = first.iter().map(|&i| reductions[i].output).collect();
+        if depends_on(body, r.inputs[0], &earlier) {
+            break;
+        }
+        first.push(k);
+    }
+    Some(first)
 }
