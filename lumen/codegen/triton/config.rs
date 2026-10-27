@@ -143,6 +143,35 @@ pub(super) const SPLIT_BELOW: usize = 1024;
 pub(super) const SPLIT_SPAN: usize = 8192;
 /// Upper bound on splits per output.
 pub(super) const MOST_SPLITS: usize = 512;
-/// Widest row a normalization row kernel holds in registers (the largest loop `BLOCK_SIZE`); wider
-/// rows run as their reductions and loops.
-pub(super) const MOST_ROW_COLUMNS: usize = 8192;
+/// Widest row a normalization row kernel holds whole in registers (XMA's `MAX_TRITON_BLOCK_SIZE`);
+/// wider rows are walked in chunks of `BLOCK_SIZE`, a pass a reduction.
+pub(super) const MOST_WHOLE_ROW: usize = 65536;
+
+/// Loop configs for a kernel of `lanes`: those whose block covers them, or, when it is wider than
+/// every block (a whole row past 8192), its lanes as the block with each warp count.
+pub(crate) fn loop_configs(lanes: usize) -> Vec<LoopConfig> {
+    let fitting: Vec<LoopConfig> = LOOP_CONFIGS
+        .into_iter()
+        .filter(|c| c.block_size >= lanes)
+        .collect();
+    match fitting.is_empty() {
+        true => WARPS
+            .iter()
+            .map(|&warps| LoopConfig {
+                block_size: lanes,
+                warps,
+            })
+            .collect(),
+        false => fitting,
+    }
+}
+
+/// The loop config used when autotuning is off: `UNTUNED_LOOP`, its block widened to `lanes` when
+/// they don't fit.
+pub(crate) fn untuned_loop(lanes: usize) -> LoopConfig {
+    let config = LOOP_CONFIGS[UNTUNED_LOOP];
+    LoopConfig {
+        block_size: config.block_size.max(lanes),
+        ..config
+    }
+}

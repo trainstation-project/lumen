@@ -149,6 +149,33 @@ def test_normalizations_train_in_one_row_kernel(device, f, triton_on_cuda):
 
 
 @pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("n", [12000, 100003], ids=["whole", "chunked"])
+@pytest.mark.parametrize(
+    "f", NORMALIZATIONS, ids=["rms mean", "rms sum", "rms reciprocal", "softmax written out", "layer norm"]
+)
+def test_wide_rows_are_one_row_kernel(device, n, f, triton_on_cuda):
+    """Rows as wide as XMA's kernels take: on CUDA one row kernel, held
+    whole up to 65536 columns, walked in chunks past that (a pass a
+    reduction, softmax's max and sum in one online pass); its values and
+    gradients the CPU's."""
+    x, w, c = rand(4, n), rand(n, seed=1), rand(4, n, seed=2)
+    try:
+        X, W, C = (lumen.from_numpy(a).to(device) for a in (x, w, c))
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    if device == "cuda":
+        (step,) = lumen.graph_compiler.Plan(lumen.make_graph(f)(X, W), device).steps()
+        assert "reduce_" in step["label"], step["label"]
+    cpu = [lumen.from_numpy(a) for a in (x, w, c)]
+    got = lumen.to_numpy(lumen.compile(f)(X, W).to("cpu"))
+    np.testing.assert_allclose(got, lumen.to_numpy(lumen.compile(f, device="cpu")(*cpu[:2])), rtol=1e-4, atol=1e-6)
+    grad = lumen.grad(lambda a, w, c: F.sum(f(a, w) * c), (0, 1))
+    for g, e in zip(lumen.compile(grad)(X, W, C), lumen.compile(grad, device="cpu")(*cpu)):
+        e = lumen.to_numpy(e)
+        np.testing.assert_allclose(lumen.to_numpy(g.to("cpu")), e, rtol=1e-4, atol=1e-4 * np.abs(e).max())
+
+
+@pytest.mark.parametrize("device", [MPS, CUDA])
 def test_rms_norm_backward_recomputes_its_normalized_input(device, triton_on_cuda):
     """A training step's RMS norm (its value read forward, its gradients
     taken): its forward row kernel writes its output and each row's

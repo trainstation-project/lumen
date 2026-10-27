@@ -26,12 +26,12 @@ pub(crate) use attention::{
 };
 pub(crate) use config::{
     ATTENTION_CONFIGS, AttentionConfig, CONFIGS, Config, LOOP_CONFIGS, LoopConfig, UNTUNED,
-    UNTUNED_LOOP, untuned_attention,
+    UNTUNED_LOOP, loop_configs, untuned_attention, untuned_loop,
 };
 pub(crate) use gemm::{EpilogueFlags, epilogue, gemm, gemm_dot, gemm_flags};
 pub(crate) use indexing::{scatter_add, update};
 pub(crate) use reduction::{reduction, reduction_root, scan};
-pub(crate) use row::{row, row_fits};
+pub(crate) use row::{row, row_fits, row_looped};
 
 /// Triton element type for `dtype`, or `None` when Triton can't hold it.
 pub(crate) fn triton_type(dtype: DType) -> Option<&'static str> {

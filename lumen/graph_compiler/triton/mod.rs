@@ -309,11 +309,7 @@ impl Kernels for Loops {
         let Some(kernel) = loop_kernel(step) else {
             return Vec::new();
         };
-        let widest = kernel.lanes.max(kernel.splits.next_power_of_two());
-        LOOP_CONFIGS
-            .into_iter()
-            .filter(|c| c.block_size >= widest)
-            .collect()
+        codegen::loop_configs(kernel.lanes.max(kernel.splits.next_power_of_two()))
     }
 
     /// The step launched with `config`.
@@ -440,9 +436,22 @@ pub(crate) fn run(
                 ));
             }
             let inputs: &[Tensor] = &[inputs, outs].concat();
-            let config = step
-                .launch::<LoopConfig>()
-                .unwrap_or(&LOOP_CONFIGS[UNTUNED_LOOP]);
+            let untuned = codegen::untuned_loop(kernel.lanes);
+            let config = step.launch::<LoopConfig>().unwrap_or(&untuned);
+            // A looped row kernel walks one row a program, a block of it at a time.
+            let looped;
+            let kernel = match &step.primitive {
+                Primitive::Fusion { name, body, .. }
+                    if name == ROW && codegen::row_looped(body) =>
+                {
+                    looped = Kernel {
+                        lanes: config.block_size,
+                        ..kernel.clone()
+                    };
+                    &looped
+                }
+                _ => kernel,
+            };
             // Grid size: outputs, or rows for a row fusion or lines for a scan, or picks for a scatter.
             let n = match &step.primitive {
                 Primitive::Fusion { name, .. } if name == ROW => out
