@@ -2,6 +2,7 @@
 //! through Triton kernels launched from Python.
 
 mod attention;
+mod diamonds;
 mod fusion;
 mod gemm;
 mod horizontal;
@@ -15,6 +16,7 @@ pub(crate) use crate::codegen::triton::Config;
 use attention::{FlashAttentionBackward, Tiles};
 #[cfg(feature = "python")]
 pub(crate) use attention::{Launch, set_attention};
+use diamonds::Diamonds;
 use fusion::LoopFusion;
 #[cfg(feature = "python")]
 pub(crate) use gemm::{Epilogue, set_gemm};
@@ -94,6 +96,9 @@ static LOOP: OnceLock<Loop> = OnceLock::new();
 pub(crate) fn set_loop(launch: Loop) {
     let _ = LOOP.set(launch);
 }
+
+/// Name of a normalization row fusion.
+const ROW: &str = "row";
 
 /// Rejects graphs with half-precision transcendentals, which Triton's libdevice lacks.
 fn unsupported(graph: &Graph) -> Result<(), String> {
@@ -176,6 +181,9 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
     if config.split_k {
         pipeline.add(SplitK);
     }
+    if config.normalization_diamonds {
+        pipeline.add(Diamonds);
+    }
     pipeline.add(PlaceConcats);
     pipeline.add(LoopFusion {
         multi_output: config.multi_output_fusion,
@@ -238,6 +246,10 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
         .collect();
     let (name, source, lanes, splits) = match &step.primitive {
         Primitive::Fusion { body, .. } if codegen::gemm_dot(body).is_some() => return None,
+        Primitive::Fusion { name, body, .. } if name == ROW => {
+            let r = codegen::row(body, &by_value);
+            (r.name, r.source, r.lanes, r.splits)
+        }
         Primitive::Fusion { body, .. } => match codegen::reduction_root(body) {
             Some(root) => {
                 let r = codegen::reduction(body, &by_value, root);
@@ -297,11 +309,7 @@ impl Kernels for Loops {
         let Some(kernel) = loop_kernel(step) else {
             return Vec::new();
         };
-        let widest = kernel.lanes.max(kernel.splits.next_power_of_two());
-        LOOP_CONFIGS
-            .into_iter()
-            .filter(|c| c.block_size >= widest)
-            .collect()
+        codegen::loop_configs(kernel.lanes.max(kernel.splits.next_power_of_two()))
     }
 
     /// The step launched with `config`.
@@ -412,9 +420,13 @@ pub(crate) fn run(
                 .collect();
             let store = Function::new("STORE", codegen::store(out.shape(), out.strides()));
             let mut functions = [loads.as_slice(), std::slice::from_ref(&store)].concat();
-            // An elementwise fusion's other outputs follow its inputs, each with its own store.
+            // An elementwise or row fusion's other outputs follow its inputs, each with its own store.
             let outs: &[Tensor] = match &step.primitive {
-                Primitive::Fusion { body, .. } if codegen::reduction_root(body).is_none() => outs,
+                Primitive::Fusion { name, body, .. }
+                    if name == ROW || codegen::reduction_root(body).is_none() =>
+                {
+                    outs
+                }
                 _ => &[],
             };
             for (k, t) in outs.iter().enumerate() {
@@ -424,14 +436,30 @@ pub(crate) fn run(
                 ));
             }
             let inputs: &[Tensor] = &[inputs, outs].concat();
-            let config = step
-                .launch::<LoopConfig>()
-                .unwrap_or(&LOOP_CONFIGS[UNTUNED_LOOP]);
-            // Grid size: outputs, or lines for a scan, or picks for a scatter.
-            let n = match step.primitive {
-                Primitive::Cumsum { axis, .. } => out.numel().checked_div(out.shape()[axis]),
+            let untuned = codegen::untuned_loop(kernel.lanes);
+            let config = step.launch::<LoopConfig>().unwrap_or(&untuned);
+            // A looped row kernel walks one row a program, a block of it at a time.
+            let looped;
+            let kernel = match &step.primitive {
+                Primitive::Fusion { name, body, .. }
+                    if name == ROW && codegen::row_looped(body) =>
+                {
+                    looped = Kernel {
+                        lanes: config.block_size,
+                        ..kernel.clone()
+                    };
+                    &looped
+                }
+                _ => kernel,
+            };
+            // Grid size: outputs, or rows for a row fusion or lines for a scan, or picks for a scatter.
+            let n = match &step.primitive {
+                Primitive::Fusion { name, .. } if name == ROW => out
+                    .numel()
+                    .checked_div(out.shape().last().copied().unwrap_or(1)),
+                Primitive::Cumsum { axis, .. } => out.numel().checked_div(out.shape()[*axis]),
                 Primitive::DynamicUpdateSlice => Some(inputs[1].numel()),
-                Primitive::ScatterAdd { axis } => out.numel().checked_div(out.shape()[axis]),
+                Primitive::ScatterAdd { axis } => out.numel().checked_div(out.shape()[*axis]),
                 _ => Some(out.numel()),
             };
             // In-place ops start from a copy of their operand.

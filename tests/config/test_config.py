@@ -50,7 +50,7 @@ def test_compiler_flags_defaults(compiler):
     assert compiler.fused_linear_cross_entropy is True and compiler.safe_kernels is False
     assert compiler.autotune is True and compiler.neural_engine is False
     assert (configs.cuda.use_triton_backend, configs.cuda.autotune) == (False, True)
-    assert configs.cuda.deterministic is False
+    assert configs.cuda.deterministic is False and configs.cuda.normalization_diamonds is True
     tpu = configs.tpu
     assert (tpu.normalization_diamonds, tpu.contraction_epilogues, tpu.horizontal_fusion) == (True, True, True)
     assert tpu.safe_kernels is False

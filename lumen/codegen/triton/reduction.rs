@@ -85,7 +85,7 @@ impl Tile {
 }
 
 /// Combine expression of `a` and `b` for a sum or a max; bool max is `or`, float max propagates NaN.
-fn combine(sum: bool, dtype: DType) -> &'static str {
+pub(super) fn combine(sum: bool, dtype: DType) -> &'static str {
     match (sum, dtype) {
         (true, _) => "a + b",
         (false, DType::Bool) => "a | b",
@@ -94,8 +94,20 @@ fn combine(sum: bool, dtype: DType) -> &'static str {
     }
 }
 
+/// Expression reducing `x` along `axis` for a sum or a max accumulating in `dtype`: `tl.sum` (in
+/// `dtype`) or `tl.max`, or `tl.reduce` with `combine` where those differ from the reduction (a float
+/// max propagates NaN, a bool max is `or`).
+pub(super) fn reduce_along(x: &str, axis: usize, sum: bool, dtype: DType, combine: &str) -> String {
+    let t = triton_type(dtype).expect("a Triton dtype");
+    match (sum, dtype) {
+        (true, d) if d != DType::Bool => format!("tl.sum({x}, {axis}, dtype={t})"),
+        (false, d) if !d.is_float() && d != DType::Bool => format!("tl.max({x}, {axis})"),
+        _ => format!("tl.reduce({x}, {axis}, {combine})"),
+    }
+}
+
 /// Identity of max for `dtype`: `-inf` for floats, the minimum for signed ints, 0 otherwise.
-fn lowest(dtype: DType) -> String {
+pub(super) fn lowest(dtype: DType) -> String {
     match dtype {
         d if d.is_float() => "float(\"-inf\")".into(),
         DType::I8 | DType::I16 | DType::I32 | DType::I64 => {
@@ -159,6 +171,10 @@ pub(crate) fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> Reducti
     );
     let (combine, init) = (combine(sum, a), lowest(a));
     let init = if sum { "0".into() } else { init };
+    let (whole, partials) = (
+        reduce_along("acc", axis, sum, a, "NAME_combine"),
+        reduce_along("partial", 1, sum, a, "NAME_combine"),
+    );
     let (lines, tail) = (indented(&prologue.lines), &epilogue.lines);
     // Each split covers a whole number of lane-sized chunks.
     let per = count.div_ceil(splits).div_ceil(lanes) * lanes;
@@ -198,7 +214,7 @@ pub(crate) fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> Reducti
                 j = {j}
                 mask = {mask}
         {lines}        acc = NAME_combine(acc, tl.where(mask, {element}, empty))
-            reduced = tl.reduce(acc, {axis}, NAME_combine)
+            reduced = {whole}
         {finish}"
     );
     // Second pass: each program combines the partials of its outputs, padded to a power of two.
@@ -217,7 +233,7 @@ pub(crate) fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> Reducti
                 empty = tl.full([], {init}, {acc})
                 mask = (o < n)[:, None] & (p < {splits})[None, :]
                 partial = tl.load(partials + o[:, None] * {splits} + p[None, :], mask=mask, other=empty)
-                reduced = tl.reduce(partial, 1, NAME_combine)
+                reduced = {partials}
                 mask = o < n
             {tail}    STORE(out, o, {result}, mask)
             "
@@ -261,6 +277,7 @@ pub(crate) fn scan(
         false => format!("LOAD0(in0, j, mask).to({acc})"),
     };
     let params = params(&[false], None, 1);
+    let total = reduce_along("x", axis, true, a, "NAME_combine");
     let source = formatdoc!(
         "
         @triton.jit
@@ -282,7 +299,7 @@ pub(crate) fn scan(
                 x = {element}
                 x = tl.where(mask, x, tl.zeros_like(x))
                 STORE(out, j, {carried} + tl.associative_scan(x, {axis}, NAME_combine), mask)
-                carry = carry + tl.reduce(x, {axis}, NAME_combine)
+                carry = carry + {total}
         "
     );
     let (name, source) = named("scan", source);
