@@ -3,8 +3,7 @@
 use super::analysis::Analysis;
 use super::dot_epilogues::DotEpilogues;
 use super::reduction_epilogues::ReductionEpilogues;
-use super::{expensive, is_reduction};
-use crate::graph_compiler::MpsConfig;
+use super::{Backend, expensive, is_reduction};
 use crate::graph_compiler::common::diamonds::Row;
 use crate::graph_compiler::common::multi_output::Readers;
 
@@ -53,7 +52,7 @@ pub(super) fn roots(
 pub(super) fn hosts(
     a: &Analysis,
     rows: &[Row],
-    config: &MpsConfig,
+    backend: &Backend,
     root: &[bool],
     reductions: &ReductionEpilogues,
     dots: &DotEpilogues,
@@ -77,7 +76,7 @@ pub(super) fn hosts(
         users,
     };
     for (i, node) in nodes.iter().enumerate().rev() {
-        let candidate = config.multi_output_fusion
+        let candidate = backend.multi_output_fusion
             && live[i]
             && root[i]
             && fusible[i]

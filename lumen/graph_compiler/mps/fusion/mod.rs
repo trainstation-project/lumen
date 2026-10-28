@@ -1,26 +1,14 @@
-//! MPS loop fusion: groups elementwise chains, reductions, normalization rows and GEMM epilogues
-//! into `Fusion` nodes, each compiled to one Metal kernel.
+//! MPS loop fusion: the shared loop fusion (`common::fusion`) with Metal's kernels' limits and shapes,
+//! each fusion compiled to one Metal kernel.
 
-mod analysis;
-mod dot_epilogues;
-mod emit;
-mod hosts;
-mod reduction_epilogues;
-mod rows;
-
-use super::diamonds::Row;
 use super::{Kernel, MpsModule, horizontal, request};
 use crate::DType;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::MpsConfig;
+use crate::graph_compiler::common::diamonds::Row;
+use crate::graph_compiler::common::fusion::{self as common, Backend};
 use crate::graph_compiler::pass::CompilerPass;
 pub(crate) use crate::graph_compiler::{constant, elementwise, label};
-
-/// Most buffers a loop fusion may read.
-const MAX_INPUTS: usize = 29;
-
-/// Most extra outputs a GEMM epilogue may write besides its main one.
-const MAX_AUX: usize = 4;
 
 /// Whether `node` can live inside a loop fusion kernel: loop ops, gathers and reductions under
 /// 2^32 elements, none touching float64.
@@ -64,25 +52,26 @@ pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
     (loop_op || gather || reduction) && !f64
 }
 
-/// Whether `node` is a sum or max reduction.
-fn is_reduction(node: &Node) -> bool {
-    matches!(
-        node.primitive,
-        Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. }
-    )
-}
-
-/// Whether `node` is costly enough per element that recomputing it in each reader is a bad trade.
-fn expensive(graph: &Graph, node: &Node) -> bool {
-    use Primitive::*;
-    match node.primitive {
-        Exp | Log | Sqrt | Tanh | Logistic => true,
-        Div => graph.type_of(node.output).dtype.is_float(),
-        _ => false,
+/// The shared loop fusion's view of Metal: its kernels bind at most 29 buffers, a GEMM epilogue
+/// writes at most 4 extra outputs, and the GEMM shapes the Metal kernels take.
+fn backend(config: &MpsConfig) -> Backend {
+    Backend {
+        fusible,
+        max_inputs: 29,
+        max_aux: 4,
+        multi_output_fusion: config.multi_output_fusion,
+        reduction_epilogues: config.reduction_epilogues,
+        contraction_epilogues: config.contraction_epilogues,
+        gemm_pair: crate::codegen::mps::gemm_pair,
+        expansion: |graph, dot, concat| {
+            crate::codegen::mps::expansion(graph, dot, concat).is_some()
+        },
+        row_dot: |body| crate::codegen::mps::row_dot(body).is_some(),
     }
 }
 
-/// Fuses `graph` given its normalization `rows` and by-value `scalars`; `kernel` names each fusion body's kernel.
+/// Fuses `graph` for Metal under `config`, given its normalization `rows` and by-value `scalars`;
+/// `kernel` names each fusion body's kernel.
 pub(super) fn fuse(
     graph: &Graph,
     rows: &[Row],
@@ -90,24 +79,7 @@ pub(super) fn fuse(
     config: &MpsConfig,
     kernel: impl FnMut(&Graph, &[bool]) -> String,
 ) -> Graph {
-    let a = analysis::Analysis::new(graph);
-    let rows = rows::extended(&a, rows);
-    let reductions = reduction_epilogues::reduction_epilogues(&a, &rows, config);
-    let dots = dot_epilogues::dot_epilogues(&a, &rows, config);
-    let mut root = hosts::roots(&a, &rows, &reductions, &dots);
-    let mut host = hosts::hosts(&a, &rows, config, &root, &reductions, &dots);
-    let mut fusions = emit::fusions(&a, &mut root, &mut host);
-    emit::row_dots(&a, &rows, config, &dots, &mut root, &mut host, &mut fusions);
-    emit::emitted(
-        &a,
-        scalars,
-        &root,
-        &host,
-        &fusions,
-        &dots,
-        &reductions,
-        kernel,
-    )
+    common::fuse(graph, rows, scalars, &backend(config), kernel)
 }
 
 /// Compiler pass running loop fusion, then optional horizontal fusion.

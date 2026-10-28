@@ -1,10 +1,9 @@
 //! Finds elementwise epilogues fused into GEMM kernels, including split-column regions and auxiliary outputs.
 
 use super::analysis::Analysis;
-use super::{MAX_AUX, elementwise};
+use super::{Backend, elementwise};
 use crate::DType;
 use crate::graph::{Node, Primitive, Var};
-use crate::graph_compiler::MpsConfig;
 use crate::graph_compiler::common::diamonds::Row;
 
 /// GEMM epilogue assignment, indexed by node.
@@ -20,7 +19,7 @@ pub(super) struct DotEpilogues {
 }
 
 /// Assigns each float GEMM the longest elementwise chain after it that can run in its epilogue.
-pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], config: &MpsConfig) -> DotEpilogues {
+pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], backend: &Backend) -> DotEpilogues {
     let (graph, nodes, n) = (a.graph, a.nodes, a.n);
     let (producer, is_output, live, users, fusible) =
         (&a.producer, &a.is_output, &a.live, &a.users, &a.fusible);
@@ -49,7 +48,7 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], config: &MpsConfig) -> D
         let dot = matches!(node.primitive, Primitive::DotGeneral { .. })
             && node.inputs.iter().all(|&v| float(v))
             && float(node.output);
-        if !config.contraction_epilogues || !live[i] || !dot {
+        if !backend.contraction_epilogues || !live[i] || !dot {
             continue;
         }
         let in_row = |u: usize| rows.iter().any(|r| r.root == u || r.inner.contains(&u));
@@ -59,11 +58,11 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], config: &MpsConfig) -> D
                 && (to.dtype.size_of() > from.dtype.size_of()) == grows
                 && to.dtype.size_of() != from.dtype.size_of()
         };
-        let pair = crate::codegen::mps::gemm_pair(graph, node);
+        let pair = (backend.gemm_pair)(graph, node);
         // When readers split the output into column regions, grow each region separately and
         // keep the largest assignment whose region outputs all fit.
         if let Some(regions) =
-            crate::codegen::mps::gemm_regions(graph, node).filter(|_| pair.is_none())
+            crate::codegen::regions::gemm_regions(graph, node).filter(|_| pair.is_none())
         {
             let index_of = |v: Var| producer[v].expect("a node's value");
             // Seed each region with its slicing nodes back to the dot.
@@ -121,7 +120,7 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], config: &MpsConfig) -> D
                         .iter()
                         .all(|&w| w > main || sets.iter().any(|set| set.contains(&w)))
                 });
-                (ends.len() - 1 <= MAX_AUX && read_after).then_some((ends, main))
+                (ends.len() - 1 <= backend.max_aux && read_after).then_some((ends, main))
             };
             let mut best = fused(&sets).map(|f| (sets.clone(), f));
             let mut depends = vec![false; n];
@@ -182,8 +181,7 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], config: &MpsConfig) -> D
             if !live[u] || !un.inputs.iter().any(|&v| after[v]) {
                 continue;
             }
-            let expands =
-                pair.is_none() && crate::codegen::mps::expansion(graph, node, un).is_some();
+            let expands = pair.is_none() && (backend.expansion)(graph, node, un);
             let step = elementwise(&un.primitive)
                 || matches!(un.primitive, Primitive::Reshape { .. })
                 || pair.is_some_and(|p| p.contains(&u))
@@ -268,7 +266,7 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], config: &MpsConfig) -> D
             });
             if kept.first() == Some(&i)
                 && read_after
-                && aux.len() <= MAX_AUX
+                && aux.len() <= backend.max_aux
                 && paired
                 && (!expands || aux.is_empty())
                 && (!upcast || expands)

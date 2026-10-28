@@ -8,6 +8,7 @@ pub(crate) mod cse;
 pub(crate) mod diamonds;
 pub(crate) mod dot_rows;
 pub(crate) mod fold_dot_reshapes;
+pub(crate) mod fusion;
 pub(crate) mod horizontal;
 pub(crate) mod loops;
 pub(crate) mod multi_output;
