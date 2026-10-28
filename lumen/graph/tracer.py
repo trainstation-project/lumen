@@ -465,23 +465,61 @@ def _lift(x):
     return x
 
 
+# Field names of each module class, in order (``dataclasses.fields``, looked up once a class).
+_FIELDS = {}
+
+# Where a scalar sits in a walked structure; whether it is runtime or static is in the key's scalars.
+_SCALAR = ("scalar",)
+
+
+def _walk(args):
+    """One pass over ``args``: their structure, hashable (``nn.structure``'s, a
+    marker at each scalar, and which module tensors share storage); each
+    scalar's ``(slot, value)`` (``_slots``); and the modules' weights, each
+    once, in order (``_weights``)."""
+    slots, ids, params = [], [], {}
+
+    def walk(x, i, path, module):
+        """The structure of ``x``, at ``path`` of argument ``i`` (inside a module when ``module``)."""
+        if isinstance(x, Tensor):
+            if module:
+                if not x._is_parameter:
+                    raise TypeError(
+                        f"a module's weights must be whole meta tensors, got a {x.device} tensor of shape {x.shape}"
+                    )
+                ids.append(x.storage_id)
+                params.setdefault(x.storage_id, x)
+            return ("tensor", x.dtype, tuple(x.shape))
+        if isinstance(x, nn.Module):
+            names = _FIELDS.get(type(x))
+            if names is None:
+                names = _FIELDS[type(x)] = tuple(f.name for f in dataclasses.fields(x))
+            return (type(x), tuple((n, walk(getattr(x, n), i, (*path, n), True)) for n in names))
+        if isinstance(x, (list, tuple)):
+            return (type(x), tuple(walk(v, i, (*path, k), module) for k, v in enumerate(x)))
+        if nn.is_scalar(x):
+            slots.append(((i, path), x))
+            return _SCALAR
+        return ("static", x)
+
+    structure = tuple(walk(a, i, (), False) for i, a in enumerate(args))
+    shared = tuple(ids.index(k) for k in ids)
+    return (structure, shared), slots, list(params.values())
+
+
+def _keyed(structure, slots, runtime):
+    """What a plan for walked arguments depends on (``_signature``): their
+    ``structure`` and each scalar's type when ``runtime``, else its value."""
+    return structure, tuple(("scalar", type(v)) if runtime(slot, v) else ("static", type(v), v) for slot, v in slots)
+
+
 def _signature(args, runtime):
     """What a plan for ``args`` depends on: the tensors' types, the
     modules' and containers' structure (``nn.structure``: a runtime
     scalar's type, a static one's value), which weights are shared, and the
     other arguments' values."""
-    ids = [t.storage_id for a in args if isinstance(a, nn.Module) for _, t in nn._leaves(a, "")]
-    shared = tuple(ids.index(i) for i in ids)
-
-    def of(i, a):
-        """Argument ``i``'s part of the signature."""
-        if isinstance(a, Tensor):
-            return (a.dtype, tuple(a.shape))
-        if nn.is_scalar(a) or isinstance(a, (nn.Module, list, tuple)):
-            return nn.structure(a, lambda path, v: runtime((i, path), v))
-        return ("static", a)
-
-    return tuple(of(i, a) for i, a in enumerate(args)) + (shared,)
+    structure, slots, _ = _walk(args)
+    return _keyed(structure, slots, runtime)
 
 
 def _settled(fn, args, device, dynamic, pinned, proven, portable=False, split=True):
@@ -597,26 +635,30 @@ def compile(fn, device=None):
     named = None if device is None else _device_name(device)
     dynamic, pinned, proven, seen = set(), set(), set(), {}
 
-    def prepare(args):
-        """The plan for ``args`` and its inputs: the graph, the plan, its
-        workspace, what ``fn`` returns (its outputs' structure), and the plan's
-        inputs (the arguments, then the weights placed, and their blocks)."""
+    def prepare(args, walked=None):
+        """The plan for ``args`` (``walked``: their ``_walk``, when the caller
+        has it) and its inputs: the graph, the plan, its workspace, what
+        ``fn`` returns (its outputs' structure), and the plan's inputs (the
+        arguments, then the weights placed, and their blocks)."""
         target = named or _device(args, None)
+        structure, slots, weights = walked or _walk(args)
         # An int or bool seen with two values across calls is made runtime instead of recompiling per value.
-        for slot, value in _slots(args):
+        for slot, value in slots:
             if type(value) in (int, bool) and slot not in dynamic and slot not in pinned:
                 if seen.setdefault(slot, (type(value), value)) != (type(value), value):
                     dynamic.add(slot)
-        key = _signature(args, _runtime(dynamic)), target, _compiler_flags()
+        key = _keyed(structure, slots, _runtime(dynamic)), target, _compiler_flags()
         result = None
         if key not in plans:
             result = _settled(fn, args, target, dynamic, pinned, proven)
-            key = _signature(args, _runtime(dynamic)), target, _compiler_flags()
+            structure, slots, weights = _walk(args)
+            key = _keyed(structure, slots, _runtime(dynamic)), target, _compiler_flags()
         if result is not None:
             plans[key] = (*result, [])
         graph, out, written_all, drawn, _, layout, entries = plans[key]
         host_graph, n_hoisted, host_slots = written_all[3]
-        runtime_slots = _runtime_slots(args, _runtime(dynamic))
+        runtime = _runtime(dynamic)
+        runtime_slots = [(slot, v) for slot, v in slots if runtime(slot, v)]
         raw = [Tensor.full([], _plain(v), _scalar_dtype(target, v)) for _, v in runtime_slots]
         pending[:] = []
         hoisted = []
@@ -627,7 +669,6 @@ def compile(fn, device=None):
             hoisted, pending[:] = values[:n_hoisted], list(zip(host_slots, values[n_hoisted:]))
         from lumen import random
 
-        weights = _weights(args)
         of = {
             "arg": [a for a in args if isinstance(a, Tensor)],
             "scalar": raw,
@@ -699,10 +740,11 @@ def compile(fn, device=None):
                     return value.cpu() if host else value
 
                 return _tree_map(returned, out)
-        graph, plan, workspace, out, inputs = prepare(args)
+        walked = _walk(args)
+        graph, plan, workspace, out, inputs = prepare(args, walked)
         ran = not (workspace is None or any(isinstance(a, Tensor) and _device_type(a.device) == "meta" for a in args))
         if ran and plan.neural_engine:
-            versions = [w._version for w in _weights(args)]
+            versions = [w._version for w in walked[2]]
             if baked.get(id(plan)) != versions:
                 plan._invalidate_neural_engine()
                 baked[id(plan)] = versions
@@ -734,7 +776,7 @@ def compile(fn, device=None):
                 fast[signature, _compiler_flags()] = (plan, workspace, out, None if lone else to_host, latest[0])
         # Write assigned weights, scalars and arguments back, and advance the random stream.
         if ran:
-            weights = _weights(args)
+            weights = walked[2]
             written, written_scalars, written_arguments, _ = plans[latest[0]][2]
             target = latest[0][1]
             for k, value in zip(written, outputs):

@@ -2,7 +2,7 @@
 
 use std::sync::OnceLock;
 
-use super::Function;
+use super::{Function, Launches};
 use crate::codegen::triton::{self as codegen, CONFIGS, Config, UNTUNED};
 use crate::graph::{Graph, Node, Primitive};
 use crate::graph_compiler::common::autotune::Kernels;
@@ -12,13 +12,15 @@ use crate::tensor::contiguous_strides;
 use crate::{DType, Tensor};
 
 /// Launches the Triton GEMM on `[lhs, rhs, out]` with `[batch, m, k, n]` sizes, the tile config, the
-/// generated prologue/epilogue jit functions and the epilogue's extra operands.
+/// generated prologue/epilogue jit functions (their compiled kernels kept in the launches) and the
+/// epilogue's extra operands.
 pub type Gemm = fn(
     tensors: [&Tensor; 3],
     sizes: [usize; 4],
     accum_dtype: DType,
     config: &Config,
     functions: &[Function],
+    launches: &Launches,
     epilogue: &Epilogue,
 ) -> Result<(), String>;
 
@@ -63,6 +65,7 @@ struct Prepared {
     /// Fusion inputs passed by value.
     scalars: Vec<usize>,
     accum: DType,
+    launches: Launches,
 }
 
 /// Generates a GEMM step's prologues and epilogue for the layouts of `inputs`, `out` and `outs`.
@@ -87,6 +90,7 @@ fn prepare(step: &Step, inputs: &[Tensor], out: &Tensor, outs: &[Tensor]) -> Pre
             },
             scalars: Vec::new(),
             accum: accum_dtype(&step.primitive),
+            launches: Launches::default(),
         };
     };
     // A fusion: the dot computes into a contiguous tile and the epilogue writes the fusion's outputs.
@@ -141,6 +145,7 @@ fn prepare(step: &Step, inputs: &[Tensor], out: &Tensor, outs: &[Tensor]) -> Pre
         flags,
         scalars: (0..inputs.len()).filter(|&k| by_value[k]).collect(),
         accum: accum_dtype(&dot.primitive),
+        launches: Launches::default(),
     }
 }
 
@@ -196,6 +201,7 @@ fn gemm(
             prepared.accum,
             &config,
             &prepared.functions,
+            &prepared.launches,
             &plain,
         );
     };
@@ -213,6 +219,7 @@ fn gemm(
         prepared.accum,
         &config,
         &prepared.functions,
+        &prepared.launches,
         &fused,
     )
 }

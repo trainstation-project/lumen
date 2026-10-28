@@ -12,7 +12,9 @@ mod horizontal;
 mod place_concats;
 mod split_k;
 
-use std::sync::OnceLock;
+use std::any::Any;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 #[cfg(feature = "python")]
 pub(crate) use crate::codegen::triton::Config;
@@ -83,11 +85,19 @@ impl Function {
     }
 }
 
-/// Launches a loop kernel over `n` outputs on `programs` programs with the given helper functions.
+/// The kernels a step's launches were compiled for, kept with its generated helpers: the launcher finds
+/// a run's kernel here by its config and argument classes instead of building a key each run.
+#[derive(Default)]
+#[cfg_attr(not(lumen_cuda_linked), allow(dead_code))]
+pub struct Launches(pub(crate) Mutex<Vec<Arc<dyn Any + Send + Sync>>>);
+
+/// Launches a loop kernel over `n` outputs on `programs` programs with the given helper functions,
+/// finding or recording its compiled kernel in `launches`.
 pub type Loop = fn(
     kernel: &Kernel,
     config: &LoopConfig,
     functions: &[Function],
+    launches: &Launches,
     inputs: &[Tensor],
     out: &Tensor,
     n: usize,
@@ -453,7 +463,8 @@ pub(crate) fn run(
             let helpers = step
                 .memo
                 .get(key, || Ok(loop_helpers(step, kernel, inputs, out, outs)))?;
-            let (loads, functions) = (&helpers.0, &helpers.1);
+            let (loads, functions, launches) =
+                (&helpers.loads, &helpers.functions, &helpers.launches);
             let inputs: &[Tensor] = &[inputs, outs].concat();
             let untuned = codegen::untuned_loop(kernel.lanes);
             let config = step.launch::<LoopConfig>().unwrap_or(&untuned);
@@ -499,7 +510,7 @@ pub(crate) fn run(
             }
             let n = n.unwrap_or(0);
             if kernel.splits == 1 {
-                return launch(kernel, config, functions, inputs, out, n);
+                return launch(kernel, config, functions, launches, inputs, out, n);
             }
             // A split reduction writes per-split partials, then a second kernel combines them into `out`.
             let Primitive::Fusion { body, .. } = &step.primitive else {
@@ -510,7 +521,7 @@ pub(crate) fn run(
                 .dtype(body.type_of(reduced).dtype)
                 .device(out.device());
             let partials = unsafe { Tensor::empty(&[n * kernel.splits], options) };
-            launch(kernel, config, loads, inputs, &partials, n)?;
+            launch(kernel, config, loads, launches, inputs, &partials, n)?;
             let last = Kernel {
                 name: format!("{}_final", kernel.name),
                 source: kernel.source.clone(),
@@ -520,29 +531,64 @@ pub(crate) fn run(
                 segments: Vec::new(),
             };
             let inputs = [inputs, std::slice::from_ref(&partials)].concat();
-            launch(&last, config, functions, &inputs, out, n)
+            launch(&last, config, functions, launches, &inputs, out, n)
         }
         _ => Err(format!("{}: has no Triton kernel on CUDA yet", step.label)),
     }
 }
 
+/// A fill or copy kernel with its helpers for one layout of its tensors, and the kernels compiled for it.
+struct Utility {
+    kernel: Kernel,
+    functions: Vec<Function>,
+    launches: Launches,
+}
+
+/// The fill or copy kernel `make` builds for the tensors' dtypes, shapes and strides in `layouts`,
+/// made once per layout.
+fn utility(layouts: &[&Tensor], make: impl FnOnce() -> (Kernel, Vec<Function>)) -> Arc<Utility> {
+    type Layout = (DType, Vec<usize>, Vec<usize>);
+    static UTILITIES: Mutex<Option<HashMap<Vec<Layout>, Arc<Utility>>>> = Mutex::new(None);
+    let key: Vec<Layout> = layouts
+        .iter()
+        .map(|t| (t.dtype(), t.shape().to_vec(), t.strides().to_vec()))
+        .collect();
+    let mut cache = UTILITIES.lock().unwrap_or_else(PoisonError::into_inner);
+    let cache = cache.get_or_insert_with(HashMap::new);
+    cache
+        .entry(key)
+        .or_insert_with(|| {
+            let (kernel, functions) = make();
+            Arc::new(Utility {
+                kernel,
+                functions,
+                launches: Launches::default(),
+            })
+        })
+        .clone()
+}
+
 /// Fills `t` with `value` using a Triton kernel.
 pub(crate) fn fill(t: &Tensor, value: Scalar) -> Result<(), String> {
-    let (name, source) = codegen::fill(t.dtype());
-    let kernel = Kernel {
-        name,
-        source,
-        by_value: vec![true],
-        lanes: 1,
-        splits: 1,
-        segments: Vec::new(),
-    };
-    let store = Function::new("STORE", codegen::store(t.shape(), t.strides()));
+    let fill = utility(&[t], || {
+        let (name, source) = codegen::fill(t.dtype());
+        let kernel = Kernel {
+            name,
+            source,
+            by_value: vec![true],
+            lanes: 1,
+            splits: 1,
+            segments: Vec::new(),
+        };
+        let store = Function::new("STORE", codegen::store(t.shape(), t.strides()));
+        (kernel, vec![store])
+    });
     let bits = Tensor::from_slice(&[codegen::bits(t.dtype(), value)], DType::U64);
     launch(
-        &kernel,
+        &fill.kernel,
         &LOOP_CONFIGS[UNTUNED_LOOP],
-        &[store],
+        &fill.functions,
+        &fill.launches,
         &[bits],
         t,
         t.numel(),
@@ -551,30 +597,43 @@ pub(crate) fn fill(t: &Tensor, value: Scalar) -> Result<(), String> {
 
 /// Copies `src` into `dst`, which may have different strides, using a Triton kernel.
 pub(crate) fn copy(dst: &Tensor, src: &Tensor) -> Result<(), String> {
-    let mut body = Graph::new();
-    let x = body.input(TensorType::new(src.dtype(), src.shape()));
-    body.set_outputs(&[x]).expect("the copied value");
-    let (name, source) = codegen::kernel(&body, &[false]);
-    let kernel = Kernel {
-        name,
-        source,
-        by_value: vec![false],
-        lanes: 1,
-        splits: 1,
-        segments: Vec::new(),
-    };
-    let functions = [
-        Function::new("LOAD0", codegen::load(src.shape(), src.strides())),
-        Function::new("STORE", codegen::store(dst.shape(), dst.strides())),
-    ];
+    let copy = utility(&[dst, src], || {
+        let mut body = Graph::new();
+        let x = body.input(TensorType::new(src.dtype(), src.shape()));
+        body.set_outputs(&[x]).expect("the copied value");
+        let (name, source) = codegen::kernel(&body, &[false]);
+        let kernel = Kernel {
+            name,
+            source,
+            by_value: vec![false],
+            lanes: 1,
+            splits: 1,
+            segments: Vec::new(),
+        };
+        let functions = vec![
+            Function::new("LOAD0", codegen::load(src.shape(), src.strides())),
+            Function::new("STORE", codegen::store(dst.shape(), dst.strides())),
+        ];
+        (kernel, functions)
+    });
     launch(
-        &kernel,
+        &copy.kernel,
         &LOOP_CONFIGS[UNTUNED_LOOP],
-        &functions,
+        &copy.functions,
+        &copy.launches,
         std::slice::from_ref(src),
         dst,
         dst.numel(),
     )
+}
+
+/// A loop step's generated helpers for its tensors' layouts, and the kernels compiled for them.
+struct Helpers {
+    /// The loads of its tensor inputs.
+    loads: Vec<Function>,
+    /// The loads, then the stores of its outputs (and a scatter-add's load of its output).
+    functions: Vec<Function>,
+    launches: Launches,
 }
 
 /// A loop step's helpers for its tensors' layouts: the loads of its tensor inputs, then those with the
@@ -585,7 +644,7 @@ fn loop_helpers(
     inputs: &[Tensor],
     out: &Tensor,
     outs: &[Tensor],
-) -> (Vec<Function>, Vec<Function>) {
+) -> Helpers {
     let loads: Vec<Function> = inputs
         .iter()
         .enumerate()
@@ -609,7 +668,11 @@ fn loop_helpers(
             codegen::load(out.shape(), out.strides()),
         ));
     }
-    (loads, functions)
+    Helpers {
+        loads,
+        functions,
+        launches: Launches::default(),
+    }
 }
 
 /// A hash of `tensors`' dtypes, shapes and strides: the key of what a step generated for those layouts.
@@ -634,11 +697,13 @@ pub(crate) fn reads_strided(step: &Step) -> bool {
         )
 }
 
-/// Launches `kernel` over `n` outputs, with enough programs for the block size, lanes and splits.
+/// Launches `kernel` over `n` outputs, with enough programs for the block size, lanes and splits; its
+/// compiled kernels are kept in `launches`.
 fn launch(
     kernel: &Kernel,
     config: &LoopConfig,
     functions: &[Function],
+    launches: &Launches,
     inputs: &[Tensor],
     out: &Tensor,
     n: usize,
@@ -650,5 +715,7 @@ fn launch(
         [] => n.div_ceil(config.block_size / kernel.lanes) * kernel.splits,
         segments => segments.iter().map(|s| s.div_ceil(config.block_size)).sum(),
     };
-    launch(kernel, config, functions, inputs, out, n, programs)
+    launch(
+        kernel, config, functions, launches, inputs, out, n, programs,
+    )
 }

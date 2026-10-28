@@ -228,53 +228,109 @@ fn triton_code(kernel: &str, functions: &[super::triton::Function]) -> String {
     [passed.join("\n"), kernel.to_owned()].join("\n")
 }
 
-/// Launches a Triton kernel from Rust when it compiles to a plain launch, returning whether it did (or
-/// had nothing to launch); otherwise the caller's Python launch runs it. `identity` names the kernel, its
-/// constexprs and launch options, `values` are its runtime parameters in order, and `compile` is the
-/// Python launcher's call with `compile=True`, made once per kernel and argument classes.
+/// A kernel compiled for one of a step's launches: the kernel's name and launch config, and the device
+/// and argument classes it was compiled for.
 #[cfg(lumen_cuda_linked)]
+struct Entry {
+    name: String,
+    config: [usize; 6],
+    device: usize,
+    classes: Vec<super::triton::direct::Class>,
+    kernel: std::sync::Arc<super::triton::direct::Compiled>,
+}
+
+/// Launches a Triton kernel from Rust when it compiles to a plain launch, returning whether it did (or
+/// had nothing to launch); otherwise the caller's Python launch runs it. The kernel is found in the
+/// step's `launches` by its `name`, launch `config` and its `values`' classes (its runtime parameters, in
+/// order, each run's own); the first launch of a class builds its `identity` (the kernel, its constexprs
+/// and launch options) and compiles it with `compile`, the Python launcher's call with `compile=True`.
+#[cfg(lumen_cuda_linked)]
+#[allow(clippy::too_many_arguments)]
 fn direct(
-    identity: &str,
+    launches: &super::triton::Launches,
+    name: &str,
+    config: [usize; 6],
+    identity: impl FnOnce() -> String,
     on: &crate::Tensor,
     values: &[super::triton::direct::Value],
     grid: [usize; 3],
     compile: impl for<'py> FnOnce(Python<'py>, Bound<'py, PyDict>) -> PyResult<Py<PyAny>>,
 ) -> Result<bool, String> {
     use super::triton::direct;
+    use std::sync::PoisonError;
     let Device::Cuda(device) = on.device() else {
         return Ok(false);
     };
-    let key = direct::key(identity, device, values);
-    let mut nothing = false;
-    let kernel = direct::compiled(&key, || {
-        Python::attach(|py| {
-            let kwargs = PyDict::new(py);
-            kwargs.set_item("compile", true)?;
-            let info = compile(py, kwargs)?.into_bound(py);
-            if info.is_none() {
-                nothing = true;
-                return Ok(direct::Compiled {
-                    function: 0,
-                    warps: 0,
-                    shared: 0,
-                    plain: false,
-                    types: Vec::new(),
-                });
-            }
-            let (function, warps, shared, plain, types): (usize, u32, u32, bool, Vec<String>) =
-                info.extract()?;
-            Ok(direct::Compiled {
-                function,
-                warps,
-                shared,
-                plain,
-                types,
-            })
+    let found = launches
+        .0
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .filter_map(|e| e.downcast_ref::<Entry>())
+        .find(|e| {
+            e.name == name
+                && e.config == config
+                && e.device == device
+                && e.classes.len() == values.len()
+                && e.classes.iter().zip(values).all(|(c, v)| *c == v.class())
         })
-        .map_err(|e: PyErr| e.to_string())
-    })?;
-    if nothing || !kernel.plain {
-        return Ok(nothing);
+        .map(|e| e.kernel.clone());
+    let kernel = match found {
+        Some(kernel) => kernel,
+        None => {
+            let key = direct::key(&identity(), device, values);
+            let mut nothing = false;
+            let kernel = direct::compiled(&key, || {
+                Python::attach(|py| {
+                    let kwargs = PyDict::new(py);
+                    kwargs.set_item("compile", true)?;
+                    let info = compile(py, kwargs)?.into_bound(py);
+                    if info.is_none() {
+                        nothing = true;
+                        return Ok(direct::Compiled {
+                            function: 0,
+                            warps: 0,
+                            shared: 0,
+                            plain: false,
+                            types: Vec::new(),
+                        });
+                    }
+                    let (function, warps, shared, plain, types): (
+                        usize,
+                        u32,
+                        u32,
+                        bool,
+                        Vec<String>,
+                    ) = info.extract()?;
+                    Ok(direct::Compiled {
+                        function,
+                        warps,
+                        shared,
+                        plain,
+                        types,
+                    })
+                })
+                .map_err(|e: PyErr| e.to_string())
+            })?;
+            if nothing {
+                return Ok(true);
+            }
+            launches
+                .0
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(std::sync::Arc::new(Entry {
+                    name: name.to_owned(),
+                    config,
+                    device,
+                    classes: values.iter().map(|v| v.class()).collect(),
+                    kernel: kernel.clone(),
+                }));
+            kernel
+        }
+    };
+    if !kernel.plain {
+        return Ok(false);
     }
     direct::launch(&kernel, grid, values)?;
     Ok(true)
@@ -301,6 +357,7 @@ fn triton_gemm(
     accum_dtype: DType,
     config: &super::triton::Config,
     functions: &[super::triton::Function],
+    launches: &super::triton::Launches,
     epilogue: &super::triton::Epilogue,
 ) -> Result<(), String> {
     crate::kernels::launched::launched("dot_general", || {
@@ -315,6 +372,8 @@ fn triton_gemm(
         );
         Some(triton_code(&template, functions))
     });
+    #[cfg(not(lumen_cuda_linked))]
+    let _ = launches;
     current(tensors[2]);
     let call = |py: Python<'_>, kwargs: Option<Bound<'_, PyDict>>| -> PyResult<Py<PyAny>> {
         let tensors = tensors.map(|t| PyTensor::wrap(t.clone()));
@@ -383,16 +442,33 @@ fn triton_gemm(
             .chain(extra)
             .chain(sizes[1..].iter().map(|&s| Value::Int(s as i128)))
             .collect();
-        let identity = format!(
-            "gemm|{accum_dtype}|{config:?}|{:?}|{:?}|{}",
-            (flags.group, flags.interleaved, flags.rows),
-            epilogue.scalars,
-            names(functions)
-        );
+        let identity = || {
+            format!(
+                "gemm|{accum_dtype}|{config:?}|{:?}|{:?}|{}",
+                (flags.group, flags.interleaved, flags.rows),
+                epilogue.scalars,
+                names(functions)
+            )
+        };
+        let tiles = [
+            config.block_m,
+            config.block_n,
+            config.block_k,
+            config.group_m,
+            config.stages,
+            config.warps,
+        ];
         let grid = [l, programs, 1];
-        if direct(&identity, tensors[2], &values, grid, |py, kw| {
-            call(py, Some(kw))
-        })? {
+        if direct(
+            launches,
+            "gemm",
+            tiles,
+            identity,
+            tensors[2],
+            &values,
+            grid,
+            |py, kw| call(py, Some(kw)),
+        )? {
             return Ok(());
         }
     }
@@ -400,10 +476,12 @@ fn triton_gemm(
 }
 
 /// Launches a generated Triton elementwise loop kernel over `n` elements in `programs` programs.
+#[allow(clippy::too_many_arguments)]
 fn triton_loop(
     kernel: &super::triton::Kernel,
     config: &crate::codegen::triton::LoopConfig,
     functions: &[super::triton::Function],
+    launches: &super::triton::Launches,
     inputs: &[crate::Tensor],
     out: &crate::Tensor,
     n: usize,
@@ -416,6 +494,8 @@ fn triton_loop(
         );
         Some(triton_code(&source, functions))
     });
+    #[cfg(not(lumen_cuda_linked))]
+    let _ = launches;
     current(out);
     let call = |py: Python<'_>, kwargs: Option<Bound<'_, PyDict>>| -> PyResult<Py<PyAny>> {
         let inputs: Vec<PyTensor> = inputs.iter().map(|t| PyTensor::wrap(t.clone())).collect();
@@ -455,16 +535,26 @@ fn triton_loop(
             })
             .chain([Value::of(out), Value::Int(n as i128)])
             .collect();
-        let identity = format!(
-            "loop|{}|{}|{}|{}",
-            kernel.name,
-            config.block_size,
-            config.warps,
-            names(functions)
-        );
-        if direct(&identity, out, &values, [programs, 1, 1], |py, kw| {
-            call(py, Some(kw))
-        })? {
+        let identity = || {
+            format!(
+                "loop|{}|{}|{}|{}",
+                kernel.name,
+                config.block_size,
+                config.warps,
+                names(functions)
+            )
+        };
+        let tiles = [config.block_size, config.warps, 0, 0, 0, 0];
+        if direct(
+            launches,
+            &kernel.name,
+            tiles,
+            identity,
+            out,
+            &values,
+            [programs, 1, 1],
+            |py, kw| call(py, Some(kw)),
+        )? {
             return Ok(());
         }
     }
@@ -534,15 +624,32 @@ fn triton_attention(launch: &super::triton::Launch) -> Result<(), String> {
             "dkdv" => sk.div_ceil(config.block_n),
             _ => sq.div_ceil(config.block_m),
         };
-        let identity = format!(
-            "attention|{}|{h},{hv}|{}|{absent:?}|{config:?}|{}",
+        let identity = || {
+            format!(
+                "attention|{}|{h},{hv}|{}|{absent:?}|{config:?}|{}",
+                launch.kernel,
+                launch.causal.is_some(),
+                names(launch.functions)
+            )
+        };
+        let tiles = [
+            config.block_m,
+            config.block_n,
+            config.stages,
+            config.warps,
+            0,
+            0,
+        ];
+        if direct(
+            launch.launches,
             launch.kernel,
-            launch.causal.is_some(),
-            names(launch.functions)
-        );
-        if direct(&identity, device, &values, [blocks, batch, 1], |py, kw| {
-            call(py, Some(kw))
-        })? {
+            tiles,
+            identity,
+            device,
+            &values,
+            [blocks, batch, 1],
+            |py, kw| call(py, Some(kw)),
+        )? {
             return Ok(());
         }
     }

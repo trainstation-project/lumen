@@ -563,8 +563,8 @@ pub(crate) fn gpu_context(device: Device) -> Option<GpuContext> {
     })
 }
 
-/// Records a device kernel or copy timed from `start_ns` to `end_ns` under `context`.
-#[cfg_attr(not(lumen_cupti_linked), allow(dead_code))]
+/// Records a device kernel or copy timed from `start_ns` to `end_ns` under `context` (tests only).
+#[cfg(test)]
 pub(crate) fn record_gpu_in(
     context: GpuContext,
     name: &str,

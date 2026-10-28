@@ -263,7 +263,9 @@ pub(crate) fn stop() {
         let context = launches.get(&correlation).and_then(|id| contexts.get(id));
         if let Some(context) = context.cloned() {
             let device = Device::Cuda(device as usize);
-            super::record_gpu_in(context, &name, device, to_ns(start), to_ns(end));
+            // Under a named launch (a plan step's), the kernel that ran keeps its own name too.
+            let kernel = context.launch.is_some().then(|| name.clone());
+            super::record_kernel_in(context, &name, kernel, device, to_ns(start), to_ns(end));
         }
     }
 }

@@ -56,23 +56,63 @@ impl Value {
 
     /// What Triton specializes this value on: a pointer's dtype and 16-byte alignment, an int's type (by
     /// range) and divisibility by 16 (and whether it is 1), a float, a bool.
-    fn class(&self) -> String {
+    pub(crate) fn class(&self) -> Class {
         match *self {
-            Value::Pointer(at, dtype) => {
-                format!("*{}{}", dtype.name(), if at % 16 == 0 { "D" } else { "" })
-            }
+            Value::Pointer(at, dtype) => Class::Pointer(dtype, at % 16 == 0),
             Value::Int(v) => {
-                let ty = match v {
-                    v if i32::try_from(v).is_ok() => "i32",
-                    v if i64::try_from(v).is_ok() => "i64",
-                    _ => "u64",
+                let width = match v {
+                    v if i32::try_from(v).is_ok() => Width::I32,
+                    v if i64::try_from(v).is_ok() => Width::I64,
+                    _ => Width::U64,
                 };
-                let div = if v % 16 == 0 { "D" } else { "" };
-                let one = if v == 1 { "1" } else { "" };
-                format!("{ty}{div}{one}")
+                Class::Int(width, v % 16 == 0, v == 1)
             }
-            Value::Float(_) => "fp32".into(),
-            Value::Bool(_) => "i1".into(),
+            Value::Float(_) => Class::Float,
+            Value::Bool(_) => Class::Bool,
+        }
+    }
+}
+
+/// An int's Triton type, by its value's range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Width {
+    I32,
+    I64,
+    U64,
+}
+
+/// The class Triton specializes a launch's value on; launches of one class reuse one compiled kernel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Class {
+    /// A pointer's dtype and whether it is 16-byte aligned.
+    Pointer(DType, bool),
+    /// An int's type, whether 16 divides it and whether it is 1.
+    Int(Width, bool, bool),
+    Float,
+    Bool,
+}
+
+impl Class {
+    /// Triton's name for this class in a signature (`*fp32D`, `i32D`, `i641`, `fp32`, `i1`).
+    fn name(self) -> String {
+        match self {
+            Class::Pointer(dtype, aligned) => {
+                format!("*{}{}", dtype.name(), if aligned { "D" } else { "" })
+            }
+            Class::Int(width, div, one) => {
+                let ty = match width {
+                    Width::I32 => "i32",
+                    Width::I64 => "i64",
+                    Width::U64 => "u64",
+                };
+                format!(
+                    "{ty}{}{}",
+                    if div { "D" } else { "" },
+                    if one { "1" } else { "" }
+                )
+            }
+            Class::Float => "fp32".into(),
+            Class::Bool => "i1".into(),
         }
     }
 }
@@ -93,7 +133,7 @@ pub(crate) struct Compiled {
 /// The cache key of a launch of kernel `identity` (its source, constexprs and launch options) on CUDA
 /// device `device` with `values`.
 pub(crate) fn key(identity: &str, device: usize, values: &[Value]) -> String {
-    let classes: Vec<String> = values.iter().map(Value::class).collect();
+    let classes: Vec<String> = values.iter().map(|v| v.class().name()).collect();
     format!("{identity}|cuda:{device}|{}", classes.join(","))
 }
 
