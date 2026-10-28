@@ -3,7 +3,7 @@
 import triton
 import triton.language as tl
 
-from lumen.codegen.triton import functions, scalar
+from lumen.codegen.triton import compiled_launch, functions, scalar
 
 
 @triton.jit
@@ -96,21 +96,23 @@ def gemm_kernel(
 TL_DTYPES = {"float32": tl.float32, "float16": tl.float16, "bfloat16": tl.bfloat16}
 
 
-def dot_general(tensors, sizes, accum_dtype, config, specs, extra, scalars, flags):
+def dot_general(tensors, sizes, accum_dtype, config, specs, extra, scalars, flags, compile=False):
     """Launches ``gemm_kernel`` on ``tensors`` (lhs, rhs, out) with ``sizes`` (L, M, K, N): ``config``
     holds blocks, group size, stages and warps; ``specs`` the generated prologue/epilogue functions;
-    ``extra`` the epilogue's other operands (those in ``scalars`` passed by value)."""
+    ``extra`` the epilogue's other operands (those in ``scalars`` passed by value). With ``compile``, returns
+    its ``compiled_launch`` instead of launching it."""
     lhs, rhs, out = tensors
     if accum_dtype not in TL_DTYPES or (lhs.dtype, accum_dtype) == ("bfloat16", "bfloat16"):
         raise ValueError(f"dot_general: Triton's dot accumulates in float32 or float16, got {accum_dtype}")
     L, M, K, N = sizes
     if L == 0 or M == 0 or N == 0:
-        return
+        return None
     block_m, block_n, block_k, group_m, stages, warps = config
     group, interleaved, rows = flags
     halves = group > 1 and not interleaved
     grid_m, grid_n = (M // group if halves and rows else M), (N // group if halves and not rows else N)
-    gemm_kernel[(L, triton.cdiv(grid_m, block_m) * triton.cdiv(grid_n, block_n))](
+    grid = (L, triton.cdiv(grid_m, block_m) * triton.cdiv(grid_n, block_n))
+    kwargs = dict(
         A_ptr=lhs,
         B_ptr=rhs,
         D_ptr=out,
@@ -130,3 +132,6 @@ def dot_general(tensors, sizes, accum_dtype, config, specs, extra, scalars, flag
         num_stages=stages,
         num_warps=warps,
     )
+    if compile:
+        return compiled_launch(gemm_kernel, grid, (), kwargs)
+    gemm_kernel[grid](**kwargs)
