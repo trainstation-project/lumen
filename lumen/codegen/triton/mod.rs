@@ -16,6 +16,7 @@ use crate::{DType, Element, Scalar};
 
 mod attention;
 mod config;
+mod cross_entropy;
 mod gemm;
 mod indexing;
 mod reduction;
@@ -29,12 +30,13 @@ pub(crate) use config::{
     UNTUNED, UNTUNED_LOOP, loop_configs, partial_tile, row_gemm_configs, untuned_attention,
     untuned_loop, untuned_row_gemm,
 };
+pub(crate) use cross_entropy::{cross_entropy_combine, cross_entropy_epilogue};
 pub(crate) use gemm::{EpilogueFlags, epilogue, gemm, gemm_dot, gemm_flags};
 pub(crate) use indexing::{scatter_add, update, updates};
 pub(crate) use reduction::{reduction, reduction_root, scan};
 pub(crate) use row::{
-    dot_row_fits, joins_rows, partials_epilogue, row, row_epilogue, row_fits, row_groups,
-    row_looped,
+    dot_row_fits, joins_rows, partials_epilogue, row, row_count, row_epilogue, row_fits,
+    row_groups, row_looped,
 };
 
 /// Triton element type for `dtype`, or `None` when Triton can't hold it.

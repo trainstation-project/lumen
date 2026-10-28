@@ -282,6 +282,10 @@ fn groups(graph: &Graph, multi_output: bool) -> (Vec<Option<usize>>, Vec<Vec<Var
             }
         }
     }
+    let mut producer: Vec<Option<usize>> = vec![None; graph.types.len()];
+    for (i, node) in nodes.iter().enumerate() {
+        producer[node.output] = Some(i);
+    }
     let mut group: Vec<Option<usize>> = vec![None; nodes.len()];
     let mut extra: Vec<Vec<Var>> = vec![Vec::new(); nodes.len()];
     let mut closed = vec![false; nodes.len()];
@@ -315,6 +319,13 @@ fn groups(graph: &Graph, multi_output: bool) -> (Vec<Option<usize>>, Vec<Vec<Var
             .iter()
             .any(|&r| matches!(nodes[r].primitive, Primitive::DotGeneral { .. }));
         joined = joined.filter(|&g| !operand && !closed[g]);
+        // A node reading a dot's product starts its own group rather than join one holding another
+        // dot: its dot joins it (`dot → add` a chunk, as an accumulation's), instead of every earlier
+        // dot left out and its product kept until the one group runs.
+        let reads_dot = node.inputs.iter().any(|&v| {
+            producer[v].is_some_and(|k| matches!(nodes[k].primitive, Primitive::DotGeneral { .. }))
+        });
+        joined = joined.filter(|&g| dot || !reads_dot || !dots[g]);
         // A group holds at most one reduction or dot, whose value must reach the root elementwise.
         let reduction = reduction(&node.primitive);
         if reduction || dot {

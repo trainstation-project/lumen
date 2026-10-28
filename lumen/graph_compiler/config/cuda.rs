@@ -11,6 +11,7 @@ device_config! {
         multi_output_fusion, set_multi_output_fusion: bool = true;
         split_k, set_split_k: bool = true;
         normalization_diamonds, set_normalization_diamonds: bool = true;
+        fused_linear_cross_entropy, set_fused_linear_cross_entropy: bool = true;
         deterministic, set_deterministic: bool = false;
     }
 }

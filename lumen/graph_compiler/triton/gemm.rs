@@ -153,9 +153,9 @@ fn operands<'a>(body: &Graph, dot: &Node, inputs: &'a [Tensor]) -> (&'a Tensor, 
     (operand(0), operand(1))
 }
 
-/// Runs a dot or GEMM-epilogue fusion `step` with tile `config` (the untuned one when `None`), its
-/// strided prologues and epilogue generated once per layout of its tensors; secondary fusion outputs go
-/// in `outs`.
+/// Runs a dot, GEMM-epilogue fusion or linear cross entropy `step` with tile `config` (the untuned one
+/// when `None`), its strided prologues and epilogue generated once per layout of its tensors; secondary
+/// fusion outputs go in `outs`.
 fn gemm(
     step: &Step,
     inputs: &[Tensor],
@@ -166,6 +166,10 @@ fn gemm(
     let launch = GEMM
         .get()
         .ok_or("the Triton backend's GEMM is Python's (lumen.kernels.dot_general.triton): none is installed")?;
+    if let Primitive::LinearCrossEntropy = step.primitive {
+        let config = tuned.copied().unwrap_or(CONFIGS[UNTUNED]);
+        return super::cross_entropy::run(*launch, step, inputs, out, &config);
+    }
     let key = super::layouts(inputs.iter().chain([out]).chain(outs));
     let prepared = step
         .memo
@@ -221,10 +225,10 @@ fn accum_dtype(dot: &Primitive) -> DType {
     *accum_dtype
 }
 
-/// Whether `step` runs on the GEMM kernel: a dot, or a fusion around one.
+/// Whether `step` runs on the GEMM kernel: a dot, a fusion around one, or a linear cross entropy.
 pub(crate) fn is_gemm(step: &Step) -> bool {
     match &step.primitive {
-        Primitive::DotGeneral { .. } => true,
+        Primitive::DotGeneral { .. } | Primitive::LinearCrossEntropy => true,
         p @ Primitive::Fusion { body, .. } => {
             !super::attention::is_attention(p) && codegen::gemm_dot(body).is_some()
         }
