@@ -22,8 +22,10 @@ cuda = [
 ]
 # A TPU's runtime: libtpu.so, which lumen/device/tpu loads at run time and
 # which compiles lumen's kernels (`make test` points TPU_LIBRARY_PATH at
-# this package's). Linux only.
-tpu = ["libtpu; sys_platform == 'linux'"]
+# this package's). Linux only. Pinned: 0.0.51's Mosaic aborts on lumen's
+# kernels (infer_memref_layout check), and Python 3.10 tops out at 0.0.21,
+# whose Mosaic is too old to read them; 0.0.48.1 needs Python 3.11+.
+tpu = ["libtpu==0.0.48.1; sys_platform == 'linux'"]
 # `make style`: the pre-commit hooks (.pre-commit-config.yaml).
 dev = ["pre-commit"]
 
