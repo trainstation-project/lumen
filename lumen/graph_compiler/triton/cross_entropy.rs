@@ -3,7 +3,7 @@
 //! logit), then a kernel combining a row's tiles into its loss and `logsumexp`.
 
 use super::gemm::{Epilogue, Gemm};
-use super::{Function, Kernel};
+use super::{Function, Kernel, Launches};
 use crate::codegen::triton::{self as codegen, Config, LOOP_CONFIGS, UNTUNED_LOOP};
 use crate::graph::Primitive;
 use crate::graph_compiler::plan::Step;
@@ -13,6 +13,8 @@ use crate::{DType, Tensor, TensorOptions};
 /// A linear cross entropy's prologues and epilogue, generated for its tensors' layouts.
 struct Prepared {
     functions: Vec<Function>,
+    /// The kernels compiled for the GEMM and the combine.
+    launches: Launches,
     /// `[batch, m, k, n]`: the rows, the hidden size and the classes.
     sizes: [usize; 4],
 }
@@ -45,6 +47,7 @@ fn prepare(h: &Tensor, w: &Tensor, target: &Tensor) -> Prepared {
             Function::new("EPILOGUE", epilogue),
         ],
         sizes: code.sizes,
+        launches: Launches::default(),
     }
 }
 
@@ -92,6 +95,7 @@ pub(super) fn run(
         DType::F32,
         config,
         &prepared.functions,
+        &prepared.launches,
         &epilogue,
     )?;
     let (name, source) = codegen::cross_entropy_combine(tiles, (out.shape(), out.strides()));
@@ -111,5 +115,13 @@ pub(super) fn run(
         splits: 1,
         segments: Vec::new(),
     };
-    super::launch(&kernel, &loop_config, &functions, &partials, out, rows)
+    super::launch(
+        &kernel,
+        &loop_config,
+        &functions,
+        &prepared.launches,
+        &partials,
+        out,
+        rows,
+    )
 }
