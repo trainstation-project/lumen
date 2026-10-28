@@ -681,7 +681,7 @@ struct Fused {
     members: Vec<usize>,
     /// Values read from outside the fusion, in body input order.
     reads: Vec<Var>,
-    /// Values the fusion produces: the root's first, then the row's extra outputs.
+    /// Values the fusion produces: the root's first, then the row's extra outputs and partials.
     outputs: Vec<Var>,
     /// Members that only lay out an output (a broadcast of a row's `rms`) and are also read outside:
     /// emitted again there, reading the fusion's output.
@@ -740,7 +740,12 @@ fn fusion(graph: &Graph, row: &Row, fusible: Fusible, written: &[bool], recomput
     computed.sort_unstable();
     reads.sort_by_key(|&v| producer[v]);
     let outputs: Vec<Var> = std::iter::once(nodes[row.root].output)
-        .chain(row.outputs.iter().map(|&k| nodes[k].output))
+        .chain(
+            row.outputs
+                .iter()
+                .chain(&row.partials)
+                .map(|&k| nodes[k].output),
+        )
         .collect();
     let mut body = Graph::new();
     let mut within: Vec<Var> = vec![usize::MAX; graph.types.len()];
@@ -827,7 +832,7 @@ pub(crate) fn fused(
     let mut member = vec![false; nodes.len()];
     let mut written = vec![false; graph.types.len()];
     for row in rows {
-        for k in std::iter::once(row.root).chain(row.outputs.iter().copied()) {
+        for k in std::iter::once(row.root).chain(row.outputs.iter().chain(&row.partials).copied()) {
             written[nodes[k].output] = true;
         }
     }
@@ -975,6 +980,234 @@ fn emit(out: &mut Graph, map: &mut [Var], graph: &Graph, node: &Node, f: Fused) 
             .apply(Primitive::FusionOutput { index, ty }, &[fused])
             .expect("the row's output");
     }
+}
+
+/// How a backend's row kernels take column sums along: the widest row, and the most and fewest row
+/// groups a sum is split into.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Partials {
+    pub columns: usize,
+    pub groups: usize,
+    pub fewest_groups: usize,
+}
+
+/// Splits column sums that can share a row kernel into a per-group partial sum attached to that row
+/// and a final sum over the groups, within `limits`; returns the rewritten graph and rows with
+/// remapped node indices.
+pub(crate) fn partials(
+    graph: &Graph,
+    mut rows: Vec<Row>,
+    fusible: Fusible,
+    limits: Partials,
+) -> (Graph, Vec<Row>) {
+    let finder = Finder::new(graph, fusible);
+    let nodes = graph.nodes();
+    let mut row_of = vec![None; nodes.len()];
+    for (r, row) in rows.iter().enumerate() {
+        for &k in std::iter::once(&row.root)
+            .chain(&row.inner)
+            .chain(&row.reductions)
+        {
+            row_of[k] = Some(r);
+        }
+    }
+    // Whether `v` depends on a node `on` accepts, looking only at producers at or after `floor`.
+    let depends = |v: Var, on: &dyn Fn(usize) -> bool, floor: usize| {
+        let (mut seen, mut stack) = (vec![false; nodes.len()], vec![v]);
+        while let Some(v) = stack.pop() {
+            let Some(k) = finder.producer[v].filter(|&k| k >= floor && !seen[k]) else {
+                continue;
+            };
+            if on(k) {
+                return true;
+            }
+            seen[k] = true;
+            stack.extend(&nodes[k].inputs);
+        }
+        false
+    };
+    let mut attach: Vec<Option<(usize, usize)>> = vec![None; nodes.len()];
+    // Look for sums over every axis but the last of a fusible value.
+    for (c, node) in nodes.iter().enumerate() {
+        let Primitive::ReduceSum { axes, .. } = &node.primitive else {
+            continue;
+        };
+        if !finder.live[c] || !fusible(graph, node) {
+            continue;
+        }
+        let x = node.inputs[0];
+        let ty = graph.type_of(x);
+        let rank = ty.shape.len();
+        let n = ty.shape.last().copied().unwrap_or(1);
+        let over_rows = rank >= 2 && axes.iter().copied().eq(0..rank - 1);
+        if !over_rows || n <= 1 || n > limits.columns {
+            continue;
+        }
+        // Use the largest group count up to `limits.groups` that divides the row count.
+        let count = ty.numel() / n;
+        let Some(groups) = (1..=limits.groups.min(count))
+            .rev()
+            .find(|&g| count.is_multiple_of(g))
+            .filter(|&g| g >= limits.fewest_groups.min(count))
+        else {
+            continue;
+        };
+        // Walk back through fusible non-reduction producers to find the values the sum's operand is built from.
+        let (mut reads, mut stack) = (Vec::new(), vec![x]);
+        while let Some(v) = stack.pop() {
+            match finder.producer[v] {
+                Some(k)
+                    if row_of[k].is_none()
+                        && fusible(graph, &nodes[k])
+                        && !matches!(
+                            nodes[k].primitive,
+                            Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. }
+                        ) =>
+                {
+                    stack.extend(&nodes[k].inputs)
+                }
+                _ if !reads.contains(&v) => reads.push(v),
+                _ => {}
+            }
+        }
+        // Attach to a row of the same shape that shares those values, is not needed to compute them,
+        // and does not itself depend on the sum.
+        attach[c] = rows
+            .iter()
+            .enumerate()
+            .find(|&(r, row)| {
+                let in_row = |k: usize| row_of[k] == Some(r);
+                let root = graph.type_of(nodes[row.root].output);
+                let first = std::iter::once(row.root)
+                    .chain(row.inner.iter().copied())
+                    .chain(row.reductions.iter().copied())
+                    .min()
+                    .unwrap_or(row.root);
+                let shares = reads.iter().any(|&v| {
+                    finder.producer[v].is_some_and(in_row)
+                        || finder.readers[v].iter().any(|&u| in_row(u))
+                });
+                let before = reads.iter().all(|&v| match finder.producer[v] {
+                    Some(k) if in_row(k) => k != row.root,
+                    _ => !depends(v, &in_row, first),
+                });
+                let after = std::iter::once(&row.root)
+                    .chain(&row.inner)
+                    .chain(&row.reductions)
+                    .all(|&k| !nodes[k].inputs.iter().any(|&v| depends(v, &|k| k == c, c)));
+                root.numel() == ty.numel()
+                    && root.shape.last() == Some(&n)
+                    && shares
+                    && before
+                    && after
+            })
+            .map(|(r, _)| (r, groups));
+    }
+    if attach.iter().all(Option::is_none) {
+        return (graph.clone(), rows);
+    }
+    let mut out = Graph::new();
+    let mut map: Vec<Var> = vec![0; graph.types.len()];
+    for &v in graph.inputs() {
+        map[v] = out.input(graph.type_of(v).clone());
+    }
+    let (mut index, mut added) = (vec![0; nodes.len()], Vec::new());
+    for (i, node) in nodes.iter().enumerate() {
+        out.set_origin(node);
+        let mut inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
+        let mut primitive = node.primitive.clone();
+        if let Some((r, groups)) = attach[i] {
+            // Rewrite as reshape to `[groups, rows/groups, n]`, sum within each group, then sum the groups.
+            let Primitive::ReduceSum { accum_dtype, .. } = node.primitive else {
+                unreachable!("a sum")
+            };
+            let ty = out.type_of(inputs[0]);
+            let n = *ty.shape.last().expect("a dimension");
+            let new_sizes = vec![groups, ty.numel() / n / groups, n];
+            let blocks = out.apply(Primitive::Reshape { new_sizes }, &inputs);
+            let sum = |axes| Primitive::ReduceSum { axes, accum_dtype };
+            let blocks = blocks.expect("a reshape of the rows");
+            inputs = vec![out.apply(sum(vec![1]), &[blocks]).expect("their sums")];
+            let at = out.nodes().len();
+            added.push((r, at - 2, at - 1));
+            primitive = sum(vec![0]);
+        }
+        index[i] = out.nodes().len();
+        map[node.output] = out
+            .apply(primitive, &inputs)
+            .expect("a graph is typed as the original");
+        out.set_label(map[node.output], node.label);
+    }
+    let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
+    out.set_outputs(&outputs)
+        .expect("outputs are values of the graph");
+    for row in &mut rows {
+        row.root = index[row.root];
+        for k in row
+            .inner
+            .iter_mut()
+            .chain(&mut row.reductions)
+            .chain(&mut row.outputs)
+        {
+            *k = index[*k];
+        }
+    }
+    for (r, reshape, partial) in added {
+        rows[r].inner.push(reshape);
+        rows[r].inner.sort_unstable();
+        rows[r].partials.push(partial);
+    }
+    (out, rows)
+}
+
+/// `rows` with the elementwise producers of their partials' operands that only the row reads moved
+/// into it, so its kernel computes them instead of reading them from a kernel of their own.
+pub(crate) fn absorbed(graph: &Graph, mut rows: Vec<Row>, fusible: Fusible) -> Vec<Row> {
+    let finder = Finder::new(graph, fusible);
+    let nodes = graph.nodes();
+    let mut owned = vec![false; nodes.len()];
+    for row in &rows {
+        for &k in std::iter::once(&row.root)
+            .chain(&row.inner)
+            .chain(&row.reductions)
+            .chain(&row.partials)
+        {
+            owned[k] = true;
+        }
+    }
+    for row in &mut rows {
+        // Each partial reads its rows through a reshape into groups; walk back from what that reshapes.
+        let mut stack: Vec<Var> = row
+            .partials
+            .iter()
+            .filter_map(|&p| finder.producer[nodes[p].inputs[0]])
+            .flat_map(|r| nodes[r].inputs.iter().copied())
+            .collect();
+        while let Some(v) = stack.pop() {
+            let Some(k) = finder.producer[v] else {
+                continue;
+            };
+            let member = |u: usize| {
+                row.root == u
+                    || row.inner.contains(&u)
+                    || row.reductions.contains(&u)
+                    || row.partials.contains(&u)
+            };
+            if owned[k]
+                || finder.output[v]
+                || !elementwise(&nodes[k].primitive)
+                || !fusible(graph, &nodes[k])
+                || !finder.readers[v].iter().all(|&u| member(u))
+            {
+                continue;
+            }
+            owned[k] = true;
+            row.inner.push(k);
+            stack.extend(&nodes[k].inputs);
+        }
+        row.inner.sort_unstable();
+    }
+    rows
 }
 
 /// Whether `v` depends on any of `of` through the body's nodes.

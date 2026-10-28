@@ -1,6 +1,8 @@
 //! Autotuning candidates and launch defaults for Triton kernels: GEMM, looped (row/elementwise),
 //! reduction and flash-attention.
 
+use crate::graph_compiler::common::diamonds::Partials;
+
 /// Tile shape and launch parameters for one Triton GEMM candidate.
 #[derive(Debug, Clone, Copy)]
 #[cfg_attr(not(feature = "python"), allow(dead_code))]
@@ -146,6 +148,14 @@ pub(super) const MOST_SPLITS: usize = 512;
 /// Widest row a normalization row kernel holds whole in registers (XMA's `MAX_TRITON_BLOCK_SIZE`);
 /// wider rows are walked in chunks of `BLOCK_SIZE`, a pass a reduction.
 pub(super) const MOST_WHOLE_ROW: usize = 65536;
+
+/// How column sums (a norm weight's gradient) ride along row kernels: rows up to 8192 wide, each
+/// program holding a partial per column, split into 32 to 256 row groups.
+pub(crate) const ROW_PARTIALS: Partials = Partials {
+    columns: 8192,
+    groups: 256,
+    fewest_groups: 32,
+};
 
 /// Loop configs for a kernel of `lanes`: those whose block covers them, or, when it is wider than
 /// every block (a whole row past 8192), its lanes as the block with each warp count.

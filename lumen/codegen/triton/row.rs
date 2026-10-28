@@ -7,22 +7,43 @@
 use indoc::writedoc;
 
 use super::config::{MOST_GEMM_ROW, MOST_WHOLE_ROW};
-use super::reduction::{Reduction, combine, lowest, reduce_along};
+use super::reduction::{Reduction, combine, indented, lowest, reduce_along};
 use super::*;
 use crate::graph_compiler::common::diamonds::softmax_pair;
 use crate::graph_compiler::elementwise;
 
-/// The body's last-axis reductions, in order.
+/// The body's last-axis reductions of its rows, in order.
 fn reductions(body: &Graph) -> Vec<&Node> {
+    let root = &body.type_of(body.outputs()[0]).shape;
     body.nodes()
         .iter()
         .filter(|n| {
             matches!(
                 n.primitive,
                 Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. }
-            )
+            ) && &body.type_of(n.inputs[0]).shape == root
         })
         .collect()
+}
+
+/// The body's column partials: sums over each group of rows (a `[groups, rows / groups, n]` reshape of
+/// the rows reduced along its middle axis), written per group.
+fn column_partials(body: &Graph) -> Vec<&Node> {
+    let root = &body.type_of(body.outputs()[0]).shape;
+    body.nodes()
+        .iter()
+        .filter(|n| {
+            matches!(n.primitive, Primitive::ReduceSum { .. })
+                && &body.type_of(n.inputs[0]).shape != root
+        })
+        .collect()
+}
+
+/// The row groups of a row fusion's `body` whose column partials each program sums, one group a
+/// program; `None` without partials.
+pub(crate) fn row_groups(body: &Graph) -> Option<usize> {
+    let partial = column_partials(body).into_iter().next()?;
+    Some(body.type_of(partial.output).shape[0])
 }
 
 /// Row width of a row fusion's `body`: its root's last dimension.
@@ -45,10 +66,26 @@ pub(crate) fn row_fits(body: &Graph) -> bool {
     let rows = root.numel() / n.max(1);
     let last = root.shape.len() - 1;
     let mut per_row = vec![false; body.types.len()];
+    let mut partial = vec![false; body.types.len()];
     for node in body.nodes() {
         let read = node.inputs.iter().any(|&v| per_row[v]);
         let out = body.type_of(node.output);
+        let x = body.type_of(node.inputs.first().copied().unwrap_or(node.output));
+        if node.inputs.iter().any(|&v| partial[v]) {
+            return false;
+        }
         match &node.primitive {
+            // A column partial: whole rows, each program summing its own group of them.
+            Primitive::ReduceSum { axes, .. } if x.shape != root.shape => {
+                let grouped = x.shape.len() == 3
+                    && x.shape[2] == n
+                    && x.numel() == root.numel()
+                    && axes == &[1];
+                if read || !grouped || n > MOST_WHOLE_ROW {
+                    return false;
+                }
+                partial[node.output] = true;
+            }
             Primitive::ReduceSum { axes, .. } | Primitive::ReduceMax { axes } => {
                 if read || body.type_of(node.inputs[0]).shape != root.shape || axes != &[last] {
                     return false;
@@ -160,9 +197,11 @@ fn chunks(emitter: &mut Emitter, n: usize, emit: impl FnOnce(&mut Emitter)) -> S
 }
 
 /// Generates the row kernel for a row fusion's `body`: whole rows, `BLOCK_SIZE // lanes` a program, or
-/// (`row_looped`) one row a program walked in chunks of `BLOCK_SIZE`; each row's last-axis reductions,
-/// then its outputs, per element or per row. The first output is `out` (`STORE`), output `k` after it
-/// `out{k}` (`STORE{k}`); `n` is the row count.
+/// (`row_looped`) one row a program walked in chunks of `BLOCK_SIZE`, or, with column partials, one
+/// group of rows a program, `BLOCK_SIZE // lanes` at a time, each partial summed per column across them;
+/// each row's last-axis reductions, then its outputs, per element or per row. The first output is `out`
+/// (`STORE`), output `k` after it `out{k}` (`STORE{k}`); `n` is the row count (the group count with
+/// partials).
 pub(crate) fn row(body: &Graph, by_value: &[bool]) -> Reduction {
     let root = body.type_of(body.outputs()[0]);
     let n = width(body);
@@ -249,15 +288,17 @@ pub(crate) fn row(body: &Graph, by_value: &[bool]) -> Reduction {
         emitter.reduced.insert(node.output, value);
         k += 1;
     }
-    // Each output is stored per element of the rows, or once per row.
-    let per_row = |v: Var| body.type_of(v).numel() == rows;
+    // Each output is stored per element of the rows, or once per row; partials once per group.
+    let partials = column_partials(body);
+    let partial = |v: Var| partials.iter().any(|p| p.output == v);
+    let per_row = |v: Var| body.type_of(v).numel() == rows && !partial(v);
     let store = |k: usize| match k {
         0 => "STORE(out".to_string(),
         k => format!("STORE{k}(out{k}"),
     };
     let elements = |emitter: &mut Emitter| {
         for (k, &v) in body.outputs().iter().enumerate() {
-            if !per_row(v) {
+            if !per_row(v) && !partial(v) {
                 let value = emitter.value(v, "j".into());
                 writeln!(emitter.lines, "    {}, j, {value}, mask)", store(k)).unwrap();
             }
@@ -277,6 +318,40 @@ pub(crate) fn row(body: &Graph, by_value: &[bool]) -> Reduction {
             writeln!(emitter.lines, "    {}, o, {value}, row_mask)", store(k)).unwrap();
         }
     }
+    // Each partial adds up its operand over the tile's rows, kept per column across the group.
+    emitter.mask = "mask".into();
+    let mut sums = String::new();
+    let mut stores = String::new();
+    for (p, node) in partials.iter().enumerate() {
+        let k = body.outputs().iter().position(|&v| v == node.output);
+        let reshape = body
+            .nodes()
+            .iter()
+            .find(|r| r.output == node.inputs[0])
+            .expect("a partial reads its rows reshaped into groups");
+        let a = body.type_of(node.output).dtype;
+        let acc = triton_type(a).expect("a Triton dtype");
+        let x = emitter.value(reshape.inputs[0], "j".into());
+        let x = match body.type_of(reshape.inputs[0]).dtype == a {
+            true => x,
+            false => format!("{x}.to({acc})"),
+        };
+        let total = reduce_along(
+            &format!("tl.where(mask, {x}, tl.full([], 0, {acc}))"),
+            0,
+            true,
+            a,
+            "",
+        );
+        writeln!(sums, "    part{p} = tl.zeros([1, {lanes}], {acc})").unwrap();
+        writeln!(emitter.lines, "    part{p} += {total}[None, :]").unwrap();
+        writeln!(
+            stores,
+            "    {}, g * {n} + c, part{p}, c < {n})",
+            store(k.expect("a partial is an output"))
+        )
+        .unwrap();
+    }
     code += &emitter.lines;
     let extra = (1..body.outputs().len())
         .map(|k| format!("out{k}"))
@@ -287,7 +362,29 @@ pub(crate) fn row(body: &Graph, by_value: &[bool]) -> Reduction {
         (!extra.is_empty()).then_some(extra.as_str()),
         body.outputs().len(),
     );
+    let each = rows / row_groups(body).unwrap_or(1);
     let tile = match looped {
+        // One group of rows a program, `BLOCK_SIZE // lanes` of them at a time.
+        false if !partials.is_empty() => {
+            let rows: String = [
+                format!("i = r + tl.arange(0, BLOCK_SIZE // {lanes})[:, None]"),
+                format!("o = g * {each} + i"),
+                format!("j = o * {n} + c"),
+                format!("row_mask = i < {each}"),
+                format!("mask = row_mask & (c < {n})"),
+            ]
+            .iter()
+            .map(|l| format!("    {l}\n"))
+            .collect();
+            code = format!(
+                "{sums}    for r in range(0, {each}, BLOCK_SIZE // {lanes}):\n{}{stores}",
+                indented(&(rows + &code))
+            );
+            vec![
+                "g = tl.program_id(0).to(tl.int64)".to_string(),
+                format!("c = tl.arange(0, {lanes})[None, :]"),
+            ]
+        }
         true => vec![
             "o = tl.program_id(0).to(tl.int64) + tl.zeros([1, 1], tl.int64)".to_string(),
             "row_mask = o < n".into(),
@@ -427,10 +524,11 @@ pub(crate) fn dot_row_fits(body: &Graph) -> bool {
 }
 
 /// Whether row body `body` reads its input `at` as whole rows at each element's own index: the root's
-/// shape, read only by elementwise ops and its rows' reductions.
+/// shape, read only by elementwise ops and its rows' reductions, in a row without column partials.
 pub(crate) fn joins_rows(body: &Graph, at: usize) -> bool {
     let v = body.inputs()[at];
     body.type_of(v).shape == body.type_of(body.outputs()[0]).shape
+        && column_partials(body).is_empty()
         && !body.outputs().contains(&v)
         && body
             .nodes()
