@@ -1407,7 +1407,14 @@ impl Plan {
                     let out = outputs.next().expect("a step's output");
                     let outs: Vec<Tensor> = outputs.collect();
                     let kernel = kernels.get(at).and_then(Option::as_ref);
-                    super::triton::run(kernel, step, &inputs, &out, &outs)?;
+                    let run = || super::triton::run(kernel, step, &inputs, &out, &outs);
+                    // Profiled, the step's kernels are timed under its name (each keeps its own as `kernel`).
+                    #[cfg(lumen_cupti_linked)]
+                    let run = || {
+                        crate::profiler::next_launch(step.label, Default::default);
+                        crate::profiler::cupti::correlated(out.device(), run)
+                    };
+                    run()?;
                 }
                 _ => {
                     let _ = scratch;

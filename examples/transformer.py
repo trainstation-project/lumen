@@ -1,22 +1,35 @@
-"""Trains a small decoder-only transformer on MPS on arithmetic token sequences, then profiles and dumps the compiled step."""
+"""Trains a small decoder-only transformer on arithmetic token sequences on ``DEVICE`` (or the device
+named on the command line: cpu, mps, cuda or tpu), then profiles and dumps the compiled step."""
+
+import sys
 
 import numpy as np
 from optim import AdamW
 
 import lumen
 import lumen.functional as F
-from lumen.profiler import ProfilerActivity, profile, record_function
+from lumen.profiler import ProfilerActivity, profile, record_function, supported_activities
 
 VOCAB, SEQ, DIM, HEADS, HIDDEN, LAYERS = 1984, 32, 64, 4, 256, 1
 BATCH, STEPS, DROPOUT = 32, 300, 0
 ACCUM = 1
 PROFILED_STEPS = 10
 
-lumen.config.compiler.mps.deterministic = True
-lumen.config.compiler.mps.split_k = False
-lumen.config.compiler.mps.fuse = True
-lumen.config.compiler.mps.fused_linear_cross_entropy_chunk_size = 64
-lumen.config.compiler.mps.fused_linear_cross_entropy = True
+DEVICE = sys.argv[1] if len(sys.argv) > 1 else "mps"
+
+# The device's compiler settings, each where it has one; CUDA runs through the Triton backend.
+config = getattr(lumen.config.compiler, DEVICE)
+settings = dict(
+    use_triton_backend=True,
+    deterministic=True,
+    split_k=False,
+    fuse=True,
+    fused_linear_cross_entropy_chunk_size=64,
+    fused_linear_cross_entropy=True,
+)
+for name, value in settings.items():
+    if hasattr(config, name):
+        setattr(config, name, value)
 
 
 class _MLP(lumen.autograd.Function):
@@ -244,7 +257,7 @@ model = Transformer(
 )
 opt = AdamW(model.parameters(), lr=3e-3, weight_decay=0.0)
 
-train_step = lumen.compile(train_step, device="mps")
+train_step = lumen.compile(train_step, device=DEVICE)
 ids_meta = meta(BATCH, SEQ, dtype="int64")
 train_step(model, opt, *[meta(ACCUM, BATCH, SEQ, dtype="int64")] * 2)
 
@@ -284,12 +297,17 @@ for step in range(STEPS + 1):
 x, _, targets = batch()
 
 batches = [microbatches() for _ in range(PROFILED_STEPS)]
-lumen.mps.synchronize()
-with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS], record_shapes=True) as prof:
+synchronize = getattr(lumen, DEVICE).synchronize
+synchronize()
+# The CPU's ops, and the device's kernels where the profiler can time them.
+activities = [
+    a for a in dict.fromkeys([ProfilerActivity.CPU, ProfilerActivity(DEVICE)]) if a in supported_activities()
+]
+with profile(activities=activities, record_shapes=True) as prof:
     for x, y in batches:
         with record_function("train step"):
             train_step(model, opt, x, y)
-    lumen.mps.synchronize()
+    synchronize()
 print(prof.key_averages().table(sort_by="self_device_time_total", row_limit=20))
 prof.export_chrome_trace("transformer_trace.json")
 print("wrote transformer_trace.json")
