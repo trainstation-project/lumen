@@ -28,20 +28,28 @@ impl Value {
     /// One-element host tensor `t` passed by value as `lumen.codegen.triton.scalar` passes it: a float64
     /// as its bits, another float as a float, an int or bool as itself.
     pub(crate) fn scalar(t: &Tensor) -> Self {
+        /// The element at `t`'s address, read where it sits in host memory.
+        fn read<T: Copy>(t: &Tensor) -> T {
+            assert!(
+                matches!(t.device(), crate::Device::Cpu(_)),
+                "a by-value scalar lives on the host"
+            );
+            unsafe { std::ptr::read_unaligned(t.data_ptr().cast::<T>()) }
+        }
         match t.dtype() {
-            DType::F64 => Value::Int(t.to_vec::<f64>()[0].to_bits() as i64 as i128),
-            DType::F32 => Value::Float(t.to_vec::<f32>()[0] as f64),
-            DType::F16 => Value::Float(f64::from(t.to_vec::<f16>()[0])),
-            DType::BF16 => Value::Float(f64::from(t.to_vec::<bf16>()[0])),
-            DType::Bool => Value::Bool(t.to_vec::<bool>()[0]),
-            DType::I8 => Value::Int(t.to_vec::<i8>()[0] as i128),
-            DType::I16 => Value::Int(t.to_vec::<i16>()[0] as i128),
-            DType::I32 => Value::Int(t.to_vec::<i32>()[0] as i128),
-            DType::I64 => Value::Int(t.to_vec::<i64>()[0] as i128),
-            DType::U8 => Value::Int(t.to_vec::<u8>()[0] as i128),
-            DType::U16 => Value::Int(t.to_vec::<u16>()[0] as i128),
-            DType::U32 => Value::Int(t.to_vec::<u32>()[0] as i128),
-            DType::U64 => Value::Int(t.to_vec::<u64>()[0] as i128),
+            DType::F64 => Value::Int(read::<f64>(t).to_bits() as i64 as i128),
+            DType::F32 => Value::Float(read::<f32>(t) as f64),
+            DType::F16 => Value::Float(f64::from(read::<f16>(t))),
+            DType::BF16 => Value::Float(f64::from(read::<bf16>(t))),
+            DType::Bool => Value::Bool(read::<u8>(t) != 0),
+            DType::I8 => Value::Int(read::<i8>(t) as i128),
+            DType::I16 => Value::Int(read::<i16>(t) as i128),
+            DType::I32 => Value::Int(read::<i32>(t) as i128),
+            DType::I64 => Value::Int(read::<i64>(t) as i128),
+            DType::U8 => Value::Int(read::<u8>(t) as i128),
+            DType::U16 => Value::Int(read::<u16>(t) as i128),
+            DType::U32 => Value::Int(read::<u32>(t) as i128),
+            DType::U64 => Value::Int(read::<u64>(t) as i128),
             d => Value::Pointer(t.data_ptr() as u64, d),
         }
     }
