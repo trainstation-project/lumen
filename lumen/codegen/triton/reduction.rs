@@ -118,7 +118,7 @@ pub(super) fn lowest(dtype: DType) -> String {
 }
 
 /// Indents every line of `lines` by four spaces.
-fn indented(lines: &str) -> String {
+pub(super) fn indented(lines: &str) -> String {
     lines.lines().map(|l| format!("    {l}\n")).collect()
 }
 

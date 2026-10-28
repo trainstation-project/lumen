@@ -448,11 +448,13 @@ pub(crate) fn run(
             let inputs: &[Tensor] = &[inputs, outs].concat();
             let untuned = codegen::untuned_loop(kernel.lanes);
             let config = step.launch::<LoopConfig>().unwrap_or(&untuned);
-            // A looped row kernel walks one row a program, a block of it at a time.
+            // A looped row kernel walks one row a program, a block of it at a time; one with column
+            // partials one group of rows a program.
             let looped;
             let kernel = match &step.primitive {
                 Primitive::Fusion { name, body, .. }
-                    if name == ROW && codegen::row_looped(body) =>
+                    if name == ROW
+                        && (codegen::row_looped(body) || codegen::row_groups(body).is_some()) =>
                 {
                     looped = Kernel {
                         lanes: config.block_size,
@@ -462,11 +464,13 @@ pub(crate) fn run(
                 }
                 _ => kernel,
             };
-            // Grid size: outputs, or rows for a row fusion or lines for a scan, or picks for a scatter.
+            // Grid size: outputs, or a row fusion's rows (its row groups with partials), or lines for a
+            // scan, or picks for a scatter.
             let n = match &step.primitive {
-                Primitive::Fusion { name, .. } if name == ROW => out
-                    .numel()
-                    .checked_div(out.shape().last().copied().unwrap_or(1)),
+                Primitive::Fusion { name, body, .. } if name == ROW => codegen::row_groups(body)
+                    .or(out
+                        .numel()
+                        .checked_div(out.shape().last().copied().unwrap_or(1))),
                 Primitive::Cumsum { axis, .. } => out.numel().checked_div(out.shape()[*axis]),
                 Primitive::DynamicUpdateSlice => Some(inputs[1].numel()),
                 Primitive::Fusion { name, .. } if name == UPDATES => Some(inputs[1].numel()),

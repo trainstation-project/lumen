@@ -282,23 +282,24 @@ def test_short_rows_are_a_simd_group_each(device, f, n, triton_on_cuda):
 def test_normalization_backwards_sum_weight_gradients_as_they_go(device, f, sums, triton_on_cuda):
     """A normalization's weight's gradient (``Σ_rows g·y``), a sum over
     rows its backward's row kernel reads the values of: that kernel adds
-    them as it goes (a threadgroup a block of rows, each column's sum in
-    registers), writing a block's sums each, then one kernel sums those
-    (a block at a time, in order): two kernels for the backward, the sums
-    the same bits every run, the gradients the CPU's."""
+    them as it goes (a threadgroup or program a group of rows, each
+    column's sum in registers), writing a group's sums each, then one
+    kernel sums those (a group at a time, in order): two kernels for the
+    backward, the sums the same bits every run, the gradients the CPU's."""
     x, w, c = rand(1024, 64), rand(64, seed=1), rand(1024, 64, seed=2)
     try:
         X, W, C = (lumen.from_numpy(a).to(device) for a in (x, w, c))
     except RuntimeError as e:
         pytest.skip(str(e))
     grad = lumen.grad(f, (0, 1))
-    if device == "mps":
-        steps = lumen.graph_compiler.Plan(lumen.make_graph(grad)(X, W, C), "mps").steps()
-        backward = [s for s in steps if s["extra_outputs"] and s["extra_outputs"][0][2] == [64, 64]]
-        assert len(backward) == 1, [s["label"] for s in steps]
-        assert len(backward[0]["extra_outputs"]) == sums
-        final = [s for s in steps if s["primitive"] == "reduce_sum"]
-        assert len(final) == sums and all(s["inputs"][0][2] == [64, 64] for s in final)
+    steps = lumen.graph_compiler.Plan(lumen.make_graph(grad)(X, W, C), device).steps()
+    final = [s for s in steps if s["label"].startswith("reduce_sum") and s["inputs"][0][2] != [1024, 64]]
+    assert len(final) == sums, [s["label"] for s in steps]
+    groups = final[0]["inputs"][0][2]
+    assert groups[1] == 64 and groups[0] < 1024 and all(s["inputs"][0][2] == groups for s in final)
+    backward = [s for s in steps if any(o[2] == groups for o in s["extra_outputs"])]
+    assert len(backward) == 1, [s["label"] for s in steps]
+    assert sum(o[2] == groups for o in backward[0]["extra_outputs"]) == sums
     got = [lumen.to_numpy(g) for g in lumen.compile(grad)(X, W, C)]
     again = [lumen.to_numpy(g) for g in lumen.compile(grad)(X, W, C)]
     want = lumen.compile(grad, device="cpu")(*(lumen.from_numpy(a) for a in (x, w, c)))
