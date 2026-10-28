@@ -1210,6 +1210,116 @@ pub(crate) fn absorbed(graph: &Graph, mut rows: Vec<Row>, fusible: Fusible) -> V
     rows
 }
 
+/// `rows` grown over the elementwise work around them whose values, of the rows' shape, the rows
+/// would otherwise leave to kernels of their own because something after the row reads them too (a
+/// residual add and the casts before a norm, the norm's output before its weight, both read by the
+/// backward): backwards over their inputs' producers and forwards over their roots' readers, each
+/// value read outside the row written as one of its outputs. A matmul feeding the add then feeds the
+/// row directly.
+pub(crate) fn widened(graph: &Graph, mut rows: Vec<Row>, fusible: Fusible) -> Vec<Row> {
+    let finder = Finder::new(graph, fusible);
+    let nodes = graph.nodes();
+    let mut owned = vec![false; nodes.len()];
+    for row in &rows {
+        for &k in members(row) {
+            owned[k] = true;
+        }
+    }
+    for row in &mut rows {
+        let Some(&first) = row.reductions.first() else {
+            continue;
+        };
+        let x = graph.type_of(nodes[first].inputs[0]);
+        let (size, n) = (x.numel(), x.shape.last().copied().unwrap_or(1));
+        // Elementwise ops and the index ops a row kernel reads through (an embedding's lookup), of the
+        // rows' elements in rows of their length.
+        let candidate = |k: usize, owned: &[bool]| {
+            let t = graph.type_of(nodes[k].output);
+            !owned[k]
+                && finder.live[k]
+                && (elementwise(&nodes[k].primitive)
+                    || matches!(
+                        nodes[k].primitive,
+                        Primitive::BroadcastInDim { .. }
+                            | Primitive::Reshape { .. }
+                            | Primitive::Gather { .. }
+                    ))
+                && fusible(graph, &nodes[k])
+                && t.numel() == size
+                && t.shape.last() == Some(&n)
+        };
+        // Backwards: producers read only inside the row or after its root.
+        let mut grew = true;
+        while grew {
+            grew = false;
+            let inputs: Vec<Var> = members(row)
+                .flat_map(|&m| nodes[m].inputs.iter().copied())
+                .collect();
+            for v in inputs {
+                let Some(k) = finder.producer[v] else {
+                    continue;
+                };
+                let inside = |u: usize| members(row).any(|&m| m == u);
+                if !candidate(k, &owned)
+                    || !finder.readers[v].iter().all(|&u| inside(u) || u > row.root)
+                {
+                    continue;
+                }
+                if finder.output[v] || finder.readers[v].iter().any(|&u| !inside(u)) {
+                    row.outputs.push(k);
+                }
+                row.inner.push(k);
+                owned[k] = true;
+                grew = true;
+            }
+        }
+        // Forwards: the root's first reader, when its other operands don't depend on the row.
+        loop {
+            let v = nodes[row.root].output;
+            let Some(&u) = finder.readers[v].first() else {
+                break;
+            };
+            let independent = |w: &Var| {
+                let (mut stack, mut seen) = (vec![*w], vec![false; graph.types.len()]);
+                while let Some(w) = stack.pop() {
+                    if std::mem::replace(&mut seen[w], true) {
+                        continue;
+                    }
+                    if let Some(p) = finder.producer[w] {
+                        if members(row).any(|&m| m == p) {
+                            return false;
+                        }
+                        stack.extend(&nodes[p].inputs);
+                    }
+                }
+                true
+            };
+            let operands = nodes[u].inputs.iter().filter(|&&w| w != v);
+            if !candidate(u, &owned) || !operands.clone().all(independent) {
+                break;
+            }
+            if finder.output[v] || finder.readers[v].len() > 1 {
+                row.outputs.push(row.root);
+            }
+            row.inner.push(row.root);
+            row.root = u;
+            owned[u] = true;
+        }
+        row.inner.sort_unstable();
+        row.outputs.sort_unstable();
+        row.outputs.dedup();
+    }
+    rows
+}
+
+/// The nodes of `row`: its root, inner nodes, reductions and partials.
+fn members(row: &Row) -> impl Iterator<Item = &usize> {
+    std::iter::once(&row.root)
+        .chain(&row.inner)
+        .chain(&row.reductions)
+        .chain(&row.partials)
+}
+
 /// Whether `v` depends on any of `of` through the body's nodes.
 pub(crate) fn depends_on(body: &Graph, v: Var, of: &[Var]) -> bool {
     let producer: HashMap<Var, &Node> = body.nodes().iter().map(|n| (n.output, n)).collect();

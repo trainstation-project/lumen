@@ -5,7 +5,8 @@ use super::TritonModule;
 use crate::codegen::triton::{
     ROW_PARTIALS, dot_row_fits, fusible, joins_rows, partial_tile, row_fits,
 };
-use crate::graph_compiler::common::diamonds::{absorbed, diamonds, fused, partials};
+use crate::graph::Primitive;
+use crate::graph_compiler::common::diamonds::{absorbed, diamonds, fused, partials, widened};
 use crate::graph_compiler::common::dot_rows::{dot_partials, dot_rows};
 use crate::graph_compiler::pass::CompilerPass;
 
@@ -19,10 +20,25 @@ impl CompilerPass<TritonModule<'_>> for Diamonds {
         "normalization_diamonds"
     }
 
-    /// Rewrites each fitting row, with its column partials, into a `row` fusion.
+    /// Rewrites each fitting row, with its column partials and the elementwise work around it whose
+    /// values other kernels read too (`widened`), into a `row` fusion.
     fn apply(&mut self, m: &mut TritonModule<'_>) -> Result<(), String> {
         let (graph, rows) = partials(&m.graph, diamonds(&m.graph, fusible), fusible, ROW_PARTIALS);
-        m.graph = fused(&graph, &absorbed(&graph, rows, fusible), fusible, row_fits);
+        let rows = absorbed(&graph, rows, fusible);
+        // A widened row is kept only where the row kernel takes it; otherwise the row as found.
+        let wide = widened(&graph, rows.clone(), fusible);
+        let rows: Vec<_> = rows
+            .into_iter()
+            .zip(wide)
+            .map(|(row, wide)| {
+                let alone = fused(&graph, std::slice::from_ref(&wide), fusible, row_fits);
+                let takes = alone.nodes().iter().any(
+                    |n| matches!(&n.primitive, Primitive::Fusion { name, .. } if name == "row"),
+                );
+                if takes { wide } else { row }
+            })
+            .collect();
+        m.graph = fused(&graph, &rows, fusible, row_fits);
         Ok(())
     }
 }
