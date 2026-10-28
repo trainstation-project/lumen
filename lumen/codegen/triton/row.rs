@@ -9,12 +9,33 @@ use indoc::writedoc;
 use super::config::{MOST_GEMM_ROW, MOST_WHOLE_ROW};
 use super::reduction::{Reduction, combine, indented, lowest, reduce_along};
 use super::*;
+use crate::graph::TensorType;
 use crate::graph_compiler::common::diamonds::softmax_pair;
 use crate::graph_compiler::elementwise;
 
+/// The rows a row fusion's `body` reduces: the operand of its first last-axis reduction, or its root
+/// when it has none. A row's results may be its rows' shape or one a row (a cross entropy's loss).
+fn rows_type(body: &Graph) -> &TensorType {
+    body.nodes()
+        .iter()
+        .find_map(|n| match &n.primitive {
+            Primitive::ReduceSum { axes, .. } | Primitive::ReduceMax { axes } => {
+                let x = body.type_of(n.inputs[0]);
+                (axes == &[x.shape.len().saturating_sub(1)]).then_some(x)
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| body.type_of(body.outputs()[0]))
+}
+
+/// The row count of a row fusion's `body`.
+pub(crate) fn row_count(body: &Graph) -> usize {
+    rows_type(body).numel() / width(body).max(1)
+}
+
 /// The body's last-axis reductions of its rows, in order.
 fn reductions(body: &Graph) -> Vec<&Node> {
-    let root = &body.type_of(body.outputs()[0]).shape;
+    let root = &rows_type(body).shape;
     body.nodes()
         .iter()
         .filter(|n| {
@@ -29,7 +50,7 @@ fn reductions(body: &Graph) -> Vec<&Node> {
 /// The body's column partials: sums over each group of rows (a `[groups, rows / groups, n]` reshape of
 /// the rows reduced along its middle axis), written per group.
 fn column_partials(body: &Graph) -> Vec<&Node> {
-    let root = &body.type_of(body.outputs()[0]).shape;
+    let root = &rows_type(body).shape;
     body.nodes()
         .iter()
         .filter(|n| {
@@ -46,20 +67,16 @@ pub(crate) fn row_groups(body: &Graph) -> Option<usize> {
     Some(body.type_of(partial.output).shape[0])
 }
 
-/// Row width of a row fusion's `body`: its root's last dimension.
+/// Row width of a row fusion's `body`: its rows' last dimension.
 fn width(body: &Graph) -> usize {
-    body.type_of(body.outputs()[0])
-        .shape
-        .last()
-        .copied()
-        .unwrap_or(1)
+    rows_type(body).shape.last().copied().unwrap_or(1)
 }
 
 /// Whether a row fusion's `body` runs as one Triton row kernel: rows reduced along their last axis,
 /// and per-row values (the reductions and what is computed from them alone) only reshaped, combined
-/// with each other, or broadcast back across their rows.
+/// with each other, or broadcast back across their rows; its outputs of its rows' shape or one a row.
 pub(crate) fn row_fits(body: &Graph) -> bool {
-    let root = body.type_of(body.outputs()[0]);
+    let root = rows_type(body);
     let Some(&n) = root.shape.last() else {
         return false;
     };
@@ -114,7 +131,11 @@ pub(crate) fn row_fits(body: &Graph) -> bool {
             _ => return false,
         }
     }
-    n > 1
+    let written = |v: &Var| {
+        let numel = body.type_of(*v).numel();
+        numel == rows || numel == root.numel() || partial[*v]
+    };
+    n > 1 && body.outputs().iter().all(written)
 }
 
 /// Whether a row fusion's `body` is too wide to hold a row whole, so its kernel walks rows in chunks.
@@ -203,7 +224,7 @@ fn chunks(emitter: &mut Emitter, n: usize, emit: impl FnOnce(&mut Emitter)) -> S
 /// (`STORE`), output `k` after it `out{k}` (`STORE{k}`); `n` is the row count (the group count with
 /// partials).
 pub(crate) fn row(body: &Graph, by_value: &[bool]) -> Reduction {
-    let root = body.type_of(body.outputs()[0]);
+    let root = rows_type(body);
     let n = width(body);
     let rows = root.numel() / n;
     let looped = row_looped(body);

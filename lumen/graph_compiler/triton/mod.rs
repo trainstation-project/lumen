@@ -2,6 +2,7 @@
 //! through Triton kernels launched from Python.
 
 mod attention;
+mod cross_entropy;
 mod diamonds;
 #[cfg(all(feature = "python", lumen_cuda_linked))]
 pub(crate) mod direct;
@@ -27,8 +28,10 @@ use place_concats::PlaceConcats;
 use split_k::SplitK;
 
 use super::common::autotune::{Autotuner, Kernels, Timer};
+use super::common::chunked_cross_entropy::ChunkedCrossEntropy;
 use super::common::clamp_indices::ClampIndices;
 use super::common::flash_attention::FlashAttention;
+use super::common::linear_cross_entropy::LinearCrossEntropy;
 use super::common::merge_dots::{Blocks, MergeDots, Packs, Target};
 use super::common::merge_dots_backward::MergeDotsBackward;
 use super::common::simplify::Simplify;
@@ -164,6 +167,9 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
         interleaved: Vec::new(),
     };
     let mut pipeline = Pipeline::new("triton");
+    if config.fused_linear_cross_entropy {
+        pipeline.add(ChunkedCrossEntropy);
+    }
     if config.merge_dots {
         pipeline.add(MergeDotsBackward).add(MergeDots {
             target: Target {
@@ -176,6 +182,9 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
     }
     if config.flash_attention {
         pipeline.add(FlashAttention).add(FlashAttentionBackward);
+    }
+    if config.fused_linear_cross_entropy {
+        pipeline.add(LinearCrossEntropy);
     }
     if config.safe_kernels {
         pipeline.add(ClampIndices);
@@ -467,10 +476,9 @@ pub(crate) fn run(
             // Grid size: outputs, or a row fusion's rows (its row groups with partials), or lines for a
             // scan, or picks for a scatter.
             let n = match &step.primitive {
-                Primitive::Fusion { name, body, .. } if name == ROW => codegen::row_groups(body)
-                    .or(out
-                        .numel()
-                        .checked_div(out.shape().last().copied().unwrap_or(1))),
+                Primitive::Fusion { name, body, .. } if name == ROW => {
+                    Some(codegen::row_groups(body).unwrap_or(codegen::row_count(body)))
+                }
                 Primitive::Cumsum { axis, .. } => out.numel().checked_div(out.shape()[*axis]),
                 Primitive::DynamicUpdateSlice => Some(inputs[1].numel()),
                 Primitive::Fusion { name, .. } if name == UPDATES => Some(inputs[1].numel()),
@@ -619,7 +627,10 @@ pub(crate) fn reads_strided(step: &Step) -> bool {
     !attention::is_attention(&step.primitive)
         && matches!(
             step.primitive,
-            Primitive::DotGeneral { .. } | Primitive::Fusion { .. } | Primitive::Cumsum { .. }
+            Primitive::DotGeneral { .. }
+                | Primitive::Fusion { .. }
+                | Primitive::Cumsum { .. }
+                | Primitive::LinearCrossEntropy
         )
 }
 
