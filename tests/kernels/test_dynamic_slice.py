@@ -107,7 +107,8 @@ def test_dynamic_update_slices(device, dtype, shape, update, starts, in_place):
 @pytest.mark.parametrize("in_place", [True, False])
 def test_chained_dynamic_update_slices(device, dtype, shape, update, starts, in_place):
     """Updates at constant starts, each into the last's result, land in
-    order (later ones over earlier ones); on TPU they run as one step."""
+    order (later ones over earlier ones); on TPU, MPS and CUDA they run as
+    one step."""
     rng = np.random.default_rng(1)
     xt = _tensor(rng.standard_normal(shape).astype(np.float32), device, dtype)
     uts = [_tensor(rng.standard_normal(update).astype(np.float32), device, dtype) for _ in starts]
@@ -120,9 +121,9 @@ def test_chained_dynamic_update_slices(device, dtype, shape, update, starts, in_
             x = prims.dynamic_update_slice(x, u, at)
         return x
 
-    if device == "tpu":
+    if device != "cpu":
         metas = [lumen.empty(list(t.shape), dtype, "meta") for t in (xt, *uts)]
-        steps = lumen.graph_compiler.Plan(lumen.make_graph(f)(*metas), "tpu").steps()
+        steps = lumen.graph_compiler.Plan(lumen.make_graph(f)(*metas), device).steps()
         assert [s["label"] for s in steps].count(f"{len(starts)}x dynamic_update_slice") == 1, steps
     got = lumen.compile(f)(xt, *uts)
     want = 2 * x if in_place else x.copy()

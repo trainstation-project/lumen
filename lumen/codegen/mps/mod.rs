@@ -26,6 +26,7 @@ mod gemm_row;
 mod reduction;
 mod row;
 mod transpose;
+mod updates;
 
 pub(crate) use attention::*;
 pub(crate) use config::*;
@@ -36,6 +37,7 @@ pub(crate) use gemm_row::*;
 pub(crate) use reduction::*;
 pub(crate) use row::*;
 pub(crate) use transpose::*;
+pub(crate) use updates::updates_kernel;
 
 /// Threadgroup, thread, simdgroup and lane position parameters shared by generated kernels.
 pub(crate) const THREAD_ARGS: &str = indoc! {"

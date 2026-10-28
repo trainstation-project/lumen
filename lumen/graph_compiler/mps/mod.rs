@@ -36,6 +36,7 @@ use crate::graph::{Graph, Primitive, TensorType, Var, View};
 use crate::graph_compiler::common::attention;
 use crate::graph_compiler::common::flash_attention::{Attentions, FlashAttention};
 use crate::graph_compiler::common::horizontal::segments;
+use crate::graph_compiler::common::updates::Updates;
 use crate::graph_compiler::plan::{Buffer, Step};
 use crate::graph_compiler::{Plan, PlanOptions};
 use crate::kernels::dot_general::mps::GemmConfig;
@@ -170,6 +171,9 @@ enum Kernel {
     AttentionBackward,
 }
 
+/// Most updates one `updates` kernel takes: Metal binds 31 buffers, two of them the operand and output.
+const MOST_UPDATES: usize = 29;
+
 /// Name prefix of fusions whose kernel is requested but not yet generated.
 const PENDING: &str = "pending#";
 
@@ -216,6 +220,12 @@ fn pipeline<'a>(config: &MpsConfig) -> Pipeline<MpsModule<'a>> {
         p.add(split_k::SplitK);
     }
     p.add(CanonicalizeDots);
+    if config.fuse {
+        p.add(Updates {
+            least: 2,
+            most: MOST_UPDATES,
+        });
+    }
     if config.fuse {
         if config.normalization_diamonds {
             p.add(diamonds::Diamonds);
@@ -451,6 +461,8 @@ enum Launch {
     Transpose,
     /// Plain elementwise loop.
     Elementwise,
+    /// A chain of constant-start updates written into its operand.
+    Updates,
 }
 
 /// Launch kind and tuning of each compiled kernel by name.
@@ -458,7 +470,19 @@ static LAUNCHES: Mutex<BTreeMap<String, (Launch, Option<Tuning>)>> = Mutex::new(
 
 /// Classifies a fusion body by the launch its kernel needs.
 fn launch_of(body: &Graph) -> Launch {
-    if attention::of_body(body).is_some() {
+    let update = |n: &crate::graph::Node| {
+        matches!(
+            n.primitive,
+            Primitive::DynamicUpdateSlice | Primitive::Full { .. }
+        )
+    };
+    let updating = body
+        .nodes()
+        .iter()
+        .any(|n| matches!(n.primitive, Primitive::DynamicUpdateSlice));
+    if updating && body.nodes().iter().all(update) {
+        Launch::Updates
+    } else if attention::of_body(body).is_some() {
         Launch::Attention
     } else if attention::backward_of_body(body).is_some() {
         Launch::AttentionBackward
@@ -714,6 +738,24 @@ pub(super) fn encode_with(
         buffers.extend(state);
         Ok(buffers)
     };
+    if kind == Launch::Updates {
+        // An out-of-place chain starts from a copy of its operand; each thread writes one element of
+        // every update.
+        if output.cast_const() != inputs[0] {
+            let x = &step.inputs[0].1;
+            crate::kernels::dynamic_slice::mps::copy(
+                inputs[0],
+                output,
+                x,
+                keep.clone(),
+                step.label,
+            )?;
+        }
+        let mut buffers = inputs.to_vec();
+        buffers.push(output.cast_const());
+        let grid = Grid::Threads([step.inputs[1].1.numel(), 1, 1]);
+        return launch(name, &buffers, &scalars, grid, keep, step.label);
+    }
     if kind == Launch::Attention {
         let a = attention::of_body(body).expect("an attention");
         let batch: usize = a.batch.iter().product();
