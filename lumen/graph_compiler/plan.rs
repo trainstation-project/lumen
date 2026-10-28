@@ -1491,7 +1491,7 @@ impl fmt::Display for Plan {
 fn updates_operand(p: &Primitive) -> bool {
     match p {
         Primitive::DynamicUpdateSlice | Primitive::ScatterAdd { .. } => true,
-        Primitive::Fusion { name, .. } => name == UPDATES,
+        Primitive::Fusion { name, .. } => name.starts_with(UPDATES),
         _ => false,
     }
 }

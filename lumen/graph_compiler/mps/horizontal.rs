@@ -26,13 +26,14 @@ fn tiled(node: &Node) -> bool {
 }
 
 impl Target for Horizontal<'_> {
-    /// Small elementwise nodes or loop fusions without reductions, attention or GEMMs.
+    /// Small elementwise nodes or loop fusions without reductions, attention, GEMMs or updates.
     fn candidate(&self, graph: &Graph, node: &Node) -> bool {
         let elements = graph.type_of(node.output).numel();
         if elements == 0 || elements > MAX_ELEMENTS {
             return false;
         }
         match &node.primitive {
+            Primitive::Fusion { name, .. } if name == crate::graph::UPDATES => false,
             Primitive::Fusion { body, .. } => {
                 let reduces = body.nodes().iter().any(|n| {
                     matches!(

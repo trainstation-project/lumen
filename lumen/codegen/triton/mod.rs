@@ -30,7 +30,7 @@ pub(crate) use config::{
     untuned_row_gemm,
 };
 pub(crate) use gemm::{EpilogueFlags, epilogue, gemm, gemm_dot, gemm_flags};
-pub(crate) use indexing::{scatter_add, update};
+pub(crate) use indexing::{scatter_add, update, updates};
 pub(crate) use reduction::{reduction, reduction_root, scan};
 pub(crate) use row::{
     dot_row_fits, joins_rows, partials_epilogue, row, row_epilogue, row_fits, row_looped,

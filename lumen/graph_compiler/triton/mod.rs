@@ -30,11 +30,12 @@ use super::common::flash_attention::FlashAttention;
 use super::common::merge_dots::{Blocks, MergeDots, Packs, Target};
 use super::common::merge_dots_backward::MergeDotsBackward;
 use super::common::simplify::Simplify;
+use super::common::updates::Updates;
 use super::pass::{Module, Pipeline};
 use super::plan::{Buffer, Step, Tuned};
 use super::{CompilerConfig, Options, Plan, PlanOptions, positions};
 use crate::codegen::triton::{self as codegen, LOOP_CONFIGS, LoopConfig, UNTUNED_LOOP};
-use crate::graph::{Graph, Primitive, TensorType};
+use crate::graph::{Graph, Primitive, TensorType, UPDATES};
 use crate::graph_compiler::common::horizontal::segments;
 use crate::{DType, Device, Scalar, Tensor, TensorOptions};
 
@@ -184,6 +185,10 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
     if config.normalization_diamonds {
         pipeline.add(Diamonds).add(DotRows);
     }
+    pipeline.add(Updates {
+        least: 2,
+        most: usize::MAX,
+    });
     pipeline.add(PlaceConcats);
     pipeline.add(LoopFusion {
         multi_output: config.multi_output_fusion,
@@ -245,6 +250,12 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
         .map(|(b, _)| matches!(b, Buffer::Scalar(_)))
         .collect();
     let (name, source, lanes, splits) = match &step.primitive {
+        Primitive::Fusion { name, body, .. } if name == UPDATES => {
+            let chain = crate::graph_compiler::common::updates::starts(body);
+            let starts: Vec<Vec<i64>> = chain.iter().map(|(_, s)| s.clone()).collect();
+            let (name, source) = codegen::updates(&step.inputs[0].1, &step.inputs[1].1, &starts);
+            (name, source, 1, 1)
+        }
         Primitive::Fusion { body, .. } if codegen::gemm_dot(body).is_some() => return None,
         Primitive::Fusion { name, body, .. } if name == ROW => {
             let r = codegen::row(body, &by_value);
@@ -459,11 +470,18 @@ pub(crate) fn run(
                     .checked_div(out.shape().last().copied().unwrap_or(1)),
                 Primitive::Cumsum { axis, .. } => out.numel().checked_div(out.shape()[*axis]),
                 Primitive::DynamicUpdateSlice => Some(inputs[1].numel()),
+                Primitive::Fusion { name, .. } if name == UPDATES => Some(inputs[1].numel()),
                 Primitive::ScatterAdd { axis } => out.numel().checked_div(out.shape()[*axis]),
                 _ => Some(out.numel()),
             };
             // In-place ops start from a copy of their operand.
-            if let Primitive::DynamicUpdateSlice | Primitive::ScatterAdd { .. } = step.primitive
+            let updates =
+                matches!(&step.primitive, Primitive::Fusion { name, .. } if name == UPDATES);
+            if (updates
+                || matches!(
+                    step.primitive,
+                    Primitive::DynamicUpdateSlice | Primitive::ScatterAdd { .. }
+                ))
                 && out.data_ptr() != inputs[0].data_ptr()
             {
                 copy(out, &inputs[0])?;

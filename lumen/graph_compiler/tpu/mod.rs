@@ -5,13 +5,12 @@ mod fusion;
 mod place_concats;
 #[cfg(test)]
 mod tests;
-mod updates;
 
+use super::common::updates::Updates;
 use diamonds::Diamonds;
 use flash_attention_backward::FlashAttentionBackward;
 use fusion::{DotRows, FuseDots, HorizontalFusion, LoopFusion};
 use place_concats::PlaceConcats;
-use updates::Updates;
 
 use super::common::attention;
 use super::common::clamp_indices::ClampIndices;
@@ -139,7 +138,10 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         pipeline.add(Diamonds).add(DotRows);
     }
     pipeline
-        .add(Updates)
+        .add(Updates {
+            least: 1,
+            most: usize::MAX,
+        })
         .add(FuseDots)
         .add(PlaceConcats)
         .add(LoopFusion);

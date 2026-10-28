@@ -68,6 +68,13 @@ impl<'a> CompilerPass<MpsModule<'a>> for Codegen {
             let Primitive::Fusion { name, body, .. } = &mut node.primitive else {
                 continue;
             };
+            if name == crate::graph::UPDATES {
+                let (kernel, source) = codegen::updates_kernel(body);
+                super::record_launch(&kernel, body, None);
+                m.sources.insert(kernel.clone(), source);
+                *name = kernel;
+                continue;
+            }
             let Some(k) = name.strip_prefix(PENDING) else {
                 continue;
             };
