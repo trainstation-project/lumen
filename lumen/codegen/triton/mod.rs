@@ -86,6 +86,7 @@ pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
             | Slice { .. }
             | Full { .. }
             | Iota { .. }
+            | RandomBits { .. }
             | ReduceSum { .. }
             | ReduceMax { .. }
             | DynamicSlice { .. }
@@ -795,6 +796,17 @@ impl<'a> Emitter<'a> {
                             Ok(_) => format!("tl.full([], {i}, {t})"),
                             Err(_) => format!("{i}.to({t})"),
                         }
+                    }
+                    RandomBits { offset, .. } => {
+                        let seed = self.value(node.inputs[0], "0".into());
+                        let start = self.value(node.inputs[1], "0".into());
+                        let i = match idx.parse::<u64>() {
+                            Ok(_) => format!("tl.full([], {idx}, tl.int64)"),
+                            Err(_) => idx.clone(),
+                        };
+                        format!(
+                            "philox_bits({seed}, {start} + tl.full([], {offset}, tl.uint64) + {i}.to(tl.uint64))"
+                        )
                     }
                     DynamicSlice { slice_sizes } => {
                         let x = body.type_of(node.inputs[0]);
