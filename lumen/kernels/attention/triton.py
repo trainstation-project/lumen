@@ -6,7 +6,7 @@ written through generated helpers that know their layouts (``LOAD_Q(ptr, b, rows
 import triton
 import triton.language as tl
 
-from lumen.codegen.triton import functions
+from lumen.codegen.triton import compiled_launch, functions
 
 
 @triton.jit
@@ -226,15 +226,16 @@ def _width(n):
     return max(16, triton.next_power_of_2(n))
 
 
-def attention(kernel, tensors, specs, sizes, causal, scale, config):
+def attention(kernel, tensors, specs, sizes, causal, scale, config, compile=False):
     """Launches flash-attention ``kernel`` (``forward``, ``dkdv`` or ``dq``) on ``tensors`` (in its parameter
     order; ``None`` for an optional one it doesn't read) with ``sizes`` (batch, queries, keys, head dims of
     Q/K and V), the ``causal`` diagonal (or ``None``), dS's ``scale`` and ``config`` (blocks, stages, warps);
-    ``specs`` are the generated helpers."""
+    ``specs`` are the generated helpers. With ``compile``, returns its ``compiled_launch`` instead of
+    launching it."""
     batch, sq, sk, h, hv = sizes
     block_m, block_n, stages, warps = config
     if batch == 0 or sq == 0 or sk == 0:
-        return
+        return None
     args = dict(
         SQ=sq,
         SK=sk,
@@ -259,4 +260,6 @@ def attention(kernel, tensors, specs, sizes, causal, scale, config):
         tensors = [*tensors, None]
     # An optional tensor the kernel doesn't read is passed as the first one, never dereferenced.
     tensors = [t if t is not None else tensors[0] for t in tensors]
+    if compile:
+        return compiled_launch(KERNELS[kernel], (blocks, batch), tensors, args)
     KERNELS[kernel][(blocks, batch)](*tensors, **args)

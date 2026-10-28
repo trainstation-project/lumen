@@ -35,14 +35,47 @@ def scalar(x):
     return x.item()
 
 
-def launch(name, source, inputs, scalars, out, specs, n, programs, block_size, warps):
-    """Launches elementwise kernel `name` over `n` output elements on a 1-D grid of `programs` blocks.
+def compiled_launch(kernel, grid, args, kwargs):
+    """`kernel` compiled for a launch with `args` and `kwargs` on `grid`, without launching it, for Rust to
+    launch: its `CUfunction` handle, warps, dynamic shared memory, whether a plain `cuLaunchKernel` launches
+    it (one CTA, no scratch, no cooperative or programmatic launch), and the type of each runtime parameter
+    in declaration order (tuples flattened; ``constexpr`` where Triton specialized the value away)."""
+    c = kernel.warmup(*args, grid=grid, **kwargs)
+    c._init_handles()
+    signature, types = c.src.signature, []
+
+    def flat(t):
+        """Appends `t`'s types, a tuple's elements in order."""
+        if isinstance(t, tuple):
+            for x in t:
+                flat(x)
+        else:
+            types.append(t)
+
+    for i, p in enumerate(kernel.params):
+        if not p.is_constexpr:
+            flat(signature[p.name] if p.name in signature else signature[i])
+    md = c.metadata
+    plain = (
+        md.num_ctas == 1
+        and not md.launch_cooperative_grid
+        and not md.launch_pdl
+        and not md.global_scratch_size
+        and not md.profile_scratch_size
+    )
+    return int(c.function), md.num_warps, md.shared, plain, types
+
+
+def launch(name, source, inputs, scalars, out, specs, n, programs, block_size, warps, compile=False):
+    """Launches elementwise kernel `name` over `n` output elements on a 1-D grid of `programs` blocks, or,
+    with `compile`, returns its `compiled_launch` instead.
 
     Inputs whose index is in `scalars` are passed by value; `specs` supplies helper jit functions."""
     if n == 0:
-        return
-    args = [scalar(x) if k in scalars else x for k, x in enumerate(inputs)]
+        return None
+    args = [*(scalar(x) if k in scalars else x for k, x in enumerate(inputs)), out, n]
     kernel = compiled(name, source)
-    kernel[(programs,)](
-        *args, out, n, **functions(specs), BLOCK_SIZE=block_size, num_warps=warps, enable_fp_fusion=False
-    )
+    kwargs = dict(**functions(specs), BLOCK_SIZE=block_size, num_warps=warps, enable_fp_fusion=False)
+    if compile:
+        return compiled_launch(kernel, (programs,), args, kwargs)
+    kernel[(programs,)](*args, **kwargs)

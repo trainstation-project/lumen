@@ -3,6 +3,8 @@
 
 mod attention;
 mod diamonds;
+#[cfg(all(feature = "python", lumen_cuda_linked))]
+pub(crate) mod direct;
 mod fusion;
 mod gemm;
 mod horizontal;
@@ -421,16 +423,6 @@ pub(crate) fn run(
             | Primitive::ScatterAdd { .. },
             Some(kernel),
         ) => {
-            let loads: Vec<Function> = inputs
-                .iter()
-                .enumerate()
-                .filter(|&(k, _)| !kernel.by_value[k])
-                .map(|(k, t)| {
-                    Function::new(format!("LOAD{k}"), codegen::load(t.shape(), t.strides()))
-                })
-                .collect();
-            let store = Function::new("STORE", codegen::store(out.shape(), out.strides()));
-            let mut functions = [loads.as_slice(), std::slice::from_ref(&store)].concat();
             // An elementwise or row fusion's other outputs follow its inputs, each with its own store.
             let outs: &[Tensor] = match &step.primitive {
                 Primitive::Fusion { name, body, .. }
@@ -440,12 +432,19 @@ pub(crate) fn run(
                 }
                 _ => &[],
             };
-            for (k, t) in outs.iter().enumerate() {
-                functions.push(Function::new(
-                    format!("STORE{}", k + 1),
-                    codegen::store(t.shape(), t.strides()),
+            if let Primitive::ScatterAdd { .. } = step.primitive
+                && out.dtype() == DType::Bool
+            {
+                return Err(format!(
+                    "{}: booleans have no sum to scatter-add",
+                    step.label
                 ));
             }
+            let key = layouts(inputs.iter().chain([out]).chain(outs));
+            let helpers = step
+                .memo
+                .get(key, || Ok(loop_helpers(step, kernel, inputs, out, outs)))?;
+            let (loads, functions) = (&helpers.0, &helpers.1);
             let inputs: &[Tensor] = &[inputs, outs].concat();
             let untuned = codegen::untuned_loop(kernel.lanes);
             let config = step.launch::<LoopConfig>().unwrap_or(&untuned);
@@ -486,21 +485,9 @@ pub(crate) fn run(
             {
                 copy(out, &inputs[0])?;
             }
-            if let Primitive::ScatterAdd { .. } = step.primitive {
-                if out.dtype() == DType::Bool {
-                    return Err(format!(
-                        "{}: booleans have no sum to scatter-add",
-                        step.label
-                    ));
-                }
-                functions.push(Function::new(
-                    "OUTLOAD",
-                    codegen::load(out.shape(), out.strides()),
-                ));
-            }
             let n = n.unwrap_or(0);
             if kernel.splits == 1 {
-                return launch(kernel, config, &functions, inputs, out, n);
+                return launch(kernel, config, functions, inputs, out, n);
             }
             // A split reduction writes per-split partials, then a second kernel combines them into `out`.
             let Primitive::Fusion { body, .. } = &step.primitive else {
@@ -511,7 +498,7 @@ pub(crate) fn run(
                 .dtype(body.type_of(reduced).dtype)
                 .device(out.device());
             let partials = unsafe { Tensor::empty(&[n * kernel.splits], options) };
-            launch(kernel, config, &loads, inputs, &partials, n)?;
+            launch(kernel, config, loads, inputs, &partials, n)?;
             let last = Kernel {
                 name: format!("{}_final", kernel.name),
                 source: kernel.source.clone(),
@@ -521,7 +508,7 @@ pub(crate) fn run(
                 segments: Vec::new(),
             };
             let inputs = [inputs, std::slice::from_ref(&partials)].concat();
-            launch(&last, config, &functions, &inputs, out, n)
+            launch(&last, config, functions, &inputs, out, n)
         }
         _ => Err(format!("{}: has no Triton kernel on CUDA yet", step.label)),
     }
@@ -576,6 +563,51 @@ pub(crate) fn copy(dst: &Tensor, src: &Tensor) -> Result<(), String> {
         dst,
         dst.numel(),
     )
+}
+
+/// A loop step's helpers for its tensors' layouts: the loads of its tensor inputs, then those with the
+/// stores of `out` and `outs` (and a scatter-add's load of `out`).
+fn loop_helpers(
+    step: &Step,
+    kernel: &Kernel,
+    inputs: &[Tensor],
+    out: &Tensor,
+    outs: &[Tensor],
+) -> (Vec<Function>, Vec<Function>) {
+    let loads: Vec<Function> = inputs
+        .iter()
+        .enumerate()
+        .filter(|&(k, _)| !kernel.by_value[k])
+        .map(|(k, t)| Function::new(format!("LOAD{k}"), codegen::load(t.shape(), t.strides())))
+        .collect();
+    let mut functions = loads.clone();
+    functions.push(Function::new(
+        "STORE",
+        codegen::store(out.shape(), out.strides()),
+    ));
+    for (k, t) in outs.iter().enumerate() {
+        functions.push(Function::new(
+            format!("STORE{}", k + 1),
+            codegen::store(t.shape(), t.strides()),
+        ));
+    }
+    if let Primitive::ScatterAdd { .. } = step.primitive {
+        functions.push(Function::new(
+            "OUTLOAD",
+            codegen::load(out.shape(), out.strides()),
+        ));
+    }
+    (loads, functions)
+}
+
+/// A hash of `tensors`' dtypes, shapes and strides: the key of what a step generated for those layouts.
+pub(crate) fn layouts<'a>(tensors: impl IntoIterator<Item = &'a Tensor>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for t in tensors {
+        (t.dtype(), t.shape(), t.strides()).hash(&mut hasher);
+    }
+    hasher.finish()
 }
 
 /// Whether the Triton kernel for `step` reads strided inputs directly.

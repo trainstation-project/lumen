@@ -617,6 +617,7 @@ fn run_loop(
         scope: &[],
         sources: Vec::new(),
         tuned: None,
+        memo: Default::default(),
     };
     let keep = vec![src.holding(), dst.holding()];
     let inputs = [src.data_ptr().cast_const()];

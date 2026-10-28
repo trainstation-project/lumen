@@ -228,6 +228,65 @@ fn triton_code(kernel: &str, functions: &[super::triton::Function]) -> String {
     [passed.join("\n"), kernel.to_owned()].join("\n")
 }
 
+/// Launches a Triton kernel from Rust when it compiles to a plain launch, returning whether it did (or
+/// had nothing to launch); otherwise the caller's Python launch runs it. `identity` names the kernel, its
+/// constexprs and launch options, `values` are its runtime parameters in order, and `compile` is the
+/// Python launcher's call with `compile=True`, made once per kernel and argument classes.
+#[cfg(lumen_cuda_linked)]
+fn direct(
+    identity: &str,
+    on: &crate::Tensor,
+    values: &[super::triton::direct::Value],
+    grid: [usize; 3],
+    compile: impl for<'py> FnOnce(Python<'py>, Bound<'py, PyDict>) -> PyResult<Py<PyAny>>,
+) -> Result<bool, String> {
+    use super::triton::direct;
+    let Device::Cuda(device) = on.device() else {
+        return Ok(false);
+    };
+    let key = direct::key(identity, device, values);
+    let mut nothing = false;
+    let kernel = direct::compiled(&key, || {
+        Python::attach(|py| {
+            let kwargs = PyDict::new(py);
+            kwargs.set_item("compile", true)?;
+            let info = compile(py, kwargs)?.into_bound(py);
+            if info.is_none() {
+                nothing = true;
+                return Ok(direct::Compiled {
+                    function: 0,
+                    warps: 0,
+                    shared: 0,
+                    plain: false,
+                    types: Vec::new(),
+                });
+            }
+            let (function, warps, shared, plain, types): (usize, u32, u32, bool, Vec<String>) =
+                info.extract()?;
+            Ok(direct::Compiled {
+                function,
+                warps,
+                shared,
+                plain,
+                types,
+            })
+        })
+        .map_err(|e: PyErr| e.to_string())
+    })?;
+    if nothing || !kernel.plain {
+        return Ok(nothing);
+    }
+    direct::launch(&kernel, grid, values)?;
+    Ok(true)
+}
+
+/// The names of a launch's generated helper functions, which content-hash their sources.
+#[cfg(lumen_cuda_linked)]
+fn names(functions: &[super::triton::Function]) -> String {
+    let names: Vec<&str> = functions.iter().map(|f| f.name.as_str()).collect();
+    names.join(",")
+}
+
 /// Makes `t`'s CUDA device current before a launch.
 fn current(t: &crate::Tensor) {
     if let Device::Cuda(index) = t.device() {
@@ -257,7 +316,7 @@ fn triton_gemm(
         Some(triton_code(&template, functions))
     });
     current(tensors[2]);
-    Python::attach(|py| {
+    let call = |py: Python<'_>, kwargs: Option<Bound<'_, PyDict>>| -> PyResult<Py<PyAny>> {
         let tensors = tensors.map(|t| PyTensor::wrap(t.clone()));
         let extra: Vec<PyTensor> = epilogue
             .tensors
@@ -266,30 +325,78 @@ fn triton_gemm(
             .collect();
         py.import("lumen.kernels.dot_general.triton")?
             .getattr("dot_general")?
-            .call1((
-                tensors,
-                sizes,
-                dtype_name(accum_dtype),
+            .call(
                 (
-                    config.block_m,
-                    config.block_n,
-                    config.block_k,
-                    config.group_m,
-                    config.stages,
-                    config.warps,
+                    tensors,
+                    sizes,
+                    dtype_name(accum_dtype),
+                    (
+                        config.block_m,
+                        config.block_n,
+                        config.block_k,
+                        config.group_m,
+                        config.stages,
+                        config.warps,
+                    ),
+                    triton_functions(functions),
+                    extra,
+                    epilogue.scalars,
+                    (
+                        epilogue.flags.group,
+                        epilogue.flags.interleaved,
+                        epilogue.flags.rows,
+                    ),
                 ),
-                triton_functions(functions),
-                extra,
-                epilogue.scalars,
-                (
-                    epilogue.flags.group,
-                    epilogue.flags.interleaved,
-                    epilogue.flags.rows,
-                ),
-            ))
-            .map(|_| ())
-    })
-    .map_err(|e| e.to_string())
+                kwargs.as_ref(),
+            )
+            .map(Bound::unbind)
+    };
+    #[cfg(lumen_cuda_linked)]
+    {
+        use super::triton::direct::Value;
+        let [l, m, _, n] = sizes;
+        let flags = epilogue.flags;
+        let halves = flags.group > 1 && !flags.interleaved;
+        let grid_m = if halves && flags.rows {
+            m / flags.group
+        } else {
+            m
+        };
+        let grid_n = if halves && !flags.rows {
+            n / flags.group
+        } else {
+            n
+        };
+        let programs = grid_m.div_ceil(config.block_m) * grid_n.div_ceil(config.block_n);
+        let extra =
+            epilogue
+                .tensors
+                .iter()
+                .enumerate()
+                .map(|(k, t)| match epilogue.scalars.contains(&k) {
+                    true => Value::scalar(t),
+                    false => Value::of(t),
+                });
+        let values: Vec<Value> = tensors
+            .iter()
+            .map(|t| Value::of(t))
+            .chain(extra)
+            .chain(sizes[1..].iter().map(|&s| Value::Int(s as i128)))
+            .collect();
+        let identity = format!(
+            "gemm|{accum_dtype}|{config:?}|{:?}|{:?}|{}",
+            (flags.group, flags.interleaved, flags.rows),
+            epilogue.scalars,
+            names(functions)
+        );
+        let grid = [l, programs, 1];
+        if direct(&identity, tensors[2], &values, grid, |py, kw| {
+            call(py, Some(kw))
+        })? {
+            return Ok(());
+        }
+    }
+    Python::attach(|py| call(py, None).map(|_| ())).map_err(|e| e.to_string())
 }
 
 /// Launches a generated Triton elementwise loop kernel over `n` elements in `programs` programs.
@@ -310,7 +417,7 @@ fn triton_loop(
         Some(triton_code(&source, functions))
     });
     current(out);
-    Python::attach(|py| {
+    let call = |py: Python<'_>, kwargs: Option<Bound<'_, PyDict>>| -> PyResult<Py<PyAny>> {
         let inputs: Vec<PyTensor> = inputs.iter().map(|t| PyTensor::wrap(t.clone())).collect();
         // Inputs passed by value (scalars) are named by position for the launcher.
         let scalars: Vec<usize> = (0..kernel.by_value.len())
@@ -318,21 +425,50 @@ fn triton_loop(
             .collect();
         py.import("lumen.codegen.triton")?
             .getattr("launch")?
-            .call1((
-                kernel.name.as_str(),
-                kernel.source.as_str(),
-                inputs,
-                scalars,
-                PyTensor::wrap(out.clone()),
-                triton_functions(functions),
-                n,
-                programs,
-                config.block_size,
-                config.warps,
-            ))
-            .map(|_| ())
-    })
-    .map_err(|e| e.to_string())
+            .call(
+                (
+                    kernel.name.as_str(),
+                    kernel.source.as_str(),
+                    inputs,
+                    scalars,
+                    PyTensor::wrap(out.clone()),
+                    triton_functions(functions),
+                    n,
+                    programs,
+                    config.block_size,
+                    config.warps,
+                ),
+                kwargs.as_ref(),
+            )
+            .map(Bound::unbind)
+    };
+    #[cfg(lumen_cuda_linked)]
+    {
+        use super::triton::direct::Value;
+        let scalar = |k: usize| kernel.by_value.get(k).copied().unwrap_or(false);
+        let values: Vec<Value> = inputs
+            .iter()
+            .enumerate()
+            .map(|(k, t)| match scalar(k) {
+                true => Value::scalar(t),
+                false => Value::of(t),
+            })
+            .chain([Value::of(out), Value::Int(n as i128)])
+            .collect();
+        let identity = format!(
+            "loop|{}|{}|{}|{}",
+            kernel.name,
+            config.block_size,
+            config.warps,
+            names(functions)
+        );
+        if direct(&identity, out, &values, [programs, 1, 1], |py, kw| {
+            call(py, Some(kw))
+        })? {
+            return Ok(());
+        }
+    }
+    Python::attach(|py| call(py, None).map(|_| ())).map_err(|e| e.to_string())
 }
 
 /// Launches one of lumen's Triton flash-attention kernels (`launch.kernel`) with its tile config.
@@ -352,7 +488,7 @@ fn triton_attention(launch: &super::triton::Launch) -> Result<(), String> {
         .next()
         .ok_or("an attention reads tensors")?;
     current(device);
-    Python::attach(|py| {
+    let call = |py: Python<'_>, kwargs: Option<Bound<'_, PyDict>>| -> PyResult<Py<PyAny>> {
         let tensors: Vec<Option<PyTensor>> = launch
             .tensors
             .iter()
@@ -360,18 +496,57 @@ fn triton_attention(launch: &super::triton::Launch) -> Result<(), String> {
             .collect();
         py.import("lumen.kernels.attention.triton")?
             .getattr("attention")?
-            .call1((
-                launch.kernel,
-                tensors,
-                triton_functions(launch.functions),
-                launch.sizes,
-                launch.causal,
-                launch.scale,
-                (config.block_m, config.block_n, config.stages, config.warps),
-            ))
-            .map(|_| ())
-    })
-    .map_err(|e| e.to_string())
+            .call(
+                (
+                    launch.kernel,
+                    tensors,
+                    triton_functions(launch.functions),
+                    launch.sizes,
+                    launch.causal,
+                    launch.scale,
+                    (config.block_m, config.block_n, config.stages, config.warps),
+                ),
+                kwargs.as_ref(),
+            )
+            .map(Bound::unbind)
+    };
+    #[cfg(lumen_cuda_linked)]
+    {
+        use super::triton::direct::Value;
+        let [batch, sq, sk, h, hv] = launch.sizes;
+        // The dK/dV kernel always takes a dQ; one it doesn't read, like any absent tensor, is the first.
+        let mut tensors: Vec<Option<&crate::Tensor>> =
+            launch.tensors.iter().map(Option::as_ref).collect();
+        if launch.kernel == "dkdv" && tensors.len() == 8 {
+            tensors.push(None);
+        }
+        let absent: Vec<bool> = tensors.iter().map(Option::is_none).collect();
+        let mut values: Vec<Value> = tensors
+            .iter()
+            .map(|t| Value::of(t.unwrap_or(device)))
+            .collect();
+        values.extend([sq, sk].map(|s| Value::Int(s as i128)));
+        values.push(Value::Int(launch.causal.unwrap_or(0) as i128));
+        if launch.kernel != "forward" {
+            values.push(Value::Float(launch.scale));
+        }
+        let blocks = match launch.kernel {
+            "dkdv" => sk.div_ceil(config.block_n),
+            _ => sq.div_ceil(config.block_m),
+        };
+        let identity = format!(
+            "attention|{}|{h},{hv}|{}|{absent:?}|{config:?}|{}",
+            launch.kernel,
+            launch.causal.is_some(),
+            names(launch.functions)
+        );
+        if direct(&identity, device, &values, [blocks, batch, 1], |py, kw| {
+            call(py, Some(kw))
+        })? {
+            return Ok(());
+        }
+    }
+    Python::attach(|py| call(py, None).map(|_| ())).map_err(|e| e.to_string())
 }
 
 /// Registers the Triton launch hooks and the module's Python functions and class.

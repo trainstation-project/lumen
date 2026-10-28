@@ -65,6 +65,45 @@ pub struct Step {
     pub sources: Vec<(&'static str, u32)>,
     /// The autotuned kernel choice, if one was made.
     pub tuned: Option<Tuned>,
+    /// What a backend prepared to launch the step, per layout of the tensors it ran on.
+    pub memo: Memo,
+}
+
+/// A step's launch preparations (generated helpers, compiled kernels), each kept under a key a backend
+/// derives from what it was prepared for (its tensors' layouts), so a step that runs again on the same
+/// layouts skips regenerating them. Clones of a step share it.
+#[derive(Clone, Default)]
+pub struct Memo(Arc<std::sync::Mutex<std::collections::HashMap<u64, Arc<dyn Any + Send + Sync>>>>);
+
+impl Memo {
+    /// The preparation kept under `key`, made by `make` and kept on first use; a failure isn't kept.
+    pub(crate) fn get<T: Send + Sync + 'static>(
+        &self,
+        key: u64,
+        make: impl FnOnce() -> Result<T, String>,
+    ) -> Result<Arc<T>, String> {
+        let kept = self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&key)
+            .cloned();
+        if let Some(t) = kept.and_then(|k| k.downcast::<T>().ok()) {
+            return Ok(t);
+        }
+        let made = Arc::new(make()?);
+        self.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(key, made.clone());
+        Ok(made)
+    }
+}
+
+impl fmt::Debug for Memo {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Memo")
+    }
 }
 
 /// A kernel picked by autotuning, with the backend-specific launch parameters it needs.
@@ -737,6 +776,7 @@ impl Plan {
                     sources
                 },
                 tuned: None,
+                memo: Memo::default(),
             })
             .collect();
         // Outputs that alias another buffer are copied out at the end.
@@ -755,6 +795,7 @@ impl Plan {
                 scope: &[],
                 sources: Vec::new(),
                 tuned: None,
+                memo: Memo::default(),
             });
         }
         Plan {
