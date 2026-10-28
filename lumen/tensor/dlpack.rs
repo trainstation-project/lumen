@@ -248,7 +248,7 @@ unsafe extern "C" fn capsule_destructor<T: Managed>(capsule: *mut ffi::PyObject)
     }
 }
 
-/// Wraps `t` in a DLPack capsule of kind `T`; meta and TPU tensors cannot be exported.
+/// Wraps `t` in a DLPack capsule of kind `T`; meta, TPU and Trainium tensors cannot be exported.
 fn to_capsule<'py, T: Managed>(py: Python<'py>, t: &Tensor) -> PyResult<Bound<'py, PyCapsule>> {
     if t.device() == Device::Meta(0) {
         return Err(pyo3::exceptions::PyRuntimeError::new_err(
@@ -258,6 +258,11 @@ fn to_capsule<'py, T: Managed>(py: Python<'py>, t: &Tensor) -> PyResult<Bound<'p
     if let Device::Tpu(_) = t.device() {
         return Err(pyo3::exceptions::PyRuntimeError::new_err(
             "TPU tensors cannot be exported: DLPack has no TPU device",
+        ));
+    }
+    if let Device::Trainium(_) = t.device() {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "Trainium tensors cannot be exported: DLPack has no Trainium device",
         ));
     }
     let managed = NonNull::new(to_managed::<T>(t).cast()).expect("Box is never null");
@@ -290,8 +295,8 @@ fn dl_device(device: Device) -> DLDevice {
         Device::Cpu(_) => (K_DL_CPU, 0),
         Device::Cuda(index) => (K_DL_CUDA, index as i32),
         Device::Mps(_) => (K_DL_METAL, 0),
-        Device::Meta(_) | Device::Tpu(_) => {
-            unreachable!("meta and TPU tensors are not exported (to_capsule)")
+        Device::Meta(_) | Device::Tpu(_) | Device::Trainium(_) => {
+            unreachable!("meta, TPU and Trainium tensors are not exported (to_capsule)")
         }
     };
     DLDevice {

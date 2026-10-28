@@ -9,6 +9,7 @@ fn every_device_has_a_backend() {
         Device::Cpu(0),
         Device::Mps(0),
         Device::Cuda(0),
+        Device::Trainium(0),
         Device::Meta(0),
     ] {
         assert!(
@@ -31,6 +32,16 @@ fn every_device_has_a_backend() {
         "{err}"
     );
     assert!(super::cpu::Cpu.check(1).is_err());
+    let count = super::trainium::TRAINIUM.device_count();
+    let err = Device::Trainium(count).check().unwrap_err();
+    assert!(
+        err.contains(&format!("Trainium device {count} is not available")),
+        "{err}"
+    );
+    if !cfg!(lumen_trainium_linked) {
+        assert!(err.contains("built without the Neuron runtime"), "{err}");
+    }
+    assert_eq!(Device::of_type("trainium", 1), Some(Device::Trainium(1)));
 }
 
 /// Tests of the TPU tiled memory layout.

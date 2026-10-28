@@ -25,11 +25,14 @@ ci: fmt-check clang-format-check clippy test miri
 # (libtpu), which the TPU tests load (TPU_ENV; a TPU_LIBRARY_PATH already
 # set wins).
 HAS_CUDA := $(shell command -v nvidia-smi >/dev/null 2>&1 && echo yes)
+# A Trainium machine has Neuron devices (/dev/neuron*); the crate and wheel
+# get the `trainium` feature, linking libnrt from the Neuron SDK.
+HAS_TRAINIUM := $(shell ls /dev/neuron0 >/dev/null 2>&1 && echo yes)
 HAS_TPU := $(shell for d in /sys/bus/pci/devices/*; do [ "$$(cat $$d/vendor 2>/dev/null)" = 0x1ae0 ] && case "$$(cat $$d/class)" in (0x12*) echo yes; break;; esac; done)
 comma := ,
 empty :=
 space := $(empty) $(empty)
-DEVICE_FEATURES := $(strip $(if $(HAS_CUDA),cuda) $(if $(HAS_TPU),tpu))
+DEVICE_FEATURES := $(strip $(if $(HAS_CUDA),cuda) $(if $(HAS_TPU),tpu) $(if $(HAS_TRAINIUM),trainium))
 CARGO_TEST_FEATURES := $(if $(DEVICE_FEATURES),--features $(subst $(space),$(comma),$(DEVICE_FEATURES)))
 MATURIN_FEATURES := $(if $(DEVICE_FEATURES),--features $(subst $(space),$(comma),python $(DEVICE_FEATURES)) --extras $(subst $(space),$(comma),$(DEVICE_FEATURES)))
 TPU_ENV := $(if $(HAS_TPU),TPU_LIBRARY_PATH="$${TPU_LIBRARY_PATH:-$$(python -c 'import libtpu, os; print(os.path.join(os.path.dirname(libtpu.__file__), "libtpu.so"))')}")

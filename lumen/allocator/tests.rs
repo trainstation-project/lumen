@@ -620,3 +620,185 @@ mod tpu {
         }
     }
 }
+
+/// Tests of the Trainium allocator against a fake Neuron runtime.
+mod trainium {
+    use std::ffi::c_void;
+    use std::ptr::NonNull;
+    use std::sync::{Arc, Mutex};
+
+    use crate::Allocator;
+    use crate::allocator::trainium::{Handle, Runtime, TrainiumAllocator};
+
+    /// What a fake runtime tensor is: the root of `nbytes`, or a slice of it.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Tensor {
+        Root(usize),
+        Slice { offset: usize, nbytes: usize },
+    }
+
+    /// The fake runtime's record: tensors made, in order, and those freed, in order.
+    #[derive(Default)]
+    struct Log {
+        made: Vec<Tensor>,
+        freed: Vec<Tensor>,
+    }
+
+    /// A runtime whose tensors are boxed descriptions and whose device memory is host memory.
+    #[derive(Clone, Default)]
+    struct Fake {
+        log: Arc<Mutex<Log>>,
+        /// Fails every root allocation when set.
+        full: bool,
+    }
+
+    impl Fake {
+        /// A handle to `tensor`, recorded as made.
+        fn handle(&self, tensor: Tensor) -> Handle {
+            self.log.lock().unwrap().made.push(tensor);
+            Handle(NonNull::from(Box::leak(Box::new(tensor))).cast::<c_void>())
+        }
+
+        /// Tensors made so far.
+        fn made(&self) -> Vec<Tensor> {
+            self.log.lock().unwrap().made.clone()
+        }
+
+        /// Tensors freed so far.
+        fn freed(&self) -> Vec<Tensor> {
+            self.log.lock().unwrap().freed.clone()
+        }
+    }
+
+    impl Runtime for Fake {
+        /// A root handle over `nbytes` of leaked host memory standing in for device memory.
+        fn allocate(&self, _core: usize, nbytes: usize) -> Result<(Handle, NonNull<u8>), String> {
+            if self.full {
+                return Err("NRT_RESOURCE".into());
+            }
+            let memory = Box::leak(vec![0u8; nbytes].into_boxed_slice());
+            Ok((
+                self.handle(Tensor::Root(nbytes)),
+                NonNull::from(memory).cast(),
+            ))
+        }
+
+        /// A slice handle recording where it starts and how long it is.
+        fn slice(&self, _root: Handle, offset: usize, nbytes: usize) -> Result<Handle, String> {
+            Ok(self.handle(Tensor::Slice { offset, nbytes }))
+        }
+
+        /// Records the tensor as freed and drops its description.
+        fn free(&self, tensor: Handle) {
+            let tensor = unsafe { Box::from_raw(tensor.0.cast::<Tensor>().as_ptr()) };
+            self.log.lock().unwrap().freed.push(*tensor);
+        }
+    }
+
+    /// A Trainium allocator of `capacity` bytes over `runtime`.
+    fn allocator(capacity: usize, runtime: &Fake) -> TrainiumAllocator<Fake> {
+        TrainiumAllocator::new(0, capacity, runtime.clone())
+    }
+
+    /// The first allocation reserves one root tensor of the whole capacity; every block is a slice
+    /// of it at the block's offset and size; dropping the allocator frees the live slices, then the root.
+    #[test]
+    fn blocks_are_slices_of_one_root_tensor() {
+        let runtime = Fake::default();
+        let trainium = allocator(1 << 20, &runtime);
+        assert!(
+            runtime.made().is_empty(),
+            "nothing is reserved before the first allocation"
+        );
+        let a = trainium.allocate(100);
+        let b = trainium.allocate(1000);
+        let root = Tensor::Root(1 << 20);
+        let slice = |offset, nbytes| Tensor::Slice { offset, nbytes };
+        assert_eq!(runtime.made(), [root, slice(0, 100), slice(256, 1000)]);
+        assert_eq!(b.as_ptr().addr() - a.as_ptr().addr(), 256);
+        unsafe { trainium.deallocate(a, 100) };
+        assert_eq!(runtime.freed(), [slice(0, 100)]);
+        drop(trainium);
+        assert_eq!(runtime.freed(), [slice(0, 100), slice(256, 1000), root]);
+    }
+
+    /// A freed block's place is reused, with a new slice of the same offset.
+    #[test]
+    fn a_freed_block_is_sliced_again_when_reused() {
+        let runtime = Fake::default();
+        let trainium = allocator(1 << 20, &runtime);
+        let a = trainium.allocate(512);
+        unsafe { trainium.deallocate(a, 512) };
+        let b = trainium.allocate(300);
+        assert_eq!(a, b);
+        assert_eq!(
+            runtime.made().last(),
+            Some(&Tensor::Slice {
+                offset: 0,
+                nbytes: 300
+            })
+        );
+        unsafe { trainium.deallocate(b, 300) };
+    }
+
+    /// A pointer at or inside a live block (a view of a tensor) finds the block's slice and its
+    /// offset there; a freed block's pointer finds none.
+    #[test]
+    fn pointers_find_their_blocks_slice() {
+        let runtime = Fake::default();
+        let trainium = allocator(1 << 20, &runtime);
+        let a = trainium.allocate(100);
+        let b = trainium.allocate(1000);
+        let at = |ptr: NonNull<u8>, bytes: usize| {
+            let (slice, offset) =
+                trainium.tensor(NonNull::new(ptr.as_ptr().wrapping_add(bytes)).unwrap())?;
+            Some((unsafe { *slice.0.cast::<Tensor>().as_ptr() }, offset))
+        };
+        assert_eq!(
+            at(a, 0),
+            Some((
+                Tensor::Slice {
+                    offset: 0,
+                    nbytes: 100
+                },
+                0
+            ))
+        );
+        assert_eq!(
+            at(b, 999),
+            Some((
+                Tensor::Slice {
+                    offset: 256,
+                    nbytes: 1000
+                },
+                999
+            ))
+        );
+        assert_eq!(at(a, 100), None, "the padding after a block is no block's");
+        unsafe { trainium.deallocate(a, 100) };
+        assert_eq!(at(a, 0), None);
+        unsafe { trainium.deallocate(b, 1000) };
+    }
+
+    /// A zero-byte allocation makes no slice, and freeing it frees none.
+    #[test]
+    fn zero_byte_allocations_have_no_slice() {
+        let runtime = Fake::default();
+        let trainium = allocator(1 << 20, &runtime);
+        let empty = trainium.allocate(0);
+        assert_eq!(runtime.made(), [Tensor::Root(1 << 20)]);
+        unsafe { trainium.deallocate(empty, 0) };
+        assert!(runtime.freed().is_empty());
+    }
+
+    /// A root tensor the runtime can't allocate is an out-of-memory panic naming the device.
+    #[test]
+    #[should_panic(expected = "Trainium out of memory: failed to reserve")]
+    fn a_failed_reservation_panics() {
+        let runtime = Fake {
+            full: true,
+            ..Fake::default()
+        };
+        allocator(1 << 20, &runtime).allocate(64);
+    }
+}

@@ -1,5 +1,5 @@
-//! Build script: links CUDA/CUPTI when found, and compiles the Metal/CoreML and PJRT C shims
-//! for the `mps` and `tpu` features.
+//! Build script: links CUDA/CUPTI and the Neuron runtime when found, and compiles the Metal/CoreML
+//! and PJRT C shims for the `mps` and `tpu` features.
 use std::env;
 use std::path::{Path, PathBuf};
 
@@ -9,11 +9,13 @@ fn main() {
     println!("cargo:rustc-check-cfg=cfg(lumen_mps_linked)");
     println!("cargo:rustc-check-cfg=cfg(lumen_cupti_linked)");
     println!("cargo:rustc-check-cfg=cfg(lumen_tpu_linked)");
+    println!("cargo:rustc-check-cfg=cfg(lumen_trainium_linked)");
 
     println!("cargo:rerun-if-env-changed=CUDA_HOME");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
     println!("cargo:rerun-if-env-changed=CUDART_LIB_DIR");
     println!("cargo:rerun-if-env-changed=CUPTI_LIB_DIR");
+    println!("cargo:rerun-if-env-changed=NEURON_RT_LIB_DIR");
     println!("cargo:rerun-if-changed=build.rs");
 
     if env::var_os("CARGO_FEATURE_CUDA").is_some() {
@@ -27,6 +29,34 @@ fn main() {
     if env::var_os("CARGO_FEATURE_TPU").is_some() {
         build_tpu_shim();
     }
+
+    if env::var_os("CARGO_FEATURE_TRAINIUM").is_some() {
+        detect_trainium();
+    }
+}
+
+/// Links the Neuron runtime (`libnrt`, from `NEURON_RT_LIB_DIR` or the Neuron SDK's
+/// `/opt/aws/neuron/lib`) and sets `lumen_trainium_linked`, warning instead of failing when it
+/// is missing.
+fn detect_trainium() {
+    let candidates = env::var_os("NEURON_RT_LIB_DIR")
+        .map(PathBuf::from)
+        .into_iter()
+        .chain([PathBuf::from("/opt/aws/neuron/lib")]);
+    let Some(lib_dir) = candidates
+        .into_iter()
+        .find(|dir| dir.join("libnrt.so").exists() || dir.join("libnrt.so.1").exists())
+    else {
+        println!(
+            "cargo:warning=trainium feature enabled but libnrt was not found; \
+             building without Trainium (set NEURON_RT_LIB_DIR to link the Neuron runtime)"
+        );
+        return;
+    };
+    println!("cargo:rustc-link-search=native={}", lib_dir.display());
+    println!("cargo:rustc-link-arg=-Wl,-rpath,{}", lib_dir.display());
+    println!("cargo:rustc-link-lib=nrt");
+    println!("cargo:rustc-cfg=lumen_trainium_linked");
 }
 
 /// Compiles the PJRT C shim on Linux and sets `lumen_tpu_linked`.

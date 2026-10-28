@@ -25,12 +25,18 @@ fn tpu_pid(i: usize) -> u64 {
     (3 << 32) + i as u64
 }
 
+/// Trace process id for Trainium device `i`.
+fn trainium_pid(i: usize) -> u64 {
+    (4 << 32) + i as u64
+}
+
 /// Trace process id events on `device` are drawn under.
 fn pid(device: Device) -> u64 {
     match device {
         Device::Cpu(_) => std::process::id().into(),
         Device::Cuda(i) => i as u64,
         Device::Tpu(i) => tpu_pid(i),
+        Device::Trainium(i) => trainium_pid(i),
         Device::Mps(_) | Device::Meta(_) => 0,
     }
 }
@@ -42,6 +48,7 @@ fn device_type(device: Device) -> (i32, i64) {
         Device::Cuda(i) => (1, i as i64),
         Device::Mps(_) => (13, 0),
         Device::Tpu(i) => (9, i as i64),
+        Device::Trainium(i) => (20, i as i64),
         Device::Meta(_) => (9, 0),
     }
 }
@@ -53,6 +60,7 @@ fn process_name(device: Device) -> String {
         Device::Cuda(i) => format!("CUDA {i}"),
         Device::Mps(_) => "MPS".to_owned(),
         Device::Tpu(i) => format!("TPU {i}"),
+        Device::Trainium(i) => format!("Trainium {i}"),
         Device::Meta(_) => "Meta".to_owned(),
     }
 }

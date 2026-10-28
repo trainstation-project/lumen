@@ -224,7 +224,7 @@ fn device_module<'py>(py: Python<'py>, kind: &'static str) -> PyResult<Bound<'py
 /// Registers the device class and each device-type submodule (also in `sys.modules`) on `m`.
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let modules = m.py().import("sys")?.getattr("modules")?;
-    for kind in ["cpu", "cuda", "meta", "mps", "tpu"] {
+    for kind in ["cpu", "cuda", "meta", "mps", "tpu", "trainium"] {
         let sub = device_module(m.py(), kind)?;
         modules.set_item(sub.name()?, &sub)?;
         m.add(kind, sub)?;

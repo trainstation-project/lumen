@@ -24,6 +24,9 @@ cuda = [
 # which compiles lumen's kernels (`make test` points TPU_LIBRARY_PATH at
 # this package's). Linux only.
 tpu = ["libtpu; sys_platform == 'linux'"]
+# Trainium's runtime (libnrt) comes with the Neuron SDK, not from PyPI, so
+# the extra installs nothing; it exists so `make install` can name it.
+trainium = []
 # `make style`: the pre-commit hooks (.pre-commit-config.yaml).
 dev = ["pre-commit"]
 
