@@ -23,6 +23,7 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 
 use super::common::chunked_cross_entropy::ChunkedCrossEntropy;
 use super::common::clamp_indices::ClampIndices;
+use super::common::dot_strength::DotStrength;
 use super::common::linear_cross_entropy::LinearCrossEntropy;
 use super::common::merge_dots::{Blocks, MergeDots, Packs, Target};
 use super::common::merge_dots_backward::MergeDotsBackward;
@@ -114,6 +115,7 @@ impl Attentions for MpsModule<'_> {
         attention::Epilogues {
             leaves: |_, _| true,
             reshaped: false,
+            transposed: true,
         }
     }
 
@@ -212,7 +214,8 @@ fn pipeline<'a>(config: &MpsConfig) -> Pipeline<MpsModule<'a>> {
     if config.safe_kernels {
         p.add(ClampIndices);
     }
-    p.add(Simplify { matched: true });
+    // Batched inner products (attention backward's delta, read through transposes) run as loops.
+    p.add(Simplify { matched: true }).add(DotStrength);
     if config.neural_engine {
         p.add(ane::NeuralEngine);
     }

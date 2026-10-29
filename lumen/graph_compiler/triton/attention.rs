@@ -68,6 +68,7 @@ impl Attentions for TritonModule<'_> {
         Epilogues {
             leaves: |_, _| true,
             reshaped: false,
+            transposed: true,
         }
     }
 
