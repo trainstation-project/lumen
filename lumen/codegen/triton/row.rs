@@ -599,8 +599,8 @@ fn at_own_index(body: &Graph, product: Var) -> bool {
 }
 
 /// Generates the GEMM epilogue of a `dot_partials` fusion: the tile, any multiple of `tile` columns wide,
-/// writes the value the row reads, its first output, and each later output, a reduction over
-/// `tile`-column blocks of the rows, as the partial of each block it covers.
+/// writes the value the row reads, its first output; each reduction output over `tile`-column blocks of
+/// the rows, as the partial of each block it covers; and the GEMM's other outputs, element by element.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn partials_epilogue(
     body: &Graph,
@@ -628,6 +628,22 @@ pub(crate) fn partials_epilogue(
     let mut combines = String::new();
     for (k, &v) in body.outputs().iter().enumerate().skip(1) {
         let reduction = producer[&v];
+        // The GEMM's other outputs, past the partials, are stored at each element's own index.
+        if !matches!(
+            reduction.primitive,
+            Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. }
+        ) {
+            let value = emitter.value(v, "j".into());
+            let (shape, strides) = outputs[k];
+            writeln!(
+                emitter.lines,
+                "    tl.store({} + {}, {value}, mask=mask)",
+                pointers[k],
+                at("j", shape, strides)
+            )
+            .unwrap();
+            continue;
+        }
         let blocks = producer[&reduction.inputs[0]];
         let a = body.type_of(reduction.output).dtype;
         let acc = triton_type(a).expect("a Triton dtype");

@@ -84,7 +84,10 @@ pub(super) fn hosts(
             && (is_output[node.output] || expensive(graph, node))
             && dot_of[i].is_none()
             && epilogue[i].is_none()
-            && !rows.iter().any(|r| r.root == i && !r.outputs.is_empty());
+            // A row root writing outputs or partials hosts them itself, so it can't be hosted too.
+            && !rows
+                .iter()
+                .any(|r| r.root == i && !(r.outputs.is_empty() && r.partials.is_empty()));
         if !candidate {
             continue;
         }

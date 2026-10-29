@@ -71,8 +71,8 @@ fn plain(graph: &Graph, dot: &Node) -> bool {
         && rhs_contracting.len() == 1
 }
 
-/// The computation node `g` stands for: its body when a single-output GEMM fusion whose plain dot reads
-/// the body's inputs, the node alone when a plain dot, else `None`.
+/// The computation node `g` stands for: its body when a GEMM fusion whose plain dot reads the body's
+/// inputs, the node alone when a plain dot, else `None`.
 fn gemm(graph: &Graph, g: &Node) -> Option<Graph> {
     match &g.primitive {
         Primitive::DotGeneral { .. } if plain(graph, g) => {
@@ -89,7 +89,7 @@ fn gemm(graph: &Graph, g: &Node) -> Option<Graph> {
         Primitive::Fusion { body, .. } => {
             let dot = gemm_dot(body)?;
             let reads = dot.inputs.iter().all(|v| body.inputs().contains(v));
-            (body.outputs().len() == 1 && plain(body, dot) && reads).then(|| body.clone())
+            (plain(body, dot) && reads).then(|| body.clone())
         }
         _ => None,
     }
@@ -117,12 +117,20 @@ fn wide(graph: &Graph, producer: &[Option<usize>], (r, row): (usize, &Node)) -> 
         return None;
     }
     let nodes = graph.nodes();
-    // The GEMM's value may be read again only after the row (it is the `dot_partials` output).
-    let only = |v: Var| {
+    // The GEMM's values may be read again only after the row (they are the `dot_partials` outputs):
+    // its extra outputs' `FusionOutput` nodes stay, read after the row too.
+    let after = |v: Var| {
         nodes
             .iter()
             .enumerate()
             .all(|(k, n)| k >= r || !n.inputs.contains(&v))
+    };
+    let only = |v: Var| {
+        nodes.iter().enumerate().all(|(k, n)| {
+            k >= r
+                || !n.inputs.contains(&v)
+                || matches!(n.primitive, Primitive::FusionOutput { .. }) && after(n.output)
+        })
     };
     let rows_shape = rows_shape(rows)?;
     let n = *rows_shape.last()?;
@@ -163,7 +171,8 @@ fn over(node: &Node, axes: Vec<usize>) -> Primitive {
 }
 
 /// The `dot_partials` body: the GEMM's reads, then the row's other operands, in; the value the row reads,
-/// then each split reduction's partials over `tile`-column blocks of each row (`[rows, n / tile]`), out.
+/// each split reduction's partials over `tile`-column blocks of each row (`[rows, n / tile]`), then the
+/// GEMM's other outputs, out.
 fn partials_body(wide: &Wide, rows: &Graph) -> Graph {
     let mut out = Graph::new();
     let mut gemm: Vec<Var> = vec![usize::MAX; wide.gemm.types.len()];
@@ -222,6 +231,7 @@ fn partials_body(wide: &Wide, rows: &Graph) -> Graph {
                 .expect("their partials"),
         );
     }
+    outputs.extend(wide.gemm.outputs()[1..].iter().map(|&v| gemm[v]));
     out.set_outputs(&outputs).expect("the partials' values");
     out
 }
@@ -269,8 +279,13 @@ fn wide_rows(graph: &Graph) -> Graph {
     for &v in graph.inputs() {
         map[v] = out.input(graph.type_of(v).clone());
     }
+    // A taken GEMM's extra outputs, emitted with its `dot_partials` past the split reductions' partials.
+    let extra = |n: &Node| match n.primitive {
+        Primitive::FusionOutput { .. } => producer[n.inputs[0]].filter(|&g| taken[g]),
+        _ => None,
+    };
     for (i, node) in nodes.iter().enumerate() {
-        if taken[i] {
+        if taken[i] || extra(node).is_some() {
             continue;
         }
         out.set_origin(node);
@@ -315,6 +330,16 @@ fn wide_rows(graph: &Graph) -> Graph {
         };
         let value = out.apply(fused, &reads).expect("the row's operand");
         map[g.output] = value;
+        for n in nodes.iter().filter(|n| extra(n) == Some(w.producer)) {
+            let Primitive::FusionOutput { index, ty } = &n.primitive else {
+                unreachable!("an extra output")
+            };
+            let index = index + w.split.len();
+            let ty = ty.clone();
+            map[n.output] = out
+                .apply(Primitive::FusionOutput { index, ty }, &[value])
+                .expect("the GEMM's extra output");
+        }
         // Each split reduction: its partials, reduced, in the reduction's own shape.
         let mut totals = Vec::new();
         for (k, &v) in w.split.iter().enumerate() {
