@@ -8,7 +8,7 @@ use indoc::formatdoc;
 use super::{Emitter, constant, load, named, triton_type};
 use crate::Scalar;
 use crate::graph::Graph;
-use crate::graph_compiler::common::attention::{Access, Attention, Score};
+use crate::graph_compiler::common::attention::{Access, Attention, Score, Strides};
 use crate::tensor::contiguous_strides;
 
 /// Statements setting `at`, the element offset of `acc`'s tile at flat batch index `b`, rows `rows`
@@ -78,9 +78,14 @@ pub(crate) fn attention_store(acc: &Access, batch: &[usize]) -> (String, String)
 /// A jit helper storing a forward attention fusion's output tile: the attention values `value`, cast to
 /// their dtype (also written as they are through `EXTRA`'s last pointer when `raw`), through the body's
 /// elementwise epilogue to its first output, as MPS's kernel does. The epilogue reads the body's inputs
-/// but the offset (`EXTRA` in body-input order, contiguous: it may read Q, K or V too) at each
-/// element's flat index `j` in that output; without an epilogue, the values themselves.
-pub(crate) fn attention_output(body: &Graph, a: &Attention, raw: bool) -> (String, String) {
+/// but the offset (`EXTRA` in body-input order, laid out as `strides` gives them: it may read Q, K or V
+/// too) at each element's flat index `j` in that output; without an epilogue, the values themselves.
+pub(crate) fn attention_output(
+    body: &Graph,
+    a: &Attention,
+    raw: bool,
+    strides: &Strides,
+) -> (String, String) {
     let at = address(&a.out, &a.batch);
     let root = body.nodes()[a.root].output;
     let t = triton_type(body.type_of(root).dtype).expect("a Triton dtype");
@@ -99,7 +104,11 @@ pub(crate) fn attention_output(body: &Graph, a: &Attention, raw: bool) -> (Strin
     }
     for (e, &k) in leaves.iter().enumerate() {
         let ty = body.type_of(body.inputs()[k]);
-        let (name, source) = load(&ty.shape, &contiguous_strides(&ty.shape));
+        let strides = match strides.inputs.get(&k) {
+            Some(strides) => strides.clone(),
+            None => contiguous_strides(&ty.shape),
+        };
+        let (name, source) = load(&ty.shape, &strides);
         loads += &(source.replace(&format!("def {name}("), &format!("def LOAD{k}(")) + "\n\n");
         writeln!(code, "    in{k} = EXTRA[{e}]").unwrap();
     }

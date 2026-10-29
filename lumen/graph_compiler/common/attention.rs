@@ -137,11 +137,52 @@ pub(crate) fn backward_of_body_into(
     body: &Graph,
     views: HashMap<usize, (usize, Vec<usize>)>,
 ) -> Option<Backward> {
-    let mut m = Matcher::new(body);
-    m.views = views
-        .into_iter()
-        .map(|(k, view)| (body.outputs()[k], view))
-        .collect();
+    let strides = Strides {
+        outputs: views,
+        ..Strides::default()
+    };
+    backward_of_body_strided(body, &strides)
+}
+
+/// Where a fusion body's operands live: element strides of its inputs read through views and
+/// `(offset, strides)` of its outputs written into views, by input and output index; others are
+/// contiguous in their own buffers.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Strides {
+    pub(crate) inputs: HashMap<usize, Vec<usize>>,
+    pub(crate) outputs: HashMap<usize, (usize, Vec<usize>)>,
+}
+
+impl Strides {
+    /// The layouts of `body`'s inputs and outputs as `inputs` and `outputs` strides give them: an
+    /// input or output with contiguous strides (and no offset) is left out.
+    pub(crate) fn of(body: &Graph, inputs: &[Vec<usize>], outputs: &[(usize, Vec<usize>)]) -> Self {
+        let contiguous =
+            |v: Var, strides: &[usize]| contiguous_strides(&body.type_of(v).shape) == strides;
+        Strides {
+            inputs: body
+                .inputs()
+                .iter()
+                .zip(inputs)
+                .enumerate()
+                .filter(|(_, (v, s))| !contiguous(**v, s))
+                .map(|(k, (_, s))| (k, s.clone()))
+                .collect(),
+            outputs: body
+                .outputs()
+                .iter()
+                .zip(outputs)
+                .enumerate()
+                .filter(|(_, (v, (o, s)))| *o != 0 || !contiguous(**v, s))
+                .map(|(k, (_, view))| (k, view.clone()))
+                .collect(),
+        }
+    }
+}
+
+/// The first attention backward in `body`, its operands laid out as `strides` gives them.
+pub(crate) fn backward_of_body_strided(body: &Graph, strides: &Strides) -> Option<Backward> {
+    let m = Matcher::new(body).laid_out(strides);
     (0..body.nodes().len()).find_map(|i| m.backward(i))
 }
 
@@ -293,9 +334,15 @@ pub(crate) const MAX_HEAD: usize = 256;
 
 /// Every live forward attention in `graph`; `runtime_offsets` allows a runtime causal offset.
 pub(crate) fn attentions(graph: &Graph, runtime_offsets: bool) -> Vec<Attention> {
+    attentions_in(Matcher::new(graph), runtime_offsets)
+}
+
+/// Every live forward attention `m`'s graph holds.
+fn attentions_in(m: Matcher<'_>, runtime_offsets: bool) -> Vec<Attention> {
+    let graph = m.graph;
     let m = Matcher {
         runtime_offsets,
-        ..Matcher::new(graph)
+        ..m
     };
     let mut found: Vec<Attention> = Vec::new();
     for (i, node) in graph.nodes().iter().enumerate() {
@@ -338,6 +385,13 @@ pub(crate) fn traced(graph: &Graph) -> Vec<(Attention, Vec<Var>)> {
 /// The attention in a fusion body, allowing a runtime causal offset.
 pub(crate) fn of_body(body: &Graph) -> Option<Attention> {
     attentions(body, true).into_iter().next()
+}
+
+/// The attention in a fusion body whose operands are laid out as `strides` gives them.
+pub(crate) fn of_body_strided(body: &Graph, strides: &Strides) -> Option<Attention> {
+    attentions_in(Matcher::new(body).laid_out(strides), true)
+        .into_iter()
+        .next()
 }
 
 /// An attention to fuse: the match, its epilogue chain, the node the fusion replaces, the epilogue's
@@ -550,6 +604,8 @@ struct Matcher<'a> {
     runtime_offsets: bool,
     /// Body outputs written into a view: `(offset, strides)` of their buffer.
     views: HashMap<Var, (usize, Vec<usize>)>,
+    /// Body inputs read through a view: their element strides.
+    strided: HashMap<Var, Vec<usize>>,
 }
 
 impl<'a> Matcher<'a> {
@@ -661,12 +717,29 @@ impl<'a> Matcher<'a> {
             plain_dq: false,
             runtime_offsets: false,
             views: HashMap::new(),
+            strided: HashMap::new(),
             graph,
             producer,
             readers,
             output,
             live,
         }
+    }
+
+    /// The matcher with the body's inputs and outputs laid out as `strides` gives them.
+    fn laid_out(mut self, strides: &Strides) -> Self {
+        let graph = self.graph;
+        self.views = strides
+            .outputs
+            .iter()
+            .map(|(&k, view)| (graph.outputs()[k], view.clone()))
+            .collect();
+        self.strided = strides
+            .inputs
+            .iter()
+            .map(|(&k, s)| (graph.inputs()[k], s.clone()))
+            .collect();
+        self
     }
 
     /// Node producing `v`, if any.
@@ -1490,14 +1563,11 @@ impl<'a> Matcher<'a> {
         use Primitive::*;
         let own = || {
             let shape = &self.graph.type_of(v).shape;
-            (
-                v,
-                0,
-                contiguous_strides(shape)
-                    .into_iter()
-                    .map(|s| (s, 1))
-                    .collect(),
-            )
+            let strides = match self.strided.get(&v) {
+                Some(strides) => strides.clone(),
+                None => contiguous_strides(shape),
+            };
+            (v, 0, strides.into_iter().map(|s| (s, 1)).collect())
         };
         let Some(n) = self.node(v) else {
             return own();

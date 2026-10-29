@@ -701,16 +701,16 @@ pub(crate) fn layouts<'a>(tensors: impl IntoIterator<Item = &'a Tensor>) -> u64 
     hasher.finish()
 }
 
-/// Whether the Triton kernel for `step` reads strided inputs directly.
+/// Whether the Triton kernel for `step` reads strided inputs directly (attention any layout with a
+/// contiguous last dim, copying others itself).
 pub(crate) fn reads_strided(step: &Step) -> bool {
-    !attention::is_attention(&step.primitive)
-        && matches!(
-            step.primitive,
-            Primitive::DotGeneral { .. }
-                | Primitive::Fusion { .. }
-                | Primitive::Cumsum { .. }
-                | Primitive::LinearCrossEntropy
-        )
+    matches!(
+        step.primitive,
+        Primitive::DotGeneral { .. }
+            | Primitive::Fusion { .. }
+            | Primitive::Cumsum { .. }
+            | Primitive::LinearCrossEntropy
+    )
 }
 
 /// Launches `kernel` over `n` outputs, with enough programs for the block size, lanes and splits; its

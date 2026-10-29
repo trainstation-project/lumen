@@ -54,7 +54,7 @@ use flash_attention_backward::FlashAttentionBackward;
 use kernel_codegen::Codegen;
 use place_concats::PlaceConcats;
 use place_views::PlaceViews;
-pub(crate) use place_views::{fusion_reads_strided, loads_strided};
+pub(crate) use place_views::{attention_reads_strided, fusion_reads_strided, loads_strided};
 
 // Metal library loader implemented in the Objective-C shim.
 unsafe extern "C" {
@@ -633,6 +633,10 @@ fn strided_variant(step: &Step, name: &str, body: &Graph) -> Result<Option<Strin
     if step.views.iter().all(Option::is_none) {
         return Ok(None);
     }
+    let (launch, _) = launch_kind(name, body);
+    if matches!(launch, Launch::Attention | Launch::AttentionBackward) {
+        return attention_variant(step, name, body, launch).map(Some);
+    }
     let strided: Vec<(usize, &[usize])> = step
         .views
         .iter()
@@ -680,6 +684,70 @@ fn strided_variant(step: &Step, name: &str, body: &Graph) -> Result<Option<Strin
         .unwrap_or_else(PoisonError::into_inner)
         .insert(key, variant.clone());
     Ok(Some(variant))
+}
+
+/// Name of attention kernel `name` generated for the step's operand layouts (any strides but a
+/// contiguous last dim), compiling it on first use.
+fn attention_variant(
+    step: &Step,
+    name: &str,
+    body: &Graph,
+    launch: Launch,
+) -> Result<String, String> {
+    let outputs: Vec<(usize, Vec<usize>)> = std::iter::once(&step.output)
+        .chain(&step.extra_outputs)
+        .zip(&step.output_views)
+        .map(|((_, ty), view)| match view {
+            Some(view) => (view.offset, view.strides.clone()),
+            None => (0, contiguous_strides(&ty.shape)),
+        })
+        .collect();
+    let strides = attention::Strides::of(body, &step.input_strides(), &outputs);
+    let mut layout: Vec<_> = strides.inputs.iter().collect();
+    layout.sort();
+    let mut views: Vec<_> = strides.outputs.iter().collect();
+    views.sort();
+    let key = format!("{name}{layout:?}{views:?}");
+    if let Some(variant) = VARIANTS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get(&key)
+    {
+        return Ok(variant.clone());
+    }
+    let unmatched = || {
+        format!(
+            "{}: no attention kernel reads its operands' layout",
+            step.label
+        )
+    };
+    let (variant, source) = match launch {
+        Launch::Attention => {
+            let a = attention::of_body_strided(body, &strides).ok_or_else(unmatched)?;
+            codegen::attention_kernel(body, &a)
+        }
+        _ => {
+            let b = attention::backward_of_body_strided(body, &strides).ok_or_else(unmatched)?;
+            codegen::attention_backward_kernel(body, &b)
+        }
+    };
+    let compiled = SOURCES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains_key(&variant);
+    if !compiled {
+        compile_kernels(BTreeMap::from([(variant.clone(), source)]))?;
+    }
+    let launch = launch_kind(name, body);
+    LAUNCHES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(variant.clone(), launch);
+    VARIANTS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(key, variant.clone());
+    Ok(variant)
 }
 
 /// Encodes fused step `step` reading `inputs` into `output`, using `scratch` and keeping `keep` alive.
