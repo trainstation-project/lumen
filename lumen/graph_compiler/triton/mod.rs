@@ -414,12 +414,7 @@ pub(crate) fn run(
         (p, _) if attention::is_attention(p) => attention::run(step, inputs, out, outs),
         _ if gemm::is_gemm(step) => gemm::run(step, inputs, out, outs),
         #[cfg(lumen_cuda_linked)]
-        (
-            Primitive::AllReduce { .. }
-            | Primitive::AllGather { .. }
-            | Primitive::ReduceScatter { .. },
-            _,
-        ) => crate::distributed::nccl::run(&step.primitive, &inputs[0], out),
+        (p, _) if p.is_collective() => crate::distributed::nccl::run(p, inputs, out),
         (Primitive::DeviceWait, _) => {
             #[cfg(lumen_cuda_linked)]
             crate::distributed::nccl::device_wait(&inputs[0])?;

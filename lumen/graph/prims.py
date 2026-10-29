@@ -28,6 +28,13 @@ __all__ = [
     "all_reduce",
     "all_gather",
     "reduce_scatter",
+    "all_to_all",
+    "broadcast",
+    "reduce",
+    "gather_to",
+    "scatter_from",
+    "send",
+    "recv",
     "to_host",
     "to_device",
     "broadcast_in_dim",
@@ -259,6 +266,47 @@ def reduce_scatter(x, op, ranks):
     """``x`` (a leading axis of one row per process in ``ranks``) combined across them with ``op``; the process at
     position ``r`` of ``ranks`` gets row ``r`` (``ncclReduceScatter``)."""
     return bind("reduce_scatter", x, op=op, ranks=tuple(ranks))
+
+
+def all_to_all(x, ranks):
+    """Rows of ``x``'s leading axis (one per process in ``ranks``) exchanged: the process at position ``r`` gets,
+    as row ``j``, row ``r`` of the process at position ``j`` (PyTorch's ``all_to_all_single``)."""
+    return bind("all_to_all", x, ranks=tuple(ranks))
+
+
+def broadcast(x, root, ranks):
+    """Process ``root``'s ``x``, given to every process in ``ranks`` (``ncclBroadcast``)."""
+    return bind("broadcast", x, root=root, ranks=tuple(ranks))
+
+
+def reduce(x, op, root, ranks):
+    """``x`` combined across ``ranks`` with ``op`` on process ``root``; zeros on the others (``ncclReduce``)."""
+    return bind("reduce", x, op=op, root=root, ranks=tuple(ranks))
+
+
+def gather_to(x, root, ranks):
+    """Every process in ``ranks``'s ``x`` stacked along a new leading axis, in ``ranks``' order, on process
+    ``root``; zeros on the others."""
+    return bind("gather_to", x, root=root, ranks=tuple(ranks))
+
+
+def scatter_from(x, root, ranks):
+    """Row ``r`` of process ``root``'s ``x`` (a leading axis of one row per process in ``ranks``) for the process
+    at position ``r``; the other processes' ``x`` is not read."""
+    return bind("scatter_from", x, root=root, ranks=tuple(ranks))
+
+
+def send(x, peer, ranks):
+    """Sends ``x`` to process ``peer`` of the group ``ranks``; returns an empty token (``ncclSend``)."""
+    return bind("send", x, peer=peer, ranks=tuple(ranks))
+
+
+def recv(shape, dtype, peer, ranks):
+    """A ``dtype`` tensor of ``shape`` received from process ``peer`` of the group ``ranks`` (``ncclRecv``)."""
+    out = bind("recv", peer=peer, ranks=tuple(ranks), dtype=dtype, shape=tuple(shape))
+    # Each receive is its own message: never replayed on the host like an op on constants.
+    out.recipe = None
+    return out
 
 
 def to_host(x):

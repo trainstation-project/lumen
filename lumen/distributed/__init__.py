@@ -1,7 +1,12 @@
-"""Process groups, device meshes, the TCP store and collectives (NCCL on CUDA), plus a helper that prepares
-single-host TPU launch variables. Each collective runs asynchronously and ends in a ``device_wait``, which
-the plan places just before the first op that reads the result."""
+"""Process groups, device meshes, the TCP store, barriers and collectives (NCCL on CUDA, the store between CPU
+processes), plus a helper that prepares single-host TPU launch variables. Collectives and point-to-point
+transfers are traced inside ``lumen.compile``, mirroring ``torch.distributed``'s names; each runs
+asynchronously and ends in a ``device_wait``, which the plan places just before the first op that reads the
+result. Every process issues its collectives in program order, so a pair's sends and receives match in the
+order they were written. ``group`` is ``None`` (every process), a ``DeviceMesh`` or a list of global ranks;
+``src``, ``dst`` and roots are global ranks."""
 
+import atexit
 import ctypes
 import importlib.util
 import os
@@ -12,6 +17,7 @@ import sys
 from lumen.distributed._C import (
     DeviceMesh,
     TCPStore,
+    _barrier,
     destroy_process_group,
     get_rank,
     get_world_size,
@@ -25,13 +31,21 @@ __all__ = [
     "TCPStore",
     "all_gather",
     "all_reduce",
+    "all_to_all",
+    "barrier",
+    "broadcast",
     "destroy_process_group",
+    "gather",
     "get_rank",
     "get_world_size",
     "init_device_mesh",
     "init_process_group",
     "is_initialized",
+    "recv",
+    "reduce",
     "reduce_scatter",
+    "scatter",
+    "send",
     "set_tpu_launch_env",
 ]
 
@@ -92,6 +106,14 @@ def _load_nccl():
 _load_nccl()
 
 
+@atexit.register
+def _leave():
+    """Holds an exiting process of the default group until every process exits: rank 0's store serves the
+    others' collectives and rendezvous, so it must outlive their last request."""
+    if is_initialized():
+        _barrier(list(range(get_world_size())))
+
+
 def _ranks(group):
     """The global ranks a collective spans: every process for ``None``, a mesh's ranks for a ``DeviceMesh`` (one
     slice, ``mesh["tp"]``, spans this process's peers along it), or the given ranks."""
@@ -107,6 +129,30 @@ def _ranks(group):
                 ranks.append(item)
         return ranks
     return [int(r) for r in group]
+
+
+def _split(tensor, dim, n, op):
+    """``tensor`` with ``dim`` split into ``n`` equal blocks along a new leading axis, block ``r`` its row ``r``;
+    ``op`` names the collective in the error when ``dim`` doesn't split."""
+    from lumen.graph import prims
+
+    if tensor.shape[dim] % n:
+        raise ValueError(f"{op}(): dimension {dim} of size {tensor.shape[dim]} doesn't split over {n} processes")
+    split = prims.reshape(tensor, [*tensor.shape[:dim], n, tensor.shape[dim] // n, *tensor.shape[dim + 1 :]])
+    order = [dim, *range(dim), *range(dim + 1, tensor.ndim + 1)]
+    return prims.transpose(split, order) if dim else split
+
+
+def _merge(rows, dim):
+    """``rows``' leading axis (one row per process) concatenated along ``dim`` of a row: row ``r`` comes
+    ``r``-th."""
+    from lumen.graph import prims
+
+    n, shape = rows.shape[0], rows.shape[1:]
+    # The leading axis goes just before `dim`, then merges with it.
+    order = [*range(1, dim + 1), 0, *range(dim + 1, len(shape) + 1)]
+    moved = prims.transpose(rows, order) if dim else rows
+    return prims.reshape(moved, [*shape[:dim], n * shape[dim], *shape[dim + 1 :]])
 
 
 def all_reduce(tensor, op="sum", group=None):
@@ -126,13 +172,7 @@ def all_gather(tensor, dim=0, group=None):
     ranks = _ranks(group)
     if len(ranks) == 1:
         return tensor
-    dim = dim % tensor.ndim
-    gathered = prims.device_wait(prims.all_gather(tensor, ranks))
-    # The gathered axis goes just before `dim`, then merges with it: rank r's rows come r-th along `dim`.
-    order = [*range(1, dim + 1), 0, *range(dim + 1, tensor.ndim + 1)]
-    moved = prims.transpose(gathered, order) if dim else gathered
-    shape = [*tensor.shape[:dim], len(ranks) * tensor.shape[dim], *tensor.shape[dim + 1 :]]
-    return prims.reshape(moved, shape)
+    return _merge(prims.device_wait(prims.all_gather(tensor, ranks)), dim % tensor.ndim)
 
 
 def reduce_scatter(tensor, dim=0, op="sum", group=None):
@@ -143,13 +183,82 @@ def reduce_scatter(tensor, dim=0, op="sum", group=None):
     ranks = _ranks(group)
     if len(ranks) == 1:
         return tensor
-    dim, n = dim % tensor.ndim, len(ranks)
-    if tensor.shape[dim] % n:
-        raise ValueError(
-            f"reduce_scatter(): dimension {dim} of size {tensor.shape[dim]} doesn't split over {n} processes"
-        )
-    # Split `dim` into (process, block) and move the process axis first, where the primitive scatters it.
-    split = prims.reshape(tensor, [*tensor.shape[:dim], n, tensor.shape[dim] // n, *tensor.shape[dim + 1 :]])
-    order = [dim, *range(dim), *range(dim + 1, tensor.ndim + 1)]
-    rows = prims.transpose(split, order) if dim else split
+    rows = _split(tensor, dim % tensor.ndim, len(ranks), "reduce_scatter")
     return prims.device_wait(prims.reduce_scatter(rows, op, ranks))
+
+
+def all_to_all(tensor, split_dim=0, concat_dim=0, group=None):
+    """``tensor`` split along ``split_dim`` into one equal block per process of ``group``, block ``j`` sent to
+    the ``j``-th; the blocks received concatenated along ``concat_dim`` in rank order (PyTorch's
+    ``all_to_all_single`` with equal splits, any dims)."""
+    from lumen.graph import prims
+
+    ranks = _ranks(group)
+    if len(ranks) == 1:
+        return tensor
+    rows = _split(tensor, split_dim % tensor.ndim, len(ranks), "all_to_all")
+    return _merge(prims.device_wait(prims.all_to_all(rows, ranks)), concat_dim % tensor.ndim)
+
+
+def broadcast(tensor, src=0, group=None):
+    """Process ``src``'s ``tensor``, given to every process of ``group`` (PyTorch's ``broadcast``)."""
+    from lumen.graph import prims
+
+    ranks = _ranks(group)
+    return tensor if len(ranks) == 1 else prims.device_wait(prims.broadcast(tensor, src, ranks))
+
+
+def reduce(tensor, dst=0, op="sum", group=None):
+    """``tensor`` combined across ``group``'s processes with ``op`` on process ``dst``; zeros on the others
+    (PyTorch's ``reduce``)."""
+    from lumen.graph import prims
+
+    ranks = _ranks(group)
+    return tensor if len(ranks) == 1 else prims.device_wait(prims.reduce(tensor, op, dst, ranks))
+
+
+def gather(tensor, dst=0, dim=0, group=None):
+    """Every process in ``group``'s ``tensor`` concatenated along ``dim``, in rank order, on process ``dst``;
+    zeros on the others (PyTorch's ``gather`` into one tensor)."""
+    from lumen.graph import prims
+
+    ranks = _ranks(group)
+    if len(ranks) == 1:
+        return tensor
+    return _merge(prims.device_wait(prims.gather_to(tensor, dst, ranks)), dim % tensor.ndim)
+
+
+def scatter(tensor, src=0, dim=0, group=None):
+    """Process ``src``'s ``tensor`` split along ``dim`` into one equal block per process of ``group``, the
+    ``r``-th going to the ``r``-th; the other processes pass a tensor of the same type, which is not read
+    (PyTorch's ``scatter`` from one tensor)."""
+    from lumen.graph import prims
+
+    ranks = _ranks(group)
+    if len(ranks) == 1:
+        return tensor
+    rows = _split(tensor, dim % tensor.ndim, len(ranks), "scatter")
+    return prims.device_wait(prims.scatter_from(rows, src, ranks))
+
+
+def send(tensor, dst, group=None):
+    """Sends ``tensor`` to process ``dst``, which receives it with ``recv`` (PyTorch's ``send``). The send runs
+    though nothing reads it; a process's sends and receives pair with another's in program order, and a send
+    may wait for its receive, so two processes exchanging tensors order them oppositely (one sends first)."""
+    from lumen.graph import prims, tracer
+
+    tracer.keep(prims.device_wait(prims.send(tensor, dst, _ranks(group))))
+
+
+def recv(tensor, src, group=None):
+    """The tensor process ``src`` sends (``send``), of ``tensor``'s dtype and shape, whose values are not read
+    (PyTorch's ``recv`` into ``tensor``, returned instead of written)."""
+    from lumen.graph import prims
+
+    return prims.device_wait(prims.recv(tensor.shape, tensor.dtype, src, _ranks(group)))
+
+
+def barrier(group=None):
+    """Blocks the host until every process of ``group`` has called ``barrier`` as many times, through the default
+    group's store (PyTorch's ``barrier``); device work already queued is not waited for. Called outside traces."""
+    _barrier(_ranks(group))

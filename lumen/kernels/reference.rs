@@ -634,9 +634,18 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
             panic!("{label}: a custom op's function runs in a plan (lumen.compile), on tensors")
         }
         PallasCall { label, .. } => panic!("{label}: a lumen.pallas kernel runs on a TPU"),
-        AllReduce { .. } | AllGather { .. } | ReduceScatter { .. } => {
+        AllReduce { .. }
+        | AllGather { .. }
+        | ReduceScatter { .. }
+        | AllToAll { .. }
+        | Broadcast { .. }
+        | Reduce { .. }
+        | GatherTo { .. }
+        | ScatterFrom { .. }
+        | Send { .. }
+        | Recv { .. } => {
             panic!(
-                "{}: collectives across processes run on CUDA (NCCL)",
+                "{}: collectives across processes run in a plan (lumen.compile), not the reference interpreter",
                 p.name()
             )
         }

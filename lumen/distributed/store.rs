@@ -17,10 +17,12 @@ const GET: u8 = 1;
 const ADD: u8 = 2;
 /// Request opcode: wait until a set of keys exists.
 const WAIT: u8 = 3;
+/// Request opcode: remove a key.
+const DELETE: u8 = 4;
 
 /// Reply status: the request succeeded.
 const FOUND: u8 = 0;
-/// Reply status: the awaited keys did not appear before the timeout.
+/// Reply status: the awaited keys did not appear before the timeout (or the key to delete did not exist).
 const TIMED_OUT: u8 = 1;
 
 /// Pause between attempts while the server isn't accepting connections yet.
@@ -159,6 +161,11 @@ fn answer(stream: &mut TcpStream, table: &Table) -> std::io::Result<()> {
                 .collect::<std::io::Result<Vec<_>>>()?;
             let timeout = read_timeout(stream)?;
             let found = table.wait_for(&keys, timeout).is_some();
+            write_u8(stream, if found { FOUND } else { TIMED_OUT })
+        }
+        DELETE => {
+            let key = read_key(stream)?;
+            let found = table.lock().remove(&key).is_some();
             write_u8(stream, if found { FOUND } else { TIMED_OUT })
         }
         op => Err(std::io::Error::new(
@@ -323,6 +330,15 @@ impl TcpStore {
             write_bytes(s, key.as_bytes())?;
             write_u64(s, amount as u64)?;
             read_u64(s).map(|sum| sum as i64)
+        })
+    }
+
+    /// Removes `key`, returning whether it existed.
+    pub fn delete_key(&self, key: &str) -> Result<bool, String> {
+        self.request(|s| {
+            write_u8(s, DELETE)?;
+            write_bytes(s, key.as_bytes())?;
+            Ok(read_u8(s)? == FOUND)
         })
     }
 

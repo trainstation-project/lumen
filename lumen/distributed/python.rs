@@ -158,6 +158,13 @@ fn destroy_process_group() -> PyResult<()> {
     super::destroy_process_group().map_err(PyRuntimeError::new_err)
 }
 
+/// Blocks until every process in `ranks` reaches the barrier (`lumen.distributed.barrier`).
+#[pyfunction]
+fn _barrier(py: Python<'_>, ranks: Vec<usize>) -> PyResult<()> {
+    py.detach(|| super::barrier(&ranks))
+        .map_err(PyRuntimeError::new_err)
+}
+
 /// Reports whether the default process group is initialised.
 #[pyfunction]
 fn is_initialized() -> bool {
@@ -418,6 +425,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(init_process_group, m)?)?;
     m.add_function(wrap_pyfunction!(destroy_process_group, m)?)?;
     m.add_function(wrap_pyfunction!(is_initialized, m)?)?;
+    m.add_function(wrap_pyfunction!(_barrier, m)?)?;
     m.add_function(wrap_pyfunction!(init_device_mesh, m)?)?;
     m.add_function(wrap_pyfunction!(get_rank, m)?)?;
     m.add_function(wrap_pyfunction!(get_world_size, m)?)
