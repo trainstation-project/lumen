@@ -8,7 +8,7 @@ use crate::codegen::triton::{
     self as codegen, ATTENTION_CONFIGS, AttentionConfig, untuned_attention,
 };
 use crate::graph::{Primitive, Var};
-use crate::graph_compiler::common::attention::{self, Access, Epilogues};
+use crate::graph_compiler::common::attention::{self, Access, Epilogues, Strides};
 use crate::graph_compiler::common::autotune::Kernels;
 use crate::graph_compiler::common::flash_attention::Attentions;
 use crate::graph_compiler::pass::CompilerPass;
@@ -68,6 +68,7 @@ impl Attentions for TritonModule<'_> {
         Epilogues {
             leaves: |_, _| true,
             reshaped: false,
+            transposed: true,
         }
     }
 
@@ -129,9 +130,9 @@ pub(super) fn run(
     }
 }
 
-/// `t`, or a contiguous copy of it, since the kernels index operands by their contiguous layout.
-fn contiguous(t: &Tensor) -> Result<Tensor, String> {
-    if t.is_contiguous() {
+/// `t`, or a contiguous copy of it when `kept` refuses its layout.
+fn contiguous(t: &Tensor, kept: impl Fn(&Tensor) -> bool) -> Result<Tensor, String> {
+    if t.is_contiguous() || kept(t) {
         return Ok(t.clone());
     }
     let options = TensorOptions::new().dtype(t.dtype()).device(t.device());
@@ -140,16 +141,22 @@ fn contiguous(t: &Tensor) -> Result<Tensor, String> {
     Ok(c)
 }
 
-/// Where the forward kernel writes each query row's log-sum-exp: `[batch.., sq]`, contiguous.
-fn per_row(batch: &[usize], sq: usize) -> Access {
+/// Whether the kernels read and write `t` where it is: its last dim contiguous, any other strides.
+fn last_contiguous(t: &Tensor) -> bool {
+    t.strides().last().is_none_or(|&s| s == 1) || t.shape().last() == Some(&1)
+}
+
+/// Where the forward kernel writes each query row's log-sum-exp, `[batch.., sq]`: at `strides`, or
+/// contiguous.
+fn per_row(batch: &[usize], sq: usize, strides: Option<&[usize]>) -> Access {
     let mut shape = batch.to_vec();
     shape.push(sq);
-    let strides = contiguous_strides(&shape);
+    let strides = strides.map_or_else(|| contiguous_strides(&shape), <[usize]>::to_vec);
     Access {
         base: 0,
         offset: 0,
         batch: strides[..batch.len()].iter().map(|&s| (s, 1)).collect(),
-        row: 1,
+        row: strides[batch.len()],
         col: 0,
     }
 }
@@ -161,8 +168,8 @@ enum Source {
     Output(usize),
 }
 
-/// A flash-attention step's kernel, its generated helpers and launch parameters, prepared once: they
-/// depend on the fusion's body alone (its operands are read contiguous).
+/// A flash-attention step's kernel, its generated helpers and launch parameters, prepared once for each
+/// layout of its operands: they depend on the fusion's body and those strides alone.
 struct Prepared {
     /// `forward`, `dkdv` or `dq`.
     kernel: &'static str,
@@ -180,8 +187,9 @@ struct Prepared {
     launches: Launches,
 }
 
-/// Analyzes flash-attention `step`'s body into its kernel's tensors, helpers and parameters.
-fn prepare(step: &Step) -> Result<Prepared, String> {
+/// Analyzes flash-attention `step`'s body, its operands laid out as `strides` gives them, into its
+/// kernel's tensors, helpers and parameters.
+fn prepare(step: &Step, strides: &Strides) -> Result<Prepared, String> {
     let Primitive::Fusion { name, body, .. } = &step.primitive else {
         unreachable!("an attention fusion")
     };
@@ -204,12 +212,16 @@ fn prepare(step: &Step) -> Result<Prepared, String> {
         step.label
     );
     if name == FORWARD {
-        let a = attention::of_body(body).ok_or("a forward flash attention")?;
+        let a = attention::of_body_strided(body, strides).ok_or("a forward flash attention")?;
         if a.dropout.is_some() {
             return Err(dropout);
         }
         let root = body.nodes()[a.root].output;
         let lse = a.lse.map(|n| output(body.nodes()[n].output));
+        let lse_strides = lse.and_then(|source| match source {
+            Source::Output(k) => strides.outputs.get(&k).map(|(_, s)| s.as_slice()),
+            Source::Input(_) => None,
+        });
         // The body's inputs but the offset, which the epilogue may read, then the attention values
         // when the body outputs them too (`EXTRA`).
         let raw = body.outputs()[1..].contains(&root);
@@ -238,8 +250,8 @@ fn prepare(step: &Step) -> Result<Prepared, String> {
                 load("LOAD_Q", &a.q, &a.batch),
                 load("LOAD_K", &a.k, &a.batch),
                 load("LOAD_V", &a.v, &a.batch),
-                Function::new("STORE_O", codegen::attention_output(body, &a, raw)),
-                store("STORE_LSE", &per_row(&a.batch, a.sq), &a.batch),
+                Function::new("STORE_O", codegen::attention_output(body, &a, raw, strides)),
+                store("STORE_LSE", &per_row(&a.batch, a.sq, lse_strides), &a.batch),
                 Function::new("SCORE", codegen::attention_score(&a.scores)),
             ],
             sizes: [a.batch.iter().product(), a.sq, a.sk, a.h, a.hv],
@@ -249,7 +261,8 @@ fn prepare(step: &Step) -> Result<Prepared, String> {
             launches: Launches::default(),
         });
     }
-    let b = attention::backward_of_body(body).ok_or("a backward flash attention")?;
+    let b =
+        attention::backward_of_body_strided(body, strides).ok_or("a backward flash attention")?;
     if b.dropout.is_some() {
         return Err(dropout);
     }
@@ -316,16 +329,45 @@ fn attention(
     let launch = ATTENTION.get().ok_or(
         "the Triton backend's flash attention is Python's (lumen.kernels.attention.triton): none is installed",
     )?;
-    let prepared = step.memo.get(0, || prepare(step))?;
-    let inputs = inputs
-        .iter()
-        .map(contiguous)
-        .collect::<Result<Vec<_>, _>>()?;
     let given: Vec<&Tensor> = std::iter::once(out).chain(outs).collect();
-    let written = given
-        .iter()
-        .map(|t| contiguous(t))
-        .collect::<Result<Vec<_>, _>>()?;
+    // Operands are read and written where they are, at any strides but a contiguous last dim (a
+    // layout the kernels can't take, or an output added into, is copied); prepared once per layout.
+    let laid_out = |kept: &dyn Fn(&Tensor) -> bool| -> Result<_, String> {
+        let inputs = inputs
+            .iter()
+            .map(|t| contiguous(t, kept))
+            .collect::<Result<Vec<_>, _>>()?;
+        let written = given
+            .iter()
+            .map(|t| contiguous(t, kept))
+            .collect::<Result<Vec<_>, _>>()?;
+        let Primitive::Fusion { body, .. } = &step.primitive else {
+            unreachable!("an attention fusion")
+        };
+        let strides = Strides::of(
+            body,
+            &inputs
+                .iter()
+                .map(|t| t.strides().to_vec())
+                .collect::<Vec<_>>(),
+            &written
+                .iter()
+                .map(|t| (0, t.strides().to_vec()))
+                .collect::<Vec<_>>(),
+        );
+        let key = super::layouts(inputs.iter().chain(&written));
+        let prepared = step.memo.get(key, || prepare(step, &strides))?;
+        let zeroed = prepared.zeroed.iter().any(|&k| match prepared.tensors[k] {
+            Some(Source::Output(o)) => !written[o].is_contiguous(),
+            _ => false,
+        });
+        match zeroed {
+            true => Err("a strided output the kernel adds into".to_string()),
+            false => Ok((prepared, inputs, written)),
+        }
+    };
+    let (prepared, inputs, written) =
+        laid_out(&last_contiguous).or_else(|_| laid_out(&|_| false))?;
     let tensors: Vec<Option<Tensor>> = prepared
         .tensors
         .iter()

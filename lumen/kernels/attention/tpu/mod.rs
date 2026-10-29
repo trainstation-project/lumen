@@ -6,6 +6,8 @@ use crate::graph::Primitive;
 use crate::graph_compiler::plan::Step;
 #[cfg(lumen_tpu_linked)]
 use crate::kernels::tpu::{Launch, launch};
+#[cfg(lumen_tpu_linked)]
+use crate::tensor::contiguous_strides;
 
 mod config;
 
@@ -41,6 +43,18 @@ pub(crate) fn encode(
     let Primitive::Fusion { name, body, .. } = &step.primitive else {
         unreachable!("an attention fusion")
     };
+    // The kernels read each operand's heads and head dim (its last two dims) contiguous.
+    for (strides, (_, ty)) in step.input_strides().iter().zip(&step.inputs) {
+        let rank = ty.shape.len();
+        let contiguous = contiguous_strides(&ty.shape);
+        if rank > 0 && strides[rank.saturating_sub(2)..] != contiguous[rank.saturating_sub(2)..] {
+            return Err(format!(
+                "{}: flash attention on TPU reads its operands' last two dims (heads, head dim) \
+                 contiguous; one has strides {strides:?}",
+                step.label
+            ));
+        }
+    }
     let n = step.inputs.len();
     let rows: Vec<*const u8> = inputs[..n]
         .iter()

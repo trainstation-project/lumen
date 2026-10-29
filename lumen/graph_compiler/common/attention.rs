@@ -137,11 +137,52 @@ pub(crate) fn backward_of_body_into(
     body: &Graph,
     views: HashMap<usize, (usize, Vec<usize>)>,
 ) -> Option<Backward> {
-    let mut m = Matcher::new(body);
-    m.views = views
-        .into_iter()
-        .map(|(k, view)| (body.outputs()[k], view))
-        .collect();
+    let strides = Strides {
+        outputs: views,
+        ..Strides::default()
+    };
+    backward_of_body_strided(body, &strides)
+}
+
+/// Where a fusion body's operands live: element strides of its inputs read through views and
+/// `(offset, strides)` of its outputs written into views, by input and output index; others are
+/// contiguous in their own buffers.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Strides {
+    pub(crate) inputs: HashMap<usize, Vec<usize>>,
+    pub(crate) outputs: HashMap<usize, (usize, Vec<usize>)>,
+}
+
+impl Strides {
+    /// The layouts of `body`'s inputs and outputs as `inputs` and `outputs` strides give them: an
+    /// input or output with contiguous strides (and no offset) is left out.
+    pub(crate) fn of(body: &Graph, inputs: &[Vec<usize>], outputs: &[(usize, Vec<usize>)]) -> Self {
+        let contiguous =
+            |v: Var, strides: &[usize]| contiguous_strides(&body.type_of(v).shape) == strides;
+        Strides {
+            inputs: body
+                .inputs()
+                .iter()
+                .zip(inputs)
+                .enumerate()
+                .filter(|(_, (v, s))| !contiguous(**v, s))
+                .map(|(k, (_, s))| (k, s.clone()))
+                .collect(),
+            outputs: body
+                .outputs()
+                .iter()
+                .zip(outputs)
+                .enumerate()
+                .filter(|(_, (v, (o, s)))| *o != 0 || !contiguous(**v, s))
+                .map(|(k, (_, view))| (k, view.clone()))
+                .collect(),
+        }
+    }
+}
+
+/// The first attention backward in `body`, its operands laid out as `strides` gives them.
+pub(crate) fn backward_of_body_strided(body: &Graph, strides: &Strides) -> Option<Backward> {
+    let m = Matcher::new(body).laid_out(strides);
     (0..body.nodes().len()).find_map(|i| m.backward(i))
 }
 
@@ -293,9 +334,15 @@ pub(crate) const MAX_HEAD: usize = 256;
 
 /// Every live forward attention in `graph`; `runtime_offsets` allows a runtime causal offset.
 pub(crate) fn attentions(graph: &Graph, runtime_offsets: bool) -> Vec<Attention> {
+    attentions_in(Matcher::new(graph), runtime_offsets)
+}
+
+/// Every live forward attention `m`'s graph holds.
+fn attentions_in(m: Matcher<'_>, runtime_offsets: bool) -> Vec<Attention> {
+    let graph = m.graph;
     let m = Matcher {
         runtime_offsets,
-        ..Matcher::new(graph)
+        ..m
     };
     let mut found: Vec<Attention> = Vec::new();
     for (i, node) in graph.nodes().iter().enumerate() {
@@ -340,6 +387,13 @@ pub(crate) fn of_body(body: &Graph) -> Option<Attention> {
     attentions(body, true).into_iter().next()
 }
 
+/// The attention in a fusion body whose operands are laid out as `strides` gives them.
+pub(crate) fn of_body_strided(body: &Graph, strides: &Strides) -> Option<Attention> {
+    attentions_in(Matcher::new(body).laid_out(strides), true)
+        .into_iter()
+        .next()
+}
+
 /// An attention to fuse: the match, its epilogue chain, the node the fusion replaces, the epilogue's
 /// extra inputs, and whether the raw attention value is also kept as an output.
 type Fused = (Attention, Vec<usize>, usize, Vec<Var>, bool);
@@ -353,6 +407,9 @@ pub(crate) struct Epilogues {
     pub(crate) leaves: Leaves,
     /// Only fuse chains that do more than reshape, keeping the value before the trailing reshapes.
     pub(crate) reshaped: bool,
+    /// Write the attention through its one transpose though others read it too (they read it transposed
+    /// back): a backend whose kernels load and store strided.
+    pub(crate) transposed: bool,
 }
 
 /// Replaces each forward attention, with its elementwise epilogue when `epilogues` allows, by a fusion
@@ -370,23 +427,52 @@ pub(crate) fn fuse(
         // A runtime causal offset must be a buffer the kernel can read.
         .filter(|a| a.offset.is_none_or(|v| !scalars.contains(&v)))
         .map(|a| {
-            let (mut chain, mut leaves, mut kept) = match epilogues {
-                Some(e) => m.epilogue(a.root, scalars, e.leaves, e.reshaped),
-                None => (Vec::new(), Vec::new(), false),
+            let plan = |a: Attention| {
+                let (mut chain, mut leaves, mut kept) = match epilogues {
+                    Some(e) => m.epilogue(a.root, scalars, e.leaves, e.reshaped),
+                    None => (Vec::new(), Vec::new(), false),
+                };
+                // Drop the epilogue when the raw attention or the logsumexp is read before the chain ends.
+                let read_after = |v: Var, end: usize| {
+                    m.readers[v].iter().all(|&r| r > end || chain.contains(&r))
+                };
+                let end = chain.last().copied().unwrap_or(a.root);
+                let root_read = !kept || read_after(graph.nodes()[a.root].output, end);
+                let lse_read = a
+                    .lse
+                    .is_none_or(|n| read_after(graph.nodes()[n].output, end));
+                if !root_read || !lse_read {
+                    (chain, leaves, kept) = (Vec::new(), Vec::new(), false);
+                }
+                let end = chain.last().copied().unwrap_or(a.root);
+                (a, chain, end, leaves, kept)
             };
-            // Drop the epilogue when the raw attention or the logsumexp is read before the chain ends.
-            let read_after =
-                |v: Var, end: usize| m.readers[v].iter().all(|&r| r > end || chain.contains(&r));
-            let end = chain.last().copied().unwrap_or(a.root);
-            let root_read = !kept || read_after(graph.nodes()[a.root].output, end);
-            let lse_read = a
-                .lse
-                .is_none_or(|n| read_after(graph.nodes()[n].output, end));
-            if !root_read || !lse_read {
-                (chain, leaves, kept) = (Vec::new(), Vec::new(), false);
+            // Written through the dot's one transpose, its other readers read it transposed back: they
+            // must come after the fusion, and the chain must leave the written value to transpose.
+            let nodes = graph.nodes();
+            let dot = nodes[a.dot2].output;
+            let through = epilogues.is_some_and(|e| e.transposed) && a.root == a.dot2;
+            let shared = through
+                .then(|| m.written(a.dot2, a.batch.len(), false, true))
+                .flatten()
+                .filter(|&(root, _)| root != a.dot2);
+            if let Some((root, out)) = shared {
+                let out_dtype = graph.type_of(nodes[root].output).dtype;
+                let (t, chain, end, leaves, kept) = plan(Attention {
+                    root,
+                    out,
+                    out_dtype,
+                    ..a.clone()
+                });
+                let reshapes = chain
+                    .iter()
+                    .all(|&n| matches!(nodes[n].primitive, Primitive::Reshape { .. }));
+                let after = m.readers[dot].iter().all(|&r| r == root || r > end);
+                if after && (kept || reshapes) {
+                    return (t, chain, end, leaves, kept);
+                }
             }
-            let end = chain.last().copied().unwrap_or(a.root);
-            (a, chain, end, leaves, kept)
+            plan(a)
         })
         .filter(|(a, _, end, _, _)| {
             a.lse
@@ -471,6 +557,30 @@ pub(crate) fn fuse(
                 .apply(Primitive::Reshape { new_sizes }, &[map[r]])
                 .expect("the attention's value");
         }
+        // Written through its transpose, the attention's other readers read it transposed back.
+        if a.root != a.dot2 {
+            if raw.is_none() && i != a.root {
+                let new_sizes = graph.type_of(root).shape.clone();
+                map[root] = out
+                    .apply(Primitive::Reshape { new_sizes }, &[map[node.output]])
+                    .expect("the attention's value");
+            }
+            let Primitive::Transpose { permutation } = &nodes[a.root].primitive else {
+                unreachable!("the attention's one transpose")
+            };
+            let mut inverse = vec![0; permutation.len()];
+            for (d, &p) in permutation.iter().enumerate() {
+                inverse[p] = d;
+            }
+            map[nodes[a.dot2].output] = out
+                .apply(
+                    Primitive::Transpose {
+                        permutation: inverse,
+                    },
+                    &[map[root]],
+                )
+                .expect("the attention's value, heads first");
+        }
     }
     let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
     out.set_outputs(&outputs).expect("values of the graph");
@@ -494,6 +604,8 @@ struct Matcher<'a> {
     runtime_offsets: bool,
     /// Body outputs written into a view: `(offset, strides)` of their buffer.
     views: HashMap<Var, (usize, Vec<usize>)>,
+    /// Body inputs read through a view: their element strides.
+    strided: HashMap<Var, Vec<usize>>,
 }
 
 impl<'a> Matcher<'a> {
@@ -605,12 +717,29 @@ impl<'a> Matcher<'a> {
             plain_dq: false,
             runtime_offsets: false,
             views: HashMap::new(),
+            strided: HashMap::new(),
             graph,
             producer,
             readers,
             output,
             live,
         }
+    }
+
+    /// The matcher with the body's inputs and outputs laid out as `strides` gives them.
+    fn laid_out(mut self, strides: &Strides) -> Self {
+        let graph = self.graph;
+        self.views = strides
+            .outputs
+            .iter()
+            .map(|(&k, view)| (graph.outputs()[k], view.clone()))
+            .collect();
+        self.strided = strides
+            .inputs
+            .iter()
+            .map(|(&k, s)| (graph.inputs()[k], s.clone()))
+            .collect();
+        self
     }
 
     /// Node producing `v`, if any.
@@ -934,7 +1063,7 @@ impl<'a> Matcher<'a> {
             return None;
         }
         let out = |d: Option<usize>, chain: bool| match d {
-            Some(d) => self.written(d, nb, chain).map(Some),
+            Some(d) => self.written(d, nb, chain, false).map(Some),
             None => Some(None),
         };
         Some(Backward {
@@ -961,16 +1090,23 @@ impl<'a> Matcher<'a> {
     }
 
     /// Follows dot `i` through transposes (and with `chain`, reshapes and one float cast) to where it
-    /// is written; returns that node and the write as an [`Access`] over the dot's dims.
-    fn written(&self, i: usize, nb: usize, chain: bool) -> Option<(usize, Access)> {
+    /// is written; returns that node and the write as an [`Access`] over the dot's dims. With `shared`,
+    /// the dot's one transpose is followed though others read the dot too.
+    fn written(&self, i: usize, nb: usize, chain: bool, shared: bool) -> Option<(usize, Access)> {
         use Primitive::*;
         let nodes = self.graph.nodes();
         let mut path = vec![i];
         let mut cast = false;
         loop {
             let o = nodes[*path.last().expect("the dot")].output;
-            let r = match self.readers[o][..] {
-                [r] if !self.output[o] && (chain || path.len() == 1) => r,
+            let transposes: Vec<usize> = self.readers[o]
+                .iter()
+                .copied()
+                .filter(|&r| matches!(nodes[r].primitive, Transpose { .. }))
+                .collect();
+            let r = match (&self.readers[o][..], &transposes[..]) {
+                (&[r], _) if !self.output[o] && (chain || path.len() == 1) => r,
+                (_, &[r]) if shared && !self.output[o] && path.len() == 1 => r,
                 _ => break,
             };
             match &nodes[r].primitive {
@@ -1223,7 +1359,7 @@ impl<'a> Matcher<'a> {
         if !fits32(&q, sq, h) || !fits32(&k, sk, h) || !fits32(&v, sk, hv) {
             return None;
         }
-        let (root, out) = self.written(i, nb, false)?;
+        let (root, out) = self.written(i, nb, false, false)?;
         Some(Attention {
             root,
             q,
@@ -1427,14 +1563,11 @@ impl<'a> Matcher<'a> {
         use Primitive::*;
         let own = || {
             let shape = &self.graph.type_of(v).shape;
-            (
-                v,
-                0,
-                contiguous_strides(shape)
-                    .into_iter()
-                    .map(|s| (s, 1))
-                    .collect(),
-            )
+            let strides = match self.strided.get(&v) {
+                Some(strides) => strides.clone(),
+                None => contiguous_strides(shape),
+            };
+            (v, 0, strides.into_iter().map(|s| (s, 1)).collect())
         };
         let Some(n) = self.node(v) else {
             return own();

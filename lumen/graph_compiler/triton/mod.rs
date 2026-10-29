@@ -34,6 +34,7 @@ use wide_rows::WideRows;
 use super::common::autotune::{Autotuner, Kernels, Timer};
 use super::common::chunked_cross_entropy::ChunkedCrossEntropy;
 use super::common::clamp_indices::ClampIndices;
+use super::common::dot_strength::DotStrength;
 use super::common::flash_attention::FlashAttention;
 use super::common::linear_cross_entropy::LinearCrossEntropy;
 use super::common::merge_dots::{Blocks, MergeDots, Packs, Target};
@@ -205,7 +206,8 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
     if config.safe_kernels {
         pipeline.add(ClampIndices);
     }
-    pipeline.add(Simplify { matched: true });
+    // Batched inner products (attention backward's delta, read through transposes) run as loops.
+    pipeline.add(Simplify { matched: true }).add(DotStrength);
     if config.split_k {
         pipeline.add(SplitK);
     }
@@ -699,16 +701,16 @@ pub(crate) fn layouts<'a>(tensors: impl IntoIterator<Item = &'a Tensor>) -> u64 
     hasher.finish()
 }
 
-/// Whether the Triton kernel for `step` reads strided inputs directly.
+/// Whether the Triton kernel for `step` reads strided inputs directly (attention any layout with a
+/// contiguous last dim, copying others itself).
 pub(crate) fn reads_strided(step: &Step) -> bool {
-    !attention::is_attention(&step.primitive)
-        && matches!(
-            step.primitive,
-            Primitive::DotGeneral { .. }
-                | Primitive::Fusion { .. }
-                | Primitive::Cumsum { .. }
-                | Primitive::LinearCrossEntropy
-        )
+    matches!(
+        step.primitive,
+        Primitive::DotGeneral { .. }
+            | Primitive::Fusion { .. }
+            | Primitive::Cumsum { .. }
+            | Primitive::LinearCrossEntropy
+    )
 }
 
 /// Launches `kernel` over `n` outputs, with enough programs for the block size, lanes and splits; its

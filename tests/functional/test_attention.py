@@ -10,6 +10,7 @@ from helpers import CUDA, MPS
 import lumen
 import lumen.functional as F
 from lumen import prims
+from lumen.profiler import ProfilerActivity, profile
 
 
 def reference(q, k, v, scale=None, causal=False):
@@ -510,6 +511,113 @@ def test_written_attention_backward_is_flash_attention(scale, device, triton_on_
     want = lumen.compile(grad, device="cpu")(*(lumen.from_numpy(a) for a in arrays))
     for g, w in zip(got, want):
         np.testing.assert_allclose(lumen.to_numpy(g.to("cpu")), lumen.to_numpy(w), rtol=1e-4, atol=1e-5)
+
+
+def _strided(device, layout, b, s, n, h, seed=0):
+    """A `[b, s, n, h]` view of a larger or reordered buffer, its head dim contiguous, laid out as `layout`
+    names (`fused` a third of a fused QKV projection's heads, `heads first` a `[b, n, s, h]` buffer
+    transposed, `padded` rows of a wider head dim at an offset, `window` a window of longer sequences), with its
+    values as a float32 array."""
+    shape = {
+        "fused": (b, s, 3 * n, h),
+        "heads first": (b, n, s, h),
+        "padded": (b, s, n, h + 8),
+        "window": (b, s + 8, n, h),
+    }[layout]
+    (t,), (a,) = tensors(device, "float32", shape, seed=seed)
+    view, values = {
+        "fused": lambda: (t.narrow(2, n, n), a[:, :, n : 2 * n]),
+        "heads first": lambda: (t.transpose(1, 2), a.transpose(0, 2, 1, 3)),
+        "padded": lambda: (t.narrow(3, 4, h), a[..., 4 : 4 + h]),
+        "window": lambda: (t.narrow(1, 4, s), a[:, 4 : 4 + s]),
+    }[layout]()
+    assert not view.is_contiguous()
+    return view, np.ascontiguousarray(values)
+
+
+LAYOUTS = [
+    ("fused", "fused", "fused"),
+    ("heads first", "heads first", "heads first"),
+    ("padded", "padded", "padded"),
+    ("window", "window", "window"),
+    ("heads first", "padded", "fused"),
+]
+
+
+@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("layouts", LAYOUTS, ids=["/".join(layout) for layout in LAYOUTS])
+def test_attention_reads_strided_operands_in_place(device, layouts, triton_on_cuda):
+    """Q, K and V at any strides but a contiguous head dim (a fused
+    projection's heads, heads-first data transposed, padded rows at an
+    offset, a window of longer sequences, or each its own) are read where they are,
+    forward and backward: no copy first; the attention and its gradients
+    the CPU's."""
+    b, s, n, h = 2, 40, 4, 32
+    (q, a_q), (k, a_k), (v, a_v) = (_strided(device, layout, b, s, n, h, seed=i) for i, layout in enumerate(layouts))
+    arrays = [a_q, a_k, a_v]
+    (w,), (wa,) = tensors(device, "float32", (b, s, n, h), seed=9)
+
+    def loss(q, k, v, w):
+        """A weighted sum of causal attention's output."""
+        return F.sum(F.flash_attention(q, k, v, is_causal=True) * w)
+
+    attend = lumen.compile(lambda q, k, v: F.flash_attention(q, k, v, is_causal=True))
+    step = lumen.compile(lumen.value_and_grad(loss, (0, 1, 2)))
+    attend(q, k, v), step(q, k, v, w)
+    with profile(activities=[ProfilerActivity.CPU]) as prof:
+        out = attend(q, k, v)
+        value, grads = step(q, k, v, w)
+    # No copy of an operand: neither a contiguous one first nor a buffer for one in an attention step.
+    events = {e["id"]: e for e in prof.events()}
+    attention = lambda e: e.get("parent") in events and events[e["parent"]]["name"].startswith("flash_attention")
+    assert not [e for e in prof.events() if e["name"] == "lumen::contiguous"]
+    assert not [e for e in prof.events() if e["name"] == "lumen::empty" and attention(e)]
+    np.testing.assert_allclose(lumen.to_numpy(out), reference(*arrays, causal=True), rtol=1e-4, atol=1e-4)
+    cpu = [lumen.from_numpy(np.ascontiguousarray(a)) for a in (*arrays, wa)]
+    want_value, want_grads = lumen.compile(lumen.value_and_grad(loss, (0, 1, 2)), device="cpu")(*cpu)
+    for got, want in zip((value, *grads), (want_value, *want_grads)):
+        np.testing.assert_allclose(lumen.to_numpy(got.to("cpu")), lumen.to_numpy(want), rtol=1e-3, atol=1e-3)
+
+
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_attention_copies_operands_with_a_strided_head_dim(device, triton_on_cuda):
+    """An operand whose head dim isn't contiguous (`[b, s, h, n]` data
+    passed transposed) is copied first, as before: the attention the CPU's."""
+    b, s, n, h = 1, 24, 2, 16
+    ts, arrays = tensors(device, "float32", *[(b, s, h, n)] * 3)
+    q, k, v = (t.transpose(2, 3) for t in ts)
+    out = lumen.compile(lambda q, k, v: F.flash_attention(q, k, v))(q, k, v)
+    want = reference(*(a.transpose(0, 1, 3, 2) for a in arrays))
+    np.testing.assert_allclose(lumen.to_numpy(out), want, rtol=1e-4, atol=1e-4)
+
+
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_trained_attention_is_written_through_its_transpose(device, triton_on_cuda):
+    """Attention written out heads first (``[b, n, s, h]``), then
+    transposed back and its heads merged for the next projection, in a
+    training step: its kernel writes ``[b, s, n, h]`` directly (one
+    ``flash_attention → reshape``, no transpose kernel), which the backward
+    reads through strides; the loss and gradients the CPU's."""
+    b, s, n, h = 2, 32, 4, 16
+    shapes = [(b * s, n * h), (n * h, n * h), (n * h, n * h), (n * h, n * h), (n * h, n * h)]
+    ts, arrays = tensors(device, "float32", *shapes)
+
+    def loss(x, wq, wk, wv, wo):
+        """A causal multi-head attention block, heads moved ahead of the sequence, summed after `wo`."""
+        q, k, v = (F.matmul(x, w, "float32", "float32").reshape(b, s, n, h).transpose(1, 2) for w in (wq, wk, wv))
+        a = F.softmax(F.matmul(q, k.transpose(-1, -2), "float32", "float32") * h**-0.5, dim=-1)
+        o = F.matmul(a, v, "float32", "float32").transpose(1, 2).reshape(b * s, n * h)
+        return F.sum(F.tanh(F.matmul(o, wo, "float32", "float32")))
+
+    step = lumen.value_and_grad(loss, (0, 1, 2, 3, 4))
+    labels = steps(step, *ts, device=device)
+    assert any(label.startswith("flash_attention → reshape") for label in labels), labels
+    assert "transpose → reshape" not in labels, labels
+    value, grads = lumen.compile(step)(*ts)
+    want_value, want_grads = lumen.compile(step, device="cpu")(*(lumen.from_numpy(a) for a in arrays))
+    for got, want in zip((value, *grads), (want_value, *want_grads)):
+        want = lumen.to_numpy(want)
+        np.testing.assert_allclose(lumen.to_numpy(got.to("cpu")), want, rtol=1e-3, atol=1e-3 * np.abs(want).max())
 
 
 @pytest.mark.parametrize("causal", [False, True], ids=["", "causal"])
