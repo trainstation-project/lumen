@@ -6,7 +6,7 @@ use std::fmt::Write;
 use indoc::formatdoc;
 
 use super::{Emitter, at, gather_index, load, named, triton_type};
-use crate::codegen::regions::{Columns, Region, gemm_regions};
+use crate::codegen::regions::{Columns, Region, gemm_expanded, gemm_regions};
 use crate::graph::{Graph, Node, Primitive, Var};
 
 /// Generated pieces of one GEMM kernel.
@@ -322,15 +322,39 @@ pub(crate) fn epilogue(
             if !depends(body, v, &members) {
                 continue;
             }
-            let value = emitter.value(v, "j".into());
             let (shape, strides) = outputs[o];
-            writeln!(
-                stores,
-                "    tl.store({} + {}, {value}, mask=r{r}_keep)",
-                pointers[o],
-                at("j", shape, strides)
-            )
-            .unwrap();
+            // An expansion (as on MPS) stores its two dot-shaped operands into their slots of the
+            // concatenation, `width` elements apart in runs of `width`.
+            let parts = match (o, gemm_expanded(body, dot)) {
+                (0, Some(([a, b], _))) => {
+                    let concat = body.nodes().iter().find(|n| n.output == v);
+                    let Some(Primitive::Concatenate { dimension, .. }) =
+                        concat.map(|n| &n.primitive)
+                    else {
+                        unreachable!("an expansion's concatenation")
+                    };
+                    let product = &body.type_of(dot.output).shape;
+                    let width: usize = product[(*dimension).min(product.len())..].iter().product();
+                    writeln!(
+                        stores,
+                        "    jx0 = (j // {width}) * {} + j % {width}\n    jx1 = jx0 + {width}",
+                        2 * width
+                    )
+                    .unwrap();
+                    vec![(a, "jx0"), (b, "jx1")]
+                }
+                _ => vec![(v, "j")],
+            };
+            for (v, index) in parts {
+                let value = emitter.value(v, "j".into());
+                writeln!(
+                    stores,
+                    "    tl.store({} + {}, {value}, mask=r{r}_keep)",
+                    pointers[o],
+                    at(index, shape, strides)
+                )
+                .unwrap();
+            }
         }
         locals = emitter.locals;
         let block = format!("{}{stores}", emitter.lines);

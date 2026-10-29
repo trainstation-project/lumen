@@ -348,9 +348,9 @@ def test_gated_pair_backward_merges_its_gradients_dots(device, swiglu, triton_on
     by its epilogue; the cotangents the down projection's
     gradient GEMM's expanding epilogue, written interleaved, whatever the
     gate (SwiGLU's in float32, from the rounded gradient widened: an upcast
-    only that epilogue takes). The forward the merged dot's paired epilogue,
-    its halves (which the backward reads) written by it too. The gradients
-    the CPU's."""
+    only that epilogue takes; on CUDA too). The forward the merged dot's paired
+    epilogue, its halves (which the backward reads) written by it too. The
+    gradients the CPU's."""
     try:
         lumen.zeros([1], device=device)
     except RuntimeError as e:
@@ -380,20 +380,20 @@ def test_gated_pair_backward_merges_its_gradients_dots(device, swiglu, triton_on
         grads[target] = [lumen.to_numpy(g) for g in f(model, lumen.from_numpy(x))]
     for got, want in zip(grads[device], grads["cpu"]):
         assert np.linalg.norm(got - want) / np.linalg.norm(want) < 2e-2
-    if device != "mps":
-        return
     model = GatedMLP(meta(d, d), meta(h, d), meta(h, d), meta(d, h))
     with pytest.warns(UserWarning, match="the rounding loses precision"):
         graph = lumen.make_graph(step)(model, meta(m, d))
-    steps = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2, 3, 4], packable=[1, 2, 3, 4]).steps()
+    steps = lumen.graph_compiler.Plan(graph, device, parameters=[1, 2, 3, 4], packable=[1, 2, 3, 4]).steps()
     labels = [s["label"] for s in steps]
+    expanding = [s for s in steps if "dot_general" in s["label"] and s["label"].endswith("concatenate")]
+    assert len(expanding) == 1 and expanding[0]["output"][2] == [m, h, 2], labels
+    if device != "mps":
+        return
     merged = [s for s in steps if s["label"].startswith("2x dot_general")]
     assert sorted(s["output"][2] for s in merged) == sorted([[m, h], [m, d], [h, d]]), labels
     forward = [s for s in merged if s["output"][2] == [m, h]]
     assert len(forward) == 1 and "mul" in forward[0]["label"], labels
     assert not any(s["label"].startswith("slice") and s["output"][2] == [m, h] for s in steps), labels
-    expanding = [s for s in steps if "dot_general" in s["label"] and s["label"].endswith("concatenate")]
-    assert len(expanding) == 1 and expanding[0]["output"][2] == [m, h, 2], labels
     assert sum("concatenate" in label for label in labels) == 1, labels
 
 
@@ -430,7 +430,7 @@ def test_hand_written_merge_dots_backward_merges_as_autodiffs(device, triton_on_
     """A gated pair's backward written by hand (a ``Function``, its
     weights' gradients ``g.t() @ x``): merged as autodiff's is, the
     transposes read as the dots' dimensions (no copies): the cotangents
-    the down projection's gradient GEMM's expanding epilogue, x's gradient
+    the down projection's gradient GEMM's expanding epilogue (on CUDA too), x's gradient
     one dot of the block, the weights' one dot writing each apart. The
     gradients autodiff's."""
     try:
@@ -474,15 +474,15 @@ def test_hand_written_merge_dots_backward_merges_as_autodiffs(device, triton_on_
         grads.append([lumen.to_numpy(g) for g in f(model, lumen.from_numpy(x))])
     for got, want in zip(*grads):
         assert np.linalg.norm(got - want) / np.linalg.norm(want) < 2e-2
-    if device != "mps":
-        return
     model = GatedMLP(meta(d, d), meta(h, d), meta(h, d), meta(d, h))
     with pytest.warns(UserWarning, match="the rounding loses precision"):
         graph = lumen.make_graph(step(_GatedMLPFunction.apply))(model, meta(m, d))
-    steps = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2, 3, 4], packable=[1, 2, 3, 4]).steps()
+    steps = lumen.graph_compiler.Plan(graph, device, parameters=[1, 2, 3, 4], packable=[1, 2, 3, 4]).steps()
     labels = [s["label"] for s in steps]
     expanding = [s for s in steps if "dot_general" in s["label"] and s["label"].endswith("concatenate")]
     assert len(expanding) == 1 and expanding[0]["output"][2] == [m, h, 2], labels
+    if device != "mps":
+        return
     assert sum("concatenate" in label for label in labels) == 1, labels
     assert any(s["label"] == "2x dot_general" and s["output"][2] == [h, d] for s in steps), labels
     assert not any("transpose" in label for label in labels), labels

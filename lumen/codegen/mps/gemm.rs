@@ -13,7 +13,9 @@ pub(crate) fn gemm_dot(body: &Graph) -> Option<&Node> {
         .find(|n| matches!(n.primitive, Primitive::DotGeneral { .. }))
 }
 
-pub(crate) use crate::codegen::regions::{Columns, ROW_COLUMNS, Region, gemm_pair, gemm_regions};
+pub(crate) use crate::codegen::regions::{
+    Columns, Expansion, ROW_COLUMNS, Region, expansion, gemm_expanded, gemm_pair, gemm_regions,
+};
 
 /// Number of dot columns one epilogue call consumes, and whether the regions run along rows
 /// instead of the last axis; `None` when the body has no column regions.
@@ -201,64 +203,6 @@ pub(crate) fn gemv_of(body: &Graph, dot: &Node) -> Option<(bool, usize)> {
     );
     let launch = plan_matmul(&dot.primitive, lhs, rhs, out, &ls, &rs, "", None).ok()?;
     Some((vector_lhs, launch.p[usize::from(!vector_lhs)]))
-}
-
-/// How a two-operand concat of dot-shaped values lays out the epilogue's two results.
-#[derive(Clone, Copy, PartialEq)]
-pub(crate) enum Expansion {
-    /// Concatenated along the last axis, as two column halves.
-    Columns,
-    /// Stacked on a new trailing axis, so the two results interleave.
-    Pairs,
-    /// Concatenated along the leading axis, as two row halves.
-    Rows,
-}
-
-/// How `concat` lays out two dot-shaped values, or `None` if it isn't an expansion the GEMM
-/// epilogue can write directly.
-pub(crate) fn expansion(graph: &Graph, dot: &Node, concat: &Node) -> Option<Expansion> {
-    let Primitive::Concatenate { dimension, .. } = concat.primitive else {
-        return None;
-    };
-    let Primitive::DotGeneral {
-        lhs_batch,
-        lhs_contracting,
-        ..
-    } = &dot.primitive
-    else {
-        return None;
-    };
-    let shape = &graph.type_of(dot.output).shape;
-    let rank = shape.len();
-    let shaped = |of: &[usize]| {
-        concat.inputs.len() == 2 && concat.inputs.iter().all(|&v| graph.type_of(v).shape == of)
-    };
-    let tupled = |at: usize| {
-        let mut tupled = shape.clone();
-        tupled.insert(at, 1);
-        tupled
-    };
-    let rows = lhs_batch.is_empty()
-        && rank >= 2
-        && graph.type_of(dot.inputs[0]).shape.len() == lhs_contracting.len() + 1;
-    match dimension {
-        d if d + 1 == rank && shaped(shape) => Some(Expansion::Columns),
-        d if d == rank && shaped(&tupled(rank)) => Some(Expansion::Pairs),
-        1 if rows && shaped(&tupled(1)) => Some(Expansion::Columns),
-        0 if rows && shaped(shape) => Some(Expansion::Rows),
-        _ => None,
-    }
-}
-
-/// The two concat operands and their layout when the body's output is such an expansion.
-pub(crate) fn gemm_expanded(body: &Graph, dot: &Node) -> Option<([Var; 2], Expansion)> {
-    let out = body.outputs()[0];
-    let concat = body.nodes().iter().find(|n| n.output == out)?;
-    let layout = expansion(body, dot, concat)?;
-    match concat.inputs.as_slice() {
-        &[a, b] if gemm_pair(body, dot).is_none() => Some(([a, b], layout)),
-        _ => None,
-    }
 }
 
 /// For each column region, the body outputs that depend on any of its members.

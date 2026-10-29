@@ -3,6 +3,7 @@
 
 use super::TritonModule;
 use crate::codegen::kinds::row_reductions;
+use crate::codegen::regions::expansion;
 use crate::codegen::triton::{self as codegen, dot_row_fits, fusible};
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::common::fusion::{Backend, fuse};
@@ -18,8 +19,8 @@ const ROW: &str = "row";
 const LOOP: &str = "loop";
 
 /// The shared loop fusion's view of Triton: kernels take any number of tensors, a GEMM epilogue
-/// writes at most 4 extra outputs (as on MPS), and a GEMM joins the row reading it when one tile
-/// holds whole rows (`dot_row_fits`).
+/// writes at most 4 extra outputs and its two results into a concatenation's slots (as on MPS), and
+/// a GEMM joins the row reading it when one tile holds whole rows (`dot_row_fits`).
 fn backend(m: &TritonModule<'_>) -> Backend {
     let config = &m.options.config.cuda;
     Backend {
@@ -29,7 +30,7 @@ fn backend(m: &TritonModule<'_>) -> Backend {
         multi_output_fusion: config.multi_output_fusion,
         reduction_epilogues: true,
         contraction_epilogues: true,
-        expansion: |_, _, _| false,
+        expansion: |graph, dot, concat| expansion(graph, dot, concat).is_some(),
         row_dot: dot_row_fits,
     }
 }
