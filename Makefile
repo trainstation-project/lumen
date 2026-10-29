@@ -3,11 +3,11 @@
 
 export RUSTFLAGS := -D warnings
 
-.PHONY: all ci install test fmt fmt-check clang-format clang-format-check clippy miri clean
+.PHONY: all ci install test coverage fmt fmt-check clang-format clang-format-check clippy miri clean
 
-## ci: every CI job (rustfmt, clang-format, clippy, tests, miri), in that
+## ci: every CI job (rustfmt, clang-format, clippy, tests, coverage, miri), in that
 ## order.
-ci: fmt-check clang-format-check clippy test miri
+ci: fmt-check clang-format-check clippy test coverage miri
 
 # The Rust tests are unit tests inside the crate (a `tests.rs` per module
 # folder). They never enable `python`: with pyo3 compiled in, test binaries
@@ -58,6 +58,29 @@ test: install
 	cargo test --doc
 	$(TPU_ENV) python -m pytest tests -q -rs -n auto -m "not all_devices"
 	$(TPU_ENV) python -m pytest tests -q -rs -m all_devices
+
+# Line coverage floors (percent) `coverage` enforces: a bit under what the
+# suite reached when last raised, so new code comes with tests. Raise them
+# as coverage grows; never lower them to make a change pass.
+RUST_COVERAGE_MIN := 50
+PYTHON_COVERAGE_MIN := 0
+
+## coverage: the `test` suite run under cargo-llvm-cov (Rust) and pytest-cov
+## (Python), with a per-file report of each; fails when either falls below
+## its floor. The wheel is built instrumented (`cargo llvm-cov show-env`),
+## so Rust code reached only from the Python tests counts too. It leaves
+## that debug build installed: `make install` before benchmarking. Needs
+## `cargo install cargo-llvm-cov` (with `rustup component add
+## llvm-tools-preview`) and `pip install pytest-cov`.
+coverage:
+	eval "$$(cargo llvm-cov show-env --sh)" && \
+	cargo llvm-cov clean --workspace && \
+	$(TPU_ENV) cargo test --lib $(CARGO_TEST_FEATURES) -- --format=terse && \
+	maturin develop $(MATURIN_FEATURES) && \
+	$(TPU_ENV) python -m pytest tests -q -rs -n auto -m "not all_devices" --cov=lumen --cov-report= && \
+	$(TPU_ENV) python -m pytest tests -q -rs -m all_devices --cov=lumen --cov-append \
+		--cov-report=term-missing:skip-covered --cov-fail-under=$(PYTHON_COVERAGE_MIN) && \
+	cargo llvm-cov report --fail-under-lines $(RUST_COVERAGE_MIN)
 
 fmt-check:
 	cargo fmt --all -- --check

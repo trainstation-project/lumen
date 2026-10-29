@@ -73,6 +73,29 @@ jobs:
       # No GPU here: the MPS and CUDA tests skip.
       - run: make test
 
+  coverage:
+    # The test suite again, instrumented; fails when Rust or Python line
+    # coverage drops below the Makefile's floors.
+    name: coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: taiki-e/install-action@cargo-llvm-cov
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Set up virtualenv
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install maturin pytest pytest-xdist pytest-cov numpy
+          echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+      - run: make coverage
+
   miri:
     # The allocator hands out raw pointers; Miri catches UB (misaligned
     # access, use-after-free, leaks) that ordinary tests won't.
