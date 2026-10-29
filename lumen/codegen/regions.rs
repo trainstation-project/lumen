@@ -201,3 +201,19 @@ pub(crate) fn readers_of(body: &Graph, v: Var) -> Vec<&Node> {
         .filter(|node| node.inputs.contains(&v))
         .collect()
 }
+
+/// The two nodes consuming adjacent output column pairs of `dot`, when the epilogue is a single
+/// two-member group along the last axis (e.g. a gated activation).
+pub(crate) fn gemm_pair<'a>(body: &'a Graph, dot: &Node) -> Option<(&'a Node, &'a Node)> {
+    let rank = body.type_of(dot.output).shape.len();
+    match gemm_regions(body, dot)?.as_slice() {
+        [
+            Columns {
+                axis,
+                region: Region::Group(members),
+                ..
+            },
+        ] if axis + 1 == rank && members.len() == 2 => Some((members[0], members[1])),
+        _ => None,
+    }
+}

@@ -1,22 +1,9 @@
 //! Metal source for row kernels: bodies whose reductions run over the last axis (softmax, norms),
 //! computed one row per threadgroup or SIMD group with values kept in registers between passes.
 use super::*;
+pub(crate) use crate::codegen::kinds::{row_partials, row_reductions};
 use crate::graph_compiler::common::diamonds::{depends_on, softmax_pair};
 use crate::kernels::dot_general::mps::GemmConfig;
-
-/// Body reductions over the last axis, excluding the first output; empty for plain reductions.
-pub(crate) fn row_reductions(body: &Graph) -> Vec<&Node> {
-    reductions_of_rows(body, true)
-}
-
-/// Body reductions that keep the last axis (per-column partial sums written per row group),
-/// present only alongside row reductions.
-pub(crate) fn row_partials(body: &Graph) -> Vec<&Node> {
-    match row_reductions(body).is_empty() {
-        true => Vec::new(),
-        false => reductions_of_rows(body, false),
-    }
-}
 
 /// Rows and row length of the first row reduction's operand.
 pub(super) fn row_shape(body: &Graph) -> (usize, usize) {
@@ -54,25 +41,6 @@ pub(crate) fn simd_rows(body: &Graph) -> bool {
     };
     let reductions = row_reductions(body);
     n <= SIMD_ROW && reductions.iter().all(simd)
-}
-
-/// Body reductions other than the first output that include (`last`) or exclude the last axis.
-pub(super) fn reductions_of_rows(body: &Graph, last: bool) -> Vec<&Node> {
-    if reduction_root(body).is_some() {
-        return Vec::new();
-    }
-    let out = body.outputs()[0];
-    body.nodes()
-        .iter()
-        .filter(|n| n.output != out)
-        .filter(|n| match &n.primitive {
-            Primitive::ReduceSum { axes, .. } | Primitive::ReduceMax { axes } => {
-                let rank = body.type_of(n.inputs[0]).shape.len();
-                axes.contains(&(rank - 1)) == last
-            }
-            _ => false,
-        })
-        .collect()
 }
 
 /// Generates the row kernel for `body`: one pass over each row per group of independent

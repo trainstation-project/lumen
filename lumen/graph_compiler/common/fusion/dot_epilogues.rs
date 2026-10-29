@@ -58,7 +58,7 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], backend: &Backend) -> Do
                 && (to.dtype.size_of() > from.dtype.size_of()) == grows
                 && to.dtype.size_of() != from.dtype.size_of()
         };
-        let pair = (backend.gemm_pair)(graph, node);
+        let pair = crate::codegen::regions::gemm_pair(graph, node);
         // When readers split the output into column regions, grow each region separately and
         // keep the largest assignment whose region outputs all fit.
         if let Some(regions) =

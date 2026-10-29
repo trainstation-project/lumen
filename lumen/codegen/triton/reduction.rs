@@ -16,15 +16,7 @@ pub(crate) struct Reduction {
     pub splits: usize,
 }
 
-/// The body's `reduce_sum`/`reduce_max` node, if it has one.
-pub(crate) fn reduction_root(body: &Graph) -> Option<&Node> {
-    body.nodes().iter().find(|n| {
-        matches!(
-            n.primitive,
-            Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. }
-        )
-    })
-}
+pub(crate) use crate::codegen::kinds::reduction_root;
 
 /// 2-D tile a reduction or scan program works on: outputs along one axis, reduced lanes along the other.
 struct Tile {

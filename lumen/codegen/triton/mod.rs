@@ -35,8 +35,7 @@ pub(crate) use gemm::{EpilogueFlags, epilogue, gemm, gemm_dot, gemm_flags};
 pub(crate) use indexing::{scatter_add, update, updates};
 pub(crate) use reduction::{reduction, reduction_root, scan};
 pub(crate) use row::{
-    dot_row_fits, joins_rows, partials_epilogue, row, row_count, row_epilogue, row_fits,
-    row_groups, row_looped,
+    dot_row_fits, partials_epilogue, row, row_count, row_epilogue, row_groups, row_looped,
 };
 
 /// Triton element type for `dtype`, or `None` when Triton can't hold it.

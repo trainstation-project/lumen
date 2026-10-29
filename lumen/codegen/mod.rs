@@ -1,4 +1,5 @@
 //! Code generators for each backend, plus GEMM epilogue region detection shared between them.
+pub(crate) mod kinds;
 #[cfg(lumen_mps_linked)]
 pub(crate) mod mps;
 pub(crate) mod regions;

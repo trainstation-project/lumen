@@ -8,7 +8,7 @@ use crate::graph_compiler::MpsConfig;
 use crate::graph_compiler::common::diamonds::Row;
 use crate::graph_compiler::common::fusion::{self as common, Backend};
 use crate::graph_compiler::pass::CompilerPass;
-pub(crate) use crate::graph_compiler::{constant, elementwise, label};
+pub(crate) use crate::graph_compiler::{elementwise, label};
 
 /// Whether `node` can live inside a loop fusion kernel: loop ops, gathers and reductions under
 /// 2^32 elements, none touching float64.
@@ -62,7 +62,6 @@ fn backend(config: &MpsConfig) -> Backend {
         multi_output_fusion: config.multi_output_fusion,
         reduction_epilogues: config.reduction_epilogues,
         contraction_epilogues: config.contraction_epilogues,
-        gemm_pair: crate::codegen::mps::gemm_pair,
         expansion: |graph, dot, concat| {
             crate::codegen::mps::expansion(graph, dot, concat).is_some()
         },

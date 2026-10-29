@@ -21,8 +21,8 @@ pub(crate) use crate::codegen::triton::Config;
 use attention::{FlashAttentionBackward, Tiles};
 #[cfg(feature = "python")]
 pub(crate) use attention::{Launch, set_attention};
-use diamonds::{Diamonds, DotRows};
-use fusion::LoopFusion;
+use diamonds::Diamonds;
+use fusion::{Alone, LoopFusion};
 #[cfg(feature = "python")]
 pub(crate) use gemm::{Epilogue, set_gemm};
 use horizontal::HorizontalFusion;
@@ -43,6 +43,7 @@ use super::plan::{Buffer, Step, Tuned};
 use super::{CompilerConfig, Options, Plan, PlanOptions, positions};
 use crate::codegen::triton::{self as codegen, LOOP_CONFIGS, LoopConfig, UNTUNED_LOOP};
 use crate::graph::{Graph, Primitive, TensorType, UPDATES};
+use crate::graph_compiler::common::diamonds::Row;
 use crate::graph_compiler::common::horizontal::segments;
 use crate::{DType, Device, Scalar, Tensor, TensorOptions};
 
@@ -139,6 +140,8 @@ struct TritonModule<'a> {
     packed: Packs,
     /// Interleaved region sizes of each packed block.
     interleaved: Vec<Vec<usize>>,
+    /// Normalization rows the diamonds pass found, consumed by loop fusion.
+    rows: Vec<Row>,
 }
 
 impl Module for TritonModule<'_> {
@@ -175,6 +178,7 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
         options,
         packed: Vec::new(),
         interleaved: Vec::new(),
+        rows: Vec::new(),
     };
     let mut pipeline = Pipeline::new("triton");
     if config.fused_linear_cross_entropy {
@@ -203,17 +207,17 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
     if config.split_k {
         pipeline.add(SplitK);
     }
-    if config.normalization_diamonds {
-        pipeline.add(Diamonds).add(DotRows);
-    }
+    // As on MPS: update chains, normalization rows, in-place concatenations, then loop fusion.
     pipeline.add(Updates {
         least: 2,
         most: usize::MAX,
     });
+    if config.normalization_diamonds {
+        pipeline.add(Diamonds);
+    }
     pipeline.add(PlaceConcats);
-    pipeline.add(LoopFusion {
-        multi_output: config.multi_output_fusion,
-    });
+    pipeline.add(LoopFusion);
+    pipeline.add(Alone);
     if config.horizontal_fusion {
         pipeline.add(HorizontalFusion);
     }
@@ -312,8 +316,13 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
         }
         _ => return None,
     };
+    // Only a plain loop's outputs (a horizontal fusion's) split the grid; a row's are one row each.
     let segments = match &step.primitive {
-        Primitive::Fusion { body, .. } if codegen::reduction_root(body).is_none() => segments(body),
+        Primitive::Fusion { name, body, .. }
+            if name != ROW && codegen::reduction_root(body).is_none() =>
+        {
+            segments(body)
+        }
         _ => Vec::new(),
     };
     let segments = match segments.len() {

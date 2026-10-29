@@ -9,6 +9,7 @@ use indoc::writedoc;
 use super::config::{MOST_GEMM_ROW, MOST_WHOLE_ROW};
 use super::reduction::{Reduction, combine, indented, lowest, reduce_along};
 use super::*;
+use crate::codegen::kinds::{row_partials, row_reductions};
 use crate::graph::TensorType;
 use crate::graph_compiler::common::diamonds::softmax_pair;
 use crate::graph_compiler::elementwise;
@@ -527,8 +528,9 @@ pub(crate) fn row_epilogue(
     )
 }
 
-/// Whether a `dot_row` fusion's `body` runs as one Triton GEMM with a row epilogue: an unbatched
-/// float matmul whose product is the row's operand, rows of at most `MOST_GEMM_ROW`.
+/// Whether a `dot_row` fusion's `body` runs as one Triton GEMM with a row epilogue: its one unbatched
+/// float matmul, reading the body's inputs, makes the rows its row reductions run over (no column
+/// partials), rows of at most `MOST_GEMM_ROW`, each product element read only at its own index.
 pub(crate) fn dot_row_fits(body: &Graph) -> bool {
     let Some(dot) = gemm_dot(body) else {
         return false;
@@ -537,31 +539,46 @@ pub(crate) fn dot_row_fits(body: &Graph) -> bool {
     let Primitive::DotGeneral { lhs_batch, .. } = &dot.primitive else {
         return false;
     };
-    lhs_batch.is_empty()
-        && body.type_of(dot.output).shape == body.type_of(body.outputs()[0]).shape
-        && dot.inputs.iter().all(|&v| float(v))
+    let dots = body
+        .nodes()
+        .iter()
+        .filter(|n| matches!(n.primitive, Primitive::DotGeneral { .. }))
+        .count();
+    let rows = rows_type(body);
+    // As MPS's `row_dot`: one unbatched float matmul over the body's inputs whose product is the rows.
+    dots == 1
+        && lhs_batch.is_empty()
+        && !row_reductions(body).is_empty()
+        && row_partials(body).is_empty()
+        && rows.shape.len() == 2
+        && body.type_of(dot.output).shape == rows.shape
+        && dot
+            .inputs
+            .iter()
+            .all(|v| body.inputs().contains(v) && float(*v))
+        && float(dot.output)
         && width(body) <= MOST_GEMM_ROW
         && row_fits(body)
+        && at_own_index(body, dot.output)
 }
 
-/// Whether row body `body` reads its input `at` as whole rows at each element's own index: the root's
-/// shape, read only by elementwise ops and its rows' reductions, in a row without column partials.
-pub(crate) fn joins_rows(body: &Graph, at: usize) -> bool {
-    let v = body.inputs()[at];
-    body.type_of(v).shape == body.type_of(body.outputs()[0]).shape
-        && column_partials(body).is_empty()
-        && !body.outputs().contains(&v)
-        && body
-            .nodes()
-            .iter()
-            .filter(|n| n.inputs.contains(&v))
-            .all(|n| {
-                elementwise(&n.primitive)
-                    || matches!(
-                        n.primitive,
-                        Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. }
-                    )
-            })
+/// Whether every value of `body` computed from `product` is read at its own element (elementwise ops)
+/// or reduced along its rows: the epilogue sees each product element once, in its tile, so a gather or
+/// layout op reading it elsewhere (a cross entropy's label logit) cannot run there.
+fn at_own_index(body: &Graph, product: Var) -> bool {
+    let mut derived = vec![false; body.types.len()];
+    derived[product] = true;
+    for node in body.nodes() {
+        if !node.inputs.iter().any(|&v| derived[v]) {
+            continue;
+        }
+        match &node.primitive {
+            Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. } => {}
+            p if elementwise(p) => derived[node.output] = true,
+            _ => return false,
+        }
+    }
+    true
 }
 
 /// Generates the GEMM epilogue of a `dot_partials` fusion: the tile, any multiple of `tile` columns wide,
