@@ -1,14 +1,16 @@
 //! Collectives on CUDA through NCCL: `libnccl.so.2` loaded at run time (as PyTorch's wheels do), one
 //! communicator per group of ranks and device, created on first use from an id rank 0 shares through the
 //! default group's store. Collectives run on a per-device NCCL stream after the work queued before them on
-//! lumen's stream; `device_wait` makes lumen's stream wait for them.
+//! lumen's stream; `device_wait` makes lumen's stream wait for them. NCCL implements `Communicator` with its
+//! native collectives, and its sends and receives in an `ncclGroupStart`/`ncclGroupEnd` group for the rest.
 
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
+use super::collective::{self, Communicator, position};
 use crate::device::cuda::CUDA;
-use crate::graph::{Primitive, Reduction};
+use crate::graph::{Primitive, Reduction, TensorType};
 use crate::stream::cuda::{EVENT_DISABLE_TIMING, ffi};
 use crate::{DType, Device, Tensor};
 
@@ -55,6 +57,29 @@ struct Nccl {
         Comm,
         *mut c_void,
     ) -> c_int,
+    broadcast: unsafe extern "C" fn(
+        *const c_void,
+        *mut c_void,
+        usize,
+        c_int,
+        c_int,
+        Comm,
+        *mut c_void,
+    ) -> c_int,
+    reduce: unsafe extern "C" fn(
+        *const c_void,
+        *mut c_void,
+        usize,
+        c_int,
+        c_int,
+        c_int,
+        Comm,
+        *mut c_void,
+    ) -> c_int,
+    send: unsafe extern "C" fn(*const c_void, usize, c_int, c_int, Comm, *mut c_void) -> c_int,
+    recv: unsafe extern "C" fn(*mut c_void, usize, c_int, c_int, Comm, *mut c_void) -> c_int,
+    group_start: unsafe extern "C" fn() -> c_int,
+    group_end: unsafe extern "C" fn() -> c_int,
     get_error_string: unsafe extern "C" fn(c_int) -> *const c_char,
 }
 
@@ -62,6 +87,15 @@ struct Nccl {
 struct Handle(Comm);
 
 unsafe impl Send for Handle {}
+
+/// The function at address `f`, typed `F`.
+///
+/// # Safety
+///
+/// `F` is a function pointer type matching the C signature of the function at `f`.
+unsafe fn function<F: Copy>(f: *mut c_void) -> F {
+    unsafe { std::mem::transmute_copy::<*mut c_void, F>(&f) }
+}
 
 /// Loads `libnccl.so.2` (or `LUMEN_NCCL_LIBRARY`) once and resolves the entry points.
 fn nccl() -> Result<&'static Nccl, String> {
@@ -87,12 +121,18 @@ fn nccl() -> Result<&'static Nccl, String> {
         // Each pointer is the named NCCL function, whose C signature the field's type spells out.
         unsafe {
             Ok(Nccl {
-                get_unique_id: std::mem::transmute(symbol("ncclGetUniqueId")?),
-                comm_init_rank: std::mem::transmute(symbol("ncclCommInitRank")?),
-                all_reduce: std::mem::transmute(symbol("ncclAllReduce")?),
-                all_gather: std::mem::transmute(symbol("ncclAllGather")?),
-                reduce_scatter: std::mem::transmute(symbol("ncclReduceScatter")?),
-                get_error_string: std::mem::transmute(symbol("ncclGetErrorString")?),
+                get_unique_id: function(symbol("ncclGetUniqueId")?),
+                comm_init_rank: function(symbol("ncclCommInitRank")?),
+                all_reduce: function(symbol("ncclAllReduce")?),
+                all_gather: function(symbol("ncclAllGather")?),
+                reduce_scatter: function(symbol("ncclReduceScatter")?),
+                broadcast: function(symbol("ncclBroadcast")?),
+                reduce: function(symbol("ncclReduce")?),
+                send: function(symbol("ncclSend")?),
+                recv: function(symbol("ncclRecv")?),
+                group_start: function(symbol("ncclGroupStart")?),
+                group_end: function(symbol("ncclGroupEnd")?),
+                get_error_string: function(symbol("ncclGetErrorString")?),
             })
         }
     })
@@ -111,20 +151,19 @@ fn checked(nccl: &Nccl, call: &str, result: c_int) -> Result<(), String> {
     }
 }
 
+/// Communicators by their processes' ranks and CUDA device.
+type Comms = HashMap<(Vec<usize>, usize), Handle>;
+
 /// The communicator of the processes `ranks` on CUDA device `device`, created on first use: the first rank
 /// of `ranks` publishes a new id under a key named after the group and every member initialises from it.
 fn communicator(nccl: &Nccl, ranks: &[usize], device: usize) -> Result<Comm, String> {
-    static COMMS: Mutex<Option<HashMap<(Vec<usize>, usize), Handle>>> = Mutex::new(None);
+    static COMMS: Mutex<Option<Comms>> = Mutex::new(None);
     let mut comms = COMMS.lock().unwrap_or_else(PoisonError::into_inner);
     let comms = comms.get_or_insert_with(HashMap::new);
     if let Some(Handle(comm)) = comms.get(&(ranks.to_vec(), device)) {
         return Ok(*comm);
     }
-    let rank = super::get_rank()?;
-    let me = ranks
-        .iter()
-        .position(|&r| r == rank)
-        .ok_or_else(|| format!("rank {rank} is not in the collective's group {ranks:?}"))?;
+    let me = position(ranks, super::get_rank()?, "rank")?;
     let store = super::default_store().ok_or(
         "a collective needs the default process group: call lumen.distributed.init_process_group",
     )?;
@@ -206,11 +245,15 @@ fn stream(device: usize) -> Result<*mut c_void, String> {
     Ok(stream)
 }
 
-/// Per output buffer address, the event recorded when the collective writing it finishes.
-static DONE: Mutex<Option<HashMap<usize, Handle>>> = Mutex::new(None);
+/// Per output buffer address, the events recorded when the collectives writing it finish (several when
+/// empty outputs, such as sends' tokens, share an address).
+static DONE: Mutex<Option<Events>> = Mutex::new(None);
 
-/// Makes lumen's stream on `x`'s device wait, without blocking the host, for the collective writing `x`
-/// (nothing when no collective is pending on it).
+/// Pending collectives' events per output buffer address.
+type Events = HashMap<usize, Vec<Handle>>;
+
+/// Makes lumen's stream on `x`'s device wait, without blocking the host, for the collectives writing `x`
+/// (nothing when none is pending on it).
 pub(crate) fn device_wait(x: &Tensor) -> Result<(), String> {
     let Device::Cuda(device) = x.device() else {
         return Ok(());
@@ -219,20 +262,224 @@ pub(crate) fn device_wait(x: &Tensor) -> Result<(), String> {
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .get_or_insert_with(HashMap::new)
-        .remove(&(x.data_ptr() as usize));
-    let Some(Handle(event)) = done else {
-        return Ok(());
-    };
+        .remove(&(x.data_ptr() as usize))
+        .unwrap_or_default();
     CUDA.set_device(device);
-    // CUDA frees the destroyed event once the wait on it completes.
-    let waited = unsafe { ffi::cudaStreamWaitEvent(std::ptr::null_mut(), event, 0) };
-    unsafe { ffi::cudaEventDestroy(event) };
-    cuda_checked("cudaStreamWaitEvent", device, waited)
+    for Handle(event) in done {
+        // CUDA frees the destroyed event once the wait on it completes.
+        let waited = unsafe { ffi::cudaStreamWaitEvent(std::ptr::null_mut(), event, 0) };
+        unsafe { ffi::cudaEventDestroy(event) };
+        cuda_checked("cudaStreamWaitEvent", device, waited)?;
+    }
+    Ok(())
 }
 
-/// Starts the collective `primitive` from `x` into `out` (contiguous, on one CUDA device) on the device's
-/// NCCL stream once lumen's stream has produced `x`; `device_wait` on `out` waits for it.
-pub(crate) fn run(primitive: &Primitive, x: &Tensor, out: &Tensor) -> Result<(), String> {
+/// One process's NCCL communicator for a group, with the stream its collectives run on.
+struct Group {
+    nccl: &'static Nccl,
+    comm: Comm,
+    stream: *mut c_void,
+    /// This process's position in the group, and the group's size.
+    rank: usize,
+    size: usize,
+    device: usize,
+}
+
+impl Communicator for Group {
+    /// This process's position in the group.
+    fn rank(&self) -> usize {
+        self.rank
+    }
+
+    /// The number of processes in the group.
+    fn size(&self) -> usize {
+        self.size
+    }
+
+    /// `ncclSend`.
+    unsafe fn send(
+        &self,
+        send: *const u8,
+        count: usize,
+        dtype: DType,
+        peer: usize,
+    ) -> Result<(), String> {
+        let (nccl, dtype) = (self.nccl, data_type(dtype)?);
+        checked(nccl, "ncclSend", unsafe {
+            (nccl.send)(
+                send.cast(),
+                count,
+                dtype,
+                peer as c_int,
+                self.comm,
+                self.stream,
+            )
+        })
+    }
+
+    /// `ncclRecv`.
+    unsafe fn recv(
+        &self,
+        recv: *mut u8,
+        count: usize,
+        dtype: DType,
+        peer: usize,
+    ) -> Result<(), String> {
+        let (nccl, dtype) = (self.nccl, data_type(dtype)?);
+        checked(nccl, "ncclRecv", unsafe {
+            (nccl.recv)(
+                recv.cast(),
+                count,
+                dtype,
+                peer as c_int,
+                self.comm,
+                self.stream,
+            )
+        })
+    }
+
+    /// Runs `transfers` between `ncclGroupStart` and `ncclGroupEnd`, ending the group even when it fails.
+    fn grouped(&self, transfers: &mut dyn FnMut() -> Result<(), String>) -> Result<(), String> {
+        let nccl = self.nccl;
+        checked(nccl, "ncclGroupStart", unsafe { (nccl.group_start)() })?;
+        let posted = transfers();
+        let ended = checked(nccl, "ncclGroupEnd", unsafe { (nccl.group_end)() });
+        posted.and(ended)
+    }
+
+    /// `cudaMemsetAsync` on the collective stream.
+    unsafe fn zero(&self, recv: *mut u8, count: usize, dtype: DType) -> Result<(), String> {
+        let bytes = count * dtype.size_of();
+        cuda_checked("cudaMemsetAsync", self.device, unsafe {
+            ffi::cudaMemsetAsync(recv.cast(), 0, bytes, self.stream)
+        })
+    }
+
+    /// `ncclAllReduce`.
+    unsafe fn all_reduce(
+        &self,
+        send: *const u8,
+        recv: *mut u8,
+        count: usize,
+        dtype: DType,
+        op: Reduction,
+    ) -> Result<(), String> {
+        let (nccl, dtype) = (self.nccl, data_type(dtype)?);
+        checked(nccl, "ncclAllReduce", unsafe {
+            (nccl.all_reduce)(
+                send.cast(),
+                recv.cast(),
+                count,
+                dtype,
+                red_op(op),
+                self.comm,
+                self.stream,
+            )
+        })
+    }
+
+    /// `ncclReduce`, then zeros on the processes other than `root`, whose `recv` NCCL leaves alone.
+    unsafe fn reduce(
+        &self,
+        send: *const u8,
+        recv: *mut u8,
+        count: usize,
+        dtype: DType,
+        op: Reduction,
+        root: usize,
+    ) -> Result<(), String> {
+        let (nccl, nccl_dtype) = (self.nccl, data_type(dtype)?);
+        checked(nccl, "ncclReduce", unsafe {
+            let op = red_op(op);
+            (nccl.reduce)(
+                send.cast(),
+                recv.cast(),
+                count,
+                nccl_dtype,
+                op,
+                root as c_int,
+                self.comm,
+                self.stream,
+            )
+        })?;
+        match self.rank == root {
+            true => Ok(()),
+            false => unsafe { self.zero(recv, count, dtype) },
+        }
+    }
+
+    /// `ncclReduceScatter`.
+    unsafe fn reduce_scatter(
+        &self,
+        send: *const u8,
+        recv: *mut u8,
+        count: usize,
+        dtype: DType,
+        op: Reduction,
+    ) -> Result<(), String> {
+        let (nccl, dtype) = (self.nccl, data_type(dtype)?);
+        checked(nccl, "ncclReduceScatter", unsafe {
+            (nccl.reduce_scatter)(
+                send.cast(),
+                recv.cast(),
+                count,
+                dtype,
+                red_op(op),
+                self.comm,
+                self.stream,
+            )
+        })
+    }
+
+    /// `ncclAllGather`.
+    unsafe fn all_gather(
+        &self,
+        send: *const u8,
+        recv: *mut u8,
+        count: usize,
+        dtype: DType,
+    ) -> Result<(), String> {
+        let (nccl, dtype) = (self.nccl, data_type(dtype)?);
+        checked(nccl, "ncclAllGather", unsafe {
+            (nccl.all_gather)(
+                send.cast(),
+                recv.cast(),
+                count,
+                dtype,
+                self.comm,
+                self.stream,
+            )
+        })
+    }
+
+    /// `ncclBroadcast`.
+    unsafe fn broadcast(
+        &self,
+        send: *const u8,
+        recv: *mut u8,
+        count: usize,
+        dtype: DType,
+        root: usize,
+    ) -> Result<(), String> {
+        let (nccl, dtype) = (self.nccl, data_type(dtype)?);
+        checked(nccl, "ncclBroadcast", unsafe {
+            (nccl.broadcast)(
+                send.cast(),
+                recv.cast(),
+                count,
+                dtype,
+                root as c_int,
+                self.comm,
+                self.stream,
+            )
+        })
+    }
+}
+
+/// Starts the collective `primitive` from `inputs` (its operand, if it has one) into `out` (contiguous, on one
+/// CUDA device) on the device's NCCL stream once lumen's stream has produced them; `device_wait` on `out`
+/// waits for it.
+pub(crate) fn run(primitive: &Primitive, inputs: &[Tensor], out: &Tensor) -> Result<(), String> {
     let Device::Cuda(device) = out.device() else {
         return Err(format!(
             "{}: NCCL collectives run on CUDA, got {}",
@@ -241,42 +488,43 @@ pub(crate) fn run(primitive: &Primitive, x: &Tensor, out: &Tensor) -> Result<(),
         ));
     };
     let nccl = nccl()?;
-    let dtype = data_type(x.dtype())?;
-    let (send, recv) = (x.data_ptr().cast_const().cast(), out.data_ptr().cast());
-    let stream = stream(device)?;
-    crate::stream::cuda::wait(device, stream as usize);
-    let launched = match primitive {
-        Primitive::AllReduce { op, ranks } => {
-            let comm = communicator(nccl, ranks, device)?;
-            checked(nccl, "ncclAllReduce", unsafe {
-                (nccl.all_reduce)(send, recv, x.numel(), dtype, red_op(*op), comm, stream)
-            })
-        }
-        Primitive::AllGather { ranks } => {
-            let comm = communicator(nccl, ranks, device)?;
-            checked(nccl, "ncclAllGather", unsafe {
-                (nccl.all_gather)(send, recv, x.numel(), dtype, comm, stream)
-            })
-        }
-        Primitive::ReduceScatter { op, ranks } => {
-            let comm = communicator(nccl, ranks, device)?;
-            checked(nccl, "ncclReduceScatter", unsafe {
-                (nccl.reduce_scatter)(send, recv, out.numel(), dtype, red_op(*op), comm, stream)
-            })
-        }
-        p => Err(format!("{}: not an NCCL collective", p.name())),
+    let ranks = collective::ranks(primitive)
+        .ok_or_else(|| format!("{}: not an NCCL collective", primitive.name()))?;
+    let group = Group {
+        nccl,
+        comm: communicator(nccl, ranks, device)?,
+        stream: stream(device)?,
+        rank: position(ranks, super::get_rank()?, "rank")?,
+        size: ranks.len(),
+        device,
     };
-    launched?;
+    crate::stream::cuda::wait(device, group.stream as usize);
+    let x = inputs.first();
+    let x_type = x.map(|x| TensorType::new(x.dtype(), x.shape()));
+    let send = x.map_or(std::ptr::null(), |x| x.data_ptr().cast_const());
+    let out_type = TensorType::new(out.dtype(), out.shape());
+    unsafe {
+        collective::run(
+            &group,
+            primitive,
+            send,
+            out.data_ptr(),
+            x_type.as_ref(),
+            &out_type,
+        )?
+    };
     let mut event = std::ptr::null_mut();
     cuda_checked("cudaEventCreateWithFlags", device, unsafe {
         ffi::cudaEventCreateWithFlags(&mut event, EVENT_DISABLE_TIMING)
     })?;
     cuda_checked("cudaEventRecord", device, unsafe {
-        ffi::cudaEventRecord(event, stream)
+        ffi::cudaEventRecord(event, group.stream)
     })?;
     DONE.lock()
         .unwrap_or_else(PoisonError::into_inner)
         .get_or_insert_with(HashMap::new)
-        .insert(out.data_ptr() as usize, Handle(event));
+        .entry(out.data_ptr() as usize)
+        .or_default()
+        .push(Handle(event));
     Ok(())
 }

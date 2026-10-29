@@ -262,6 +262,48 @@ pub enum Primitive {
         op: Reduction,
         ranks: Vec<usize>,
     },
+    /// Exchanges rows of the leading axis (one per process in `ranks`): the process at position `r` gets, as
+    /// row `j`, row `r` of the process at position `j`.
+    AllToAll {
+        ranks: Vec<usize>,
+    },
+    /// Gives every process in `ranks` the operand of process `root`.
+    Broadcast {
+        root: usize,
+        ranks: Vec<usize>,
+    },
+    /// Combines the operand across `ranks` with `op` into process `root`'s result; the others' are zeros.
+    Reduce {
+        op: Reduction,
+        root: usize,
+        ranks: Vec<usize>,
+    },
+    /// Stacks every process in `ranks`'s operand along a new leading axis, in `ranks`' order, into process
+    /// `root`'s result; the others' are zeros.
+    GatherTo {
+        root: usize,
+        ranks: Vec<usize>,
+    },
+    /// Gives the process at position `r` of `ranks` row `r` of process `root`'s operand, whose leading axis
+    /// has one row per process (the other processes' operands are not read).
+    ScatterFrom {
+        root: usize,
+        ranks: Vec<usize>,
+    },
+    /// Sends the operand to process `peer` of the group `ranks`; the result is an empty token, which the
+    /// trace keeps as an output so the send runs.
+    Send {
+        peer: usize,
+        ranks: Vec<usize>,
+    },
+    /// Receives a `dtype` tensor of `shape` from process `peer` of the group `ranks` (which sends it with
+    /// `Send`); takes no operand.
+    Recv {
+        peer: usize,
+        ranks: Vec<usize>,
+        dtype: DType,
+        shape: Vec<usize>,
+    },
     /// Copies a device value to the host.
     ToHost,
     /// Copies a host value to the device.
@@ -389,7 +431,19 @@ impl Primitive {
             Primitive::AllReduce { .. }
                 | Primitive::AllGather { .. }
                 | Primitive::ReduceScatter { .. }
+                | Primitive::AllToAll { .. }
+                | Primitive::Broadcast { .. }
+                | Primitive::Reduce { .. }
+                | Primitive::GatherTo { .. }
+                | Primitive::ScatterFrom { .. }
+                | Primitive::Send { .. }
+                | Primitive::Recv { .. }
         )
+    }
+
+    /// Whether the op is a point-to-point transfer: never merged with an equal one, since each is a message.
+    pub fn is_point_to_point(&self) -> bool {
+        matches!(self, Primitive::Send { .. } | Primitive::Recv { .. })
     }
 
     /// The op's display name; fusions and custom calls use their label.
@@ -422,6 +476,13 @@ impl Primitive {
             AllReduce { .. } => "all_reduce",
             AllGather { .. } => "all_gather",
             ReduceScatter { .. } => "reduce_scatter",
+            AllToAll { .. } => "all_to_all",
+            Broadcast { .. } => "broadcast",
+            Reduce { .. } => "reduce",
+            GatherTo { .. } => "gather_to",
+            ScatterFrom { .. } => "scatter_from",
+            Send { .. } => "send",
+            Recv { .. } => "recv",
             ToHost => "to_host",
             ToDevice => "to_device",
             Reshape { .. } => "reshape",
@@ -466,7 +527,7 @@ impl Primitive {
         use Primitive::*;
         // Number of operands; index ops take a scalar per dimension of the indexed tensor.
         let arity = match self {
-            Full { .. } | Iota { .. } => 0,
+            Full { .. } | Iota { .. } | Recv { .. } => 0,
             RandomBits { .. } => 2,
             Add | Sub | Mul | Div | Max | Eq | Lt | DotGeneral { .. } | Gather { .. } => 2,
             TakeAlongAxis { .. } => 2,
@@ -559,6 +620,39 @@ impl Primitive {
                 Ok(x.clone())
             }
             HostWait | DeviceWait | ToHost | ToDevice | AllReduce { .. } => Ok(args[0].clone()),
+            Broadcast { root, ranks } | Reduce { root, ranks, .. } => {
+                member(*root, ranks, "root").map_err(prefix)?;
+                Ok(args[0].clone())
+            }
+            Send { peer, ranks } => {
+                member(*peer, ranks, "peer").map_err(prefix)?;
+                Ok(TensorType::new(args[0].dtype, &[0]))
+            }
+            Recv {
+                peer,
+                ranks,
+                dtype,
+                shape,
+            } => {
+                member(*peer, ranks, "peer").map_err(prefix)?;
+                Ok(TensorType::new(*dtype, shape))
+            }
+            GatherTo { root, ranks } => {
+                member(*root, ranks, "root").map_err(prefix)?;
+                let x = args[0];
+                let shape: Vec<usize> = std::iter::once(ranks.len())
+                    .chain(x.shape.iter().copied())
+                    .collect();
+                Ok(TensorType::new(x.dtype, &shape))
+            }
+            AllToAll { ranks } => match args[0].shape.first() {
+                Some(&n) if n == ranks.len() => Ok(args[0].clone()),
+                _ => err(format!(
+                    "{} has no leading axis of one row for each of the {} processes",
+                    args[0],
+                    ranks.len()
+                )),
+            },
             AllGather { ranks } => {
                 let x = args[0];
                 let shape: Vec<usize> = std::iter::once(ranks.len())
@@ -566,7 +660,10 @@ impl Primitive {
                     .collect();
                 Ok(TensorType::new(x.dtype, &shape))
             }
-            ReduceScatter { ranks, .. } => {
+            ReduceScatter { ranks, .. } | ScatterFrom { ranks, .. } => {
+                if let ScatterFrom { root, .. } = self {
+                    member(*root, ranks, "root").map_err(prefix)?;
+                }
                 let x = args[0];
                 match x.shape.split_first() {
                     Some((&n, rest)) if n == ranks.len() => Ok(TensorType::new(x.dtype, rest)),
@@ -883,6 +980,17 @@ fn check_dims(dims: &[usize], ndim: usize, what: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Errors unless process `rank` (a collective's `what`) is one of its group's `ranks`.
+fn member(rank: usize, ranks: &[usize], what: &str) -> Result<(), String> {
+    match ranks.contains(&rank) {
+        true => Ok(()),
+        false => Err(format!(
+            "{what} {rank} is not in the group {}",
+            Tuple(ranks)
+        )),
+    }
+}
+
 /// Dimensions `0..ndim` not listed in `used`, in order.
 pub(crate) fn free_dims(ndim: usize, used: &[usize]) -> impl Iterator<Item = usize> + '_ {
     (0..ndim).filter(move |d| !used.contains(d))
@@ -1028,7 +1136,25 @@ impl fmt::Display for Primitive {
             AllReduce { op, ranks } | ReduceScatter { op, ranks } => {
                 write!(f, "[op={} ranks={}]", op.name(), Tuple(ranks))
             }
-            AllGather { ranks } => write!(f, "[ranks={}]", Tuple(ranks)),
+            AllGather { ranks } | AllToAll { ranks } => write!(f, "[ranks={}]", Tuple(ranks)),
+            Broadcast { root, ranks } | GatherTo { root, ranks } | ScatterFrom { root, ranks } => {
+                write!(f, "[ranks={} root={root}]", Tuple(ranks))
+            }
+            Reduce { op, root, ranks } => {
+                write!(f, "[op={} ranks={} root={root}]", op.name(), Tuple(ranks))
+            }
+            Send { peer, ranks } => write!(f, "[peer={peer} ranks={}]", Tuple(ranks)),
+            Recv {
+                peer,
+                ranks,
+                dtype,
+                shape,
+            } => write!(
+                f,
+                "[dtype={dtype} peer={peer} ranks={} shape={}]",
+                Tuple(ranks),
+                Tuple(shape)
+            ),
             Gather { axis } | ScatterAdd { axis } | TakeAlongAxis { axis } => {
                 write!(f, "[axis={axis}]")
             }
