@@ -79,6 +79,7 @@ impl Attentions for TpuModule<'_> {
         attention::Epilogues {
             leaves: |graph, v| graph.type_of(v).shape.is_empty(),
             reshaped: true,
+            transposed: false,
         }
     }
 

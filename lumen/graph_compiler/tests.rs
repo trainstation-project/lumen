@@ -472,3 +472,32 @@ fn a_pipeline_runs_its_passes_in_order_and_dumps_each() {
     assert_eq!(last, module.graph.to_string());
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// `Strides::of` keeps only the operands not laid out contiguously in their own buffers.
+#[test]
+fn attention_strides_record_only_strided_operands() {
+    use super::common::attention::Strides;
+    let mut g = Graph::new();
+    let a = g.input(ty(&[2, 3]));
+    let b = g.input(ty(&[2, 3]));
+    let sum = apply(&mut g, Add, &[a, b]);
+    g.set_outputs(&[sum, a]).unwrap();
+    let strides = Strides::of(
+        &g,
+        &[vec![3, 1], vec![1, 2]],
+        &[(0, vec![3, 1]), (4, vec![3, 1])],
+    );
+    assert_eq!(strides.inputs, [(1, vec![1, 2])].into_iter().collect());
+    assert_eq!(
+        strides.outputs,
+        [(1, (4, vec![3, 1]))].into_iter().collect()
+    );
+    assert_eq!(
+        Strides::of(
+            &g,
+            &[vec![3, 1], vec![3, 1]],
+            &[(0, vec![3, 1]), (0, vec![3, 1])]
+        ),
+        Strides::default()
+    );
+}

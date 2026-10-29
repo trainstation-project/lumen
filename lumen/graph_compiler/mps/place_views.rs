@@ -36,8 +36,17 @@ pub(crate) fn loads_strided(body: &Graph, k: usize) -> bool {
             .any(|n| template(&n.primitive) && n.inputs.contains(&v))
 }
 
+/// Whether an attention fusion reads its inputs at `strides`: any, with a contiguous last dim (its
+/// kernel is generated for the layout when it runs).
+pub(crate) fn attention_reads_strided(body: &Graph, strides: &[usize]) -> bool {
+    strides.last().is_none_or(|&s| s == 1)
+        && (attention::of_body(body).is_some() || attention::backward_of_body(body).is_some())
+}
+
 /// Whether GEMM fusion input `k` is read only by the dot, as one operand, in a layout MPS's matmul
-/// kernels stride through.
+/// kernels stride through: an attention's dots are its kernel's, not a GEMM's.
 pub(crate) fn fusion_reads_strided(body: &Graph, k: usize, strides: &[usize]) -> bool {
-    place_views::fusion_reads_strided(body, k, strides, reads_strided, codegen::gemm_dot)
+    attention::of_body(body).is_none()
+        && attention::backward_of_body(body).is_none()
+        && place_views::fusion_reads_strided(body, k, strides, reads_strided, codegen::gemm_dot)
 }
