@@ -88,6 +88,15 @@ struct Handle(Comm);
 
 unsafe impl Send for Handle {}
 
+/// The function at address `f`, typed `F`.
+///
+/// # Safety
+///
+/// `F` is a function pointer type matching the C signature of the function at `f`.
+unsafe fn function<F: Copy>(f: *mut c_void) -> F {
+    unsafe { std::mem::transmute_copy::<*mut c_void, F>(&f) }
+}
+
 /// Loads `libnccl.so.2` (or `LUMEN_NCCL_LIBRARY`) once and resolves the entry points.
 fn nccl() -> Result<&'static Nccl, String> {
     static NCCL: OnceLock<Result<Nccl, String>> = OnceLock::new();
@@ -112,18 +121,18 @@ fn nccl() -> Result<&'static Nccl, String> {
         // Each pointer is the named NCCL function, whose C signature the field's type spells out.
         unsafe {
             Ok(Nccl {
-                get_unique_id: std::mem::transmute(symbol("ncclGetUniqueId")?),
-                comm_init_rank: std::mem::transmute(symbol("ncclCommInitRank")?),
-                all_reduce: std::mem::transmute(symbol("ncclAllReduce")?),
-                all_gather: std::mem::transmute(symbol("ncclAllGather")?),
-                reduce_scatter: std::mem::transmute(symbol("ncclReduceScatter")?),
-                broadcast: std::mem::transmute(symbol("ncclBroadcast")?),
-                reduce: std::mem::transmute(symbol("ncclReduce")?),
-                send: std::mem::transmute(symbol("ncclSend")?),
-                recv: std::mem::transmute(symbol("ncclRecv")?),
-                group_start: std::mem::transmute(symbol("ncclGroupStart")?),
-                group_end: std::mem::transmute(symbol("ncclGroupEnd")?),
-                get_error_string: std::mem::transmute(symbol("ncclGetErrorString")?),
+                get_unique_id: function(symbol("ncclGetUniqueId")?),
+                comm_init_rank: function(symbol("ncclCommInitRank")?),
+                all_reduce: function(symbol("ncclAllReduce")?),
+                all_gather: function(symbol("ncclAllGather")?),
+                reduce_scatter: function(symbol("ncclReduceScatter")?),
+                broadcast: function(symbol("ncclBroadcast")?),
+                reduce: function(symbol("ncclReduce")?),
+                send: function(symbol("ncclSend")?),
+                recv: function(symbol("ncclRecv")?),
+                group_start: function(symbol("ncclGroupStart")?),
+                group_end: function(symbol("ncclGroupEnd")?),
+                get_error_string: function(symbol("ncclGetErrorString")?),
             })
         }
     })
@@ -142,10 +151,13 @@ fn checked(nccl: &Nccl, call: &str, result: c_int) -> Result<(), String> {
     }
 }
 
+/// Communicators by their processes' ranks and CUDA device.
+type Comms = HashMap<(Vec<usize>, usize), Handle>;
+
 /// The communicator of the processes `ranks` on CUDA device `device`, created on first use: the first rank
 /// of `ranks` publishes a new id under a key named after the group and every member initialises from it.
 fn communicator(nccl: &Nccl, ranks: &[usize], device: usize) -> Result<Comm, String> {
-    static COMMS: Mutex<Option<HashMap<(Vec<usize>, usize), Handle>>> = Mutex::new(None);
+    static COMMS: Mutex<Option<Comms>> = Mutex::new(None);
     let mut comms = COMMS.lock().unwrap_or_else(PoisonError::into_inner);
     let comms = comms.get_or_insert_with(HashMap::new);
     if let Some(Handle(comm)) = comms.get(&(ranks.to_vec(), device)) {
