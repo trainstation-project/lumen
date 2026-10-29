@@ -23,7 +23,7 @@ use attention::{FlashAttentionBackward, Tiles};
 #[cfg(feature = "python")]
 pub(crate) use attention::{Launch, set_attention};
 use diamonds::Diamonds;
-use fusion::{Alone, LoopFusion};
+use fusion::{Alone, LoopFusion, PlaceViews};
 #[cfg(feature = "python")]
 pub(crate) use gemm::{Epilogue, set_gemm};
 use horizontal::HorizontalFusion;
@@ -223,6 +223,7 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
     if config.normalization_diamonds {
         pipeline.add(WideRows);
     }
+    pipeline.add(PlaceViews);
     pipeline.add(Alone);
     if config.horizontal_fusion {
         pipeline.add(HorizontalFusion);

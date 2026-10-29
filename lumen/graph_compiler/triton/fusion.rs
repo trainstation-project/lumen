@@ -7,6 +7,7 @@ use crate::codegen::regions::expansion;
 use crate::codegen::triton::{self as codegen, dot_row_fits, fusible};
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::common::fusion::{Backend, fuse};
+use crate::graph_compiler::common::place_views::place_views;
 use crate::graph_compiler::pass::CompilerPass;
 
 /// Name of a fusion of a GEMM and the normalization row reading its product.
@@ -70,6 +71,23 @@ impl CompilerPass<TritonModule<'_>> for LoopFusion {
     }
 }
 
+/// Compiler pass marking slices read only by GEMMs as strided views, as on MPS: Triton's GEMM reads its
+/// operands at any strides.
+pub(super) struct PlaceViews;
+
+impl CompilerPass<TritonModule<'_>> for PlaceViews {
+    /// Pass name used in profiler ranges and dumps.
+    fn name(&self) -> &'static str {
+        "place_views"
+    }
+
+    /// Marks each slice read only by GEMMs a view (`common::place_views`).
+    fn apply(&mut self, m: &mut TritonModule<'_>) -> Result<(), String> {
+        place_views(&mut m.graph, |_, _, _, _| true, codegen::gemm_dot);
+        Ok(())
+    }
+}
+
 /// Compiler pass wrapping each node left outside any fusion that a Triton loop kernel computes in a
 /// fusion of its own: Triton has no other kernel for it.
 pub(super) struct Alone;
@@ -80,13 +98,16 @@ impl CompilerPass<TritonModule<'_>> for Alone {
         "alone"
     }
 
-    /// Wraps every lone fusible node but reshapes (views of their operand) and in-place concatenations.
+    /// Wraps every lone fusible node but views of their operand (reshapes, slices placed as views) and
+    /// in-place concatenations.
     fn apply(&mut self, m: &mut TritonModule<'_>) -> Result<(), String> {
         m.graph = wrapped(&m.graph, |graph, n| {
             fusible(graph, n)
                 && !matches!(
                     n.primitive,
-                    Primitive::Reshape { .. } | Primitive::Concatenate { in_place: true, .. }
+                    Primitive::Reshape { .. }
+                        | Primitive::Slice { view: true, .. }
+                        | Primitive::Concatenate { in_place: true, .. }
                 )
         });
         Ok(())
