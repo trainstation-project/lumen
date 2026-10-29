@@ -5,9 +5,9 @@ export RUSTFLAGS := -D warnings
 
 .PHONY: all ci install test coverage fmt fmt-check clang-format clang-format-check clippy miri clean
 
-## ci: every CI job (rustfmt, clang-format, clippy, tests, coverage, miri), in that
+## ci: every CI job (rustfmt, clang-format, clippy, tests, miri), in that
 ## order.
-ci: fmt-check clang-format-check clippy test coverage miri
+ci: fmt-check clang-format-check clippy test miri
 
 # The Rust tests are unit tests inside the crate (a `tests.rs` per module
 # folder). They never enable `python`: with pyo3 compiled in, test binaries
@@ -61,8 +61,9 @@ test: install
 
 # Line coverage floors (percent) `coverage` enforces: a bit under what the
 # suite reached when last raised, so new code comes with tests. Raise them
-# as coverage grows; never lower them to make a change pass. Linux (CI) has
-# no Metal, so the MPS code is compiled out and its tests skip.
+# as coverage grows; never lower them to make a change pass. Linux has no
+# Metal, so the MPS code is compiled out and its tests skip. CI doesn't run
+# `coverage` (it reruns the whole suite instrumented); run it locally.
 ifeq ($(shell uname),Darwin)
 RUST_COVERAGE_MIN := 75
 PYTHON_COVERAGE_MIN := 78
