@@ -210,8 +210,8 @@ fn prepare(step: &Step) -> Result<Prepared, String> {
         }
         let root = body.nodes()[a.root].output;
         let lse = a.lse.map(|n| output(body.nodes()[n].output));
-        let operands = [a.q.base, a.k.base, a.v.base];
-        // The epilogue's leaves, then the attention values when the body outputs them too (`EXTRA`).
+        // The body's inputs but the offset, which the epilogue may read, then the attention values
+        // when the body outputs them too (`EXTRA`).
         let raw = body.outputs()[1..].contains(&root);
         let mut tensors = vec![
             Some(input(a.q.base)),
@@ -224,7 +224,7 @@ fn prepare(step: &Step) -> Result<Prepared, String> {
         tensors.extend(
             body.inputs()
                 .iter()
-                .filter(|&&v| !operands.contains(&v) && a.offset != Some(v))
+                .filter(|&&v| a.offset != Some(v))
                 .map(|&v| Some(input(v))),
         );
         if raw {

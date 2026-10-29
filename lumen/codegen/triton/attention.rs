@@ -32,11 +32,15 @@ fn address(acc: &Access, batch: &[usize]) -> String {
             writeln!(code, "    rest = rest // {size}").unwrap();
         }
     }
-    let terms: Vec<String> = [("rows", acc.row), ("cols", acc.col)]
+    let mut terms: Vec<String> = [("rows", acc.row), ("cols", acc.col)]
         .into_iter()
         .filter(|&(_, stride)| stride != 0)
         .map(|(name, stride)| format!("{name} * {stride}"))
         .collect();
+    // Both strides zero (one query row of a per-row tensor): zero offsets still shaped like the tile.
+    if terms.is_empty() {
+        terms = vec!["rows * 0".into(), "cols * 0".into()];
+    }
     writeln!(code, "    at = at + {}", terms.join(" + ")).unwrap();
     code
 }
@@ -73,19 +77,15 @@ pub(crate) fn attention_store(acc: &Access, batch: &[usize]) -> (String, String)
 
 /// A jit helper storing a forward attention fusion's output tile: the attention values `value`, cast to
 /// their dtype (also written as they are through `EXTRA`'s last pointer when `raw`), through the body's
-/// elementwise epilogue to its first output, reading the epilogue's other inputs (`EXTRA` in body-input
-/// order, contiguous) at each element's flat index `j` in that output, as MPS's kernel does; without an
-/// epilogue, the values themselves.
+/// elementwise epilogue to its first output, as MPS's kernel does. The epilogue reads the body's inputs
+/// but the offset (`EXTRA` in body-input order, contiguous: it may read Q, K or V too) at each
+/// element's flat index `j` in that output; without an epilogue, the values themselves.
 pub(crate) fn attention_output(body: &Graph, a: &Attention, raw: bool) -> (String, String) {
     let at = address(&a.out, &a.batch);
     let root = body.nodes()[a.root].output;
     let t = triton_type(body.type_of(root).dtype).expect("a Triton dtype");
-    let operands = [a.q.base, a.k.base, a.v.base];
     let leaves: Vec<usize> = (0..body.inputs().len())
-        .filter(|&k| {
-            let v = body.inputs()[k];
-            !operands.contains(&v) && a.offset != Some(v)
-        })
+        .filter(|&k| a.offset != Some(body.inputs()[k]))
         .collect();
     let mut loads = String::new();
     let mut code = format!("    j = at\n    r = value.to({t})\n");
