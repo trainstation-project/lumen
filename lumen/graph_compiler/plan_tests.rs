@@ -189,6 +189,63 @@ fn plan_rematerializes_under_a_memory_limit() {
     assert_eq!(plan(Some(kept)), (kept, 2));
     let (recomputed, exps) = plan(Some(1));
     assert_eq!((recomputed, exps), (4 * N, 3));
+    // A limit the first recompute meets stops there.
+    assert_eq!(plan(Some(4 * N)), (4 * N, 3));
+}
+
+/// Under a memory limit, a value is recomputed together with its producers, past small values and
+/// reshapes, and the plan still matches the reference with a smaller workspace.
+#[test]
+#[cfg_attr(miri, ignore = "128 KiB values, too slow for Miri")]
+fn plan_rematerializes_values_with_their_producers() {
+    let mut g = Graph::new();
+    const N: usize = 32 << 10;
+    let x = g.input(ty(DType::F32, &[N]));
+    let a = g.apply(Exp, &[x]).unwrap();
+    let h = g.apply(Tanh, &[a]).unwrap();
+    let sum = ReduceSum {
+        axes: vec![0],
+        accum_dtype: DType::F32,
+    };
+    let s = g.apply(sum, &[h]).unwrap();
+    let b = g.apply(Exp, &[h]).unwrap();
+    let e = g.apply(Exp, &[b]).unwrap();
+    let c = g.apply(Mul, &[e, b]).unwrap();
+    let r = g
+        .apply(
+            Reshape {
+                new_sizes: vec![N / 2, 2],
+            },
+            &[c],
+        )
+        .unwrap();
+    let r = g.apply(Reshape { new_sizes: vec![N] }, &[r]).unwrap();
+    let d = g.apply(Mul, &[r, h]).unwrap();
+    g.set_outputs(&[d, s]).unwrap();
+    let inputs = [data(&[N], 4)];
+    let expected = reference::run(&g, &inputs).unwrap();
+    let plan = |limit| {
+        let options = super::PlanOptions {
+            memory_limit: limit,
+            ..Default::default()
+        };
+        let plan = Plan::compile_with(&g, &options);
+        let actual = plan.run(&inputs).unwrap();
+        for (e, a) in expected.iter().zip(&actual) {
+            assert_eq!(e.to_vec::<f32>(), a.to_vec::<f32>(), "{plan}");
+        }
+        plan
+    };
+    let kept = plan(None);
+    let recomputed = plan(Some(1));
+    assert!(
+        recomputed.workspace_bytes() < kept.workspace_bytes(),
+        "{kept}\n{recomputed}"
+    );
+    assert!(
+        recomputed.steps().len() > kept.steps().len(),
+        "{recomputed}"
+    );
 }
 
 /// Philox-4x32-10 matches the Random123 known-answer tests.
@@ -1391,4 +1448,93 @@ pub(crate) mod mps {
         );
         assert!(Plan::compile(&g).run(&[a, b]).is_err());
     }
+}
+
+/// A step's memo makes each key's preparation once, shares it with clones and doesn't keep failures.
+#[test]
+fn memos_keep_each_preparation_once() {
+    use super::plan::{Memo, Tuned};
+    let memo = Memo::default();
+    let clone = memo.clone();
+    let made = std::cell::Cell::new(0usize);
+    let make = || {
+        made.set(made.get() + 1);
+        Ok::<_, String>(made.get())
+    };
+    assert_eq!(*memo.get(1, make).unwrap(), 1);
+    assert_eq!(*clone.get(1, make).unwrap(), 1);
+    assert_eq!(*memo.get(2, make).unwrap(), 2);
+    assert_eq!(
+        memo.get::<usize>(3, || Err("failed".into())).unwrap_err(),
+        "failed"
+    );
+    assert_eq!(*memo.get(3, make).unwrap(), 3);
+    assert_eq!(format!("{memo:?}"), "Memo");
+    assert_eq!(format!("{:?}", Tuned::new("gemm".into(), 4usize)), "gemm");
+}
+
+/// Plans reject inputs of the wrong count or type, and owned plans a workspace that isn't `u8`.
+#[test]
+fn plans_reject_mismatched_inputs_and_workspaces() {
+    let mut g = Graph::new();
+    let x = g.input(ty(DType::F32, &[4]));
+    let y = g.apply(Neg, &[x]).unwrap();
+    g.set_outputs(&[y]).unwrap();
+    let plan = Plan::compile(&g);
+    assert_eq!(plan.run(&[]).unwrap_err(), "the plan takes 1 inputs, got 0");
+    let error = plan.run(&[data(&[5], 1)]).unwrap_err();
+    assert!(error.starts_with("input 0 must be"), "{error}");
+    let options = super::PlanOptions {
+        parameters: Some(vec![true]),
+        ..Default::default()
+    };
+    let owned = Plan::compile_with(&g, &options);
+    let workspace = Tensor::zeros(&[64], DType::F32);
+    let error = owned.run_in(&workspace, &[data(&[4], 1)]).unwrap_err();
+    assert!(
+        error.starts_with("the workspace must be contiguous uint8"),
+        "{error}"
+    );
+}
+
+/// A device layout sizes and aligns workspace values its own way, and a reshape between types it
+/// stores differently runs as a step instead of aliasing its input.
+#[test]
+fn device_layouts_size_and_align_values() {
+    let mut g = Graph::new();
+    let x = g.input(ty(DType::F32, &[4, 8]));
+    let e = g.apply(Exp, &[x]).unwrap();
+    let r = g
+        .apply(
+            Reshape {
+                new_sizes: vec![32],
+            },
+            &[e],
+        )
+        .unwrap();
+    let t = g.apply(Tanh, &[r]).unwrap();
+    g.set_outputs(&[t]).unwrap();
+    let options = super::PlanOptions {
+        layout: Some(super::plan::DeviceLayout {
+            bytes: |t| 2 * t.numel() * t.dtype.size_of(),
+            same: |_, _| false,
+            align: |_| 1024,
+        }),
+        ..Default::default()
+    };
+    let plan = Plan::compile_with(&g, &options);
+    let names: Vec<_> = plan.steps().iter().map(|s| s.primitive.name()).collect();
+    assert_eq!(names, ["exp", "reshape", "tanh"], "{plan}");
+    assert_eq!(plan.steps()[0].output.0, Buffer::Workspace(0), "{plan}");
+    assert_eq!(
+        (plan.workspace_bytes(), plan.workspace_alignment()),
+        (256, 1024),
+        "{plan}"
+    );
+    let inputs = [data(&[4, 8], 1)];
+    let expected = reference::run(&g, &inputs).unwrap();
+    assert_eq!(
+        expected[0].to_vec::<f32>(),
+        plan.run(&inputs).unwrap()[0].to_vec::<f32>()
+    );
 }

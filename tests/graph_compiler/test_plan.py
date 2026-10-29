@@ -152,10 +152,15 @@ def test_compiled_blocks_match_cpu(device, dtype, triton_on_cuda):
 
 
 def test_plan():
-    """A plan folds the reshape away, sizes its workspace and checks input dtypes when run."""
+    """A plan folds the reshape away, sizes its workspace, prints as its
+    steps, checks input dtypes when run, and rejects input positions the
+    graph doesn't have."""
     graph = lumen.make_graph(lambda x: F.tanh((F.exp(x) + 1).reshape(-1)))(lumen.zeros([16, 16]))
     plan = lumen.graph_compiler.Plan(graph)
-    assert "reshape" not in str(plan)
+    assert "reshape" not in str(plan) and repr(plan) == str(plan)
+    for positions in ({"donate": [1]}, {"parameters": [3]}, {"donate_into": [(2, 0)]}):
+        with pytest.raises(ValueError, match="the graph has 1 inputs, got input [123]"):
+            lumen.graph_compiler.Plan(graph, **positions)
     assert plan.workspace_bytes == 1024 + 4, plan
     x = rand(16, 16)
     np.testing.assert_allclose(

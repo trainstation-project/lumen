@@ -193,13 +193,30 @@ def test_the_tangent_program_is_pruned():
 
 
 def test_transforms_check_their_inputs():
-    """grad needs a float scalar output, and transforms run only while tracing."""
+    """grad needs a float scalar output, transforms run only while tracing, the
+    tangents and cotangents they take match their values in number and type,
+    and a primitive without a derivative raises."""
     x = lumen.empty([3], device="meta")
     with pytest.raises(TypeError, match="float scalar"):
         lumen.make_graph(lumen.grad(lambda x: x * 2.0))(x)
     for transform in (lambda: lumen.vjp(lambda x: x, x), lambda: lumen.grad(lambda x: F.sum(x))(x)):
         with pytest.raises(RuntimeError, match="while tracing"):
             transform()
+    errors = [
+        (
+            lambda x: lumen.vjp(lambda a: a * 2.0, 2.0),
+            TypeError,
+            "nothing to differentiate: the arguments have no tensors",
+        ),
+        (lambda x: lumen.jvp(lambda a: a, (x,), (x, x)), ValueError, "jvp: 1 primals, 2 tangents"),
+        (lambda x: lumen.jvp(lambda a: a, (x,), (x.half(),)), TypeError, "a tangent must have its primal's type"),
+        (lambda x: lumen.vjp(lambda a: a * 2.0, x)[1](x.half()), TypeError, "a cotangent must have its value's type"),
+        (lambda x: (x * 2.0).backward(x.half()), TypeError, "backward: a gradient must have its value's type"),
+        (lambda x: lumen.grad(lambda a: F.sum(F.sin(a)))(x), NotImplementedError, "sin has no JVP rule"),
+    ]
+    for f, error, message in errors:
+        with pytest.raises(error, match=message):
+            lumen.make_graph(f)(x)
 
 
 class _Exp(lumen.autograd.Function):
@@ -616,3 +633,213 @@ def test_projections_backward_writes_cotangents_side_by_side(device, triton_on_c
     for a, b in zip(gw, gw_):
         _equal(a, b, device)
     np.testing.assert_allclose(gx, gx_, rtol=1e-5, atol=1e-5)
+
+
+class _Doubled(lumen.autograd.Function):
+    """`2 * x`, defining forward alone."""
+
+    @staticmethod
+    def forward(ctx, x):
+        """`2 * x`."""
+        return x * 2.0
+
+
+def test_function_errors():
+    """A Function missing forward, backward or jvp raises when it is needed;
+    so does a forward not returning tensors, a jvp returning the wrong
+    number of tangents, and a backward returning the wrong number of
+    gradients or one for a name that is not an argument. A backward may
+    return its gradients as a dict alone."""
+    (x,) = arrays((3,))
+
+    class Empty(lumen.autograd.Function):
+        """No methods."""
+
+    class Number(lumen.autograd.Function):
+        """A forward returning a tensor and a Python number."""
+
+        @staticmethod
+        def forward(ctx, x):
+            """`x` and a number, not a tensor."""
+            return x, 1.0
+
+    class Wrong(lumen.autograd.Function):
+        """Two outputs; jvp and backward return the wrong counts."""
+
+        @staticmethod
+        def forward(ctx, x, y):
+            """`x + y` and `x * y`."""
+            return x + y, x * y
+
+        @staticmethod
+        def jvp(ctx, tx, ty):
+            """One tangent for two outputs."""
+            return tx
+
+        @staticmethod
+        def backward(ctx, ga, gb):
+            """Three gradients for two arguments."""
+            return ga, gb, ga
+
+    class Misnamed(lumen.autograd.Function):
+        """A backward naming a gradient `z` forward has no argument for."""
+
+        @staticmethod
+        def forward(ctx, x):
+            """`x + 1`."""
+            return x + 1.0
+
+        @staticmethod
+        def backward(ctx, g):
+            """A gradient for `z`."""
+            return {"z": g}
+
+    class Named(lumen.autograd.Function):
+        """`3 * x`, its gradient returned by name alone."""
+
+        @staticmethod
+        def forward(ctx, x):
+            """`3 * x`."""
+            return x * 3.0
+
+        @staticmethod
+        def backward(ctx, g):
+            """`3 * g` for `x`, by name."""
+            return {"x": g * 3.0}
+
+    def tangent(fn):
+        """The tangents of `fn`'s outputs at `x` along ones."""
+        return lambda x: lumen.jvp(fn, (x,), (x * 0.0 + 1.0,))[1]
+
+    errors = [
+        (lambda x: Empty.apply(x), NotImplementedError, "defines forward"),
+        (lumen.grad(lambda x: F.sum(_Doubled.apply(x))), NotImplementedError, "defines backward"),
+        (tangent(_Doubled.apply), NotImplementedError, "defines jvp"),
+        (
+            lambda x: Number.apply(x),
+            TypeError,
+            r"Number.forward must return a tensor or a tuple of them, got \(TracedTensor",
+        ),
+        (tangent(lambda a: Wrong.apply(a, a)), ValueError, "Wrong.jvp returned 1 tangents for 2 outputs"),
+        (
+            lumen.grad(lambda x: F.sum(Wrong.apply(x, x)[0])),
+            ValueError,
+            "Wrong.backward returned 3 gradients for 2 positional arguments",
+        ),
+        (lumen.grad(lambda x: F.sum(Misnamed.apply(x))), ValueError, "gradient for 'z', not an argument"),
+    ]
+    for f, error, message in errors:
+        with pytest.raises(error, match=message):
+            lumen.compile(f)(lumen.from_numpy(x))
+    g = lumen.compile(lumen.grad(lambda x: F.sum(Named.apply(x) * x)))(lumen.from_numpy(x))
+    np.testing.assert_allclose(lumen.to_numpy(g), 6 * x)
+
+
+def test_collectives_are_differentiated_as_sums():
+    """A summing all_reduce's tangent and gradient are all_reduces; an
+    all_gather's gradient a reduce_scatter and a reduce_scatter's an
+    all_gather, its tangent a reduce_scatter; a max is not differentiable."""
+    x, x2 = lumen.empty([3], device="meta"), lumen.empty([2, 3], device="meta")
+    ranks = [0, 1]
+
+    def text(f, *args):
+        """The primitives of the graph `f` traces to on `args`, in order."""
+        return [n["primitive"] for n in lumen.make_graph(f)(*args).nodes()]
+
+    def jvp(collective):
+        """The tangent of `collective` (waited on) along `t`."""
+        return lambda x, t: lumen.jvp(lambda a: prims.device_wait(collective(a)), (x,), (t,))[1]
+
+    def grad(collective):
+        """The gradient of the sum of `collective` (waited on)."""
+        return lumen.grad(lambda a: F.sum(prims.device_wait(collective(a))))
+
+    all_reduce = lambda a: prims.all_reduce(a, "sum", ranks)  # noqa: E731
+    reduce_scatter = lambda a: prims.reduce_scatter(a, "sum", ranks)  # noqa: E731
+    assert "all_reduce" in text(jvp(all_reduce), x, x)
+    assert "all_reduce" in text(grad(all_reduce), x)
+    assert "reduce_scatter" in text(grad(lambda a: prims.all_gather(a, ranks)), x)
+    assert "reduce_scatter" in text(jvp(reduce_scatter), x2, x2)
+    assert "all_gather" in text(grad(reduce_scatter), x2)
+    for collective, at in (
+        (lambda a: prims.all_reduce(a, "max", ranks), "all_reduce"),
+        (lambda a: prims.reduce_scatter(a, "min", ranks), "reduce_scatter"),
+    ):
+        for f, args in ((jvp(collective), (x2, x2)), (grad(collective), (x2,))):
+            with pytest.raises(NotImplementedError, match=f"{at}: only a sum is differentiable"):
+                lumen.make_graph(f)(*args)
+
+
+def test_gradients_of_casts_and_scatter_adds():
+    """A cast's cotangent is cast back (an argument's too: nothing produced
+    it); a scatter_add passes its cotangent to the operand and gathers it
+    for the updates."""
+    x, c, u = arrays((3,), (3,), (2,), seed=2)
+    x, c, u = x.astype(np.float32), c.astype(np.float32), u.astype(np.float32)
+
+    def pulled(x, c):
+        """`c` pulled back through `x.bfloat16()`."""
+        return lumen.vjp(lambda a: a.bfloat16(), x)[1](c)[0]
+
+    got = lumen.compile(pulled)(lumen.from_numpy(x), lumen.from_numpy(c).to(dtype="bfloat16"))
+    assert got.dtype == "float32"
+    np.testing.assert_array_equal(
+        lumen.to_numpy(got), lumen.to_numpy(lumen.from_numpy(c).to(dtype="bfloat16").to(dtype="float32"))
+    )
+    index = np.array([2, 0], dtype=np.int32)
+    w = np.arange(3, dtype=np.float32) + 1
+
+    def loss(x, u, i, w):
+        """Weighted sum of `u` scatter-added into `x` at `i`."""
+        return F.sum(prims.scatter_add(x, i, u, 0) * w)
+
+    gx, gu = lumen.compile(lumen.grad(loss, (0, 1)))(*map(lumen.from_numpy, (x, u, index, w)))
+    np.testing.assert_array_equal(lumen.to_numpy(gx), w)
+    np.testing.assert_array_equal(lumen.to_numpy(gu), w[index])
+
+
+def test_unfusable_cross_entropies_keep_their_backward():
+    """With fused_linear_cross_entropy_chunk_size set, a cross entropy of
+    logits that are not a plain float32 dot's (scaled after it, or a
+    float64 dot's) is differentiated as written: the gradients without it."""
+    rng = np.random.default_rng(0)
+    h, w = rng.standard_normal((8, 4)).astype(np.float32), rng.standard_normal((6, 4)).astype(np.float32)
+    t = rng.integers(0, 6, 8).astype(np.int64)
+    args = [lumen.from_numpy(a) for a in (h, w, t)]
+    cases = [
+        lambda h, w, t: F.mean(F.cross_entropy(F.matmul(h, w.t(), "float32", "float32") * 2.0, t)),
+        lambda h, w, t: F.mean(F.cross_entropy(F.matmul(h.double(), w.double().t(), "float64", "float64"), t)),
+    ]
+    for case in cases:
+        step = lumen.grad(case, (0, 1))
+        want = [lumen.to_numpy(g) for g in lumen.compile(step)(*args)]
+        lumen.config.compiler.cpu.fused_linear_cross_entropy_chunk_size = 4
+        try:
+            graph = str(lumen.make_graph(step)(*args))
+            got = [lumen.to_numpy(g) for g in lumen.compile(step)(*args)]
+        finally:
+            lumen.config.compiler.cpu.fused_linear_cross_entropy_chunk_size = None
+        assert "dynamic_update_slice" not in graph, graph
+        for a, b in zip(got, want):
+            np.testing.assert_array_equal(a, b)
+
+
+def test_dots_with_several_free_weight_dimensions_do_not_merge():
+    """Dots of one lhs and 3-d weights (two free dimensions each) are not
+    merged for the backward, and their gradients are the dots' own."""
+    x, w1, w2 = arrays((2, 4), (4, 3, 2), (4, 3, 2), seed=3)
+    dims = (((1,), (0,)), ((), ()))
+
+    def loss(x, w1, w2):
+        """Sum of tanh of both dots of `x`."""
+        dot = lambda w: prims.dot_general(x, w, dims, "float64", "float64")  # noqa: E731
+        return F.sum(F.tanh(dot(w1)) + F.tanh(dot(w2)))
+
+    graph = lumen.make_graph(lumen.grad(loss, (0, 1, 2)))(*map(lumen.from_numpy, (x, w1, w2)))
+    assert [n["primitive"] for n in graph.nodes()].count("dot_general") == 6
+    gx, g1, g2 = lumen.compile(lumen.grad(loss, (0, 1, 2)))(*map(lumen.from_numpy, (x, w1, w2)))
+    numpy_loss = lambda x, w1, w2: (
+        np.tanh(np.tensordot(x, w1, 1)) + np.tanh(np.tensordot(x, w2, 1))
+    ).sum()  # noqa: E731
+    for argnum, got in enumerate((gx, g1, g2)):
+        np.testing.assert_allclose(lumen.to_numpy(got), numeric_grad(numpy_loss, [x, w1, w2], argnum), rtol=1e-5)

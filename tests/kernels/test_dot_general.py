@@ -136,3 +136,93 @@ def test_tuned_matmul_matches_numpy_in_every_layout(device, dtype, lhs_k, rhs_k,
     got = lumen.compile(lambda a, b: prims.dot_general(a, b, dims, "float32", dtype))(a, b)
     rtol = 1e-4 if dtype == "float32" else 2**-6
     np.testing.assert_allclose(lumen.to_numpy(got.to(dtype="float32")), want, rtol=rtol, atol=rtol * 16)
+
+
+@pytest.mark.mps
+def test_mps_dot_of_two_dtypes_is_refused():
+    """MPS has no dot of operands of two dtypes: compiling one raises
+    naming both and the way out; the CPU reference computes it."""
+    a, b = np.ones((4, 8), np.float32), np.ones((8, 3), np.float32)
+    f = lambda a, b: prims.dot_general(a, b, (([1], [0]), ([], [])), "float32", "float32")  # noqa: E731
+    cpu = lumen.compile(f, device="cpu")(lumen.from_numpy(a), lumen.from_numpy(b).to(dtype="float16"))
+    np.testing.assert_array_equal(lumen.to_numpy(cpu), np.full((4, 3), 8, np.float32))
+    try:
+        x, y = lumen.from_numpy(a).to("mps"), lumen.from_numpy(b).to("mps").to(dtype="float16")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    with pytest.raises(
+        RuntimeError, match="dot_general: has no kernel of two dtypes on MPS, got f32\\[4,8\\] and f16"
+    ):
+        lumen.compile(f, device="mps")(x, y)
+
+
+@pytest.mark.mps
+@pytest.mark.parametrize("n, vocab, tiles", [(192, 2048, "mid"), (256, 2048, "large"), (5, 7, "small"), (0, 7, None)])
+def test_mps_linear_cross_entropy_tiles_and_launches(n, vocab, tiles):
+    """MPS's linear cross entropy (``cross_entropy(h @ w.T)``, nothing else
+    reading the logits) runs its matmul on the tiles that fit its rows (64
+    x 64 where 33 to 64 rows are left of a 128-row tile) and is profiled as
+    its two launches, partials (each row's max and sum of exps a tile of
+    classes, ``[2, n, tiles]``) then combine (into ``[2, n]``: losses and
+    log-sum-exps); of no rows it launches nothing. Its losses NumPy's."""
+    from lumen import functional as F
+
+    rng = np.random.default_rng(0)
+    h = (rng.standard_normal((n, 32)) / 4).astype(np.float32)
+    w = rng.standard_normal((vocab, 32)).astype(np.float32)
+    t = rng.integers(0, vocab, n).astype(np.int64)
+    try:
+        H, W, T = (lumen.from_numpy(a).to("mps") for a in (h, w, t))
+    except RuntimeError as e:
+        pytest.skip(str(e))
+
+    def loss(h, w, t):
+        """Per-row cross entropy of the logits `h @ w.T`."""
+        return F.cross_entropy(F.matmul(h, w.t(), "float32", "float32"), t)
+
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS], record_shapes=True) as prof:
+        got = lumen.to_numpy(lumen.compile(loss)(H, W, T))
+    kernels = [e["kernel"] for e in prof.events() if e["kind"] == "gpu"]
+    if tiles is None:
+        assert got.shape == (0,) and not any(k.startswith("lce_") for k in kernels), kernels
+        return
+    launches = [e for e in prof.events() if e["name"].startswith("linear_cross_entropy (")]
+    assert [e["name"] for e in launches] == ["linear_cross_entropy (partials)", "linear_cross_entropy (combine)"]
+    (_, (_, partial)), (_, (_, losses)) = ((e["inputs"], e["outputs"][0]) for e in launches)
+    assert partial[:2] == [2, n] and launches[1]["inputs"] == [("float32", partial)] and losses == [2, n], launches
+    partials = next(k for k in kernels if k.startswith("lce_partials"))
+    assert ("small_" in partials, "mid_" in partials) == (tiles == "small", tiles == "mid"), partials
+    x = h.astype(np.float64) @ w.T
+    m = x.max(-1, keepdims=True)
+    lse = (m + np.log(np.exp(x - m).sum(-1, keepdims=True)))[:, 0]
+    np.testing.assert_allclose(got, lse - x[np.arange(n), t], rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("norm", ["rms_norm", "softmax"])
+def test_a_vector_times_a_matrix_fused_with_a_wide_norm(device, norm, triton_on_cuda):
+    """A decode step's projection of one row (``x @ w.T``, its K
+    contiguous: a matrix-vector product) normalized over 4096 columns,
+    more than one tile: on MPS one fusion whose matmul is the
+    matrix-vector kernel over 64-column tiles, then the row's norm.
+    Values the CPU's."""
+    rng = np.random.default_rng(0)
+    x = rng.standard_normal((1, 256)).astype(np.float32)
+    w = (rng.standard_normal((4096, 256)) / 16).astype(np.float32)
+
+    def f(x, w):
+        """The norm of the row's projection."""
+        y = F.matmul(x, w.t(), "float32", "float32")
+        return F.rms_norm(y, [4096], None, 1e-6) if norm == "rms_norm" else F.softmax(y, -1)
+
+    want = lumen.to_numpy(lumen.compile(f, device="cpu")(lumen.from_numpy(x), lumen.from_numpy(w)))
+    try:
+        X, W = lumen.from_numpy(x).to(device), lumen.from_numpy(w).to(device)
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    if device == "mps" and norm == "rms_norm":
+        (step,) = lumen.graph_compiler.Plan(lumen.make_graph(f)(X, W), "mps").steps()
+        assert step["label"].startswith("dot_general"), step["label"]
+        assert "matmul_gemv" in step["fusion"]["source"], step["label"]
+    got = lumen.to_numpy(lumen.compile(f)(X, W).to("cpu"))
+    np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-6)

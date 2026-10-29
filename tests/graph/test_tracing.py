@@ -285,3 +285,156 @@ def test_python_values_inside_a_compiled_function_raise():
     for body in (lambda x: x.item(), lambda x: x.tolist(), lambda x: float(F.sum(x))):
         with pytest.raises((AttributeError, TypeError)):
             lumen.compile(body)(lumen.tensor([1.0]))
+
+
+def test_operands_must_be_traced_tensors():
+    """A primitive of a Python scalar, and an elementwise op of scalars
+    alone, raise: they have no tensor operand."""
+    x = lumen.tensor([1.0])
+    with pytest.raises(TypeError, match="exp: operands must be traced tensors of the current trace, got 1.0"):
+        lumen.compile(lambda x: prims.exp(1.0))(x)
+    with pytest.raises(TypeError, match="max needs a tensor operand"):
+        lumen.compile(lambda x: F.maximum(1.0, 2.0) + x)(x)
+
+
+def test_make_graph_needs_meta_weights():
+    """make_graph of a module whose weight holds data raises: weights are whole meta tensors."""
+
+    class Bias(lumen.nn.Module):
+        """Adds `b`."""
+
+        b: lumen.Tensor
+
+    x = lumen.tensor([1.0, 2.0])
+    with pytest.raises(TypeError, match="a module's weights must be whole meta tensors, got a cpu:0 tensor"):
+        lumen.make_graph(lambda m, x: m.b + x)(Bias(x), x)
+
+
+def test_runtime_scalar_times_a_device_value():
+    """A runtime scalar times a 0-d value computed from a tensor: the
+    product runs in the device graph, not the scalars' host graph."""
+    x = np.array([1.0, 2.0, 4.0], dtype=np.float32)
+    f = lumen.compile(lambda x, s: F.sum(x) * s)
+    assert lumen.to_numpy(f(lumen.from_numpy(x), 2.0)) == 14.0
+    assert lumen.to_numpy(f(lumen.from_numpy(x), 0.5)) == 3.5
+
+
+def test_unused_backward_warns():
+    """backward() whose gradients the compiled function neither returns nor
+    uses warns that they are pruned; the result is still computed."""
+
+    def f(x):
+        """Computes x's gradient, then drops it."""
+        F.sum(x * x).backward()
+        return x + 1.0
+
+    with pytest.warns(UserWarning, match="backward\\(\\) computed gradients the compiled function does not use"):
+        out = lumen.compile(f)(lumen.tensor([1.0, 2.0]))
+    assert lumen.to_numpy(out).tolist() == [2.0, 3.0]
+
+
+def test_static_arguments_select_the_trace():
+    """A non-scalar, non-tensor argument (a string) is static: each value traces its own program."""
+    x = np.array([-1.0, 0.0, 2.0], dtype=np.float32)
+    f = lumen.compile(lambda x, act: getattr(F, act)(x))
+    np.testing.assert_array_equal(lumen.to_numpy(f(lumen.from_numpy(x), "relu")), np.maximum(x, 0))
+    np.testing.assert_allclose(lumen.to_numpy(f(lumen.from_numpy(x), "exp")), np.exp(x), rtol=1e-6)
+
+
+class _Counter(lumen.nn.Module):
+    """An int field `n` used as a shape: static."""
+
+    n: int
+
+
+def test_static_fields_assigned_in_a_trace():
+    """A module's int field used as a shape stays static: assigning it a
+    Python value writes the value back after each call (a new value
+    retraces); assigning it a traced value raises."""
+
+    def take(m, x):
+        """The first `m.n` entries of `x`, incrementing `m.n`."""
+        y = x[: m.n]
+        m.n = m.n + 1
+        return y * 1.0
+
+    x = lumen.tensor([1.0, 2.0, 3.0])
+    counter, f = _Counter(1), lumen.compile(take)
+    assert lumen.to_numpy(f(counter, x)).tolist() == [1.0] and counter.n == 2
+    assert lumen.to_numpy(f(counter, x)).tolist() == [1.0, 2.0] and counter.n == 3
+
+    def traced(m, x):
+        """Slices by `m.n`, then assigns it a traced value."""
+        y = x[: m.n]
+        m.n = F.sum(x).int()
+        return y
+
+    with pytest.raises(TypeError, match="argument 0's n is static .* cannot be assigned a traced value"):
+        lumen.compile(traced)(_Counter(2), x)
+
+
+class _Gated(lumen.nn.Module):
+    """Gated MLP projection `relu(x @ w1) * (x @ w3)`, its dots merged over packed weights."""
+
+    w1: lumen.Tensor
+    w3: lumen.Tensor
+
+    def __call__(self, x):
+        """Applies the gated projection to `x`."""
+        return F.relu(F.matmul(x, self.w1, "float32", x.dtype)) * F.matmul(x, self.w3, "float32", x.dtype)
+
+
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_weights_placed_apart_get_a_plan_without_packing(device, tmp_path, triton_on_cuda):
+    """A merged dot reads its weights packed in one block, placed so by the
+    first compiled function taking them; weights another function placed
+    apart first cannot be read in place, so a function merging their dots
+    gets a plan without packing, whether it has a packed plan cached (for
+    other weights) or not. dump_code compiles a packed plan of ones-filled
+    inputs, its packed blocks included."""
+    try:
+        lumen.zeros([1], device=device)
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    x = rand(16, 32)
+
+    def placed(compiled):
+        """A `_Gated` placed by `compiled`'s first call, loaded with seeded weights, and those weights."""
+        model = _Gated(lumen.empty([32, 64], device="meta"), lumen.empty([32, 64], device="meta"))
+        compiled(model, lumen.empty([16, 32], device="meta"))
+        w1, w3 = rand(32, 64, seed=1), rand(32, 64, seed=2)
+        model.load_state_dict({"w1": lumen.from_numpy(w1), "w3": lumen.from_numpy(w3)})
+        return model, np.maximum(x @ w1, 0) * (x @ w3)
+
+    gated = lumen.compile(lambda m, x: m(x), device=device)
+    apart = lumen.compile(
+        lambda m, x: F.matmul(x, m.w1, "float32", "float32") + F.matmul(x + 1.0, m.w3, "float32", "float32"),
+        device=device,
+    )
+    packed, expected = placed(gated)
+    assert packed.w1._placed(device).shares_storage_with(packed.w3._placed(device))
+    np.testing.assert_allclose(lumen.to_numpy(gated(packed, lumen.from_numpy(x))), expected, rtol=1e-5, atol=1e-5)
+    separate, expected = placed(apart)
+    assert not separate.w1._placed(device).shares_storage_with(separate.w3._placed(device))
+    np.testing.assert_allclose(lumen.to_numpy(gated(separate, lumen.from_numpy(x))), expected, rtol=1e-5, atol=1e-5)
+    fresh = lumen.compile(lambda m, x: m(x), device=device)
+    np.testing.assert_allclose(lumen.to_numpy(fresh(separate, lumen.from_numpy(x))), expected, rtol=1e-5, atol=1e-5)
+    assert gated.dump_code(tmp_path, packed, lumen.from_numpy(x))
+
+
+@pytest.mark.parametrize("device", ["cpu", MPS, CUDA])
+def test_linear_cross_entropy_primitive(device, triton_on_cuda):
+    """prims.linear_cross_entropy of rows `h`, weights `w` and classes: a
+    float32 `[2, B]` of each row's loss (log-sum-exp minus the class's
+    logit), then its log-sum-exp, the logits `h @ w.T` never stored."""
+    h, w = rand(4, 8), rand(5, 8, seed=1)
+    target = np.array([0, 1, 4, 2], dtype=np.int64)
+    try:
+        args = [lumen.from_numpy(a).to(device) for a in (h, w, target)]
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    out = lumen.to_numpy(lumen.compile(prims.linear_cross_entropy)(*args).to("cpu"))
+    logits = h.astype(np.float64) @ w.T
+    lse = np.log(np.exp(logits).sum(-1))
+    assert out.dtype == np.float32 and out.shape == (2, 4)
+    np.testing.assert_allclose(out, [lse - logits[np.arange(4), target], lse], rtol=1e-5, atol=1e-5)

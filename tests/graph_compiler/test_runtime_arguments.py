@@ -57,3 +57,53 @@ def test_tensors_at_other_addresses(device, dtype, triton_on_cuda):
     for seed in range(3):
         x = (np.random.default_rng(seed).integers(0, 50, 1024)).astype(dtype)
         np.testing.assert_array_equal(lumen.to_numpy(g(lumen.from_numpy(x).to(device)).to("cpu")), x * 3 + 1)
+
+
+@pytest.mark.parametrize("device", ["cpu", MPS, CUDA])
+@pytest.mark.parametrize("kernel", ["reduction", "matmul epilogue", "row"])
+def test_float_scalars_in_reductions_and_matmuls(device, kernel, triton_on_cuda):
+    """A Python float read inside a reduction's prologue, a matmul's
+    epilogue or a softmax row is traced once and passed to each run's kernel
+    as an argument: each run computes with its own value, as the CPU does."""
+    _device(device)
+    rng = np.random.default_rng(0)
+    x, w = rng.standard_normal((64, 512)).astype(np.float32), rng.standard_normal((512, 256)).astype(np.float32)
+    traces = []
+    import lumen.functional as F
+
+    def f(x, w, c):
+        """Counts the trace and computes the case's kernel reading `c`."""
+        traces.append(1)
+        if kernel == "reduction":
+            return F.sum(x * c, -1)
+        if kernel == "row":
+            return F.softmax(x * c, -1)
+        return F.matmul(x, w, "float32", "float32") * c
+
+    g, cpu = lumen.compile(f, device=device), lumen.compile(f, device="cpu")
+    args = (lumen.from_numpy(x).to(device), lumen.from_numpy(w).to(device))
+    for c in (0.5, -2.0, 3.0):
+        got = lumen.to_numpy(g(*args, c).to("cpu"))
+        want = lumen.to_numpy(cpu(lumen.from_numpy(x), lumen.from_numpy(w), c))
+        np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-4)
+    assert len(traces) == 2
+
+
+@pytest.mark.parametrize("device", ["cpu", MPS, CUDA])
+def test_a_reduction_of_many_inputs(device, triton_on_cuda):
+    """A sum of sixteen inputs' sum, one reduction fusion reading them all
+    (its generated kernel's argument list wrapped one to a line): the CPU's."""
+    _device(device)
+    arrays = [np.random.default_rng(k).standard_normal((32, 64)).astype(np.float32) for k in range(16)]
+    import lumen.functional as F
+
+    def f(*xs):
+        """The row sums of the inputs' sum."""
+        total = xs[0]
+        for x in xs[1:]:
+            total = total + x
+        return F.sum(total, -1)
+
+    got = lumen.to_numpy(lumen.compile(f)(*(lumen.from_numpy(a).to(device) for a in arrays)).to("cpu"))
+    want = lumen.to_numpy(lumen.compile(f, device="cpu")(*(lumen.from_numpy(a) for a in arrays)))
+    np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-5)

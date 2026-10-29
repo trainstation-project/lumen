@@ -376,3 +376,318 @@ fn meta_tensors_load_from_the_header_and_do_not_save() {
         |e| matches!(e, Error::MetaTensor(n) if n == "m"),
     );
 }
+
+/// The JSON parser reads every value kind, number form and escape, keeping number text as written.
+#[test]
+fn json_parses_every_value_kind() {
+    use super::json::{Value, parse};
+    let doc = r#"{"a": [true, false, null, -0, -12.5e+3, 1E-2, 7e9, 0.25],
+        "s": "\"\\\/\b\f\n\r\t\u00e9\ud83d\ude00", "o": {}, "e": []}"#;
+    let num = |s: &str| Value::Number(s.into());
+    assert_eq!(
+        parse(doc).unwrap(),
+        Value::Object(vec![
+            (
+                "a".into(),
+                Value::Array(vec![
+                    Value::Bool(true),
+                    Value::Bool(false),
+                    Value::Null,
+                    num("-0"),
+                    num("-12.5e+3"),
+                    num("1E-2"),
+                    num("7e9"),
+                    num("0.25"),
+                ])
+            ),
+            (
+                "s".into(),
+                Value::String("\"\\/\u{8}\u{c}\n\r\t\u{e9}\u{1F600}".into())
+            ),
+            ("o".into(), Value::Object(vec![])),
+            ("e".into(), Value::Array(vec![])),
+        ])
+    );
+}
+
+/// Each JSON syntax error is reported with what was expected and the byte offset.
+#[test]
+fn json_rejects_malformed_documents() {
+    use super::json::parse;
+    let cases = [
+        ("{} x", "trailing characters at byte 3"),
+        ("{\"a\" 1}", "expected `:` at byte 5"),
+        ("tru", "expected a value at byte 0"),
+        ("nul", "expected a value at byte 0"),
+        ("@", "expected a value at byte 0"),
+        ("", "unexpected end of input at byte 0"),
+        ("{1:2}", "expected a string key at byte 1"),
+        ("{\"a\":1 2}", "expected `,` or `}` at byte 7"),
+        ("[1 2]", "expected `,` or `]` at byte 3"),
+        ("-", "expected digits at byte 1"),
+        ("1.", "expected digits after `.` at byte 2"),
+        ("1e+", "expected exponent digits at byte 3"),
+        ("\"\\", "unterminated escape at byte 2"),
+        ("\"\\x\"", "invalid escape at byte 3"),
+        ("\"\\u12\"", "expected 4 hex digits at byte 3"),
+        ("\"\\ud83d\"", "unpaired surrogate at byte 7"),
+        ("\"\\ud83d\\u0041\"", "unpaired surrogate at byte 13"),
+        ("\"\\udc00\"", "unpaired surrogate at byte 7"),
+        ("\"a\nb\"", "control character in string at byte 2"),
+        ("\"ab", "unterminated string at byte 3"),
+    ];
+    for (text, err) in cases {
+        assert_eq!(parse(text).unwrap_err(), err, "{text:?}");
+    }
+    // One level past the 64-deep limit is refused; the limit itself parses.
+    assert!(parse(&format!("{}{}", "[".repeat(65), "]".repeat(65))).is_ok());
+    assert_eq!(
+        parse(&"[".repeat(66)).unwrap_err(),
+        "nested too deeply at byte 65"
+    );
+}
+
+/// `write_string` escapes quotes, backslashes and every control character, and the parser reads them back.
+#[test]
+fn json_strings_round_trip() {
+    let s = "q\"b\\n\nr\rt\tb\u{8}f\u{c}u\u{1f}é";
+    let mut out = String::new();
+    super::json::write_string(&mut out, s);
+    assert_eq!(out, "\"q\\\"b\\\\n\\nr\\rt\\tb\\bf\\fu\\u001fé\"");
+    assert_eq!(
+        super::json::parse(&out).unwrap(),
+        super::json::Value::String(s.into())
+    );
+}
+
+/// Each error variant formats a message naming the problem, and I/O and UTF-8 errors expose their source.
+#[test]
+fn errors_describe_themselves() {
+    use std::error::Error as _;
+    let bad = vec![0xffu8];
+    let utf8 = std::str::from_utf8(&bad).unwrap_err();
+    let cases: [(Error, &str); 16] = [
+        (
+            Error::InvalidHeader(utf8),
+            "invalid UTF-8 in header: invalid utf-8 sequence of 1 bytes from index 0",
+        ),
+        (
+            Error::InvalidHeaderDeserialization("x".into()),
+            "invalid JSON in header: x",
+        ),
+        (
+            Error::HeaderTooLarge,
+            "header too large (over 100000000 bytes)",
+        ),
+        (Error::HeaderTooSmall, "header too small"),
+        (Error::InvalidHeaderLength, "invalid header length"),
+        (Error::TensorNotFound("w".into()), "no tensor named `w`"),
+        (
+            Error::TensorInvalidInfo,
+            "a tensor's data length does not match its shape and dtype",
+        ),
+        (
+            Error::InvalidOffset("w".into()),
+            "invalid offsets for tensor `w`",
+        ),
+        (io::Error::other("disk").into(), "disk"),
+        (
+            Error::MetadataIncompleteBuffer,
+            "the tensors do not cover the file's data exactly",
+        ),
+        (Error::ValidationOverflow, "a tensor's shape overflows"),
+        (Error::MisalignedSlice, "a tensor ends inside a byte"),
+        (
+            Error::UnsupportedDtype("w".into(), "F4".into()),
+            "tensor `w` has dtype F4, which lumen does not support",
+        ),
+        (
+            Error::NotContiguous("w".into()),
+            "tensor `w` is not contiguous: save contiguous tensors (call .contiguous() on it first)",
+        ),
+        (
+            Error::MetaTensor("w".into()),
+            "tensor `w` is on the meta device: it has no data to save",
+        ),
+        (
+            Error::BigEndian,
+            "safetensors files are little-endian; this host is not",
+        ),
+    ];
+    for (e, msg) in &cases {
+        assert_eq!(e.to_string(), *msg);
+    }
+    assert!(cases[0].0.source().is_some());
+    assert_eq!(cases[8].0.source().unwrap().to_string(), "disk");
+    assert!(cases[3].0.source().is_none());
+}
+
+/// Builds a file from header JSON `header` followed by `data` bytes.
+fn file_with(header: &str, data: &[u8]) -> Vec<u8> {
+    let mut file = (header.len() as u64).to_le_bytes().to_vec();
+    file.extend(header.as_bytes());
+    file.extend(data);
+    file
+}
+
+/// Headers whose JSON is valid but not shaped like a safetensors header name the problem.
+#[test]
+fn badly_shaped_headers_name_the_problem() {
+    let info = r#"{"dtype":"F32","shape":[1],"data_offsets":[0,4]}"#;
+    let cases = [
+        ("[]".to_string(), "the header is not a JSON object"),
+        (
+            format!(r#"{{"a":{info},"a":{info}}}"#),
+            "duplicate tensor `a`",
+        ),
+        (
+            r#"{"__metadata__":{},"__metadata__":{}}"#.into(),
+            "duplicate `__metadata__`",
+        ),
+        (
+            r#"{"__metadata__":{"k":1}}"#.into(),
+            "`__metadata__` value of `k` is not a string",
+        ),
+        (
+            r#"{"__metadata__":{"k":"a","k":"b"}}"#.into(),
+            "duplicate `__metadata__` key `k`",
+        ),
+        (
+            r#"{"__metadata__":[]}"#.into(),
+            "`__metadata__` is not an object",
+        ),
+        (r#"{"w":1}"#.into(), "tensor `w`: not an object"),
+        (
+            r#"{"w":{"shape":[1]}}"#.into(),
+            "tensor `w`: missing `dtype`",
+        ),
+        (
+            r#"{"w":{"dtype":"X"}}"#.into(),
+            "tensor `w`: unknown dtype `X`",
+        ),
+        (
+            r#"{"w":{"dtype":1}}"#.into(),
+            "tensor `w`: `dtype` is not a string",
+        ),
+        (
+            r#"{"w":{"dtype":"F32","shape":1}}"#.into(),
+            "tensor `w`: `shape` is not an array",
+        ),
+        (
+            r#"{"w":{"dtype":"F32","shape":["1"]}}"#.into(),
+            "tensor `w`: expected an integer, got String(\"1\")",
+        ),
+        (
+            r#"{"w":{"dtype":"F32","shape":[-1]}}"#.into(),
+            "tensor `w`: expected a nonnegative integer, got -1",
+        ),
+        (
+            r#"{"w":{"dtype":"F32","shape":[1],"data_offsets":[0]}}"#.into(),
+            "tensor `w`: `data_offsets` is not an array of two integers",
+        ),
+    ];
+    for (header, msg) in &cases {
+        match read_metadata(&file_with(header, &[0; 4])) {
+            Err(Error::InvalidHeaderDeserialization(m)) => assert_eq!(m, *msg, "{header}"),
+            other => panic!("{header}: unexpected {other:?}"),
+        }
+    }
+    // `"__metadata__": null` means no metadata.
+    let (_, m) = read_metadata(&file_with(r#"{"__metadata__":null}"#, &[])).unwrap();
+    assert!(m.metadata().is_none());
+}
+
+/// A sub-byte dtype whose elements end partway through a byte is rejected.
+#[test]
+fn sub_byte_tensors_must_fill_whole_bytes() {
+    let header = r#"{"w":{"dtype":"F4","shape":[3],"data_offsets":[0,2]}}"#;
+    assert_err(read_metadata(&file_with(header, &[0; 2])), |e| {
+        matches!(e, Error::MisalignedSlice)
+    });
+}
+
+/// `Metadata` exposes each tensor's entry and the data length, and writes several metadata keys.
+#[test]
+fn metadata_accessors_and_multi_key_metadata() {
+    let a = f32s(&[1.0, 2.0], &[2]);
+    let b = Tensor::from_slice(&[7i64], DType::I64);
+    let metadata = BTreeMap::from([
+        ("a".to_string(), "1".to_string()),
+        ("b".to_string(), "2".to_string()),
+    ]);
+    let bytes = serialize(&[("a", &a), ("b", &b)], Some(metadata.clone())).unwrap();
+    let (_, m) = read_metadata(&bytes).unwrap();
+    assert_eq!(m.metadata(), Some(&metadata));
+    // The wider i64 comes first in data order.
+    assert_eq!(
+        m.info("b"),
+        Some(&TensorInfo {
+            dtype: Dtype::I64,
+            shape: vec![1],
+            data_offsets: (0, 8)
+        })
+    );
+    assert_eq!(m.info("a").unwrap().data_offsets, (8, 16));
+    assert!(m.info("c").is_none());
+    assert_eq!(m.data_len(), 16);
+    assert_eq!(Metadata::new(None, vec![]).unwrap().data_len(), 0);
+    assert_eq!(Dtype::F8_E4M3.to_string(), "F8_E4M3");
+}
+
+/// Saving a dtype the format lacks names the tensor and its dtype.
+#[test]
+fn unsupported_dtypes_do_not_save() {
+    let t = Tensor::zeros(&[2], TensorOptions::new().dtype(DType::I4));
+    assert!(Dtype::from_lumen(DType::F8E4M3FN).is_none());
+    assert_err(
+        serialize(&[("q", &t)], None),
+        |e| matches!(e, Error::UnsupportedDtype(n, d) if n == "q" && d == "int4"),
+    );
+}
+
+/// Tensors with no elements save as empty byte ranges and load back.
+#[test]
+fn zero_element_tensors_round_trip() {
+    let t = Tensor::zeros(&[0, 3], TensorOptions::new());
+    let bytes = serialize(&[("e", &t)], None).unwrap();
+    let loaded = deserialize(&bytes, Device::Cpu(0)).unwrap();
+    assert_eq!(loaded[0].1.shape(), [0, 3]);
+}
+
+/// File-level errors: a failed save leaves no file, and short or truncated files are refused on open.
+#[test]
+#[cfg_attr(miri, ignore = "file I/O, which Miri isolates")]
+fn file_errors() {
+    let dir = std::env::temp_dir().join(format!("lumen_safetensors_err_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let t = f32s(&[1.0, 2.0], &[2]);
+    // A path inside a missing directory fails to create its temp file.
+    let missing = dir.join("missing").join("m.safetensors");
+    assert_err(save_file(&[("t", &t)], None, &missing), |e| {
+        matches!(e, Error::Io(_))
+    });
+    assert!(!missing.exists());
+    // Renaming over a directory fails after the temp file was written; it is cleaned up.
+    let blocked = dir.join("blocked");
+    std::fs::create_dir_all(blocked.join("child")).unwrap();
+    assert_err(save_file(&[("t", &t)], None, &blocked), |e| {
+        matches!(e, Error::Io(_))
+    });
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+
+    let short = dir.join("short.safetensors");
+    std::fs::write(&short, [1u8, 0, 0]).unwrap();
+    assert_err(SafeTensorsFile::open(&short), |e| {
+        matches!(e, Error::HeaderTooSmall)
+    });
+    std::fs::write(&short, 100u64.to_le_bytes()).unwrap();
+    assert_err(SafeTensorsFile::open(&short), |e| {
+        matches!(e, Error::InvalidHeaderLength)
+    });
+
+    let good = dir.join("good.safetensors");
+    save_file(&[("t", &t)], None, &good).unwrap();
+    let loaded = load_file(&good, Device::Cpu(0)).unwrap();
+    assert_eq!(loaded[0].1.to_vec::<f32>(), [1.0, 2.0]);
+    std::fs::remove_dir_all(&dir).unwrap();
+}

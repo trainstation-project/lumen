@@ -267,3 +267,44 @@ def test_online_softmax_agrees(compiler, n):
     e = np.exp(x - x.max(-1, keepdims=True))
     np.testing.assert_allclose(exact, e / e.sum(-1, keepdims=True), rtol=1e-5, atol=1e-7)
     np.testing.assert_allclose(online, exact, rtol=1e-5, atol=1e-7)
+
+
+@pytest.mark.parametrize("device", ["cuda", "tpu"])
+def test_shared_settings_set_and_reset_per_device(compiler, device):
+    """A shared setting changed on one device's config shows on that device
+    only, and its ``reset`` restores it without touching the others."""
+    configs = lumen.config.compiler
+    config = getattr(configs, device)
+    config.merge_dots, config.memory_limit = False, 1 << 20
+    assert (config.merge_dots, configs.of(device).memory_limit) == (False, 1 << 20)
+    assert configs.mps.merge_dots and configs.cpu.memory_limit == 0
+    configs.mps.merge_dots = False
+    config.reset()
+    assert (config.merge_dots, config.memory_limit) == (True, 0)
+    assert not configs.mps.merge_dots
+
+
+@pytest.mark.mps
+def test_memory_limit_keeps_multi_output_fusions_whole(compiler):
+    """Under ``memory_limit``, a plan whose fused matmul also writes its raw
+    product for a later reader (a two-output fusion, never recomputed) still
+    computes exactly what the unlimited plan does, in no more workspace."""
+
+    def f(x, w):
+        """A matmul read by a tanh and an exp, both feeding later matmuls."""
+        h = F.matmul(x, w, "float32", "float32")
+        a = F.tanh(h)
+        y = F.matmul(a, w, "float32", "float32")
+        return F.matmul(y * F.exp(h), w, "float32", "float32") + a
+
+    meta = [lumen.empty([256, 256], device="meta")] * 2
+    plan = lambda: lumen.graph_compiler.Plan(lumen.make_graph(f)(*meta), "mps")  # noqa: E731
+    kept = plan()
+    assert any(s["extra_outputs"] for s in kept.steps()), [s["label"] for s in kept.steps()]
+    rng = np.random.default_rng(0)
+    x, w = (lumen.from_numpy(rng.standard_normal((256, 256)).astype(np.float32) / 16).to("mps") for _ in range(2))
+    want = lumen.to_numpy(lumen.compile(f)(x, w).to("cpu"))
+    compiler.memory_limit = 1
+    assert plan().workspace_bytes <= kept.workspace_bytes
+    got = lumen.to_numpy(lumen.compile(f)(x, w).to("cpu"))
+    np.testing.assert_array_equal(got, want)

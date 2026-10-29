@@ -101,14 +101,15 @@ def test_dynamic_update_slices(device, dtype, shape, update, starts, in_place):
         ((512, 256), (64, 256), [(64, 0), (128, 0), (192, 0), (256, 0)]),
         ((300, 700), (40, 300), [(13, 77), (0, 0), (290, 500), (64, 128)]),
         ((3, 70, 260), (1, 9, 130), [(1, 5, 3), (0, 0, 0), (2, 61, 130)]),
+        ((4, 4), (1, 1), [(1, 2), (3, 0), (1, 2)]),
     ],
-    ids=["aligned", "tiled", "unaligned", "lead"],
+    ids=["aligned", "tiled", "unaligned", "lead", "elements"],
 )
 @pytest.mark.parametrize("in_place", [True, False])
 def test_chained_dynamic_update_slices(device, dtype, shape, update, starts, in_place):
     """Updates at constant starts, each into the last's result, land in
-    order (later ones over earlier ones); on TPU, MPS and CUDA they run as
-    one step."""
+    order (later ones over earlier ones, single elements at one place too);
+    on TPU, MPS and CUDA they run as one step."""
     rng = np.random.default_rng(1)
     xt = _tensor(rng.standard_normal(shape).astype(np.float32), device, dtype)
     uts = [_tensor(rng.standard_normal(update).astype(np.float32), device, dtype) for _ in starts]
@@ -296,3 +297,16 @@ def test_kv_cache_is_written_in_place(device):
     assert cache.k._placed(device).storage_id == memory.storage_id
     k = lumen.to_numpy(cache.k._placed(device))
     np.testing.assert_array_equal(k[0, :6, 0], [1, 2, 3, 4, 5, 0])
+
+
+@pytest.mark.mps
+def test_mps_dynamic_slice_refuses_more_than_eight_dims():
+    """MPS's dynamic slice kernels take up to 8 dimensions: one of 9 raises
+    naming the op and the limit; the CPU reference slices it."""
+    x = np.arange(2**9, dtype=np.float32).reshape([2] * 9)
+    f = lambda x, i: prims.dynamic_slice(x, [i.reshape(())] * 9, [1] * 9)  # noqa: E731
+    one = np.array([1], np.int32)
+    got = lumen.compile(f, device="cpu")(_tensor(x, "cpu"), _tensor(one, "cpu"))
+    np.testing.assert_array_equal(lumen.to_numpy(got).ravel(), [2**9 - 1])
+    with pytest.raises(ValueError, match="dynamic_slice: 9 dimensions are more than its MPS kernels take \\(8\\)"):
+        lumen.compile(f, device="mps")(_tensor(x, "mps"), _tensor(one, "mps"))

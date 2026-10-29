@@ -301,3 +301,31 @@ def test_float64_runtime_scalars_are_exact():
     f = lumen.compile(lambda x, c: x * c, device="cpu")
     assert lumen.to_numpy(f(lumen.from_numpy(np.ones(1)), 0.1))[0] == 0.1
     assert lumen.to_numpy(f(lumen.from_numpy(np.ones(1, np.float32)), 0.1))[0] == np.float32(0.1)
+
+
+class _Named(lumen.nn.Module):
+    """A weight, a static name and learning rates held in a list."""
+
+    w: lumen.Tensor
+    name: str
+    lrs: list
+
+
+def test_a_float_in_a_list_is_written_back():
+    """A float in a module's list field (a runtime scalar) assigned with
+    copy_ is written back into the list after each call; a field that is
+    neither a weight nor a scalar (a name) passes through unchanged."""
+
+    def step(s):
+        """Halves the first learning rate and scales the weight by the second."""
+        s.lrs[0].copy_(s.lrs[0] * 0.5)
+        return s.w * s.lrs[1]
+
+    s = _Named(lumen.empty([2], device="meta"), "layer", [1.0, 3.0])
+    step = lumen.compile(step, device="cpu")
+    step(s)
+    assert s.lrs == [0.5, 3.0] and s.name == "layer"
+    s.load_state_dict({"w": lumen.from_numpy(np.ones(2, np.float32))})
+    for k in range(2, 4):
+        np.testing.assert_array_equal(lumen.to_numpy(step(s)), [3.0, 3.0])
+        assert s.lrs == [0.5**k, 3.0] and s.name == "layer"

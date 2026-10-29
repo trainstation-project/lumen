@@ -1,5 +1,6 @@
 """Tests for graph, plan and kernel-source dumps and the `lumen.viz` program writer and CLI."""
 
+import json
 import subprocess
 import sys
 
@@ -158,3 +159,132 @@ def test_the_cli_writes_the_page(tmp_path):
     )
     assert run.stdout.startswith(f"{out}: ") and "plan steps" in run.stdout
     assert out.read_text().startswith("<!doctype html>")
+
+
+@pytest.mark.mps
+def test_collect_shows_each_output_and_leaves_unmatched_runs_untimed():
+    """``collect`` of an MPS plan adds an output node for each result
+    buffer, those a step writes besides its own too; a ``run`` whose
+    profiled ranges aren't the plan's steps (another function, read from
+    the host, in a range of its own) times none of them."""
+    f = lambda x: (F.exp(x), F.sum(F.exp(x), -1), F.matmul(x, x.t(), "float32", "float32"))  # noqa: E731
+    x = lumen.from_numpy(np.arange(32, dtype=np.float32).reshape(4, 8) / 32)
+    try:
+        on_mps = x.to("mps")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    graph = lumen.make_graph(f)(on_mps)
+    plan = lumen.graph_compiler.Plan(graph, "mps")
+    other = lumen.compile(F.exp, device="mps")
+    other(x)
+
+    def run():
+        """Runs ``other`` in a range of its own."""
+        with lumen.profiler.record_function("other"):
+            other(x)
+
+    data = viz.collect(graph, plan, [on_mps], "three", runs=3, device="mps", run=run)
+    nodes = data["views"]["fused"]["nodes"]
+    assert [n["label"] for n in nodes] == ["in0", "exp → reduce_sum", "dot_general", "out0", "out1", "out2"]
+    fused = [n for n in nodes if n["kind"] == "fusion"]
+    outputs = {n["label"]: n["id"] for n in nodes if n["kind"] == "output"}
+    edges = {(src, dst) for src, dst, _ in data["views"]["fused"]["edges"]}
+    assert {(fused[0]["id"], outputs["out0"]), (fused[0]["id"], outputs["out1"])} <= edges
+    assert all(n["kernels"] == [] for n in fused)
+    assert all(n["kernels"] for n in data["views"]["traced"]["nodes"] if n["label"] == "dot_general")
+
+
+def test_code_traced_from_an_unreadable_file_is_left_out(tmp_path):
+    """A function whose source can't be read (made by ``exec``) still dumps:
+    its nodes keep their traced locations, the page has no code for them and
+    each kernel's header names the location without its line."""
+    scope = {"F": F}
+    exec(compile("def generated(x):\n    return F.exp(x) * 2.0\n", "<generated>", "exec"), scope)
+    f = lumen.compile(scope["generated"])
+    f(lumen.zeros([3]))
+    data = f.dump_graph(tmp_path / "generated.html")
+    assert data["code"] == {}
+    assert {tuple(s) for n in data["views"]["traced"]["nodes"] for s in n.get("sources") or []} == {("<generated>", 2)}
+    written = f.dump_code(tmp_path / "code")
+    assert written and all(p.read_text().splitlines()[1] == "# <generated>:2  " for p in written)
+
+
+def test_snippets_are_a_macro_or_a_function():
+    """A kernel's snippet is its ``#define`` macro (to the first line
+    without a continuation) or its function (to the closing brace), or the
+    whole source when the anchor isn't in it."""
+    from lumen.viz.code import _snippet
+
+    text = "// head\n#define M(x) \\\n  x + 1\nint after;\ninline void f() {\n  return;\n}\nint tail;\n"
+    assert _snippet(text, "#define M") == "#define M(x) \\\n  x + 1\n"
+    assert _snippet(text, "inline void f") == "inline void f() {\n  return;\n}\n"
+    assert _snippet(text, "kernel void g") == text
+
+
+def _cli(monkeypatch, *argv):
+    """Runs ``python -m lumen.viz`` with ``argv`` in this process; returns the code it exits with, None when it
+    returns."""
+    import runpy
+
+    monkeypatch.setattr(sys, "argv", ["lumen.viz", *argv])
+    # Loading FILE.py puts its folder on sys.path: restore it afterwards.
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    try:
+        runpy.run_module("lumen.viz", run_name="__main__", alter_sys=True)
+    except SystemExit as e:
+        return e.code
+    return None
+
+
+@pytest.mark.parametrize(
+    "example, inputs",
+    [
+        ("attention", ["f32[4,8]"] + ["f32[8,8]"] * 3 + ["f32[8,16]", "f32[16,8]"]),
+        ("mlp", ["f32[4,8]", "f32[8,16]", "f32[16,8]"]),
+    ],
+)
+def test_the_cli_writes_an_example_with_its_inputs(example, inputs, tmp_path, monkeypatch, capsys):
+    """``python -m lumen.viz --example`` writes the example's page (a
+    fragment, without the doctype, if asked) and JSON, on inputs given by
+    ``--input``."""
+    out, data = tmp_path / f"{example}.html", tmp_path / f"{example}.json"
+    args = ["--example", example, "--device", "cpu", "--runs", "1", "-o", str(out), "--json", str(data)]
+    assert _cli(monkeypatch, *args, *[a for i in inputs for a in ("--input", i)], "--fragment") is None
+    assert capsys.readouterr().out.startswith(f"{out}: ")
+    assert not out.read_text().startswith("<!doctype html>")
+    assert json.loads(data.read_text())["inputs"] == inputs
+
+
+def test_the_cli_loads_a_function_from_a_file_or_a_module(tmp_path, monkeypatch, capsys):
+    """``python -m lumen.viz FILE.py:FUNCTION`` and ``MODULE:FUNCTION``
+    write the function's page, by default ``<function>.html``, on ones of
+    each ``--input``'s dtype and shape."""
+    (tmp_path / "scaled.py").write_text(
+        'import lumen.functional as F\n\n\ndef scaled(x):\n    """Doubles the exponential of x."""\n'
+        "    return F.exp(x) * 2.0\n"
+    )
+    monkeypatch.chdir(tmp_path)
+    assert _cli(monkeypatch, f"{tmp_path / 'scaled.py'}:scaled", "--input", "f16[2, 3]", "--device", "cpu") is None
+    page = (tmp_path / "scaled.html").read_text()
+    assert page.startswith("<!doctype html>") and '"inputs":["f16[2,3]"]' in page
+    assert _cli(monkeypatch, "lumen.functional:relu", "--input", "i32[5]", "--device", "cpu", "--runs", "1") is None
+    assert '"inputs":["i32[5]"]' in (tmp_path / "relu.html").read_text()
+    assert capsys.readouterr().out.splitlines()[-1] == "relu.html: 3 plan steps (0 fusions), 3 traced primitives"
+
+
+@pytest.mark.parametrize(
+    "argv, error",
+    [
+        ([], "give a FUNCTION or --example"),
+        (["no_function"], "expected FILE.py:FUNCTION or MODULE:FUNCTION, got 'no_function'"),
+        (["lumen.functional:relu", "--input", "f32(4)"], "expected an input like f32[64,128], got 'f32(4)'"),
+    ],
+)
+def test_the_cli_reports_bad_arguments(argv, error, monkeypatch, capsys):
+    """The CLI exits with a message for a missing function, a function not
+    written ``FILE.py:FUNCTION`` or ``MODULE:FUNCTION`` and an input not
+    written ``dtype[shape]``."""
+    code = _cli(monkeypatch, *argv)
+    assert code == 2 if not argv else code == error
+    if not argv:
+        assert error in capsys.readouterr().err

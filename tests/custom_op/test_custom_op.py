@@ -367,3 +367,9 @@ def test_overlappable_errors():
         custom_op("t::f", mutates_args=("out",), overlappable={"out": "z"})(_square)
     with pytest.raises(ValueError, match="arguments it reads"):
         custom_op("t::f", mutates_args=("x", "out"), overlappable={"out": "x"})(_square)
+
+
+def test_custom_op_repr():
+    """A custom op prints as its name and the arguments it mutates."""
+    assert repr(axpy) == "<custom op test::axpy mutating y>"
+    assert repr(swap_add) == "<custom op test::swap_add mutating a, b>"

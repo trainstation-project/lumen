@@ -50,7 +50,8 @@ def test_record_function_is_free_without_a_profiler():
 
 
 def test_key_averages_rows_and_table():
-    """``key_averages`` sums calls, times and memory per name, and the table shows PyTorch's columns."""
+    """``key_averages`` sums calls, times and memory per name, the table shows PyTorch's columns, and a row's
+    repr its key, times and count."""
     with profile(activities=[ProfilerActivity.CPU], profile_memory=True) as prof:
         for _ in range(3):
             lumen.zeros([256])
@@ -65,6 +66,9 @@ def test_key_averages_rows_and_table():
         assert column in table
     assert "lumen::zeros" in table
     assert "Self CPU time total:" in table
+    assert repr(zeros).startswith("<FunctionEventAvg key=lumen::zeros self_cpu_time=") and repr(zeros).endswith(
+        "count=3>"
+    )
 
 
 def test_table_rejects_unknown_sort_keys():
@@ -146,8 +150,9 @@ def test_results_need_a_finished_session():
 
 
 def test_supported_activities_always_include_cpu():
-    """CPU is always a supported activity."""
+    """CPU is always a supported activity, and a profiler given no activities records every supported one."""
     assert ProfilerActivity.CPU in lumen.profiler.supported_activities()
+    assert profile().activities == lumen.profiler.supported_activities()
 
 
 def test_unknown_activity_names_are_rejected():

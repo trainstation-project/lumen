@@ -753,3 +753,252 @@ fn ranges_are_annotated_on_the_gpu_timeline() {
         "{trace}"
     );
 }
+
+/// An event of `kind` named `name` over `[start, end)` ns on `device`, under `parent`.
+fn event(
+    id: u64,
+    name: &str,
+    kind: EventKind,
+    (start_ns, end_ns): (u64, u64),
+    parent: Option<u64>,
+    device: Device,
+) -> Event {
+    Event {
+        id,
+        name: name.to_owned(),
+        kind,
+        start_ns,
+        end_ns,
+        thread: 0,
+        parent,
+        device,
+        inputs: Vec::new(),
+        outputs: Vec::new(),
+        input_strides: Vec::new(),
+        output_strides: Vec::new(),
+        accum: Vec::new(),
+        bytes: 0,
+        addr: 0,
+        total_allocated: 0,
+        total_reserved: 0,
+        kernel: None,
+    }
+}
+
+/// A `bytes`-byte memory event on `device` under `parent`.
+fn memory(id: u64, bytes: i64, parent: u64, device: Device) -> Event {
+    Event {
+        bytes,
+        ..event(
+            id,
+            "[memory]",
+            EventKind::Memory,
+            (0, 0),
+            Some(parent),
+            device,
+        )
+    }
+}
+
+/// Synthetic MPS events: an op with a nested op, kernels and device memory, laid out by hand.
+fn mps_profile() -> Profile {
+    let mps = Device::Mps(0);
+    let events = vec![
+        event(1, "outer", EventKind::Op, (0, 10_000), None, Device::Cpu(0)),
+        event(
+            2,
+            "inner",
+            EventKind::Op,
+            (1_000, 3_000),
+            Some(1),
+            Device::Cpu(0),
+        ),
+        // A kernel named like its op adds to the op's device time but gets no row of its own.
+        event(3, "inner", EventKind::Gpu, (1_000, 2_000), Some(2), mps),
+        event(4, "gemm", EventKind::Gpu, (4_000, 8_000), Some(1), mps),
+        memory(5, 256, 2, mps),
+        memory(6, 1024, 1, mps),
+    ];
+    let config = ProfilerConfig {
+        activities: vec![Activity::Cpu, Activity::Mps],
+        profile_memory: true,
+        record_shapes: false,
+    };
+    Profile::new(events, config)
+}
+
+/// Device memory is summed into self and inclusive columns, kernels named like their op fold into it,
+/// and every sort key orders rows by its column.
+#[test]
+fn device_memory_columns_and_every_sort_key() {
+    let p = mps_profile();
+    assert!(p.config().profile_memory);
+    let rows = p.key_averages(false);
+    let names: Vec<&str> = rows.iter().map(|r| r.name.as_str()).collect();
+    assert_eq!(names, ["outer", "inner", "gemm"]);
+    let (outer, inner) = (row(&rows, "outer"), row(&rows, "inner"));
+    assert_eq!(
+        (outer.self_device_memory_usage, outer.device_memory_usage),
+        (1024, 1280)
+    );
+    assert_eq!(
+        (inner.self_device_memory_usage, inner.device_time_total),
+        (256, 1_000)
+    );
+    assert_eq!(
+        (outer.self_device_time_total, outer.device_time_total),
+        (4_000, 5_000)
+    );
+    let table = p.table(None, None, false);
+    for column in [
+        "Self MPS",
+        "MPS total",
+        "MPS Mem",
+        "Self MPS Mem",
+        "1.25 Kb",
+    ] {
+        assert!(table.contains(column), "missing {column:?} in\n{table}");
+    }
+    assert!(table.contains("Self MPS time total: 5.000us"), "{table}");
+    // The first row each sort key puts on top.
+    for (key, first) in [
+        (SortBy::SelfCpuTimeTotal, "outer"),
+        // `outer` and `gemm` tie at 4us of self device time; the sort is stable.
+        (SortBy::SelfDeviceTimeTotal, "outer"),
+        (SortBy::CpuMemoryUsage, "outer"),
+        (SortBy::SelfCpuMemoryUsage, "outer"),
+        (SortBy::DeviceMemoryUsage, "outer"),
+        (SortBy::SelfDeviceMemoryUsage, "outer"),
+        (SortBy::Count, "outer"),
+        (SortBy::DeviceTimeTotal, "outer"),
+    ] {
+        let table = p.table(Some(key), Some(1), false);
+        let body = table.lines().nth(3).unwrap();
+        assert!(body.starts_with(first), "{key:?}: {table}");
+    }
+    let ranked = p.table(Some(SortBy::SelfDeviceMemoryUsage), None, false);
+    let order: Vec<&str> = ranked
+        .lines()
+        .skip(3)
+        .filter_map(|l| l.split_whitespace().next())
+        .filter(|c| ["outer", "inner", "gemm"].contains(c))
+        .collect();
+    assert_eq!(order, ["outer", "inner", "gemm"]);
+}
+
+/// The device column is labelled by the one device kind seen, or `DEVICE` when they mix.
+#[test]
+fn device_column_names_follow_the_devices_seen() {
+    let label = |devices: &[Device]| {
+        let mut events = vec![event(1, "op", EventKind::Op, (0, 10), None, Device::Cpu(0))];
+        for (i, &d) in devices.iter().enumerate() {
+            events.push(event(2 + i as u64, "k", EventKind::Gpu, (0, 5), Some(1), d));
+        }
+        let table = Profile::new(events, cpu()).table(None, None, false);
+        let header = table.lines().nth(1).unwrap().to_owned();
+        ["MPS", "TPU", "CUDA", "DEVICE"]
+            .into_iter()
+            .find(|d| header.contains(&format!("Self {d} %")))
+            .unwrap()
+    };
+    assert_eq!(label(&[Device::Mps(0)]), "MPS");
+    assert_eq!(label(&[Device::Tpu(0)]), "TPU");
+    assert_eq!(label(&[Device::Cuda(0)]), "CUDA");
+    assert_eq!(label(&[Device::Mps(0), Device::Tpu(1)]), "DEVICE");
+}
+
+/// Long names are cut to the 55-character name column, and zero total CPU time shows 0% shares.
+#[test]
+fn long_names_are_truncated_and_empty_totals_show_zero_percent() {
+    let name = "n".repeat(60);
+    let p = Profile::new(
+        vec![event(1, &name, EventKind::Op, (5, 5), None, Device::Cpu(0))],
+        cpu(),
+    );
+    let table = p.table(None, None, false);
+    let body = table.lines().nth(3).unwrap();
+    assert!(
+        body.starts_with(&format!("{}... ", "n".repeat(52))),
+        "{table}"
+    );
+    assert!(body.contains("0.00%"), "{table}");
+}
+
+/// The Chrome trace names each device's process and memory device type, and marks memsets.
+#[test]
+fn chrome_trace_covers_every_device_kind() {
+    let mut events = vec![event(
+        1,
+        "op",
+        EventKind::Op,
+        (0, 9_000),
+        None,
+        Device::Cpu(0),
+    )];
+    for (i, d) in [Device::Tpu(2), Device::Meta(0), Device::Cpu(0)]
+        .into_iter()
+        .enumerate()
+    {
+        events.push(event(
+            10 + i as u64,
+            "Memset 0",
+            EventKind::Gpu,
+            (1_000, 2_000),
+            Some(1),
+            d,
+        ));
+        events.push(memory(20 + i as u64, 64, 1, d));
+    }
+    events.push(event(
+        30,
+        "tab\tcr\r",
+        EventKind::UserRange,
+        (0, 1),
+        None,
+        Device::Cpu(0),
+    ));
+    let trace = Profile::new(events, cpu()).chrome_trace();
+    let tpu_pid = (3u64 << 32) + 2;
+    for needle in [
+        format!("\"cat\":\"gpu_memset\",\"name\":\"Memset 0\",\"pid\":{tpu_pid}"),
+        format!("\"pid\":{tpu_pid},\"tid\":0,\"args\":{{\"name\":\"TPU 2\"}}"),
+        "\"args\":{\"name\":\"Meta\"}".to_owned(),
+        "\"args\":{\"name\":\"CPU\"}".to_owned(),
+        "\"Device Type\":9,\"Device Id\":2".to_owned(),
+        "\"Device Type\":9,\"Device Id\":0".to_owned(),
+        "\"name\":\"tab\\tcr\\r\"".to_owned(),
+    ] {
+        assert!(trace.contains(&needle), "missing {needle} in\n{trace}");
+    }
+}
+
+/// `export_chrome_trace` writes the same JSON `chrome_trace` returns.
+#[test]
+#[cfg_attr(miri, ignore = "file I/O, which Miri isolates")]
+fn chrome_traces_export_to_a_file() {
+    let p = mps_profile();
+    let path = std::env::temp_dir().join(format!("lumen_trace_{}.json", std::process::id()));
+    p.export_chrome_trace(&path).unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), p.chrome_trace());
+    std::fs::remove_file(&path).unwrap();
+}
+
+/// Kernels are never timed on the CPU, TPU timing needs the TPU backend, and an idle TPU bit stays off.
+#[test]
+fn device_timing_flags() {
+    let _lock = exclusive();
+    assert!(!device_enabled(Device::Cpu(0)));
+    assert!(!device_enabled(Device::Tpu(0)));
+    #[cfg(not(lumen_tpu_linked))]
+    {
+        let config = ProfilerConfig {
+            activities: vec![Activity::Tpu],
+            ..cpu()
+        };
+        assert_eq!(
+            start(config).unwrap_err(),
+            "timing TPUs needs lumen built with the TPU backend"
+        );
+        assert!(!is_enabled());
+    }
+}

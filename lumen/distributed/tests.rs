@@ -153,6 +153,81 @@ fn a_tpu_process_joins_its_slice_with_its_chip() {
     )));
 }
 
+/// The TPU slice env needs a non-empty address list whose entries carry ports.
+#[test]
+fn tpu_slice_addresses_must_have_ports() {
+    let env =
+        |addresses| super::backend::tpu_slice_env("2,2,1", addresses, 0, 0, 1, "").unwrap_err();
+    assert_eq!(env(",,"), "LUMEN_TPU_SLICEBUILDER_ADDRESSES is empty");
+    assert_eq!(
+        env("localhost"),
+        "LUMEN_TPU_SLICEBUILDER_ADDRESSES: 'localhost' has no port"
+    );
+}
+
+/// Meshes need a dimension, and naming or slicing needs names and the calling rank inside the mesh.
+#[test]
+fn mesh_lookups_need_names_and_membership() {
+    assert_eq!(
+        DeviceMesh::new("cpu", vec![], vec![], None, 0, 1).unwrap_err(),
+        "a DeviceMesh needs at least one dimension"
+    );
+    let unnamed = DeviceMesh::new("cpu", vec![2], vec![0, 1], None, 0, 2).unwrap();
+    assert_eq!(
+        unnamed.dim("x").unwrap_err(),
+        "cannot find mesh dimension 'x': the mesh has no mesh_dim_names"
+    );
+    let outside = DeviceMesh::new("cpu", vec![2], vec![0, 1], Some(names(&["x"])), 3, 4).unwrap();
+    assert_eq!(
+        outside.slice(&names(&["x"])).unwrap_err(),
+        "rank 3 is not in the mesh: it has no submesh to slice"
+    );
+}
+
+/// Bad rendezvous URLs and missing arguments are reported before any connection is tried.
+#[test]
+fn rendezvous_checks_its_arguments() {
+    let t = std::time::Duration::from_millis(10);
+    let err = |url, rank, world| super::rendezvous(url, rank, world, t).err().unwrap();
+    assert_eq!(
+        err("file:///tmp/x", Some(0), Some(1)),
+        "init_method must be env:// or tcp://host:port, got 'file:///tmp/x'"
+    );
+    assert_eq!(
+        err("tcp://localhost", Some(0), Some(1)),
+        "tcp:// rendezvous: 'tcp://localhost' has no port"
+    );
+    assert_eq!(
+        err("tcp://h:1", None, Some(1)),
+        "tcp:// rendezvous needs rank"
+    );
+    assert_eq!(
+        err("tcp://h:1", Some(0), None),
+        "tcp:// rendezvous needs world_size"
+    );
+    assert_eq!(
+        err("tcp://h:port", Some(0), Some(1)),
+        "the store's port must be a number, got 'port'"
+    );
+}
+
+/// Without a default group there is no store, and a rank outside the world cannot join one.
+#[test]
+#[cfg_attr(miri, ignore = "sockets, which Miri isolates")]
+fn joining_needs_a_rank_inside_the_world() {
+    assert!(!super::is_initialized());
+    assert!(super::default_store().is_none());
+    let store = std::sync::Arc::new(
+        super::TcpStore::new("127.0.0.1", 0, true, std::time::Duration::from_secs(10)).unwrap(),
+    );
+    assert_eq!(store.host(), "127.0.0.1");
+    assert_eq!(
+        super::init_process_group(store, 2, 2).unwrap_err(),
+        "rank 2 is outside the world of size 2"
+    );
+    assert!(!super::is_initialized());
+}
+
 /// Tests of the TCP store server and client over loopback.
 mod store {
     use std::thread;
@@ -251,5 +326,33 @@ mod store {
             .port();
         let err = TcpStore::new("127.0.0.1", port, false, Duration::from_millis(50)).err();
         assert!(err.unwrap().contains("connecting to the store"));
+    }
+
+    /// A request with an unknown opcode makes the server drop that connection, not crash.
+    #[test]
+    #[cfg_attr(miri, ignore = "sockets, which Miri isolates")]
+    fn unknown_requests_close_the_connection() {
+        use std::io::{Read, Write};
+        let master = master();
+        let mut raw = std::net::TcpStream::connect(("127.0.0.1", master.port())).unwrap();
+        raw.write_all(&[0xff]).unwrap();
+        let mut reply = Vec::new();
+        assert_eq!(raw.read_to_end(&mut reply).unwrap(), 0);
+        // The store still serves other clients.
+        master.set("k", b"v").unwrap();
+        assert_eq!(client(&master).get("k").unwrap(), b"v");
+    }
+
+    /// A host name that does not resolve fails once the timeout passes.
+    #[test]
+    #[cfg_attr(miri, ignore = "sockets, which Miri isolates")]
+    fn unresolvable_hosts_time_out() {
+        let err = TcpStore::new("not a host", 1, false, Duration::from_millis(50))
+            .err()
+            .unwrap();
+        assert!(
+            err.starts_with("timed out after 50ms connecting to the store at not a host:1"),
+            "{err}"
+        );
     }
 }

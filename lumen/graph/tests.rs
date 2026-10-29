@@ -473,3 +473,205 @@ fn float_functions_follow_xla() {
     assert!((e[1] - 0.476_936_3).abs() < 1e-6, "{e:?}");
     assert_eq!(e[2], f32::NEG_INFINITY);
 }
+
+/// Type errors of the less common primitives each name the op and the problem.
+#[test]
+fn uncommon_primitives_reject_bad_operands() {
+    let f = |s: &[usize]| ty(DType::F32, s);
+    let b = ty(DType::Bool, &[2]);
+    let u64s = ty(DType::U64, &[]);
+    let cases: Vec<(Primitive, Vec<TensorType>, &str)> = vec![
+        (Neg, vec![b.clone()], "neg: does not take bool operands"),
+        (
+            ReduceSum {
+                axes: vec![0],
+                accum_dtype: DType::I32,
+            },
+            vec![b.clone()],
+            "reduce_sum: does not take bool operands",
+        ),
+        (
+            Transpose {
+                permutation: vec![0],
+            },
+            vec![f(&[2, 3])],
+            "transpose: [0] is not a permutation for f32[2,3]",
+        ),
+        (
+            CustomCall {
+                label: "op",
+                kernel: 0,
+                mutated: vec![0],
+                overlappable: vec![(0, 0)],
+            },
+            vec![f(&[2])],
+            "op: an overlappable pair (0, 0) is a mutated operand and another operand",
+        ),
+        (
+            CustomCall {
+                label: "op",
+                kernel: 0,
+                mutated: vec![],
+                overlappable: vec![],
+            },
+            vec![f(&[2])],
+            "op: mutates no operand: it would compute nothing",
+        ),
+        (
+            PallasCall {
+                label: "k",
+                kernel: 0,
+                outputs: vec![],
+            },
+            vec![],
+            "k: computes no output",
+        ),
+        (
+            LinearCrossEntropy,
+            vec![f(&[2, 4]), f(&[8, 3]), ty(DType::I32, &[2])],
+            "linear_cross_entropy: needs rows [B, D] and weights [V, D] of one dtype, got f32[2,4] and f32[8,3]",
+        ),
+        (
+            LinearCrossEntropy,
+            vec![
+                ty(DType::I32, &[2, 4]),
+                ty(DType::I32, &[8, 4]),
+                ty(DType::I32, &[2]),
+            ],
+            "linear_cross_entropy: needs float rows, got i32[2,4]",
+        ),
+        (
+            LinearCrossEntropy,
+            vec![f(&[2, 4]), f(&[8, 4]), ty(DType::F32, &[2])],
+            "linear_cross_entropy: needs a class a row, int32 or int64 [2], got f32[2]",
+        ),
+        (
+            RandomBits {
+                shape: vec![4],
+                offset: 0,
+            },
+            vec![u64s.clone(), ty(DType::U32, &[])],
+            "random_bits: needs uint64 scalars (seed, start), got u64[] and u32[]",
+        ),
+        (
+            Iota {
+                dtype: DType::I32,
+                shape: vec![3],
+                dimension: 1,
+            },
+            vec![],
+            "iota: needs a non-bool dtype and a dimension of [3], got i32 and 1",
+        ),
+        (
+            Iota {
+                dtype: DType::Bool,
+                shape: vec![3],
+                dimension: 0,
+            },
+            vec![],
+            "iota: needs a non-bool dtype and a dimension of [3], got bool and 0",
+        ),
+    ];
+    for (p, args, msg) in cases {
+        assert_eq!(infer(p.clone(), &args).unwrap_err(), msg, "{p}");
+    }
+    // The valid forms of the same ops.
+    assert_eq!(
+        infer(
+            LinearCrossEntropy,
+            &[f(&[2, 4]), f(&[8, 4]), ty(DType::I64, &[2])]
+        )
+        .unwrap(),
+        f(&[2, 2])
+    );
+    assert_eq!(
+        infer(
+            RandomBits {
+                shape: vec![4],
+                offset: 0
+            },
+            &[u64s.clone(), u64s]
+        )
+        .unwrap(),
+        ty(DType::U32, &[4])
+    );
+    assert_eq!(
+        infer(
+            PallasCall {
+                label: "k",
+                kernel: 0,
+                outputs: vec![f(&[3])]
+            },
+            &[]
+        )
+        .unwrap(),
+        f(&[3])
+    );
+}
+
+/// A fusion's operands must match its body's inputs, and its body must have an output.
+#[test]
+fn fusion_types_come_from_the_body() {
+    let mut body = Graph::new();
+    let x = body.input(ty(DType::F32, &[2]));
+    let fusion = |body: &Graph| Fusion {
+        name: "f".into(),
+        label: "f",
+        body: body.clone(),
+    };
+    assert_eq!(
+        infer(fusion(&body), &[ty(DType::F16, &[2])]).unwrap_err(),
+        "f: operand 0 must be f32[2], got f16[2]"
+    );
+    assert_eq!(
+        infer(fusion(&body), &[ty(DType::F32, &[2])]).unwrap_err(),
+        "f: the body must have an output"
+    );
+    let y = body.apply(Exp, &[x]).unwrap();
+    body.set_outputs(&[y]).unwrap();
+    assert_eq!(
+        infer(fusion(&body), &[ty(DType::F32, &[2])]).unwrap(),
+        ty(DType::F32, &[2])
+    );
+}
+
+/// Parameters of casts, precision reductions and fusion outputs print in brackets, and reductions name themselves.
+#[test]
+fn parameterized_primitives_display() {
+    use crate::graph::{Reduction, UnaryOp};
+    assert_eq!(
+        Cast {
+            new_dtype: DType::BF16
+        }
+        .to_string(),
+        "cast[new_dtype=bf16]"
+    );
+    let rp = Unary(UnaryOp::ReducePrecision {
+        exponent_bits: 5,
+        mantissa_bits: 10,
+    });
+    assert_eq!(
+        rp.to_string(),
+        "reduce_precision[exponent_bits=5 mantissa_bits=10]"
+    );
+    let out = FusionOutput {
+        index: 2,
+        ty: ty(DType::F32, &[1]),
+    };
+    assert_eq!(out.to_string(), "fusion_output[index=2]");
+    assert_eq!(
+        [Reduction::Sum, Reduction::Max, Reduction::Min].map(|r| r.name()),
+        ["sum", "max", "min"]
+    );
+}
+
+/// `slot` only makes sense for a concatenate.
+#[test]
+#[should_panic(expected = "neg: not a concatenate")]
+fn slot_needs_a_concatenate() {
+    let mut g = Graph::new();
+    let x = g.input(ty(DType::F32, &[2]));
+    g.apply(Neg, &[x]).unwrap();
+    let node = g.nodes()[0].clone();
+    g.slot(&node, 0);
+}

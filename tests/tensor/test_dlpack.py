@@ -238,3 +238,174 @@ def test_mps_dlpack_device():
         pytest.skip(str(e))
     assert t.__dlpack_device__() == (8, 0)
     assert lumen.from_dlpack(t.narrow(0, 0, 1)).device == "mps:0"
+
+
+class _DLDevice(ctypes.Structure):
+    """``DLDevice`` from ``dlpack.h``."""
+
+    _fields_ = [("device_type", ctypes.c_int32), ("device_id", ctypes.c_int32)]
+
+
+class _DLDataType(ctypes.Structure):
+    """``DLDataType`` from ``dlpack.h``."""
+
+    _fields_ = [("code", ctypes.c_uint8), ("bits", ctypes.c_uint8), ("lanes", ctypes.c_uint16)]
+
+
+class _DLTensor(ctypes.Structure):
+    """``DLTensor`` from ``dlpack.h``."""
+
+    _fields_ = [
+        ("data", ctypes.c_void_p),
+        ("device", _DLDevice),
+        ("ndim", ctypes.c_int32),
+        ("dtype", _DLDataType),
+        ("shape", ctypes.POINTER(ctypes.c_int64)),
+        ("strides", ctypes.POINTER(ctypes.c_int64)),
+        ("byte_offset", ctypes.c_uint64),
+    ]
+
+
+class _DLManagedTensor(ctypes.Structure):
+    """Legacy ``DLManagedTensor``, with no deleter."""
+
+    _fields_ = [("dl_tensor", _DLTensor), ("manager_ctx", ctypes.c_void_p), ("deleter", ctypes.c_void_p)]
+
+
+class _DLManagedTensorVersioned(ctypes.Structure):
+    """DLPack 1.0 ``DLManagedTensorVersioned``, with no deleter."""
+
+    _fields_ = [
+        ("major", ctypes.c_uint32),
+        ("minor", ctypes.c_uint32),
+        ("manager_ctx", ctypes.c_void_p),
+        ("deleter", ctypes.c_void_p),
+        ("flags", ctypes.c_uint64),
+        ("dl_tensor", _DLTensor),
+    ]
+
+
+# Hand-built capsules' structs and buffers, kept alive for as long as an imported tensor may read them.
+_KEEP = []
+
+
+def _capsule(data, shape, strides=None, byte_offset=0, device=(1, 0), dtype=(2, 32, 1), version=None):
+    """A capsule around a hand-built DLPack tensor: ``data`` is a ctypes buffer or ``None``;
+    ``version`` set to ``(major, minor)`` makes a versioned capsule."""
+    n = len(shape)
+    dl = _DLTensor(
+        data=ctypes.cast(data, ctypes.c_void_p) if data is not None else None,
+        device=_DLDevice(*device),
+        ndim=n,
+        dtype=_DLDataType(*dtype),
+        shape=(ctypes.c_int64 * n)(*shape),
+        strides=(ctypes.c_int64 * n)(*strides) if strides is not None else None,
+        byte_offset=byte_offset,
+    )
+    if version is None:
+        managed, name = _DLManagedTensor(dl_tensor=dl), b"dltensor"
+    else:
+        managed = _DLManagedTensorVersioned(major=version[0], minor=version[1], dl_tensor=dl)
+        name = b"dltensor_versioned"
+    _KEEP.append((data, dl.shape, dl.strides, managed))
+    new = ctypes.pythonapi.PyCapsule_New
+    new.restype = ctypes.py_object
+    new.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_void_p]
+    return new(ctypes.addressof(managed), name, None)
+
+
+def test_import_a_hand_built_capsule_with_byte_offset_and_strides():
+    """A capsule giving explicit strides and an element-aligned byte offset imports that view."""
+    buf = (ctypes.c_float * 6)(0, 1, 2, 3, 4, 5)
+    t = lumen.from_dlpack(_capsule(buf, [2, 2], strides=[2, 1], byte_offset=8, version=(1, 0)))
+    assert t.tolist() == [[2.0, 3.0], [4.0, 5.0]]
+
+
+@pytest.mark.parametrize(
+    "kwargs,error,match",
+    [
+        ({"version": (2, 0)}, BufferError, "DLPack version 2.0 is not supported"),
+        ({"byte_offset": 4}, BufferError, "without strides must have byte_offset 0"),
+        ({"strides": [1], "byte_offset": 2}, BufferError, "byte_offset 2 is not a multiple of the element size 4"),
+        ({"shape": [-1]}, BufferError, "negative DLPack size -1"),
+        ({"strides": [-1]}, BufferError, "negative DLPack stride -1"),
+        ({"device": (4, 0)}, BufferError, "unsupported DLPack device type 4"),
+        ({"dtype": (2, 32, 4)}, BufferError, r"unsupported DLPack dtype \(code 2, 32 bits, 4 lanes\)"),
+        ({"dtype": (5, 64, 1)}, BufferError, r"unsupported DLPack dtype \(code 5, 64 bits, 1 lanes\)"),
+        ({"null": True}, BufferError, "null data pointer"),
+    ],
+)
+def test_import_rejects_invalid_capsules(kwargs, error, match):
+    """Each invalid capsule field is reported, and the capsule is left unconsumed."""
+    buf = None if kwargs.pop("null", False) else (ctypes.c_float * 4)()
+    kwargs.setdefault("shape", [2])
+    cap = _capsule(buf, **kwargs)
+    with pytest.raises(error, match=match):
+        lumen.from_dlpack(cap)
+    assert _capsule_name(cap) in ("dltensor", "dltensor_versioned")
+
+
+def test_import_an_empty_tensor_with_no_data():
+    """A tensor with a zero-sized dimension imports from a null data pointer."""
+    t = lumen.from_dlpack(_capsule(None, [2, 0]))
+    assert t.shape == [2, 0]
+    assert t.tolist() == [[], []]
+
+
+def test_round_trip_bfloat16():
+    """bfloat16 exports with DLPack's bfloat code and imports back as bfloat16."""
+    t = lumen.full([3], 1.5, dtype=lumen.bfloat16)
+    u = lumen.from_dlpack(t.__dlpack__())
+    assert u.dtype == "bfloat16"
+    assert u.tolist() == [1.5, 1.5, 1.5]
+
+
+@pytest.mark.parametrize("dtype", ["int4", "float8_e4m3fn"])
+def test_narrow_dtypes_export_as_bytes(dtype):
+    """Dtypes DLPack has no code for export as unsigned bytes of their storage."""
+    t = lumen.zeros([3], dtype=dtype)
+    u = lumen.from_dlpack(t.__dlpack__())
+    assert u.dtype == "uint8"
+    assert u.data_ptr() == t.data_ptr()
+    assert u.tolist() == [0, 0, 0]
+
+
+@pytest.mark.mps
+def test_mps_export_to_the_cpu_copies():
+    """An MPS tensor exported for the CPU (``dl_device=(kDLCPU, 0)``) is a
+    copy there, with the tensor's values."""
+    try:
+        t = lumen.arange(4, dtype=lumen.float32, device="mps")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    assert lumen.from_dlpack(t.__dlpack__(dl_device=(1, 0))).device == "cpu:0"
+    assert np.from_dlpack(t, device="cpu").tolist() == [0.0, 1.0, 2.0, 3.0]
+
+
+def test_export_to_an_unknown_device_type_raises():
+    """A DLPack device type lumen has no device for is a ``BufferError``."""
+    with pytest.raises(BufferError, match="unsupported DLPack device type 99"):
+        lumen.zeros([1]).__dlpack__(dl_device=(99, 0))
+
+
+def test_import_from_a_producer_without_max_version():
+    """A producer predating DLPack 1.0, whose ``__dlpack__`` takes no
+    ``max_version``, is asked again without it."""
+
+    class Legacy:
+        """Wraps a tensor, exporting it the pre-1.0 way."""
+
+        def __init__(self, t):
+            """Keeps ``t`` to export."""
+            self.t = t
+
+        def __dlpack_device__(self):
+            """The wrapped tensor's device."""
+            return self.t.__dlpack_device__()
+
+        def __dlpack__(self, stream=None):
+            """A legacy capsule of the wrapped tensor."""
+            return self.t.__dlpack__(stream=stream)
+
+    t = lumen.full([3], 2.5, dtype=lumen.float32)
+    assert lumen.from_dlpack(Legacy(t)).tolist() == [2.5, 2.5, 2.5]

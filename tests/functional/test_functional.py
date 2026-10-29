@@ -2,7 +2,7 @@
 
 import numpy as np
 import pytest
-from helpers import CUDA, MPS, TPU, rand, run
+from helpers import CUDA, MPS, TPU, meta, rand, run
 
 import lumen
 import lumen.functional as F
@@ -249,3 +249,74 @@ def test_matmul_takes_accum_and_output_dtypes():
         lumen.make_graph(lambda x, y: F.matmul(x, y))(x, y)
     a, b = (lumen.ones(s, dtype="bfloat16") for s in ([4, 8], [8, 3]))
     assert lumen.compile(lambda x, y: F.matmul(x, y, "float32", "float32"))(a, b).dtype == "float32"
+
+
+def test_arithmetic_and_comparison_functions():
+    """F.sub, F.div, F.ne, F.gt and F.ge, the functions the operators trace
+    as, match numpy (exactly: one rounding each)."""
+    x, y = rand(6), rand(6, seed=1)
+    y[0] = x[0]
+    tx, ty = lumen.from_numpy(x), lumen.from_numpy(y)
+    for fn, expected in [(F.sub, x - y), (F.div, x / y), (F.ne, x != y), (F.gt, x > y), (F.ge, x >= y)]:
+        np.testing.assert_array_equal(run(fn, tx, ty), expected)
+
+
+def test_max_of_two_tensors_and_its_errors():
+    """F.max of two tensors is their elementwise maximum; F.max over a
+    dimension (which returns indices) is not supported; F.where needs a
+    bool condition; F.matmul needs operands of at least one dimension."""
+    x, y = rand(2, 3), rand(2, 3, seed=1)
+    np.testing.assert_array_equal(run(F.max, lumen.from_numpy(x), lumen.from_numpy(y)), np.maximum(x, y))
+    t = lumen.from_numpy(x)
+    with pytest.raises(NotImplementedError, match="use amax"):
+        lumen.compile(lambda a: F.max(a, 1))(t)
+    with pytest.raises(TypeError, match="condition to be a bool tensor"):
+        lumen.compile(lambda a: F.where(a, a, 0.0))(t)
+    with pytest.raises(RuntimeError, match="at least 1D"):
+        lumen.compile(lambda a: F.matmul(F.sum(a), a, "float32", "float32"))(t)
+
+
+def test_rms_norm_weight_must_match_its_input():
+    """F.rms_norm's weight has the input's dtype and the normalized shape."""
+    x = meta(4, 8)
+    with pytest.raises(TypeError, match=r"weight must be float32\[8\], got float16\[8\]"):
+        lumen.make_graph(lambda a, w: F.rms_norm(a, 8, w))(x, meta(8, dtype="float16"))
+    with pytest.raises(TypeError, match=r"weight must be float32\[8\], got float32\[4\]"):
+        lumen.make_graph(lambda a, w: F.rms_norm(a, 8, w))(x, meta(4))
+
+
+@pytest.mark.parametrize("dtype", ["int32", "uint8", "bool"])
+def test_isfinite_isnan_and_amin_of_non_floats(dtype):
+    """Integers and bools are always finite and never NaN; F.amin of them
+    (unsigned and bool through bitwise not, signed through negation) is
+    numpy's min."""
+    x = np.array([[1, 0, 1], [1, 1, 1]] if dtype == "bool" else [[3, 0, 7], [5, 2, 9]]).astype(dtype)
+    t = lumen.from_numpy(x)
+    np.testing.assert_array_equal(run(F.isfinite, t), np.ones(x.shape, bool))
+    np.testing.assert_array_equal(run(F.isnan, t), np.zeros(x.shape, bool))
+    np.testing.assert_array_equal(run(lambda a: F.amin(a, 1), t), x.min(1))
+
+
+@pytest.mark.parametrize("offset", [-3, -1, 0, 1, 3, 4])
+def test_diagonal_follows_numpy(offset):
+    """F.diagonal of a matrix, above (offset > 0) or below (offset < 0) the
+    main one, is numpy's, empty past the matrix; it takes only a matrix's
+    (0, 1)."""
+    x = np.arange(12, dtype=np.float32).reshape(3, 4)
+    np.testing.assert_array_equal(run(lambda a: F.diagonal(a, offset), lumen.from_numpy(x)), np.diagonal(x, offset))
+    with pytest.raises(NotImplementedError, match="dim1=0, dim2=1"):
+        lumen.make_graph(lambda a: F.diagonal(a, 0, 1, 0))(meta(3, 4))
+    with pytest.raises(NotImplementedError, match="dim1=0, dim2=1"):
+        lumen.make_graph(lambda a: F.diagonal(a))(meta(2, 3, 4))
+
+
+def test_pad_rejects_unknown_modes():
+    """F.pad takes ``"constant"`` and ``"circular"`` padding only."""
+    with pytest.raises(NotImplementedError, match="pad mode 'reflect'"):
+        lumen.make_graph(lambda a: F.pad(a, (1, 1), mode="reflect"))(meta(3, 4))
+
+
+def test_cross_entropy_target_has_the_inputs_rows():
+    """F.cross_entropy takes a target per row of the input."""
+    with pytest.raises(ValueError, match=r"target of shape \(3,\) for input of shape \(4, 10\)"):
+        lumen.make_graph(F.cross_entropy)(meta(4, 10), meta(3, dtype="int64"))

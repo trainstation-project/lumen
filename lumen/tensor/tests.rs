@@ -982,3 +982,263 @@ fn narrow_dtypes_are_ml_dtypes_bytes() {
     assert_eq!(f8e4m3fn::from_f64(1.0625).to_f64(), 1.0);
     assert_eq!(f8e4m3fn::from_f64(1.1875).to_f64(), 1.25);
 }
+
+/// Names, conversions and formatting of every dtype and element type.
+mod formatting {
+    use crate::tensor::dtype::{bf16, dispatch_dtype, f8e5m2};
+    use crate::{DType, Element, Scalar, Tensor, TensorOptions};
+
+    /// Every dtype the crate has, narrow ones included.
+    const ALL: [DType; 20] = [
+        DType::Bool,
+        DType::U8,
+        DType::U16,
+        DType::U32,
+        DType::U64,
+        DType::I8,
+        DType::I16,
+        DType::I32,
+        DType::I64,
+        DType::F16,
+        DType::BF16,
+        DType::F32,
+        DType::F64,
+        DType::I2,
+        DType::I4,
+        DType::U2,
+        DType::U4,
+        DType::F8E4M3FN,
+        DType::F8E5M2,
+        DType::F8E4M3B11FNUZ,
+    ];
+
+    /// Short names of the narrow dtypes.
+    #[test]
+    fn narrow_dtype_names() {
+        let names: Vec<String> = ALL[13..].iter().map(DType::to_string).collect();
+        assert_eq!(
+            names,
+            [
+                "i2",
+                "i4",
+                "u2",
+                "u4",
+                "f8e4m3fn",
+                "f8e5m2",
+                "f8e4m3b11fnuz"
+            ]
+        );
+    }
+
+    /// A tensor of every dtype prints its values read as that dtype.
+    #[test]
+    fn tensors_of_every_dtype_display_their_values() {
+        for dtype in ALL {
+            let t = Tensor::ones(&[2], TensorOptions::new().dtype(dtype));
+            let one = dispatch_dtype!(dtype, T => format!("{:?}", T::from_scalar(Scalar::Int(1))));
+            assert_eq!(
+                t.to_string(),
+                format!("Tensor([{one}, {one}], dtype={dtype}, device=cpu:0)")
+            );
+        }
+        assert_eq!(
+            Tensor::from_slice(&[true, false], DType::Bool).to_string(),
+            "Tensor([true, false], dtype=bool, device=cpu:0)"
+        );
+    }
+
+    /// `arange` works for every dtype, counting 0 and 1 exactly in each.
+    #[test]
+    fn arange_of_every_dtype() {
+        for dtype in ALL {
+            let t = Tensor::arange(2, TensorOptions::new().dtype(dtype));
+            let expected = dispatch_dtype!(dtype, T => format!("{:?}", [T::from_scalar(Scalar::Int(0)), T::from_scalar(Scalar::Int(1))]));
+            assert_eq!(
+                t.to_string(),
+                format!("Tensor({expected}, dtype={dtype}, device=cpu:0)")
+            );
+        }
+        assert_eq!(
+            Tensor::arange(2, DType::Bool).to_vec::<bool>(),
+            [false, true]
+        );
+    }
+
+    /// Bool scalars convert to 0 or 1 of a numeric type, and half and float8 values format as their f64 value.
+    #[test]
+    fn scalar_conversions_and_float8_formatting() {
+        assert_eq!(i32::from_scalar(Scalar::Bool(true)), 1);
+        assert_eq!(f32::from_scalar(Scalar::Bool(false)), 0.0);
+        assert_eq!(Scalar::from(bf16::from_f32(2.5)), Scalar::Float(2.5));
+        let x = f8e5m2::from_f64(-1.5);
+        assert_eq!(
+            (x.to_string(), format!("{x:?}")),
+            ("-1.5".into(), "-1.5".into())
+        );
+    }
+
+    /// Storage debug output names its id, size and device, not its data.
+    #[test]
+    fn storage_debug_shows_size_and_device() {
+        let t = Tensor::zeros(&[3], DType::F32);
+        assert_eq!(
+            format!("{:?}", t.storage()),
+            format!(
+                "Storage {{ id: {}, nbytes: 12, device: Cpu(0) }}",
+                t.storage_id()
+            )
+        );
+    }
+}
+
+/// View constructors and copy errors.
+mod views {
+    use crate::{DType, Device, Tensor, TensorOptions};
+
+    /// `view_strided` reinterprets a byte range of a contiguous tensor with any dtype and strides.
+    #[test]
+    fn view_strided_reads_a_byte_range() {
+        let t = Tensor::arange(8, DType::F32);
+        let v = t.view_strided(4, DType::F32, &[2, 2], &[3, 1]);
+        assert!(v.shares_storage_with(&t));
+        assert_eq!((v.storage_offset(), v.strides()), (1, &[3, 1][..]));
+        assert_eq!(v.to_vec::<f32>(), [1.0, 2.0, 4.0, 5.0]);
+        let e = t.view_strided(32, DType::I32, &[0, 4], &[4, 1]);
+        assert_eq!((e.shape(), e.numel()), (&[0, 4][..], 0));
+    }
+
+    /// A view reaching past the end of its tensor is refused.
+    #[test]
+    #[should_panic(expected = "a view within the tensor")]
+    fn view_strided_stays_in_bounds() {
+        Tensor::arange(4, DType::F32).view_strided(4, DType::F32, &[2], &[3]);
+    }
+
+    /// Unsqueezing at the end appends a size-1 dimension with stride 1.
+    #[test]
+    fn unsqueeze_at_the_end() {
+        let t = Tensor::arange(6, DType::F32).reshape(&[2, 3]).unsqueeze(2);
+        assert_eq!((t.shape(), t.strides()), (&[2, 3, 1][..], &[3, 1, 1][..]));
+    }
+
+    /// Reshaping to another element count names both shapes.
+    #[test]
+    #[should_panic(expected = "cannot reshape [2, 3] (6 elems) into [4]")]
+    fn reshape_must_keep_the_element_count() {
+        Tensor::zeros(&[2, 3], DType::F32).reshape(&[4]);
+    }
+
+    /// Narrowing past the end names the dimension's size.
+    #[test]
+    #[should_panic(expected = "narrow(0, 2, 2) out of bounds for size 3")]
+    fn narrow_must_stay_in_bounds() {
+        Tensor::zeros(&[3], DType::F32).narrow(0, 2, 2);
+    }
+
+    /// A stepped view past the end names the dimension's size.
+    #[test]
+    #[should_panic(expected = "stepped(0, 1, 2, 3) out of bounds for size 4")]
+    fn stepped_must_stay_in_bounds() {
+        Tensor::zeros(&[4], DType::F32).stepped(0, 1, 2, 3);
+    }
+
+    /// On MPS, copying a tensor onto itself and copying empty views are no-ops, and moving to meta keeps the layout.
+    #[test]
+    fn mps_self_and_empty_copies_are_no_ops() {
+        if Device::Mps(0).check().is_err() {
+            return;
+        }
+        let t = Tensor::arange(4, DType::F32).to(Device::Mps(0));
+        t.copy_(&t).unwrap();
+        assert_eq!(t.to(Device::Cpu(0)).to_vec::<f32>(), [0.0, 1.0, 2.0, 3.0]);
+        let empty = Tensor::zeros(&[0, 2], TensorOptions::new().device(Device::Mps(0)));
+        empty.copy_(&empty.clone()).unwrap();
+        let strided = empty.transpose(0, 1);
+        strided
+            .copy_(&Tensor::zeros(
+                &[2, 0],
+                TensorOptions::new().device(Device::Mps(0)),
+            ))
+            .unwrap();
+        assert_eq!(strided.shape(), [2, 0]);
+        // A move between two non-CPU devices goes through the host.
+        let m = t.reshape(&[2, 2]).transpose(0, 1).to(Device::Meta(0));
+        assert_eq!(
+            (m.device(), m.shape(), m.strides()),
+            (Device::Meta(0), &[2, 2][..], &[1, 2][..])
+        );
+    }
+
+    /// `copy_` refuses mismatched dtypes or shapes and meta sources.
+    #[test]
+    fn copy_rejects_mismatches_and_meta_sources() {
+        let dst = Tensor::zeros(&[2], DType::F32);
+        assert_eq!(
+            dst.copy_(&Tensor::zeros(&[3], DType::F32)).unwrap_err(),
+            "copy_: cannot copy f32[3] into f32[2]"
+        );
+        assert_eq!(
+            dst.copy_(&Tensor::zeros(&[2], DType::I32)).unwrap_err(),
+            "copy_: cannot copy i32[2] into f32[2]"
+        );
+        let meta = Tensor::zeros(&[2], TensorOptions::new().device(Device::Meta(0)));
+        assert_eq!(
+            dst.copy_(&meta).unwrap_err(),
+            "copy_: meta tensors have no data"
+        );
+    }
+}
+
+/// Parameter placement edge cases.
+mod parameters {
+    use crate::{Device, Tensor, TensorOptions};
+
+    /// A meta parameter of `n` columns.
+    fn meta(n: usize) -> Tensor {
+        Tensor::zeros(&[2, n], TensorOptions::new().device(Device::Meta(0)))
+    }
+
+    /// Only whole meta tensors can be placed.
+    #[test]
+    fn placing_needs_a_whole_meta_tensor() {
+        let view = meta(4).narrow(1, 1, 2);
+        assert_eq!(
+            view.placed(Device::Cpu(0)).unwrap_err(),
+            "a parameter must be a whole meta tensor"
+        );
+        assert!(
+            Tensor::zeros(&[2], Device::Cpu(0))
+                .placed(Device::Cpu(0))
+                .is_err()
+        );
+    }
+
+    /// `pack` declines repeated members, views, members placed alone, and a block of another size.
+    #[test]
+    fn pack_declines_members_it_cannot_lay_out() {
+        let a = meta(3);
+        let cpu = Device::Cpu(0);
+        assert!(
+            Tensor::pack(&[a.clone(), a.clone()], 1, &[2], cpu)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            Tensor::pack(&[meta(4).narrow(1, 0, 3), meta(3)], 1, &[2], cpu)
+                .unwrap()
+                .is_none()
+        );
+        // `a` placed on its own has no block to share.
+        a.placed(cpu).unwrap();
+        assert!(Tensor::pack(&[a, meta(3)], 1, &[2], cpu).unwrap().is_none());
+        // Packed once as a pair, the first member's block is too wide for it alone.
+        let (b, c) = (meta(3), meta(3));
+        let block = Tensor::pack(&[b.clone(), c.clone()], 1, &[2], cpu)
+            .unwrap()
+            .unwrap();
+        assert!(Tensor::pack(&[b.clone()], 1, &[1], cpu).unwrap().is_none());
+        // Packing the same pair again reuses the block.
+        let again = Tensor::pack(&[b, c], 1, &[2], cpu).unwrap().unwrap();
+        assert!(again.shares_storage_with(&block));
+    }
+}

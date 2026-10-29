@@ -272,12 +272,15 @@ def test_randint(device, triton_on_cuda):
 
 
 def test_randint_errors():
-    """``low < high``, within the dtype's values; two or three arguments."""
+    """``low < high``, within the dtype's values, fewer than 2**63 of them;
+    a numeric dtype; two or three arguments."""
     for args, kwargs, error in [
         ((5, 5, (3,)), {}, ValueError),
         ((0, 300, (3,)), {"dtype": "uint8"}, ValueError),
         ((-1, 3, (3,)), {"dtype": "uint32"}, ValueError),
         (((3,),), {}, TypeError),
+        ((-(1 << 63), 0, (3,)), {}, ValueError),
+        ((0, 2, (3,)), {"dtype": "bool"}, TypeError),
     ]:
         with pytest.raises(error):
             lumen.compile(lambda x: lumen.randint(*args, **kwargs))(lumen.zeros([1]))
@@ -305,6 +308,8 @@ def test_uniform_initializes_a_weight(device, triton_on_cuda):
     u = ((_bits(6, range(64 * 32)) >> 8).astype(np.float64) * 2.0**-24).astype(np.float32)
     np.testing.assert_allclose(w.ravel(), u * np.float32(5) + np.float32(-2), rtol=0, atol=4e-7)
     assert w.min() >= -2 and w.max() < 3
+    with pytest.raises(ValueError, match="from=3.0 > to=-2.0"):
+        lumen.compile(lambda m: m.w.uniform_(3.0, -2.0), device=device)(model)
 
 
 def test_rng_state_round_trips():
@@ -330,7 +335,7 @@ def test_fork_rng():
     """``fork_rng``: the draws inside leave the generator as it was, between
     calls and inside a compiled function (the draws after the block reading
     the block's numbers again, the call moving the generator past those
-    alone)."""
+    alone); with ``enabled`` false it forks nothing."""
     from lumen.random import fork_rng
 
     f = _compile(lambda x: (lumen.rand([5]),), "cpu")
@@ -352,6 +357,17 @@ def test_fork_rng():
     np.testing.assert_array_equal(inside, first)
     np.testing.assert_array_equal(after, first)
     assert lumen.get_rng_state().tolist()[8:] == [5, 0, 0, 0, 0, 0, 0, 0]
+
+    def unforked(x):
+        """Draws inside a disabled fork, then after it."""
+        with fork_rng(enabled=False):
+            inside = lumen.rand([5])
+        return inside, lumen.rand([5])
+
+    lumen.manual_seed(3)
+    inside, after = _compile(unforked, "cpu")()
+    np.testing.assert_array_equal(inside, first)
+    assert not np.array_equal(after, first)
 
 
 @pytest.mark.mps
