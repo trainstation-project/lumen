@@ -40,6 +40,7 @@ use super::common::linear_cross_entropy::LinearCrossEntropy;
 use super::common::merge_dots::{Blocks, MergeDots, Packs, Target};
 use super::common::merge_dots_backward::MergeDotsBackward;
 use super::common::simplify::Simplify;
+use super::common::take_along_axis::TakeAlongAxis;
 use super::common::updates::Updates;
 use super::pass::{Module, Pipeline};
 use super::plan::{Buffer, Step, Tuned};
@@ -184,6 +185,7 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
         rows: Vec::new(),
     };
     let mut pipeline = Pipeline::new("triton");
+    pipeline.add(TakeAlongAxis);
     if config.fused_linear_cross_entropy {
         pipeline.add(ChunkedCrossEntropy);
     }
