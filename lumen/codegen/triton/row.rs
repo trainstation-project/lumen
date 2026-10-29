@@ -493,6 +493,7 @@ pub(crate) fn row_epilogue(
 ) -> (String, String) {
     let (loads, mut code, pointers) = preamble(body, by_value, dot, inputs, outputs, [rows, cols]);
     let mut emitter = Emitter::new(body, by_value);
+    emitter.tile = Some(dot.output);
     emitter
         .values
         .insert((dot.output, "j".into()), "product".into());
@@ -562,18 +563,34 @@ pub(crate) fn dot_row_fits(body: &Graph) -> bool {
         && at_own_index(body, dot.output)
 }
 
-/// Whether every value of `body` computed from `product` is read at its own element (elementwise ops)
-/// or reduced along its rows: the epilogue sees each product element once, in its tile, so a gather or
-/// layout op reading it elsewhere (a cross entropy's label logit) cannot run there.
+/// Whether every value of `body` computed from `product` is read at its own element (elementwise ops),
+/// reduced along its rows, or flattened and picked once a row by a gather (a cross entropy's label
+/// logit, from the row the tile holds): the epilogue sees each product element once, in its tile, so
+/// any other layout op reading it cannot run there.
 fn at_own_index(body: &Graph, product: Var) -> bool {
+    let rows = row_count(body);
     let mut derived = vec![false; body.types.len()];
+    // The rows flattened, readable only as a gather's operand picking one element a row.
+    let mut flat = vec![false; body.types.len()];
     derived[product] = true;
     for node in body.nodes() {
+        if node.inputs.iter().any(|&v| flat[v]) {
+            let picks = matches!(node.primitive, Primitive::Gather { axis: 0 })
+                && flat[node.inputs[0]]
+                && !flat[node.inputs[1]]
+                && !derived[node.inputs[1]]
+                && body.type_of(node.output).numel() == rows;
+            if !picks {
+                return false;
+            }
+            continue;
+        }
         if !node.inputs.iter().any(|&v| derived[v]) {
             continue;
         }
         match &node.primitive {
             Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. } => {}
+            Primitive::Reshape { new_sizes } if new_sizes.len() == 1 => flat[node.output] = true,
             p if elementwise(p) => derived[node.output] = true,
             _ => return false,
         }
