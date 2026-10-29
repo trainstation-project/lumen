@@ -93,7 +93,6 @@ pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
             | ReduceMax { .. }
             | DynamicSlice { .. }
             | Gather { .. }
-            | TakeAlongAxis { .. }
             | Concatenate { .. }
     );
     let typed = |v: &Var| triton_type(graph.type_of(*v).dtype).is_some();
@@ -892,15 +891,6 @@ impl<'a> Emitter<'a> {
                             picks * after,
                             x.shape[*axis] * after
                         ));
-                        return self.value(node.inputs[0], i);
-                    }
-                    TakeAlongAxis { axis } => {
-                        let x = body.type_of(node.inputs[0]);
-                        let mut strides = contiguous_strides(&x.shape);
-                        let along = std::mem::replace(&mut strides[*axis], 0);
-                        let k = self.value(node.inputs[1], idx.clone());
-                        let others = gather_index(&idx, &ty.shape, &strides);
-                        let i = self.index(format!("{others} + {k}.to(tl.int64) * {along}"));
                         return self.value(node.inputs[0], i);
                     }
                     Concatenate { dimension, .. } => {
