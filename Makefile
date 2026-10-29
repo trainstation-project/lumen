@@ -62,8 +62,8 @@ test: install
 # Line coverage floors (percent) `coverage` enforces: a bit under what the
 # suite reached when last raised, so new code comes with tests. Raise them
 # as coverage grows; never lower them to make a change pass.
-RUST_COVERAGE_MIN := 50
-PYTHON_COVERAGE_MIN := 0
+RUST_COVERAGE_MIN := 70
+PYTHON_COVERAGE_MIN := 72
 
 ## coverage: the `test` suite run under cargo-llvm-cov (Rust) and pytest-cov
 ## (Python), with a per-file report of each; fails when either falls below
