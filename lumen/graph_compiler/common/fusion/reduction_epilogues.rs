@@ -1,9 +1,8 @@
 //! Finds elementwise epilogues that can run inside the kernel of the reduction feeding them.
 
 use super::analysis::Analysis;
-use super::{constant, elementwise};
+use super::{Backend, constant, elementwise};
 use crate::graph::Primitive;
-use crate::graph_compiler::MpsConfig;
 use crate::graph_compiler::common::diamonds::Row;
 
 /// Reduction epilogue assignment, indexed by node.
@@ -21,7 +20,7 @@ pub(super) struct ReductionEpilogues {
 pub(super) fn reduction_epilogues(
     a: &Analysis,
     rows: &[Row],
-    config: &MpsConfig,
+    backend: &Backend,
 ) -> ReductionEpilogues {
     let (graph, nodes, n) = (a.graph, a.nodes, a.n);
     let (producer, is_output, live, users, fusible) =
@@ -39,7 +38,7 @@ pub(super) fn reduction_epilogues(
             rows.iter()
                 .any(|r| r.root == u || r.inner.contains(&u) || r.reductions.contains(&u))
         };
-        if !config.reduction_epilogues || !live[i] || !fusible[i] || !reduction || in_row {
+        if !backend.reduction_epilogues || !live[i] || !fusible[i] || !reduction || in_row {
             continue;
         }
         let (mut taken, mut after, mut end) = (vec![i], vec![false; n], None);

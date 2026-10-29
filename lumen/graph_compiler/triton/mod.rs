@@ -11,6 +11,7 @@ mod gemm;
 mod horizontal;
 mod place_concats;
 mod split_k;
+mod wide_rows;
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -21,13 +22,14 @@ pub(crate) use crate::codegen::triton::Config;
 use attention::{FlashAttentionBackward, Tiles};
 #[cfg(feature = "python")]
 pub(crate) use attention::{Launch, set_attention};
-use diamonds::{Diamonds, DotRows};
-use fusion::LoopFusion;
+use diamonds::Diamonds;
+use fusion::{Alone, LoopFusion, PlaceViews};
 #[cfg(feature = "python")]
 pub(crate) use gemm::{Epilogue, set_gemm};
 use horizontal::HorizontalFusion;
 use place_concats::PlaceConcats;
 use split_k::SplitK;
+use wide_rows::WideRows;
 
 use super::common::autotune::{Autotuner, Kernels, Timer};
 use super::common::chunked_cross_entropy::ChunkedCrossEntropy;
@@ -43,6 +45,7 @@ use super::plan::{Buffer, Step, Tuned};
 use super::{CompilerConfig, Options, Plan, PlanOptions, positions};
 use crate::codegen::triton::{self as codegen, LOOP_CONFIGS, LoopConfig, UNTUNED_LOOP};
 use crate::graph::{Graph, Primitive, TensorType, UPDATES};
+use crate::graph_compiler::common::diamonds::Row;
 use crate::graph_compiler::common::horizontal::segments;
 use crate::{DType, Device, Scalar, Tensor, TensorOptions};
 
@@ -139,6 +142,8 @@ struct TritonModule<'a> {
     packed: Packs,
     /// Interleaved region sizes of each packed block.
     interleaved: Vec<Vec<usize>>,
+    /// Normalization rows the diamonds pass found, consumed by loop fusion.
+    rows: Vec<Row>,
 }
 
 impl Module for TritonModule<'_> {
@@ -175,6 +180,7 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
         options,
         packed: Vec::new(),
         interleaved: Vec::new(),
+        rows: Vec::new(),
     };
     let mut pipeline = Pipeline::new("triton");
     if config.fused_linear_cross_entropy {
@@ -203,17 +209,22 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
     if config.split_k {
         pipeline.add(SplitK);
     }
-    if config.normalization_diamonds {
-        pipeline.add(Diamonds).add(DotRows);
-    }
+    // As on MPS: update chains, normalization rows, in-place concatenations, then loop fusion.
     pipeline.add(Updates {
         least: 2,
         most: usize::MAX,
     });
+    if config.normalization_diamonds {
+        pipeline.add(Diamonds);
+    }
     pipeline.add(PlaceConcats);
-    pipeline.add(LoopFusion {
-        multi_output: config.multi_output_fusion,
-    });
+    pipeline.add(LoopFusion);
+    // Rows too wide for one GEMM tile: the GEMM feeding them writes their reductions' partials too.
+    if config.normalization_diamonds {
+        pipeline.add(WideRows);
+    }
+    pipeline.add(PlaceViews);
+    pipeline.add(Alone);
     if config.horizontal_fusion {
         pipeline.add(HorizontalFusion);
     }
@@ -312,8 +323,13 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
         }
         _ => return None,
     };
+    // Only a plain loop's outputs (a horizontal fusion's) split the grid; a row's are one row each.
     let segments = match &step.primitive {
-        Primitive::Fusion { body, .. } if codegen::reduction_root(body).is_none() => segments(body),
+        Primitive::Fusion { name, body, .. }
+            if name != ROW && codegen::reduction_root(body).is_none() =>
+        {
+            segments(body)
+        }
         _ => Vec::new(),
     };
     let segments = match segments.len() {
@@ -442,13 +458,9 @@ pub(crate) fn run(
             | Primitive::ScatterAdd { .. },
             Some(kernel),
         ) => {
-            // An elementwise or row fusion's other outputs follow its inputs, each with its own store.
+            // A fusion's other outputs follow its inputs, each with its own store.
             let outs: &[Tensor] = match &step.primitive {
-                Primitive::Fusion { name, body, .. }
-                    if name == ROW || codegen::reduction_root(body).is_none() =>
-                {
-                    outs
-                }
+                Primitive::Fusion { .. } => outs,
                 _ => &[],
             };
             if let Primitive::ScatterAdd { .. } = step.primitive
@@ -463,8 +475,7 @@ pub(crate) fn run(
             let helpers = step
                 .memo
                 .get(key, || Ok(loop_helpers(step, kernel, inputs, out, outs)))?;
-            let (loads, functions, launches) =
-                (&helpers.loads, &helpers.functions, &helpers.launches);
+            let (functions, launches) = (&helpers.functions, &helpers.launches);
             let inputs: &[Tensor] = &[inputs, outs].concat();
             let untuned = codegen::untuned_loop(kernel.lanes);
             let config = step.launch::<LoopConfig>().unwrap_or(&untuned);
@@ -521,7 +532,8 @@ pub(crate) fn run(
                 .dtype(body.type_of(reduced).dtype)
                 .device(out.device());
             let partials = unsafe { Tensor::empty(&[n * kernel.splits], options) };
-            launch(kernel, config, loads, launches, inputs, &partials, n)?;
+            // The first pass also writes the fusion's other outputs; the second only the result.
+            launch(kernel, config, functions, launches, inputs, &partials, n)?;
             let last = Kernel {
                 name: format!("{}_final", kernel.name),
                 source: kernel.source.clone(),
@@ -531,7 +543,12 @@ pub(crate) fn run(
                 segments: Vec::new(),
             };
             let inputs = [inputs, std::slice::from_ref(&partials)].concat();
-            launch(&last, config, functions, launches, &inputs, out, n)
+            let finals: Vec<Function> = functions
+                .iter()
+                .filter(|f| f.param == "STORE" || !f.param.starts_with("STORE"))
+                .cloned()
+                .collect();
+            launch(&last, config, &finals, launches, &inputs, out, n)
         }
         _ => Err(format!("{}: has no Triton kernel on CUDA yet", step.label)),
     }
@@ -629,15 +646,14 @@ pub(crate) fn copy(dst: &Tensor, src: &Tensor) -> Result<(), String> {
 
 /// A loop step's generated helpers for its tensors' layouts, and the kernels compiled for them.
 struct Helpers {
-    /// The loads of its tensor inputs.
-    loads: Vec<Function>,
-    /// The loads, then the stores of its outputs (and a scatter-add's load of its output).
+    /// The loads of its tensor inputs, then the stores of its outputs (and a scatter-add's load of its
+    /// output).
     functions: Vec<Function>,
     launches: Launches,
 }
 
-/// A loop step's helpers for its tensors' layouts: the loads of its tensor inputs, then those with the
-/// stores of `out` and `outs` (and a scatter-add's load of `out`).
+/// A loop step's helpers for its tensors' layouts: the loads of its tensor inputs, the stores of `out`
+/// and `outs` (and a scatter-add's load of `out`).
 fn loop_helpers(
     step: &Step,
     kernel: &Kernel,
@@ -645,13 +661,12 @@ fn loop_helpers(
     out: &Tensor,
     outs: &[Tensor],
 ) -> Helpers {
-    let loads: Vec<Function> = inputs
+    let mut functions: Vec<Function> = inputs
         .iter()
         .enumerate()
         .filter(|&(k, _)| !kernel.by_value[k])
         .map(|(k, t)| Function::new(format!("LOAD{k}"), codegen::load(t.shape(), t.strides())))
         .collect();
-    let mut functions = loads.clone();
     functions.push(Function::new(
         "STORE",
         codegen::store(out.shape(), out.strides()),
@@ -669,7 +684,6 @@ fn loop_helpers(
         ));
     }
     Helpers {
-        loads,
         functions,
         launches: Launches::default(),
     }

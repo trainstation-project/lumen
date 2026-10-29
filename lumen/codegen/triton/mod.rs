@@ -9,6 +9,7 @@ use indoc::formatdoc;
 
 use crate::graph::{BinaryOp, Graph, Node, Primitive, UnaryOp, Var};
 use crate::graph_compiler::common::horizontal::segments;
+use crate::graph_compiler::elementwise;
 use crate::tensor::contiguous_strides;
 use crate::tensor::dtype::dispatch_dtype;
 use crate::tensor::storage::as_bytes;
@@ -23,7 +24,7 @@ mod reduction;
 mod row;
 
 pub(crate) use attention::{
-    attention_atomic_add, attention_load, attention_score, attention_store,
+    attention_atomic_add, attention_load, attention_output, attention_score, attention_store,
 };
 pub(crate) use config::{
     ATTENTION_CONFIGS, AttentionConfig, CONFIGS, Config, LOOP_CONFIGS, LoopConfig, ROW_PARTIALS,
@@ -35,8 +36,7 @@ pub(crate) use gemm::{EpilogueFlags, epilogue, gemm, gemm_dot, gemm_flags};
 pub(crate) use indexing::{scatter_add, update, updates};
 pub(crate) use reduction::{reduction, reduction_root, scan};
 pub(crate) use row::{
-    dot_row_fits, joins_rows, partials_epilogue, row, row_count, row_epilogue, row_fits,
-    row_groups, row_looped,
+    dot_row_fits, partials_epilogue, row, row_count, row_epilogue, row_groups, row_looped,
 };
 
 /// Triton element type for `dtype`, or `None` when Triton can't hold it.
@@ -323,6 +323,9 @@ struct Emitter<'a> {
     mask: String,
     /// Local holding each row reduction already computed, read at any index (a row kernel's rows).
     reduced: HashMap<Var, String>,
+    /// The product a GEMM row epilogue holds whole rows of, at flat index `j` of its tile: a gather
+    /// picking one element of each row from it is a masked sum along the tile's rows.
+    tile: Option<Var>,
 }
 
 impl<'a> Emitter<'a> {
@@ -343,6 +346,7 @@ impl<'a> Emitter<'a> {
             locals: 0,
             mask: "mask".into(),
             reduced: HashMap::new(),
+            tile: None,
         }
     }
 
@@ -649,6 +653,41 @@ impl<'a> Emitter<'a> {
         name
     }
 
+    /// Whether `v` is the flattened rows of the product a row epilogue holds in its tile: reshaped to
+    /// one dimension from a value computed from it through elementwise ops alone.
+    fn tiled(&self, v: Var) -> bool {
+        let Some(product) = self.tile else {
+            return false;
+        };
+        let Some(&k) = self.producer.get(&v) else {
+            return false;
+        };
+        let node = &self.body.nodes()[k];
+        let flat = matches!(node.primitive, Primitive::Reshape { .. })
+            && self.body.type_of(v).shape.len() == 1;
+        flat && self.through(node.inputs[0], product) == Some(true)
+    }
+
+    /// Whether `v` depends on `product` (`Some(true)`), doesn't (`Some(false)`), or does through a node
+    /// other than an elementwise op (`None`).
+    fn through(&self, v: Var, product: Var) -> Option<bool> {
+        if v == product {
+            return Some(true);
+        }
+        let Some(&k) = self.producer.get(&v) else {
+            return Some(false);
+        };
+        let node = &self.body.nodes()[k];
+        let mut depends = false;
+        for &u in &node.inputs {
+            depends |= self.through(u, product)?;
+        }
+        match depends && !elementwise(&node.primitive) {
+            true => None,
+            false => Some(depends),
+        }
+    }
+
     /// Translates flat output index `idx` of a layout op (reshape, broadcast, transpose, slice) into
     /// the flat index of its operand.
     fn operand_index(&mut self, node: &Node, idx: String) -> String {
@@ -831,6 +870,14 @@ impl<'a> Emitter<'a> {
                         };
                         let i = self.index(i);
                         return self.value(node.inputs[0], i);
+                    }
+                    Gather { .. } if self.tiled(node.inputs[0]) => {
+                        // One element of each row the tile holds whole: the row's column at the pick.
+                        let flat = self.value(node.inputs[0], "j".into());
+                        let k = self.value(node.inputs[1], idx.clone());
+                        format!(
+                            "tl.sum(tl.where(mask & (j == {k}.to(tl.int64)), {flat}, tl.zeros_like({flat})), 1)[:, None]"
+                        )
                     }
                     Gather { axis } => {
                         let (x, indices) =

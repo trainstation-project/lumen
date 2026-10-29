@@ -243,17 +243,17 @@ def test_flash_attention_checks_its_operands():
 def test_attention_epilogues_fuse(f, sq, device, triton_on_cuda):
     """The elementwise primitives after an attention, through reshapes (a
     residual, a bias, a scale, a cast), run in its kernel as it writes each
-    output on MPS (``contraction_epilogues``): one step, labeled with them,
-    agreeing with the CPU and with the unfused plan."""
+    output (on MPS, ``contraction_epilogues``): one step, labeled with them,
+    agreeing with the CPU and, on MPS, with the unfused plan."""
     shapes = [(1, sq, 4, 32), (1, 96, 4, 32), (1, 96, 4, 32), (sq, 128), (128,)]
     ts, arrays = tensors(device, "float32", *shapes)
     got = lumen.to_numpy(lumen.compile(f)(*ts).to(dtype="float32").to("cpu"))
     want = lumen.to_numpy(lumen.compile(f, device="cpu")(*(lumen.from_numpy(a) for a in arrays)).to(dtype="float32"))
     np.testing.assert_allclose(got, want, rtol=1e-3, atol=1e-3)
+    (label,) = steps(f, *ts, device=device)
+    assert label.startswith("flash_attention → reshape → "), label
     if device != "mps":
         return
-    (label,) = steps(f, *ts)
-    assert label.startswith("flash_attention → reshape → "), label
     lumen.config.compiler.mps.contraction_epilogues = False
     try:
         assert len(steps(f, *ts)) == 2
@@ -521,6 +521,28 @@ def test_attention_epilogue_fuses_in_training(sq):
         lumen.config.compiler.reset()
     for g, w in zip(got, (loss, *grads)):
         np.testing.assert_array_equal(g, lumen.to_numpy(w))
+
+
+@pytest.mark.parametrize("device", [CUDA])
+@pytest.mark.parametrize("sq", [40, 1], ids=["tiled", "decode"])
+def test_attention_epilogue_fuses_in_training_on_cuda(sq, device, triton_on_cuda):
+    """On CUDA too, a training step's attention runs its epilogue (a
+    residual) in its kernel, which writes the attention's value for the
+    backward too; the step agrees with the CPU."""
+    shapes = [(1, sq, 4, 32), (1, 40, 2, 32), (1, 40, 2, 32), (sq, 128)]
+    ts, arrays = tensors(device, "float32", *shapes)
+
+    def block(q, k, v, x):
+        """Sum of tanh of a residual added to the attention output."""
+        return F.sum(F.tanh(x + F.flash_attention(q, k, v, is_causal=True).reshape(sq, 128)))
+
+    step = lumen.value_and_grad(block, (0, 1, 2, 3))
+    labels = steps(step, *ts, device=device)
+    assert "flash_attention → reshape → add → tanh" in labels, labels
+    loss, grads = lumen.compile(step)(*ts)
+    want_loss, want_grads = lumen.compile(step, device="cpu")(*(lumen.from_numpy(a) for a in arrays))
+    for g, w in zip((loss, *grads), (want_loss, *want_grads)):
+        np.testing.assert_allclose(lumen.to_numpy(g.to("cpu")), lumen.to_numpy(w), rtol=1e-3, atol=1e-3)
 
 
 @pytest.mark.mps

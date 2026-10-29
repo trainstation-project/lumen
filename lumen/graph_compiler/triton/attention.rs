@@ -55,17 +55,18 @@ pub(crate) fn set_attention(launch: Attention) {
     let _ = ATTENTION.set(launch);
 }
 
-/// Flash-attention matching for Triton: no epilogues yet, runtime causal offsets (decode).
+/// Flash-attention matching for Triton, as on MPS: elementwise epilogues reading any leaf, runtime causal
+/// offsets (decode).
 impl Attentions for TritonModule<'_> {
-    /// Epilogues are not fused into the attention kernels yet.
+    /// Elementwise epilogues are fused into the forward kernel's output store.
     fn contraction_epilogues(&self) -> bool {
-        false
+        true
     }
 
-    /// Unused: epilogues are off.
+    /// Any leaf, read at the output's flat index; the chain keeps the attention's shape.
     fn epilogues(&self) -> Epilogues {
         Epilogues {
-            leaves: |_, _| false,
+            leaves: |_, _| true,
             reshaped: false,
         }
     }
@@ -165,7 +166,8 @@ enum Source {
 struct Prepared {
     /// `forward`, `dkdv` or `dq`.
     kernel: &'static str,
-    /// The kernel's tensors in parameter order; `None` for an optional one it doesn't read.
+    /// The kernel's tensors in parameter order; `None` for an optional one it doesn't read. The forward
+    /// kernel's past its sixth are its `EXTRA` tuple.
     tensors: Vec<Option<Source>>,
     /// Outputs the kernel adds into (dQ, atomically), zeroed before each launch.
     zeroed: Vec<usize>,
@@ -208,22 +210,35 @@ fn prepare(step: &Step) -> Result<Prepared, String> {
         }
         let root = body.nodes()[a.root].output;
         let lse = a.lse.map(|n| output(body.nodes()[n].output));
+        // The body's inputs but the offset, which the epilogue may read, then the attention values
+        // when the body outputs them too (`EXTRA`).
+        let raw = body.outputs()[1..].contains(&root);
+        let mut tensors = vec![
+            Some(input(a.q.base)),
+            Some(input(a.k.base)),
+            Some(input(a.v.base)),
+            Some(output(body.outputs()[0])),
+            lse,
+            a.offset.map(input),
+        ];
+        tensors.extend(
+            body.inputs()
+                .iter()
+                .filter(|&&v| a.offset != Some(v))
+                .map(|&v| Some(input(v))),
+        );
+        if raw {
+            tensors.push(Some(output(root)));
+        }
         return Ok(Prepared {
             kernel: "forward",
-            tensors: vec![
-                Some(input(a.q.base)),
-                Some(input(a.k.base)),
-                Some(input(a.v.base)),
-                Some(output(root)),
-                lse,
-                a.offset.map(input),
-            ],
+            tensors,
             zeroed: Vec::new(),
             functions: vec![
                 load("LOAD_Q", &a.q, &a.batch),
                 load("LOAD_K", &a.k, &a.batch),
                 load("LOAD_V", &a.v, &a.batch),
-                store("STORE_O", &a.out, &a.batch),
+                Function::new("STORE_O", codegen::attention_output(body, &a, raw)),
                 store("STORE_LSE", &per_row(&a.batch, a.sq), &a.batch),
                 Function::new("SCORE", codegen::attention_score(&a.scores)),
             ],

@@ -1,7 +1,8 @@
 """Triton flash attention (FlashAttention-2): a forward kernel writing each query row's log-sum-exp, and
 backward kernels for dK with dV and for dQ that recompute the probabilities from it. Operands are read and
 written through generated helpers that know their layouts (``LOAD_Q(ptr, b, rows, cols, mask)``,
-``STORE_O(ptr, b, rows, cols, value, mask)``), and ``SCORE`` applies the traced score ops (casts, scales)."""
+``STORE_O(ptr, EXTRA, b, rows, cols, value, mask)``, applying the fused epilogue to the tensors in ``EXTRA``),
+and ``SCORE`` applies the traced score ops (casts, scales)."""
 
 import triton
 import triton.language as tl
@@ -36,6 +37,7 @@ def forward_kernel(
     O,
     LSE,
     OFFSET,
+    EXTRA,
     SQ,
     SK,
     SHIFT,
@@ -87,7 +89,7 @@ def forward_kernel(
         m = m_new
     if HAS_LSE:
         STORE_LSE(LSE, b, rows, 0, m + tl.log(l), rows < SQ)
-    STORE_O(O, b, rows[:, None], dv[None, :], acc / l[:, None], (rows < SQ)[:, None] & (dv < HV)[None, :])
+    STORE_O(O, EXTRA, b, rows[:, None], dv[None, :], acc / l[:, None], (rows < SQ)[:, None] & (dv < HV)[None, :])
 
 
 @triton.jit
@@ -228,7 +230,7 @@ def _width(n):
 
 def attention(kernel, tensors, specs, sizes, causal, scale, config, compile=False):
     """Launches flash-attention ``kernel`` (``forward``, ``dkdv`` or ``dq``) on ``tensors`` (in its parameter
-    order; ``None`` for an optional one it doesn't read) with ``sizes`` (batch, queries, keys, head dims of
+    order; ``None`` for an optional one it doesn't read; the forward kernel's past the sixth are its ``EXTRA``) with ``sizes`` (batch, queries, keys, head dims of
     Q/K and V), the ``causal`` diagonal (or ``None``), dS's ``scale`` and ``config`` (blocks, stages, warps);
     ``specs`` are the generated helpers. With ``compile``, returns its ``compiled_launch`` instead of
     launching it."""
@@ -260,6 +262,9 @@ def attention(kernel, tensors, specs, sizes, causal, scale, config, compile=Fals
         tensors = [*tensors, None]
     # An optional tensor the kernel doesn't read is passed as the first one, never dereferenced.
     tensors = [t if t is not None else tensors[0] for t in tensors]
+    if kernel == "forward":
+        # The epilogue's tensors, past the sixth, as one tuple, never empty.
+        tensors = [*tensors[:6], tuple(tensors[6:] or tensors[:1])]
     if compile:
         return compiled_launch(KERNELS[kernel], (blocks, batch), tensors, args)
     KERNELS[kernel][(blocks, batch)](*tensors, **args)

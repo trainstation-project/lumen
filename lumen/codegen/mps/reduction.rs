@@ -1,37 +1,6 @@
 //! Metal source for a single reduction fused with an elementwise prologue and epilogue.
 use super::*;
-
-/// The body's only reduction when the first output reaches it through elementwise or reshape
-/// nodes alone, else `None`.
-pub(crate) fn reduction_root(body: &Graph) -> Option<&Node> {
-    use Primitive::*;
-    let nodes = body.nodes();
-    let mut producer = vec![None; body.types.len()];
-    for (i, node) in nodes.iter().enumerate() {
-        producer[node.output] = Some(i);
-    }
-    // Walk back from the first output; any non-elementwise node other than the one reduction
-    // rules the body out.
-    let (mut found, mut stack) = (None, vec![body.outputs()[0]]);
-    while let Some(v) = stack.pop() {
-        let i = producer[v]?;
-        let node = &nodes[i];
-        match &node.primitive {
-            ReduceSum { .. } | ReduceMax { .. } if found.is_none_or(|f| f == i) => found = Some(i),
-            p if fusion::elementwise(p) || matches!(p, Reshape { .. }) => stack.extend(
-                node.inputs
-                    .iter()
-                    .filter(|&&u| !fusion::constant(body, &producer, u)),
-            ),
-            _ => return None,
-        }
-    }
-    let reductions = nodes
-        .iter()
-        .filter(|n| matches!(n.primitive, ReduceSum { .. } | ReduceMax { .. }))
-        .count();
-    found.filter(|_| reductions == 1).map(|i| &nodes[i])
-}
+pub(crate) use crate::codegen::kinds::reduction_root;
 
 /// Labels for the two launches of a split reduction: the reduction with its prologue, and the
 /// reduction root with its epilogue.

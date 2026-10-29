@@ -9,6 +9,7 @@ use indoc::writedoc;
 use super::config::{MOST_GEMM_ROW, MOST_WHOLE_ROW};
 use super::reduction::{Reduction, combine, indented, lowest, reduce_along};
 use super::*;
+use crate::codegen::kinds::{row_partials, row_reductions};
 use crate::graph::TensorType;
 use crate::graph_compiler::common::diamonds::softmax_pair;
 use crate::graph_compiler::elementwise;
@@ -492,6 +493,7 @@ pub(crate) fn row_epilogue(
 ) -> (String, String) {
     let (loads, mut code, pointers) = preamble(body, by_value, dot, inputs, outputs, [rows, cols]);
     let mut emitter = Emitter::new(body, by_value);
+    emitter.tile = Some(dot.output);
     emitter
         .values
         .insert((dot.output, "j".into()), "product".into());
@@ -527,8 +529,9 @@ pub(crate) fn row_epilogue(
     )
 }
 
-/// Whether a `dot_row` fusion's `body` runs as one Triton GEMM with a row epilogue: an unbatched
-/// float matmul whose product is the row's operand, rows of at most `MOST_GEMM_ROW`.
+/// Whether a `dot_row` fusion's `body` runs as one Triton GEMM with a row epilogue: its one unbatched
+/// float matmul, reading the body's inputs, makes the rows its row reductions run over (no column
+/// partials), rows of at most `MOST_GEMM_ROW`, each product element read only at its own index.
 pub(crate) fn dot_row_fits(body: &Graph) -> bool {
     let Some(dot) = gemm_dot(body) else {
         return false;
@@ -537,36 +540,67 @@ pub(crate) fn dot_row_fits(body: &Graph) -> bool {
     let Primitive::DotGeneral { lhs_batch, .. } = &dot.primitive else {
         return false;
     };
-    lhs_batch.is_empty()
-        && body.type_of(dot.output).shape == body.type_of(body.outputs()[0]).shape
-        && dot.inputs.iter().all(|&v| float(v))
+    let dots = body
+        .nodes()
+        .iter()
+        .filter(|n| matches!(n.primitive, Primitive::DotGeneral { .. }))
+        .count();
+    let rows = rows_type(body);
+    // As MPS's `row_dot`: one unbatched float matmul over the body's inputs whose product is the rows.
+    dots == 1
+        && lhs_batch.is_empty()
+        && !row_reductions(body).is_empty()
+        && row_partials(body).is_empty()
+        && rows.shape.len() == 2
+        && body.type_of(dot.output).shape == rows.shape
+        && dot
+            .inputs
+            .iter()
+            .all(|v| body.inputs().contains(v) && float(*v))
+        && float(dot.output)
         && width(body) <= MOST_GEMM_ROW
         && row_fits(body)
+        && at_own_index(body, dot.output)
 }
 
-/// Whether row body `body` reads its input `at` as whole rows at each element's own index: the root's
-/// shape, read only by elementwise ops and its rows' reductions, in a row without column partials.
-pub(crate) fn joins_rows(body: &Graph, at: usize) -> bool {
-    let v = body.inputs()[at];
-    body.type_of(v).shape == body.type_of(body.outputs()[0]).shape
-        && column_partials(body).is_empty()
-        && !body.outputs().contains(&v)
-        && body
-            .nodes()
-            .iter()
-            .filter(|n| n.inputs.contains(&v))
-            .all(|n| {
-                elementwise(&n.primitive)
-                    || matches!(
-                        n.primitive,
-                        Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. }
-                    )
-            })
+/// Whether every value of `body` computed from `product` is read at its own element (elementwise ops),
+/// reduced along its rows, or flattened and picked once a row by a gather (a cross entropy's label
+/// logit, from the row the tile holds): the epilogue sees each product element once, in its tile, so
+/// any other layout op reading it cannot run there.
+fn at_own_index(body: &Graph, product: Var) -> bool {
+    let rows = row_count(body);
+    let mut derived = vec![false; body.types.len()];
+    // The rows flattened, readable only as a gather's operand picking one element a row.
+    let mut flat = vec![false; body.types.len()];
+    derived[product] = true;
+    for node in body.nodes() {
+        if node.inputs.iter().any(|&v| flat[v]) {
+            let picks = matches!(node.primitive, Primitive::Gather { axis: 0 })
+                && flat[node.inputs[0]]
+                && !flat[node.inputs[1]]
+                && !derived[node.inputs[1]]
+                && body.type_of(node.output).numel() == rows;
+            if !picks {
+                return false;
+            }
+            continue;
+        }
+        if !node.inputs.iter().any(|&v| derived[v]) {
+            continue;
+        }
+        match &node.primitive {
+            Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. } => {}
+            Primitive::Reshape { new_sizes } if new_sizes.len() == 1 => flat[node.output] = true,
+            p if elementwise(p) => derived[node.output] = true,
+            _ => return false,
+        }
+    }
+    true
 }
 
 /// Generates the GEMM epilogue of a `dot_partials` fusion: the tile, any multiple of `tile` columns wide,
-/// writes the value the row reads, its first output, and each later output, a reduction over
-/// `tile`-column blocks of the rows, as the partial of each block it covers.
+/// writes the value the row reads, its first output; each reduction output over `tile`-column blocks of
+/// the rows, as the partial of each block it covers; and the GEMM's other outputs, element by element.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn partials_epilogue(
     body: &Graph,
@@ -594,6 +628,22 @@ pub(crate) fn partials_epilogue(
     let mut combines = String::new();
     for (k, &v) in body.outputs().iter().enumerate().skip(1) {
         let reduction = producer[&v];
+        // The GEMM's other outputs, past the partials, are stored at each element's own index.
+        if !matches!(
+            reduction.primitive,
+            Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. }
+        ) {
+            let value = emitter.value(v, "j".into());
+            let (shape, strides) = outputs[k];
+            writeln!(
+                emitter.lines,
+                "    tl.store({} + {}, {value}, mask=mask)",
+                pointers[k],
+                at("j", shape, strides)
+            )
+            .unwrap();
+            continue;
+        }
         let blocks = producer[&reduction.inputs[0]];
         let a = body.type_of(reduction.output).dtype;
         let acc = triton_type(a).expect("a Triton dtype");

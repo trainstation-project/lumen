@@ -238,8 +238,13 @@ pub(crate) fn untuned_row_gemm(n: usize) -> Config {
 /// candidate tile (each a multiple of it) writes whole partials and the autotuner picks any.
 const PARTIAL_WIDTH: usize = 32;
 
-/// The partial width for a GEMM whose product rows are `n` wide and normalized after it: rows too wide
-/// for one tile (past `MOST_GEMM_ROW`) that `PARTIAL_WIDTH` divides.
+/// Narrowest partial: a row width no power of two this wide divides (an odd one) stays whole.
+const LEAST_PARTIAL_WIDTH: usize = 8;
+
+/// The partial width for a GEMM whose product rows are `n` wide and normalized after it, rows too wide
+/// for one tile (past `MOST_GEMM_ROW`): the widest power of two up to `PARTIAL_WIDTH` dividing `n`, so
+/// rows of any width MPS splits are split too (1000 in partials of 8).
 pub(crate) fn partial_tile(n: usize) -> Option<usize> {
-    (n > MOST_GEMM_ROW && n.is_multiple_of(PARTIAL_WIDTH)).then_some(PARTIAL_WIDTH)
+    let tile = (1 << n.trailing_zeros()).min(PARTIAL_WIDTH);
+    (n > MOST_GEMM_ROW && tile >= LEAST_PARTIAL_WIDTH).then_some(tile)
 }

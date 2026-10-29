@@ -1160,56 +1160,6 @@ pub(crate) fn partials(
     (out, rows)
 }
 
-/// `rows` with the elementwise producers of their partials' operands that only the row reads moved
-/// into it, so its kernel computes them instead of reading them from a kernel of their own.
-pub(crate) fn absorbed(graph: &Graph, mut rows: Vec<Row>, fusible: Fusible) -> Vec<Row> {
-    let finder = Finder::new(graph, fusible);
-    let nodes = graph.nodes();
-    let mut owned = vec![false; nodes.len()];
-    for row in &rows {
-        for &k in std::iter::once(&row.root)
-            .chain(&row.inner)
-            .chain(&row.reductions)
-            .chain(&row.partials)
-        {
-            owned[k] = true;
-        }
-    }
-    for row in &mut rows {
-        // Each partial reads its rows through a reshape into groups; walk back from what that reshapes.
-        let mut stack: Vec<Var> = row
-            .partials
-            .iter()
-            .filter_map(|&p| finder.producer[nodes[p].inputs[0]])
-            .flat_map(|r| nodes[r].inputs.iter().copied())
-            .collect();
-        while let Some(v) = stack.pop() {
-            let Some(k) = finder.producer[v] else {
-                continue;
-            };
-            let member = |u: usize| {
-                row.root == u
-                    || row.inner.contains(&u)
-                    || row.reductions.contains(&u)
-                    || row.partials.contains(&u)
-            };
-            if owned[k]
-                || finder.output[v]
-                || !elementwise(&nodes[k].primitive)
-                || !fusible(graph, &nodes[k])
-                || !finder.readers[v].iter().all(|&u| member(u))
-            {
-                continue;
-            }
-            owned[k] = true;
-            row.inner.push(k);
-            stack.extend(&nodes[k].inputs);
-        }
-        row.inner.sort_unstable();
-    }
-    rows
-}
-
 /// Whether `v` depends on any of `of` through the body's nodes.
 pub(crate) fn depends_on(body: &Graph, v: Var, of: &[Var]) -> bool {
     let producer: HashMap<Var, &Node> = body.nodes().iter().map(|n| (n.output, n)).collect();

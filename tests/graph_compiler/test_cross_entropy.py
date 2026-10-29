@@ -288,8 +288,8 @@ def test_chunked_linear_cross_entropy(device, n, d, vocab, chunk, reduce, head, 
             for s in steps
             if s["output"][2][1:] == [vocab] and [o[2] for o in s.get("extra_outputs", [])] == [s["output"][2][:1]]
         ]
-        # On MPS a row this narrow runs in its matmul's kernel.
-        one = device == "mps" and vocab <= 64
+        # A row this narrow runs in its matmul's kernel.
+        one = vocab <= 64
         assert sorted(logits) == ([] if one else sorted(sizes)), labels
         assert sorted(s["output"][2][0] for s in rows) == sorted(sizes), labels
         assert all(("dot_general" in s["label"]) == one for s in rows), labels

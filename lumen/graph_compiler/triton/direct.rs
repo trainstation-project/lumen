@@ -284,7 +284,7 @@ pub(crate) fn launch(kernel: &Compiled, grid: [usize; 3], values: &[Value]) -> R
     }
     storage.extend([[0u8; 8]; 2]);
     let mut params: Vec<*mut c_void> = storage.iter_mut().map(|b| b.as_mut_ptr().cast()).collect();
-    if grid.iter().any(|&g| g == 0) {
+    if grid.contains(&0) {
         return Ok(());
     }
     let driver = driver()?;

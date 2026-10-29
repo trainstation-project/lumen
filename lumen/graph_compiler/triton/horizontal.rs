@@ -5,6 +5,7 @@ use super::TritonModule;
 use crate::codegen::triton as codegen;
 use crate::graph::{Graph, Node, Primitive};
 use crate::graph_compiler::common::horizontal::{Target, fuse};
+use crate::graph_compiler::elementwise;
 use crate::graph_compiler::pass::CompilerPass;
 
 /// Largest output, in elements, of a loop fusion eligible for horizontal fusion.
@@ -17,15 +18,21 @@ const MAX_BUFFERS: usize = 64;
 struct Loops;
 
 impl Target for Loops {
-    /// Accepts non-empty, small `loop` fusions without a reduction or GEMM.
+    /// Accepts non-empty, small `loop` fusions without a reduction or GEMM, as MPS's target does: a node
+    /// alone joins only when elementwise (MPS runs a lone fill, iota or the like as its own step).
     fn candidate(&self, graph: &Graph, node: &Node) -> bool {
         let elements = graph.type_of(node.output).numel();
         let Primitive::Fusion { name, body, .. } = &node.primitive else {
             return false;
         };
+        let alone = match body.nodes() {
+            [n] => !elementwise(&n.primitive),
+            _ => false,
+        };
         name == "loop"
             && elements > 0
             && elements <= MAX_ELEMENTS
+            && !alone
             && codegen::reduction_root(body).is_none()
             && codegen::gemm_dot(body).is_none()
     }

@@ -108,14 +108,14 @@ def test_long_reductions_split_and_match_the_cpu(device, shape, axes, triton_on_
 @pytest.mark.parametrize("device", [MPS, CUDA])
 def test_reductions_fuse_their_prologue_and_epilogue(device, triton_on_cuda):
     """The elementwise ops feeding a reduction and those applied to its
-    result run in the reduction's kernel: one step, the CPU's value. On
-    MPS an epilogue reads only the reduction and constants, so one adding
-    another tensor runs as a step of its own."""
+    result run in the reduction's kernel: one step, the CPU's value. An
+    epilogue reads only the reduction and constants (MPS's loop fusion,
+    Triton's too), so one adding another tensor runs as a step of its own."""
     a, b = rand(64, 96), rand(96, seed=1)
     fns = [
         (lambda x, y: F.sum(F.exp(x) * 2.0 - y, -1) * 0.5 + 1.0, 1),
         (lambda x, y: F.amax(x.t() + y.reshape(96, 1), 0).to(dtype="bfloat16"), 1),
-        (lambda x, y: F.mean(x * x, 1) + y[:64], 2 if device == "mps" else 1),
+        (lambda x, y: F.mean(x * x, 1) + y[:64], 2),
     ]
     for f, steps in fns:
         agrees(device, f, [a, b], 1e-5)
@@ -179,8 +179,8 @@ def test_values_read_outside_a_loop_are_its_extra_outputs(device, triton_on_cuda
     """A loop's value that is also returned is written by the loop reading
     it, as an extra output (``multi_output_fusion``): one step, each value
     as with the flag off, where it is a step of its own. A value two loops
-    read: MPS recomputes it in each and runs both as one horizontal kernel;
-    Triton writes it once from the first loop, which the second reads."""
+    read is recomputed in each and both run as one horizontal kernel (MPS's
+    loop fusion, Triton's too)."""
     compiler = getattr(lumen.config.compiler, device)
     a, b = rand(64, 32), rand(32, seed=1)
     try:
@@ -198,7 +198,7 @@ def test_values_read_outside_a_loop_are_its_extra_outputs(device, triton_on_cuda
         v = F.exp(x) * 3.0
         return v * 2.0, F.tanh(v) + y
 
-    for f, steps, extra in [(returned, 1, 1), (shared, 1 if device == "mps" else 2, 1)]:
+    for f, steps, extra in [(returned, 1, 1), (shared, 1, 1)]:
         plan = lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), device).steps()
         assert len(plan) == steps and sum(len(s["extra_outputs"]) for s in plan) == extra, [s["label"] for s in plan]
         fused = [lumen.to_numpy(v) for v in lumen.compile(f)(*args)]

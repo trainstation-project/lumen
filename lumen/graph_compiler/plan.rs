@@ -1377,33 +1377,30 @@ impl Plan {
                         _ => tensor(buffer).view_bytes(0, ty.dtype, &ty.shape),
                     };
                     let kernels = self.triton.as_deref().unwrap_or_default();
-                    let inputs: Vec<Tensor> = step
-                        .inputs
-                        .iter()
-                        .zip(&step.views)
-                        .map(|(input, strided)| match strided {
-                            Some(_) => tensor(input.0).clone(),
-                            None => view(input),
-                        })
-                        .collect();
-                    // An output placed in a larger buffer (an in-place concatenate's slot) is
-                    // written through its offset and strides there.
-                    let written = |(output, at): (&(Buffer, TensorType), &Option<View>)| match at {
-                        None => view(output),
+                    // A value placed in a larger buffer (a slice read in place, an in-place
+                    // concatenate's slot) is read or written through its offset and strides there.
+                    let strided = |(value, at): (&(Buffer, TensorType), &Option<View>)| match at {
+                        None => view(value),
                         Some(at) => {
-                            let (buffer, ty) = output;
+                            let (buffer, ty) = value;
                             let bytes = at.offset * ty.dtype.size_of();
                             let (base, start) = match *buffer {
                                 Buffer::Workspace(offset) => (workspace, offset + bytes),
                                 b => (tensor(b), bytes),
                             };
-                            base.view_strided(start, ty.dtype, &ty.shape, &at.strides)
+                            match base.is_contiguous() {
+                                true => base.view_strided(start, ty.dtype, &ty.shape, &at.strides),
+                                // A strided caller input, read through its own strides.
+                                false => base.clone(),
+                            }
                         }
                     };
+                    let inputs: Vec<Tensor> =
+                        step.inputs.iter().zip(&step.views).map(strided).collect();
                     let mut outputs = std::iter::once(&step.output)
                         .chain(&step.extra_outputs)
                         .zip(&step.output_views)
-                        .map(written);
+                        .map(strided);
                     let out = outputs.next().expect("a step's output");
                     let outs: Vec<Tensor> = outputs.collect();
                     let kernel = kernels.get(at).and_then(Option::as_ref);

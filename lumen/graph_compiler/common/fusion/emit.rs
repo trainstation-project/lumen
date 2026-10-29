@@ -3,17 +3,21 @@
 use super::analysis::Analysis;
 use super::dot_epilogues::DotEpilogues;
 use super::reduction_epilogues::ReductionEpilogues;
-use super::{MAX_INPUTS, label};
+use super::{Backend, label};
 use crate::graph::{Graph, Primitive, Var};
-use crate::graph_compiler::MpsConfig;
 use crate::graph_compiler::common::diamonds::Row;
 
 /// Per root node, its fusion's member nodes and the values it reads, both sorted.
 pub(super) type Fusions = Vec<Option<(Vec<usize>, Vec<Var>)>>;
 
-/// Gathers each unhosted root's fusion, splitting fusions that read more than `MAX_INPUTS` values
-/// by turning all their members into roots and retrying.
-pub(super) fn fusions(a: &Analysis, root: &mut [bool], host: &mut [Option<usize>]) -> Fusions {
+/// Gathers each unhosted root's fusion, splitting fusions that read more than the backend's
+/// `max_inputs` values by turning all their members into roots and retrying.
+pub(super) fn fusions(
+    a: &Analysis,
+    backend: &Backend,
+    root: &mut [bool],
+    host: &mut [Option<usize>],
+) -> Fusions {
     let (graph, nodes, producer, live, fusible) =
         (a.graph, a.nodes, &a.producer, &a.live, &a.fusible);
     loop {
@@ -31,7 +35,7 @@ pub(super) fn fusions(a: &Analysis, root: &mut [bool], host: &mut [Option<usize>
             .filter(|&i| {
                 fusions[i]
                     .as_ref()
-                    .is_some_and(|(_, reads)| reads.len() > MAX_INPUTS)
+                    .is_some_and(|(_, reads)| reads.len() > backend.max_inputs)
             })
             .collect();
         if too_big.is_empty() {
@@ -41,9 +45,10 @@ pub(super) fn fusions(a: &Analysis, root: &mut [bool], host: &mut [Option<usize>
             let (members, reads) = fusions[f].as_ref().expect("a fusion");
             assert!(
                 members.len() > 1,
-                "{}: reads {} values, more than a kernel binds ({MAX_INPUTS})",
+                "{}: reads {} values, more than a kernel binds ({})",
                 nodes[f].primitive.name(),
-                reads.len()
+                reads.len(),
+                backend.max_inputs
             );
             for &m in members {
                 root[m] = true;
@@ -61,7 +66,7 @@ pub(super) fn fusions(a: &Analysis, root: &mut [bool], host: &mut [Option<usize>
 pub(super) fn row_dots(
     a: &Analysis,
     rows: &[Row],
-    config: &MpsConfig,
+    backend: &Backend,
     dots: &DotEpilogues,
     root: &mut [bool],
     host: &mut Vec<Option<usize>>,
@@ -73,7 +78,7 @@ pub(super) fn row_dots(
     let row_root = |i: usize| rows.iter().any(|r| r.root == i);
     for d in 0..nodes.len() {
         let dot = matches!(nodes[d].primitive, Primitive::DotGeneral { .. });
-        if !config.contraction_epilogues || !dot || !live[d] {
+        if !backend.contraction_epilogues || !dot || !live[d] {
             continue;
         }
         let p = dot_end[d].unwrap_or(d);
@@ -125,7 +130,7 @@ pub(super) fn row_dots(
         let (members, reads) = members(graph, producer, hosted, &starts);
         let others: Vec<Var> = starts[1..].iter().map(|&h| nodes[h].output).collect();
         let body = body(graph, &members, &reads, nodes[f].output, &others);
-        match reads.len() <= MAX_INPUTS && crate::codegen::mps::row_dot(&body).is_some() {
+        match reads.len() <= backend.max_inputs && (backend.row_dot)(&body) {
             true => fusions[f] = Some((members, reads)),
             false => (root[p], *host) = (true, before),
         }

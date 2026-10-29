@@ -615,6 +615,10 @@ fn triton_attention(launch: &super::triton::Launch) -> Result<(), String> {
             .iter()
             .map(|t| Value::of(t.unwrap_or(device)))
             .collect();
+        // The forward kernel's `EXTRA` tuple, flattened, holds at least the first tensor.
+        if launch.kernel == "forward" && values.len() == 6 {
+            values.push(Value::of(device));
+        }
         values.extend([sq, sk].map(|s| Value::Int(s as i128)));
         values.push(Value::Int(launch.causal.unwrap_or(0) as i128));
         if launch.kernel != "forward" {

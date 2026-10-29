@@ -16,15 +16,7 @@ pub(crate) struct Reduction {
     pub splits: usize,
 }
 
-/// The body's `reduce_sum`/`reduce_max` node, if it has one.
-pub(crate) fn reduction_root(body: &Graph) -> Option<&Node> {
-    body.nodes().iter().find(|n| {
-        matches!(
-            n.primitive,
-            Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. }
-        )
-    })
-}
+pub(crate) use crate::codegen::kinds::reduction_root;
 
 /// 2-D tile a reduction or scan program works on: outputs along one axis, reduced lanes along the other.
 struct Tile {
@@ -155,6 +147,20 @@ pub(crate) fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> Reducti
         true => element,
         false => format!("{element}.to({acc})"),
     };
+    // Values the prologue computes that other kernels read too (hosted, as MPS writes them) are
+    // written where it reads each element, once (by whichever split covers it).
+    let extras = body.outputs().len() - 1;
+    for (k, &v) in body.outputs()[1..].iter().enumerate() {
+        let value = prologue.value(v, "j".into());
+        writeln!(
+            prologue.lines,
+            "    STORE{}(out{}, j, {value}, mask)",
+            k + 1,
+            k + 1
+        )
+        .unwrap();
+    }
+    let outs: Vec<String> = (1..=extras).map(|k| format!("out{k}")).collect();
     // The epilogue starts with the reduced value bound at output index `o`.
     let mut epilogue = Emitter::new(body, by_value);
     epilogue.locals = prologue.locals;
@@ -192,7 +198,9 @@ pub(crate) fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> Reducti
         ),
     };
     let block = block.replace("{outputs}", &outputs);
-    let kernel_params = params(by_value, None, usize::from(splits == 1));
+    // A split's first pass stores only the extras (`STORE` stays unused), the second the result.
+    let extra = (extras > 0).then(|| outs.join(",\n    "));
+    let kernel_params = params(by_value, extra.as_deref(), 1 + extras);
     let mut source = formatdoc!(
         "
         @triton.jit
@@ -220,7 +228,12 @@ pub(crate) fn reduction(body: &Graph, by_value: &[bool], root: &Node) -> Reducti
     // Second pass: each program combines the partials of its outputs, padded to a power of two.
     if splits > 1 {
         let parts = splits.next_power_of_two();
-        let params = params(by_value, Some("partials"), 1);
+        let reads: Vec<&str> = outs
+            .iter()
+            .map(String::as_str)
+            .chain(["partials"])
+            .collect();
+        let params = params(by_value, Some(&reads.join(",\n    ")), 1);
         source += &formatdoc!(
             "
 

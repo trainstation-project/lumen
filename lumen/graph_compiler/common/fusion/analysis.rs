@@ -1,6 +1,6 @@
 //! Per-graph facts shared by the loop fusion stages: producers, users, liveness and fusibility.
 
-use super::{constant, elementwise, fusible};
+use super::{constant, elementwise};
 use crate::graph::{Graph, Node, Primitive, Var};
 
 /// Use-def facts about a graph, indexed by value or node.
@@ -22,8 +22,8 @@ pub(super) struct Analysis<'a> {
 }
 
 impl<'a> Analysis<'a> {
-    /// Computes the analysis of `graph`.
-    pub(super) fn new(graph: &'a Graph) -> Self {
+    /// Computes the analysis of `graph`, `fusible` telling which nodes may join a fusion.
+    pub(super) fn new(graph: &'a Graph, fusible: fn(&Graph, &Node) -> bool) -> Self {
         let nodes = graph.nodes();
         let n = graph.types.len();
         let mut producer: Vec<Option<usize>> = vec![None; n];
