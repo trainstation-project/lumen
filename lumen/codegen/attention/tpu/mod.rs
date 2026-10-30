@@ -1,5 +1,9 @@
-//! TPU flash attention: checks that each attention operand and output is read or written as whole
-//! tiles per head and encodes the forward and backward kernel specs.
+//! TPU flash attention: the Pallas forward and backward programs (`forward.py`, `backward.py` and their
+//! helpers in `__init__.py`, beside this file) and the specs generated per fusion for them: each attention
+//! operand and output checked to be read or written as whole tiles per head, and the blocks chosen
+//! (`config.rs`).
+
+mod config;
 
 use super::AttentionCodegen;
 use crate::DType;
@@ -10,8 +14,8 @@ use crate::graph_compiler::common::attention::{
     self, Access, Attention, Backward, Dropout, Score, Strides,
 };
 use crate::graph_compiler::elementwise;
-use crate::kernels::attention::tpu::blocks;
 use crate::tensor::contiguous_strides;
+use config::blocks;
 
 /// Lanes of a TPU vreg; head widths are whole multiples of it unless a head spans its rows.
 const LANES: usize = 128;

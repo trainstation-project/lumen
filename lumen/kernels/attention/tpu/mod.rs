@@ -9,16 +9,12 @@ use crate::kernels::tpu::{Launch, launch};
 #[cfg(lumen_tpu_linked)]
 use crate::tensor::contiguous_strides;
 
-mod config;
-
-pub(crate) use config::blocks;
-
 /// Launches the Python attention kernel `kind` (`forward` or `backward`) with buffer pointers `rows`.
 #[cfg(lumen_tpu_linked)]
 fn run(index: usize, kind: &str, spec: String, rows: &[*const u8]) -> Result<(), String> {
     let module = match kind {
-        "forward" => "lumen.kernels.attention.tpu.forward",
-        _ => "lumen.kernels.attention.tpu.backward",
+        "forward" => "lumen.codegen.attention.tpu.forward",
+        _ => "lumen.codegen.attention.tpu.backward",
     };
     let launched = Launch {
         module,
