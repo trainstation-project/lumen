@@ -1,4 +1,5 @@
-//! Metal source for fused flash-attention forward and backward kernels.
+//! Metal flash attention: the forward and backward kernel templates (`forward.metal`, `backward.metal`
+//! beside this file, in the Metal prelude) and the source generated per fusion to call them.
 
 use std::fmt::Write;
 

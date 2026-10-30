@@ -79,8 +79,8 @@ const PRELUDE: &str = concat!(
     include_str!("../../kernels/dot_general/mps/skinny/matmul_skinny.metal"),
     include_str!("../../kernels/dot_general/mps/gemv/matmul_gemv.metal"),
     include_str!("../../kernels/dot_general/mps/linear_cross_entropy/linear_cross_entropy.metal"),
-    include_str!("../../kernels/attention/mps/forward.metal"),
-    include_str!("../../kernels/attention/mps/backward.metal"),
+    include_str!("../../codegen/attention/mps/forward.metal"),
+    include_str!("../../codegen/attention/mps/backward.metal"),
 );
 
 /// Graph and side tables threaded through the MPS passes.
