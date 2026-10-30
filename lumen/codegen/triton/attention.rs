@@ -19,7 +19,7 @@ fn address(acc: &Access, batch: &[usize]) -> String {
     let mut code = formatdoc!(
         "
         rest = b
-        at = rest * 0 + {offset}
+        at = {offset}
         ",
         offset = acc.offset
     );
