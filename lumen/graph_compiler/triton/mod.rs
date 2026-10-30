@@ -82,8 +82,8 @@ pub struct Kernel {
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(not(feature = "python"), allow(dead_code))]
 pub enum Template {
-    /// `loop_kernel` (lumen.codegen.elementwise.triton): blocks of each grid segment's elements.
-    Loop,
+    /// `elementwise_kernel` (lumen.codegen.elementwise.triton): blocks of each grid segment's elements.
+    Elementwise,
     /// `transpose_kernel` (lumen.codegen.layout.triton): `TILE` x `TILE` tiles of an `a` x `b` output, per
     /// batch.
     Transpose { a: usize, b: usize },
@@ -94,7 +94,7 @@ impl Template {
     /// The Python module and name of the kernel.
     pub fn kernel(self) -> (&'static str, &'static str) {
         match self {
-            Template::Loop => ("lumen.codegen.elementwise.triton", "loop_kernel"),
+            Template::Elementwise => ("lumen.codegen.elementwise.triton", "elementwise_kernel"),
             Template::Transpose { .. } => ("lumen.codegen.layout.triton", "transpose_kernel"),
         }
     }
@@ -103,7 +103,7 @@ impl Template {
     /// loop's segments' element counts, a transpose's output sides and tile.
     pub fn constexprs(self, n: usize, segments: &[usize]) -> Vec<(&'static str, Constexpr)> {
         match self {
-            Template::Loop => {
+            Template::Elementwise => {
                 let segments = match segments {
                     [] => vec![n],
                     segments => segments.to_vec(),
@@ -340,14 +340,14 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
     Ok(plan)
 }
 
-/// The name of a templated loop's kernel: `loop_` plus a hash of its body (its `BODY`, generated per
+/// The name of a templated loop's kernel: `elementwise_` plus a hash of its body (its `BODY`, generated per
 /// layout at launch, is named after its own source).
 fn templated(body: &Graph) -> String {
     use std::hash::{Hash, Hasher};
 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     body.to_string().hash(&mut hasher);
-    format!("loop_{:016x}", hasher.finish())
+    format!("elementwise_{:016x}", hasher.finish())
 }
 
 /// Generates the loop kernel for `step`, or `None` for GEMMs and steps without a Triton loop kernel.
@@ -434,7 +434,7 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
                     a: tiling.a,
                     b: tiling.b,
                 }),
-                None => Some(Template::Loop),
+                None => Some(Template::Elementwise),
             }
         }
         _ => None,
@@ -778,7 +778,7 @@ pub(crate) fn copy(dst: &Tensor, src: &Tensor) -> Result<(), String> {
             lanes: 1,
             splits: 1,
             segments: Vec::new(),
-            template: Some(Template::Loop),
+            template: Some(Template::Elementwise),
         };
 
         let functions = vec![Function::new("BODY", generated)];
@@ -827,7 +827,7 @@ fn loop_helpers(
         };
 
         let generated = match template {
-            Template::Loop => {
+            Template::Elementwise => {
                 codegen::Triton::elementwise(body, &kernel.by_value, &HashMap::new(), &layouts)
                     .expect("a Triton loop of every elementwise body")
             }

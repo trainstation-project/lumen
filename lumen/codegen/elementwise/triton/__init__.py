@@ -1,4 +1,4 @@
-"""Triton loop kernel: the fixed grid of a loop fusion, its elementwise work a generated ``BODY``.
+"""Triton elementwise kernel: the fixed grid of a loop fusion, its elementwise work a generated ``BODY``.
 
 ``BODY(EXTRA, BLOCK, MASK, SEGMENT)`` computes and stores every output of grid segment ``SEGMENT`` at the
 flat indices ``BLOCK`` where ``MASK`` holds, reading the step's tensors and scalars from ``EXTRA`` (its
@@ -9,7 +9,7 @@ import triton.language as tl
 
 
 @triton.jit
-def loop_kernel(EXTRA, BODY: tl.constexpr, SEGMENTS: tl.constexpr, BLOCK_SIZE: tl.constexpr):
+def elementwise_kernel(EXTRA, BODY: tl.constexpr, SEGMENTS: tl.constexpr, BLOCK_SIZE: tl.constexpr):
     """Program ``BLOCK_ID``'s ``BLOCK_SIZE`` elements: each segment's element count in ``SEGMENTS`` runs on
     its own consecutive range of programs, the first segment's first."""
     BLOCK_ID = tl.program_id(0).to(tl.int64)
