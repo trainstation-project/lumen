@@ -252,6 +252,7 @@ impl AttentionCodegen for super::Triton {
             "SCORE".into(),
             named("attention_score", Self::score(&b.scores)),
         ));
+
         Ok(code)
     }
 
@@ -274,6 +275,7 @@ impl AttentionCodegen for super::Triton {
                     constant(d, Scalar::Float(c))
                 ),
             };
+
             writeln!(lines, "    {line}").unwrap();
         }
 
