@@ -71,6 +71,7 @@ const PRELUDE: &str = concat!(
         #define TEMPLATES_ONLY
         "
     ),
+    include_str!("../../codegen/elementwise/mps/elementwise.metal"),
     include_str!("../../codegen/reduction/mps/kernels.metal"),
     include_str!("../../codegen/dot_general/mps/integer/matmul.metal"),
     include_str!("../../codegen/dot_general/mps/integer/matmul_wide.metal"),
