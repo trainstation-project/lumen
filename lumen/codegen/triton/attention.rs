@@ -13,36 +13,30 @@ use crate::graph::Graph;
 use crate::graph_compiler::common::attention::{Access, Attention, Backward, Score, Strides};
 use crate::tensor::contiguous_strides;
 
-/// The statement setting `at`, the element offset of `acc`'s tile at flat batch index `b`, rows `rows`
-/// and columns `cols`; `batch` holds the batch extents, outermost first.
-fn address(acc: &Access, batch: &[usize]) -> String {
+/// The statement setting `at`, the element offset of `acc`'s tile at outer batch index `b`, head `h`,
+/// rows `rows` and columns `cols`, on the grid `grid_batch` gives `batch`. A divisor maps the heads onto
+/// fewer (shared KV heads). Fails when the outer batch dims don't step as one dim.
+fn address(acc: &Access, batch: &[usize]) -> Result<String, String> {
+    let (outer, (heads, divisor)) = acc.grid_strides(batch).ok_or(
+        "flash attention on Triton: batch dims before the heads that don't step as one dim",
+    )?;
+
     let mut terms: Vec<String> = Vec::new();
     if acc.offset != 0 {
         terms.push(acc.offset.to_string());
     }
 
-    // A batch dim's index is `b` over the dims inside it, modulo its size (the outermost needs none); a
-    // divisor maps a broadcast dim (shared KV heads) onto a smaller one.
-    for (k, (&size, &(stride, divisor))) in batch.iter().zip(&acc.batch).enumerate() {
-        if stride == 0 {
-            continue;
-        }
+    if outer != 0 {
+        terms.push(format!("b * {outer}"));
+    }
 
-        let inner: usize = batch[k + 1..].iter().product();
-        let mut index = match inner {
-            1 => "b".to_string(),
-            _ => format!("(b // {inner})"),
+    if heads != 0 {
+        let h = match divisor {
+            1 => "h".to_string(),
+            _ => format!("(h // {divisor})"),
         };
 
-        if k > 0 {
-            index = format!("({index} % {size})");
-        }
-
-        if divisor != 1 {
-            index = format!("({index} // {divisor})");
-        }
-
-        terms.push(format!("{index} * {stride}"));
+        terms.push(format!("{h} * {heads}"));
     }
 
     let mut tile: Vec<String> = [("rows", acc.row), ("cols", acc.col)]
@@ -57,37 +51,38 @@ fn address(acc: &Access, batch: &[usize]) -> String {
     }
 
     terms.extend(tile);
-    indented(&format!("at = {}\n", terms.join(" + ")))
+    Ok(indented(&format!("at = {}\n", terms.join(" + "))))
 }
 
-/// A jit helper loading the tile at `rows` and `cols` of operand `acc` for batch `b`, zero where masked.
-fn attention_load(acc: &Access, batch: &[usize]) -> (String, String) {
-    let at = address(acc, batch);
-    named(
+/// A jit helper loading the tile at `rows` and `cols` of operand `acc` for batch `b` and head `h`, zero
+/// where masked.
+fn attention_load(acc: &Access, batch: &[usize]) -> Result<(String, String), String> {
+    let at = address(acc, batch)?;
+    Ok(named(
         "attention_load",
         formatdoc!(
             "
             @triton.jit
-            def NAME(ptr, b, rows, cols, mask):
+            def NAME(ptr, b, h, rows, cols, mask):
             {at}    return tl.load(ptr + at, mask=mask, other=0)
             "
         ),
-    )
+    ))
 }
 
 /// A jit helper storing `value`, cast to the operand's dtype, to the tile at `rows` and `cols` of `acc`.
-fn attention_store(acc: &Access, batch: &[usize]) -> (String, String) {
-    let at = address(acc, batch);
-    named(
+fn attention_store(acc: &Access, batch: &[usize]) -> Result<(String, String), String> {
+    let at = address(acc, batch)?;
+    Ok(named(
         "attention_store",
         formatdoc!(
             "
             @triton.jit
-            def NAME(ptr, b, rows, cols, value, mask):
+            def NAME(ptr, b, h, rows, cols, value, mask):
             {at}    tl.store(ptr + at, value.to(ptr.dtype.element_ty), mask=mask)
             "
         ),
-    )
+    ))
 }
 
 /// A jit helper storing a forward attention fusion's output tile: the attention values `value`, cast to
@@ -95,8 +90,13 @@ fn attention_store(acc: &Access, batch: &[usize]) -> (String, String) {
 /// elementwise epilogue to its first output, as MPS's kernel does. The epilogue reads the body's inputs
 /// but the offset (`EXTRA` in body-input order, laid out as `strides` gives them: it may read Q, K or V
 /// too) at each element's flat index `j` in that output; without an epilogue, the values themselves.
-fn attention_output(body: &Graph, a: &Attention, raw: bool, strides: &Strides) -> (String, String) {
-    let at = address(&a.out, &a.batch);
+fn attention_output(
+    body: &Graph,
+    a: &Attention,
+    raw: bool,
+    strides: &Strides,
+) -> Result<(String, String), String> {
+    let at = address(&a.out, &a.batch)?;
     let root = body.nodes()[a.root].output;
     let t = triton_type(body.type_of(root).dtype).expect("a Triton dtype");
     let leaves: Vec<usize> = (0..body.inputs().len())
@@ -127,31 +127,31 @@ fn attention_output(body: &Graph, a: &Attention, raw: bool, strides: &Strides) -
     emitter.values.insert((root, "j".into()), "r".into());
     let value = emitter.value(body.outputs()[0], "j".into());
     let (code, lines) = (indented(&code), emitter.lines);
-    named(
+    Ok(named(
         "attention_output",
         formatdoc!(
             "
             {loads}@triton.jit
-            def NAME(ptr, EXTRA, b, rows, cols, value, mask):
+            def NAME(ptr, EXTRA, b, h, rows, cols, value, mask):
             {at}{code}{lines}    tl.store(ptr + at, {value}.to(ptr.dtype.element_ty), mask=mask)
             "
         ),
-    )
+    ))
 }
 
 /// A jit helper adding float32 `value` atomically to the tile at `rows` and `cols` of `acc`.
-fn attention_atomic_add(acc: &Access, batch: &[usize]) -> (String, String) {
-    let at = address(acc, batch);
-    named(
+fn attention_atomic_add(acc: &Access, batch: &[usize]) -> Result<(String, String), String> {
+    let at = address(acc, batch)?;
+    Ok(named(
         "attention_atomic_add",
         formatdoc!(
             "
             @triton.jit
-            def NAME(ptr, b, rows, cols, value, mask):
+            def NAME(ptr, b, h, rows, cols, value, mask):
             {at}    tl.atomic_add(ptr + at, value, mask=mask, sem=\"relaxed\")
             "
         ),
-    )
+    ))
 }
 
 /// A jit helper applying the traced score ops (rounding casts and scalings) to float32 `Q K^T`
@@ -231,11 +231,11 @@ impl AttentionCodegen for super::Triton {
         };
 
         Ok(vec![
-            ("LOAD_Q".into(), attention_load(&a.q, &a.batch)),
-            ("LOAD_K".into(), attention_load(&a.k, &a.batch)),
-            ("LOAD_V".into(), attention_load(&a.v, &a.batch)),
-            ("STORE_O".into(), attention_output(body, a, raw, strides)),
-            ("STORE_LSE".into(), attention_store(&lse, &a.batch)),
+            ("LOAD_Q".into(), attention_load(&a.q, &a.batch)?),
+            ("LOAD_K".into(), attention_load(&a.k, &a.batch)?),
+            ("LOAD_V".into(), attention_load(&a.v, &a.batch)?),
+            ("STORE_O".into(), attention_output(body, a, raw, strides)?),
+            ("STORE_LSE".into(), attention_store(&lse, &a.batch)?),
             ("SCORE".into(), attention_score(&a.scores)),
         ])
     }
@@ -253,13 +253,13 @@ impl AttentionCodegen for super::Triton {
 
         let mut code: Self::Code = operands
             .iter()
-            .map(|(name, acc)| (format!("LOAD_{name}"), attention_load(acc, &b.batch)))
-            .collect();
+            .map(|(name, acc)| Ok((format!("LOAD_{name}"), attention_load(acc, &b.batch)?)))
+            .collect::<Result<_, String>>()?;
 
         for (param, (_, acc)) in gradients(b) {
             let helper = match param {
-                "ADD_DQ" => attention_atomic_add(acc, &b.batch),
-                _ => attention_store(acc, &b.batch),
+                "ADD_DQ" => attention_atomic_add(acc, &b.batch)?,
+                _ => attention_store(acc, &b.batch)?,
             };
             code.push((param.into(), helper));
         }

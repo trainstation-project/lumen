@@ -603,7 +603,7 @@ fn triton_attention(launch: &super::triton::Launch) -> Result<(), String> {
     #[cfg(lumen_cuda_linked)]
     {
         use super::triton::direct::Value;
-        let [batch, sq, sk, h, hv] = launch.sizes;
+        let [batch, heads, sq, sk, h, hv] = launch.sizes;
         // The dK/dV kernel always takes a dQ; one it doesn't read, like any absent tensor, is the first.
         let mut tensors: Vec<Option<&crate::Tensor>> =
             launch.tensors.iter().map(Option::as_ref).collect();
@@ -651,7 +651,7 @@ fn triton_attention(launch: &super::triton::Launch) -> Result<(), String> {
             identity,
             device,
             &values,
-            [blocks, batch, 1],
+            [blocks, heads, batch],
             |py, kw| call(py, Some(kw)),
         )? {
             return Ok(());

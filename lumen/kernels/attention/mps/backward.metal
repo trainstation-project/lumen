@@ -1,7 +1,7 @@
 // Flash attention backward templates: a key-block kernel computing dK and dV (and optionally dQ atomically)
 // and a query-block kernel computing dQ.
 
-/// Computes dK and dV for a block of ATTN_BQ keys of batch `b`, streaming BQ queries at a time.
+/// Computes dK and dV for a block of ATTN_BQ keys of head `h` of batch `b`, streaming BQ queries at a time.
 /// Recomputes probabilities from `lse`; `delta` holds the per-query rowsum of dO * O.
 /// With `DQ`, also adds each block's dS * K into `dq` with float atomics, so `dq` must start zeroed.
 template <typename T,
@@ -37,25 +37,29 @@ inline void flash_attention_dkdv(device const T *q,
                                  threadgroup T *dss,
                                  uint kblock,
                                  uint b,
+                                 uint h,
+                                 uint heads,
                                  uint sg,
                                  uint lane,
                                  uint t,
                                  Score score,
                                  Drop drop = Drop()) {
-    q += ix.q(b);
-    k += ix.k(b);
-    v += ix.v(b);
-    g += ix.g(b);
-    lse += ix.lse(b);
-    delta += ix.delta(b);
-    dk += ix.dk(b);
-    dv += ix.dv(b);
+    // The flat batch index, as dropout's stream and the log-sum-exp's row count it.
+    const uint bh = b * heads + h;
+    q += ix.q(b, h);
+    k += ix.k(b, h);
+    v += ix.v(b, h);
+    g += ix.g(b, h);
+    lse += ix.lse(b, h);
+    delta += ix.delta(b, h);
+    dk += ix.dk(b, h);
+    dv += ix.dv(b, h);
     const uint fr = frag_row(lane), fc = frag_col(lane);
     const uint row = kblock * ATTN_BQ + sg * ATTN_ROWS + fr;
     const bool in_rows = row < sk;
     // The dQ path keeps this block's keys in threadgroup memory for the dS * K product.
     if constexpr (DQ) {
-        dq += ix.dq(b);
+        dq += ix.dq(b, h);
         for (uint e = t; e < ATTN_BQ * D; e += 256) {
             uint j = e / D, d = e % D, key = kblock * ATTN_BQ + j;
             ks[e] = key < sk ? k[key * Ix::K_ROW + d * Ix::K_COL] : T(0);
@@ -116,8 +120,8 @@ inline void flash_attention_dkdv(device const T *q,
                 uint i = ic * 8 + fc + u;
                 bool seen = q0 + i < sq && (!CAUSAL || int(row) <= int(q0 + i) + offset);
                 float pu = seen ? exp(score(s[u]) - lses[i]) : 0.0f;
-                ds[u] = pu * (drop(dp[u], b, q0 + i, row) - deltas[i]) * ds_scale;
-                p[u] = drop(pu, b, q0 + i, row);
+                ds[u] = pu * (drop(dp[u], bh, q0 + i, row) - deltas[i]) * ds_scale;
+                p[u] = drop(pu, bh, q0 + i, row);
             }
             simdgroup_matrix<T, 8, 8> pm, dsm;
             frag(pm) = vec<T, 2>(p);
@@ -171,7 +175,7 @@ inline void flash_attention_dkdv(device const T *q,
     }
 }
 
-/// Computes dQ for a block of ATTN_BQ queries of batch `b`, streaming BK keys at a time.
+/// Computes dQ for a block of ATTN_BQ queries of head `h` of batch `b`, streaming BK keys at a time.
 /// Recomputes probabilities from `lse`; `delta` holds the per-query rowsum of dO * O.
 template <typename T,
           uint D,
@@ -198,18 +202,22 @@ inline void flash_attention_dq(device const T *q,
                                threadgroup T *vs,
                                uint qblock,
                                uint b,
+                               uint h,
+                               uint heads,
                                uint sg,
                                uint lane,
                                uint t,
                                Score score,
                                Drop drop = Drop()) {
-    q += ix.q(b);
-    k += ix.k(b);
-    v += ix.v(b);
-    g += ix.g(b);
-    lse += ix.lse(b);
-    delta += ix.delta(b);
-    dq += ix.dq(b);
+    // The flat batch index, as dropout's stream and the log-sum-exp's row count it.
+    const uint bh = b * heads + h;
+    q += ix.q(b, h);
+    k += ix.k(b, h);
+    v += ix.v(b, h);
+    g += ix.g(b, h);
+    lse += ix.lse(b, h);
+    delta += ix.delta(b, h);
+    dq += ix.dq(b, h);
     const uint fr = frag_row(lane), fc = frag_col(lane);
     const uint row = qblock * ATTN_BQ + sg * ATTN_ROWS + fr;
     const bool in_rows = row < sq;
@@ -263,7 +271,7 @@ inline void flash_attention_dq(device const T *q,
                 int key = int(k0 + jc * 8 + fc + u);
                 bool seen = in_rows && key < int(sk) && (!CAUSAL || key <= int(row) + offset);
                 float p = seen ? exp(score(se[u]) - l) : 0.0f;
-                ds[u] = p * (drop(dpe[u], b, row, uint(key)) - dl) * ds_scale;
+                ds[u] = p * (drop(dpe[u], bh, row, uint(key)) - dl) * ds_scale;
             }
             simdgroup_matrix<T, 8, 8> dsm;
             frag(dsm) = vec<T, 2>(ds);

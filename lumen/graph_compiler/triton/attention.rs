@@ -33,8 +33,9 @@ pub struct Launch<'a> {
     /// The kernels compiled for this step's launches.
     #[cfg_attr(not(lumen_cuda_linked), allow(dead_code))]
     pub launches: &'a Launches,
-    /// Flat batch count, query count, key count, and the head dims of Q/K and of V.
-    pub sizes: [usize; 5],
+    /// The grid's batch (`grid_batch`: outer count, head count), query count, key count, and the head
+    /// dims of Q/K and of V.
+    pub sizes: [usize; 6],
     /// Causal diagonal: key `k` is seen by query `q` when `k <= q + causal` (plus a runtime offset).
     pub causal: Option<i64>,
     /// Scale of dS in the backward kernels.
@@ -146,12 +147,19 @@ struct Prepared {
     /// Outputs the kernel adds into (dQ, atomically), zeroed before each launch.
     zeroed: Vec<usize>,
     functions: Vec<Function>,
-    sizes: [usize; 5],
+    sizes: [usize; 6],
     causal: Option<i64>,
     scale: f64,
     /// The head dims of Q/K and of V and the operands' dtype, choosing the untuned tiles.
     heads: (usize, usize, crate::DType),
     launches: Launches,
+}
+
+/// A launch's sizes: the grid's batch for `batch` (outer count, head count), then the query and key
+/// counts and the head dims of Q/K and of V.
+fn sizes(batch: &[usize], [sq, sk, h, hv]: [usize; 4]) -> [usize; 6] {
+    let (outer, heads) = attention::grid_batch(batch);
+    [outer, heads, sq, sk, h, hv]
 }
 
 /// Analyzes flash-attention `step`'s body, its operands laid out as `strides` gives them, into its
@@ -208,7 +216,7 @@ fn prepare(step: &Step, strides: &Strides) -> Result<Prepared, String> {
             tensors,
             zeroed: Vec::new(),
             functions: functions(codegen::Triton::forward(body, &a, strides)?),
-            sizes: [a.batch.iter().product(), a.sq, a.sk, a.h, a.hv],
+            sizes: sizes(&a.batch, [a.sq, a.sk, a.h, a.hv]),
             causal: a.causal,
             scale: 1.0,
             heads: (a.h, a.hv, a.dtype),
@@ -241,7 +249,7 @@ fn prepare(step: &Step, strides: &Strides) -> Result<Prepared, String> {
         tensors,
         zeroed,
         functions: functions(codegen::Triton::backward(body, &b, strides)?),
-        sizes: [b.batch.iter().product(), b.sq, b.sk, b.h, b.hv],
+        sizes: sizes(&b.batch, [b.sq, b.sk, b.h, b.hv]),
         causal: b.causal,
         scale: b.ds_scale,
         heads: (b.h, b.hv, b.dtype),

@@ -1,7 +1,7 @@
 //! Metal source for fused flash-attention forward and backward kernels.
 use super::*;
 use crate::codegen::AttentionCodegen;
-use crate::graph_compiler::common::attention::Strides;
+use crate::graph_compiler::common::attention::{Strides, grid_batch};
 
 /// Buffer parameters for the dropout seed and stream offset starting at buffer `first`.
 pub(super) fn random_state(first: usize) -> [String; 2] {
@@ -31,46 +31,41 @@ pub(super) fn dropout_functor(d: &Dropout, dtype: DType, sq: usize, sk: usize) -
     )
 }
 
-/// Metal `NAME_ix` method returning the element offset of operand `name` for flattened batch
-/// index `b`, plus its row and column strides.
-pub(super) fn ix_method(name: &str, acc: &Access, batch: &[usize]) -> String {
+/// Metal `NAME_ix` method returning the element offset of operand `name` for outer batch index `b` and
+/// head `h`, on the grid `grid_batch` gives `batch`, plus its row and column strides. A divisor maps the
+/// heads onto fewer (shared KV heads). Fails when the outer batch dims don't step as one dim.
+pub(super) fn ix_method(name: &str, acc: &Access, batch: &[usize]) -> Result<String, String> {
     let up = name.to_uppercase();
+    let (outer, (heads, div)) = acc
+        .grid_strides(batch)
+        .ok_or("flash attention on MPS: batch dims before the heads that don't step as one dim")?;
     let mut terms = Vec::new();
     if acc.offset != 0 {
         terms.push(format!("{}ul", acc.offset));
     }
-    // A batch dim's index is `b` over the dims inside it, modulo its size (the outermost needs none);
-    // `div` maps broadcast batch dims (e.g. shared KV heads) onto the operand's smaller dim.
-    for (k, (&size, &(stride, div))) in batch.iter().zip(&acc.batch).enumerate() {
-        if stride == 0 {
-            continue;
-        }
-        let inner: usize = batch[k + 1..].iter().product();
-        let mut idx = match inner {
-            1 => "b".to_string(),
-            _ => format!("(b / {inner}u)"),
+    if outer != 0 {
+        terms.push(format!("ulong(b) * {outer}ul"));
+    }
+    if heads != 0 {
+        let h = match div {
+            1 => "h".to_string(),
+            _ => format!("(h / {div}u)"),
         };
-        if k > 0 {
-            idx = format!("({idx} % {size}u)");
-        }
-        if div != 1 {
-            idx = format!("({idx} / {div}u)");
-        }
-        terms.push(format!("ulong({idx}) * {stride}ul"));
+        terms.push(format!("ulong({h}) * {heads}ul"));
     }
     if terms.is_empty() {
         terms.push("0ul".into());
     }
-    formatdoc!(
+    Ok(formatdoc!(
         "
         static constant constexpr uint {up}_ROW = {}u, {up}_COL = {}u;
-        inline ulong {name}(uint b) const {{
+        inline ulong {name}(uint b, uint h) const {{
             return {};
         }}",
         acc.row,
         acc.col,
         terms.join(" + ")
-    )
+    ))
 }
 
 /// Metal functor applying the score transforms (rounding casts and scalings) in order.
@@ -118,10 +113,10 @@ impl AttentionCodegen for Mps {
                 {}
             }};
             ",
-            index("q", &a.q),
-            index("k", &a.k),
-            index("v", &a.v),
-            index("o", &a.out)
+            index("q", &a.q)?,
+            index("k", &a.k)?,
+            index("v", &a.v)?,
+            index("o", &a.out)?
         );
         let (t, o) = (metal_type(a.dtype), metal_type(a.out_dtype));
         let out = body.outputs()[0];
@@ -201,6 +196,7 @@ impl AttentionCodegen for Mps {
             None => offset.to_string(),
         };
         let (h, hv, sq, sk) = (a.h, a.hv, a.sq, a.sk);
+        let heads = grid_batch(&a.batch).1;
         // Short query sequences use the decode kernel, which splits keys across threadgroups.
         let call = match decodes(a) {
             true => formatdoc!(
@@ -211,7 +207,7 @@ impl AttentionCodegen for Mps {
                     {q}, {k}, {v}, out, {raw_arg}, {lse_arg},
                     NAME_ix(), {sq}u, {sk}u, NAME_score(), {offset},
                     maxima, sums, os,
-                    group.x, group.y, sg, lane, tid.y * 16 + tid.x{epi});"
+                    group.x, group.z, group.y, {heads}u, sg, lane, tid.y * 16 + tid.x{epi});"
             ),
             false => {
                 let bk = key_block(a);
@@ -223,7 +219,7 @@ impl AttentionCodegen for Mps {
                         {q}, {k}, {v}, out, {raw_arg}, {lse_arg},
                         NAME_ix(), {sq}u, {sk}u, NAME_score(), {offset},
                         ks, vs,
-                        group.x, group.y, sg, lane, tid.y * 16 + tid.x{epi});"
+                        group.x, group.z, group.y, {heads}u, sg, lane, tid.y * 16 + tid.x{epi});"
                 )
             }
         };
@@ -258,7 +254,7 @@ impl AttentionCodegen for Mps {
             .filter_map(|(name, out)| out.as_ref().map(|(_, acc)| (*name, acc)));
         let mut methods = String::new();
         for (name, acc) in operands.into_iter().chain(outputs) {
-            writeln!(methods, "{}", ix_method(name, acc, &b.batch)).unwrap();
+            writeln!(methods, "{}", ix_method(name, acc, &b.batch)?).unwrap();
         }
         let ix = formatdoc!(
             "
@@ -318,6 +314,7 @@ impl AttentionCodegen for Mps {
         let (lse, delta) = (input(b.lse.base), input(b.delta.base));
         let (causal, offset) = (b.causal.is_some(), b.causal.unwrap_or(0));
         let (h, hv, sq, sk) = (b.h, b.hv, b.sq, b.sk);
+        let heads = grid_batch(&b.batch).1;
         let ds_scale = constant(DType::F32, Scalar::Float(b.ds_scale));
         let rows = match dkdv && dq {
             true => backward_block_with_dq(b).expect("a fused backward fits"),
@@ -339,7 +336,7 @@ impl AttentionCodegen for Mps {
                     dk, dv, dq,
                     NAME_ix(), {sq}u, {sk}u, {offset}, {ds_scale},
                     qs, gs, lses, deltas, ks, dss,
-                    group.x, group.y, sg, lane, tid.y * 16 + tid.x,
+                    group.x, group.z, group.y, {heads}u, sg, lane, tid.y * 16 + tid.x,
                     NAME_score(){drop_arg});"
             ),
             (true, false) => formatdoc!(
@@ -352,7 +349,7 @@ impl AttentionCodegen for Mps {
                     dk, dv, nullptr,
                     NAME_ix(), {sq}u, {sk}u, {offset}, {ds_scale},
                     qs, gs, lses, deltas, qs, qs,
-                    group.x, group.y, sg, lane, tid.y * 16 + tid.x,
+                    group.x, group.z, group.y, {heads}u, sg, lane, tid.y * 16 + tid.x,
                     NAME_score(){drop_arg});"
             ),
             (false, _) => formatdoc!(
@@ -364,7 +361,7 @@ impl AttentionCodegen for Mps {
                     dq,
                     NAME_ix(), {sq}u, {sk}u, {offset}, {ds_scale},
                     ks, vs,
-                    group.x, group.y, sg, lane, tid.y * 16 + tid.x,
+                    group.x, group.z, group.y, {heads}u, sg, lane, tid.y * 16 + tid.x,
                     NAME_score(){drop_arg});"
             ),
         };

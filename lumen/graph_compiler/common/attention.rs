@@ -23,6 +23,38 @@ pub(crate) struct Access {
     pub col: usize,
 }
 
+/// The batch extents as the attention kernels' grid launches them: the dims before the last merged into
+/// one, and the last (the heads); 1 for an absent one.
+pub(crate) fn grid_batch(batch: &[usize]) -> (usize, usize) {
+    match batch.split_last() {
+        Some((&heads, outer)) => (outer.iter().product(), heads),
+        None => (1, 1),
+    }
+}
+
+impl Access {
+    /// The access's strides on the grid `grid_batch` gives `batch`: the merged outer dims' stride, and the
+    /// heads' stride with its divisor. `None` when the outer dims don't step as one dim (each over the
+    /// whole of the one inside it) or carry a divisor.
+    pub(crate) fn grid_strides(&self, batch: &[usize]) -> Option<(usize, (usize, usize))> {
+        let Some((&heads, outer)) = self.batch.split_last() else {
+            return Some((0, (0, 1)));
+        };
+        // The outer dims of more than one element, outermost first.
+        let dims: Vec<(usize, (usize, usize))> = batch
+            .iter()
+            .copied()
+            .zip(outer.iter().copied())
+            .filter(|&(n, _)| n != 1)
+            .collect();
+        let steps = dims.windows(2).all(|w| w[0].1.0 == w[1].1.0 * w[1].0);
+        if !steps || dims.iter().any(|&(_, (_, divisor))| divisor != 1) {
+            return None;
+        }
+        Some((dims.last().map_or(0, |&(_, (stride, _))| stride), heads))
+    }
+}
+
 /// A matched `softmax(scores(Q K^T)) V` attention.
 #[derive(Debug, Clone)]
 pub(crate) struct Attention {

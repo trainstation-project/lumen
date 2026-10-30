@@ -11,7 +11,7 @@ struct NoDropout {
 #define ATTN_BQ (ATTN_ROWS * ATTN_GROUPS)
 #define ATTN_UNROLL _Pragma("clang loop unroll(full)")
 
-/// Computes attention for one block of ATTN_BQ queries of batch `b` with 8x8 simdgroup matrices,
+/// Computes attention for one block of ATTN_BQ queries of head `h` of batch `b` with 8x8 simdgroup matrices,
 /// streaming BK keys at a time through threadgroup memory with an online softmax.
 /// Writes `epi` of the output, optionally the raw output (`RAW`) and the row log-sum-exp (`LSE`).
 /// `offset` shifts the causal diagonal so query `i` sees keys up to `i + offset`.
@@ -43,15 +43,19 @@ inline void flash_attention(device const T *q,
                             threadgroup T *vs,
                             uint qblock,
                             uint b,
+                            uint h,
+                            uint heads,
                             uint sg,
                             uint lane,
                             uint t,
                             Epi epi = Epi(),
                             Drop drop = Drop()) {
-    q += ix.q(b);
-    k += ix.k(b);
-    v += ix.v(b);
-    const ulong ob = ix.o(b);
+    // The flat batch index, as dropout's stream and the log-sum-exp's row count it.
+    const uint bh = b * heads + h;
+    q += ix.q(b, h);
+    k += ix.k(b, h);
+    v += ix.v(b, h);
+    const ulong ob = ix.o(b, h);
     out += ob;
     const uint r0 = qblock * ATTN_BQ + sg * ATTN_ROWS;
     const uint fr = frag_row(lane), fc = frag_col(lane);
@@ -115,7 +119,7 @@ inline void flash_attention(device const T *q,
             sum += p.x + p.y;
             vec<T, 2> pr = vec<T, 2>(p);
             uint key = k0 + jc * 8 + fc;
-            frag(pm[jc]) = vec<T, 2>(drop(pr.x, b, row, key), drop(pr.y, b, row, key + 1));
+            frag(pm[jc]) = vec<T, 2>(drop(pr.x, bh, row, key), drop(pr.y, bh, row, key + 1));
         }
         sum += simd_shuffle_xor(sum, 1);
         sum += simd_shuffle_xor(sum, 8);
@@ -131,7 +135,7 @@ inline void flash_attention(device const T *q,
         }
     }
     if (LSE && in_rows && fc == 0) {
-        lse[ulong(b) * sq + row] = m + log(l);
+        lse[ulong(bh) * sq + row] = m + log(l);
     }
     if (in_rows) {
         ATTN_UNROLL for (uint c = 0; c < DV / 8; ++c) {
@@ -148,7 +152,7 @@ inline void flash_attention(device const T *q,
     }
 }
 
-/// Computes attention for query `i` of batch `b`: each of the ATTN_GROUPS simdgroups takes every
+/// Computes attention for query `i` of head `h` of batch `b`: each of the ATTN_GROUPS simdgroups takes every
 /// ATTN_GROUPS-th key with lanes splitting the head dims, then partial softmaxes merge in threadgroup memory.
 template <typename T,
           typename O,
@@ -178,6 +182,8 @@ inline void attention_decode(device const T *q,
                              threadgroup float *os,
                              uint i,
                              uint b,
+                             uint h,
+                             uint heads,
                              uint sg,
                              uint lane,
                              uint t,
@@ -185,10 +191,12 @@ inline void attention_decode(device const T *q,
                              Drop drop = Drop()) {
     // Each lane holds head dims `lane`, `lane + 32`, ... of the query and its output.
     constexpr uint QN = (D + 31) / 32, VN = (DV + 31) / 32;
-    q += ix.q(b);
-    k += ix.k(b);
-    v += ix.v(b);
-    const ulong ob = ix.o(b);
+    // The flat batch index, as dropout's stream and the log-sum-exp's row count it.
+    const uint bh = b * heads + h;
+    q += ix.q(b, h);
+    k += ix.k(b, h);
+    v += ix.v(b, h);
+    const ulong ob = ix.o(b, h);
     out += ob;
     float qv[QN], ov[VN];
     ATTN_UNROLL for (uint n = 0; n < QN; ++n) {
@@ -214,7 +222,7 @@ inline void attention_decode(device const T *q,
         float factor = exp(m - m_new);
         float p = exp(s - m_new);
         l = l * factor + p;
-        float pt = float(drop(T(p), b, i, j));
+        float pt = float(drop(T(p), bh, i, j));
         ATTN_UNROLL for (uint n = 0; n < VN; ++n) {
             uint d = lane + 32 * n;
             if (d < DV) {
@@ -244,7 +252,7 @@ inline void attention_decode(device const T *q,
         total += maxima[g] == -INFINITY ? 0.0f : sums[g] * exp(maxima[g] - mm);
     }
     if (LSE && t == 0) {
-        lse[ulong(b) * sq + i] = mm + log(total);
+        lse[ulong(bh) * sq + i] = mm + log(total);
     }
     for (uint d = t; d < DV; d += 256) {
         float o = 0;
