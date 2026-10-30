@@ -533,6 +533,7 @@ fn group(dk: &Access) -> usize {
 fn path(body: &Graph, from: Var, k: usize) -> Option<Vec<&Node>> {
     let mut depends = vec![false; body.types.len()];
     depends[from] = true;
+
     for n in body.nodes() {
         depends[n.output] |= n.inputs.iter().any(|&v| depends[v]);
     }
@@ -761,6 +762,7 @@ fn run(index: usize, kind: &str, spec: String, rows: &[*const u8]) -> Result<(),
         "forward" => "lumen.codegen.attention.tpu.forward",
         _ => "lumen.codegen.attention.tpu.backward",
     };
+
     let launched = Launch {
         module,
         kernel: format!("flash_attention_{kind}"),
@@ -770,6 +772,7 @@ fn run(index: usize, kind: &str, spec: String, rows: &[*const u8]) -> Result<(),
         host: &[],
         sparse: None,
     };
+
     launch(index, launched)
 }
 
@@ -784,10 +787,12 @@ pub(crate) fn encode(
     let Primitive::Fusion { name, body, .. } = &step.primitive else {
         unreachable!("an attention fusion")
     };
+
     // The kernels read each operand's heads and head dim (its last two dims) contiguous.
     for (strides, (_, ty)) in step.input_strides().iter().zip(&step.inputs) {
         let rank = ty.shape.len();
         let contiguous = contiguous_strides(&ty.shape);
+
         if rank > 0 && strides[rank.saturating_sub(2)..] != contiguous[rank.saturating_sub(2)..] {
             return Err(format!(
                 "{}: flash attention on TPU reads its operands' last two dims (heads, head dim) \
@@ -796,6 +801,7 @@ pub(crate) fn encode(
             ));
         }
     }
+
     let n = step.inputs.len();
     let rows: Vec<*const u8> = inputs[..n]
         .iter()
@@ -803,6 +809,7 @@ pub(crate) fn encode(
         .chain([output.cast_const()])
         .chain(inputs[n..].iter().copied())
         .collect();
+
     let (kind, spec) = kernel(name, body)?;
     run(index, kind, spec, &rows)
 }

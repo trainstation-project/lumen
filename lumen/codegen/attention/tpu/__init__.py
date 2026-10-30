@@ -13,9 +13,7 @@ MASK = -0.7 * 3.4028234663852886e38
 
 # Dot dimension numbers: plain matmul, rhs transposed, lhs transposed.
 NN = (((1,), (0,)), ((), ()))
-
 NT = (((1,), (1,)), ((), ()))
-
 TN = (((0,), (0,)), ((), ()))
 
 
