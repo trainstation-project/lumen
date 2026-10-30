@@ -138,11 +138,11 @@ pub(crate) fn untuned_attention(head_bytes: usize) -> AttentionConfig {
 }
 
 /// Most lanes per output when the reduced axis is innermost.
-pub(super) const ROW_LANES: usize = 256;
+pub(crate) const ROW_LANES: usize = 256;
 /// Most lanes per output for a split reduction over the innermost axis.
-pub(super) const SPLIT_ROW_LANES: usize = 512;
+pub(crate) const SPLIT_ROW_LANES: usize = 512;
 /// Most lanes per output when the reduced axis is strided (outputs are contiguous instead).
-pub(super) const COLUMN_LANES: usize = 16;
+pub(crate) const COLUMN_LANES: usize = 16;
 /// Reductions with fewer outputs than this are split across programs to fill the GPU.
 pub(crate) const SPLIT_BELOW: usize = 1024;
 /// Reduced elements each split aims to cover.
