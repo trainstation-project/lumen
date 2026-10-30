@@ -17,6 +17,7 @@ pub(super) fn dropout_functor(d: &Dropout, dtype: DType, sq: usize, sk: usize) -
     let t = metal_type(dtype);
     let scale = constant(dtype, Scalar::Float(d.scale));
     let (offset, threshold) = (d.offset, d.threshold);
+
     formatdoc!(
         "
         struct NAME_drop {{
@@ -36,6 +37,7 @@ pub(super) fn dropout_functor(d: &Dropout, dtype: DType, sq: usize, sk: usize) -
 /// heads onto fewer (shared KV heads). Fails when the outer batch dims don't step as one dim.
 pub(super) fn ix_method(name: &str, acc: &Access, batch: &[usize]) -> Result<String, String> {
     let up = name.to_uppercase();
+
     let mut terms: Vec<String> = acc
         .batch_terms(batch)?
         .into_iter()
@@ -45,9 +47,11 @@ pub(super) fn ix_method(name: &str, acc: &Access, batch: &[usize]) -> Result<Str
             Term::Heads { stride, divisor } => format!("ulong(h / {divisor}u) * {stride}ul"),
         })
         .collect();
+
     if terms.is_empty() {
         terms.push("0ul".into());
     }
+
     Ok(formatdoc!(
         "
         static constant constexpr uint {up}_ROW = {}u, {up}_COL = {}u;
@@ -63,12 +67,14 @@ pub(super) fn ix_method(name: &str, acc: &Access, batch: &[usize]) -> Result<Str
 /// Metal functor applying the score transforms (rounding casts and scalings) in order.
 pub(super) fn score_functor(scores: &[Score]) -> String {
     let mut score = "s".to_string();
+
     for step in scores {
         score = match *step {
             Score::Round(d) => format!("convert_value<{}>({score})", metal_type(d)),
             Score::Mul(c, d) => format!("Mul::apply({score}, {})", constant(d, Scalar::Float(c))),
         };
     }
+
     formatdoc!(
         "
         struct NAME_score {{
@@ -95,6 +101,7 @@ impl AttentionCodegen for Mps {
             let k = body.inputs().iter().position(|&v| v == base);
             format!("in{}", k.expect("an input of the body"))
         };
+
         let index = |name: &str, acc: &Access| ix_method(name, acc, &a.batch);
         let ix = formatdoc!(
             "
@@ -110,10 +117,12 @@ impl AttentionCodegen for Mps {
             index("v", &a.v)?,
             index("o", &a.out)?
         );
+
         let (t, o) = (metal_type(a.dtype), metal_type(a.out_dtype));
         let out = body.outputs()[0];
         let root = body.nodes()[a.root].output;
         let w = metal_type(body.type_of(out).dtype);
+
         // When the body's output isn't the attention node itself, emit a functor computing it from
         // the attention row value `r`.
         let (epilogue, epi) = match out == root {
@@ -122,14 +131,18 @@ impl AttentionCodegen for Mps {
                 let mut e = Emitter::new(body, &[]);
                 e.invariant[root] = true;
                 e.row_locals.insert(root, "r".into());
+
                 let value = e.value(out, "j".into());
                 let mut fields = String::new();
+
                 for (k, &v) in body.inputs()[..n].iter().enumerate() {
                     let vt = metal_type(body.type_of(v).dtype);
                     writeln!(fields, "    device const {vt} *in{k};").unwrap();
                 }
+
                 let members: Vec<String> = (0..n).map(|k| format!("in{k}")).collect();
                 let (hoisted, lines) = (&e.hoisted, &e.lines);
+
                 (
                     formatdoc!(
                         "
@@ -145,6 +158,7 @@ impl AttentionCodegen for Mps {
                 )
             }
         };
+
         let mut params: Vec<String> = body.inputs()[..n]
             .iter()
             .enumerate()
@@ -153,20 +167,25 @@ impl AttentionCodegen for Mps {
                 format!("device const {vt} *in{k} [[buffer({k})]]")
             })
             .collect();
+
         params.push(format!("device {w} *out [[buffer({n})]]"));
         let mut buffer = n;
+
         let raw = body.outputs()[1..].contains(&root);
         if raw {
             buffer += 1;
             params.push(format!("device {o} *raw [[buffer({buffer})]]"));
         }
+
         let lse = a.lse.is_some();
         if lse {
             buffer += 1;
             params.push(format!("device float *lse [[buffer({buffer})]]"));
         }
+
         let raw_arg = if raw { "raw" } else { "nullptr" };
         let lse_arg = if lse { "lse" } else { "nullptr" };
+
         let (drop, epi) = match &a.dropout {
             Some(d) => {
                 params.extend(random_state(buffer + 1));
@@ -180,6 +199,7 @@ impl AttentionCodegen for Mps {
             }
             None => (String::new(), epi),
         };
+
         let (q, k, v) = (input(a.q.base), input(a.k.base), input(a.v.base));
         let score = score_functor(&a.scores);
         let (causal, offset) = (a.causal.is_some(), a.causal.unwrap_or(0));
@@ -187,8 +207,10 @@ impl AttentionCodegen for Mps {
             Some(v) => format!("{offset} + int({}[0])", input(v)),
             None => offset.to_string(),
         };
+
         let (h, hv, sq, sk) = (a.h, a.hv, a.sq, a.sk);
         let heads = grid_batch(&a.batch).1;
+
         // Short query sequences use the decode kernel, which splits keys across threadgroups.
         let call = match decodes(a) {
             true => formatdoc!(
@@ -215,7 +237,9 @@ impl AttentionCodegen for Mps {
                 )
             }
         };
+
         let params = params.join(",\n");
+
         Ok(named(formatdoc!(
             "
             {ix}{score}{epilogue}{drop}kernel void NAME({params},
@@ -232,6 +256,7 @@ impl AttentionCodegen for Mps {
             let k = body.inputs().iter().position(|&v| v == base);
             format!("in{}", k.expect("an input of the body"))
         };
+
         let operands = [
             ("q", &b.q),
             ("k", &b.k),
@@ -240,14 +265,18 @@ impl AttentionCodegen for Mps {
             ("lse", &b.lse),
             ("delta", &b.delta),
         ];
+
         let outputs = [("dv", &b.dv_out), ("dk", &b.dk_out), ("dq", &b.dq_out)];
         let outputs = outputs
             .iter()
             .filter_map(|(name, out)| out.as_ref().map(|(_, acc)| (*name, acc)));
+
         let mut methods = String::new();
+
         for (name, acc) in operands.into_iter().chain(outputs) {
             writeln!(methods, "{}", ix_method(name, acc, &b.batch)?).unwrap();
         }
+
         let ix = formatdoc!(
             "
             struct NAME_ix {{
@@ -255,9 +284,11 @@ impl AttentionCodegen for Mps {
             }};
             "
         );
+
         let score = score_functor(&b.scores);
         let t = metal_type(b.dtype);
         let n = body.inputs().len() - if b.dropout.is_some() { 2 } else { 0 };
+
         let mut params: Vec<String> = body.inputs()[..n]
             .iter()
             .enumerate()
@@ -268,6 +299,7 @@ impl AttentionCodegen for Mps {
                 )
             })
             .collect();
+
         let dkdv = b.dv_out.is_some();
         let dq = b.dq_out.is_some();
         let outs: &[&str] = match (dkdv, dq) {
@@ -275,10 +307,12 @@ impl AttentionCodegen for Mps {
             (true, false) => &["dv", "dk"],
             _ => &["dq"],
         };
+
         let stored = |out: &Option<(usize, Access)>| {
             let (node, _) = out.as_ref().expect("a computed gradient");
             metal_type(body.type_of(body.nodes()[*node].output).dtype)
         };
+
         // When dK/dV and dQ are fused, dQ is accumulated atomically across key blocks in float.
         for (k, out) in outs.iter().enumerate() {
             let ty = match *out {
@@ -287,8 +321,10 @@ impl AttentionCodegen for Mps {
                 "dk" => stored(&b.dk_out),
                 _ => stored(&b.dv_out),
             };
+
             params.push(format!("device {ty} *{out} [[buffer({})]]", n + k));
         }
+
         let (drop, drop_arg) = match &b.dropout {
             Some(d) => {
                 params.extend(random_state(n + outs.len()));
@@ -297,12 +333,14 @@ impl AttentionCodegen for Mps {
             }
             None => (String::new(), ""),
         };
+
         let (q, k, v, g) = (
             input(b.q.base),
             input(b.k.base),
             input(b.v.base),
             input(b.d_o.base),
         );
+
         let (lse, delta) = (input(b.lse.base), input(b.delta.base));
         let (causal, offset) = (b.causal.is_some(), b.causal.unwrap_or(0));
         let (h, hv, sq, sk) = (b.h, b.hv, b.sq, b.sk);
@@ -312,10 +350,12 @@ impl AttentionCodegen for Mps {
             true => backward_block_with_dq(b).expect("a fused backward fits"),
             false => backward_block(b),
         };
+
         let (dk_t, dv_t, dq_t) = match (dkdv, dq) {
             (true, _) => (stored(&b.dk_out), stored(&b.dv_out), ""),
             (false, _) => ("", "", stored(&b.dq_out)),
         };
+
         let call = match (dkdv, dq) {
             (true, true) => formatdoc!(
                 "
@@ -357,6 +397,7 @@ impl AttentionCodegen for Mps {
                     NAME_score(){drop_arg});"
             ),
         };
+
         let params = params.join(",\n");
         Ok(named(formatdoc!(
             "

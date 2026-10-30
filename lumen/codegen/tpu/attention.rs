@@ -43,9 +43,11 @@ fn view(
             op.ty, op.acc.offset, op.acc.row, op.acc.col
         ))
     };
+
     if shape.len() < 2 {
         return failed("an operand of fewer than two dimensions");
     }
+
     let (rows, width) = (shape[shape.len() - 2], shape[shape.len() - 1]);
     let tiles = Layout::new(op.ty.dtype, shape)?.rows;
     // A sequence that divides the rows in whole tiles makes each slab one head's matrix.
@@ -53,9 +55,11 @@ fn view(
         Some(seq) if rows.is_multiple_of(seq) && seq.is_multiple_of(tiles) => seq,
         _ => rows,
     };
+
     let slab = rows * width;
     let slabs = op.ty.numel() / slab.max(1);
     let (row, col) = (op.acc.row, op.acc.col);
+
     let fits = match matrix {
         Some(_) => col == 1 && row == width,
         None => col == width,
@@ -63,40 +67,49 @@ fn view(
     if !fits {
         return failed("an operand whose rows are not its tiles' rows");
     }
+
     let unit = match matrix {
         Some(_) => op.width,
         None => 1,
     };
+
     if matrix.is_some() && !(op.width.is_multiple_of(LANES) || op.width == width) {
         return failed("a head dimension that is neither a multiple of 128 nor its rows' width");
     }
+
     // Splits an element offset into (slab, row, column).
     let split = |a: usize| (a / slab, (a % slab) / width, (a % slab) % width);
     let (l0, r0, c0) = split(op.acc.offset);
     let mut dims = Vec::new();
+
     for (&size, &(stride, div)) in batch.iter().zip(&op.acc.batch) {
         let (dl, dr, dc) = split(stride);
         dims.push((size, div, dl, dr, dc));
     }
+
     let heads: usize = batch.iter().product();
     // Check every head's start lands where the per-dim slab and column steps put it.
     for g in 0..heads {
         let (mut rest, mut address, mut at) = (g, op.acc.offset, (l0, r0, c0));
+
         for (k, &(size, div, dl, dr, dc)) in dims.iter().enumerate().rev() {
             let idx = (rest % size) / div;
             rest /= size;
             address += idx * op.acc.batch[k].0;
             at = (at.0 + idx * dl, at.1 + idx * dr, at.2 + idx * dc);
         }
+
         let whole = split(address) == at && at.1 == 0 && at.0 < slabs;
         if !whole || !at.2.is_multiple_of(unit) || at.2 + unit > width {
             return failed("heads that are not whole tiles of their operand");
         }
     }
+
     let shown: Vec<String> = dims
         .iter()
         .map(|&(size, div, dl, _, dc)| format!("[{size}, {div}, {dl}, {}]", dc / unit))
         .collect();
+
     Ok(format!(
         "{{\"row\": {}, \"dtype\": \"{}\", \"view\": [{slabs}, {rows}, {width}], \"at\": [{l0}, {}], \"dims\": [{}]}}",
         op.row,
@@ -115,6 +128,7 @@ fn scores(scores: &[Score]) -> String {
             Score::Mul(c, d) => format!("[\"mul\", {c:?}, \"{}\"]", d.full_name()),
         })
         .collect();
+
     format!("[{}]", shown.join(", "))
 }
 
@@ -130,6 +144,7 @@ fn rows_of(body: &Graph, acc: &Access, n: usize) -> usize {
 fn per_head(ty: &TensorType, batch: &[usize]) -> Access {
     let strides = contiguous_strides(&ty.shape);
     let nb = batch.len();
+
     Access {
         base: 0,
         offset: 0,
@@ -142,6 +157,7 @@ fn per_head(ty: &TensorType, batch: &[usize]) -> Access {
 /// The operand `acc` reads, `width` columns per head.
 fn operand(body: &Graph, acc: &Access, width: usize) -> Operand {
     let n = body.inputs().len();
+
     Operand {
         row: rows_of(body, acc, n),
         ty: body.type_of(acc.base).clone(),
@@ -153,6 +169,7 @@ fn operand(body: &Graph, acc: &Access, width: usize) -> Operand {
 /// Body output `k` written at `acc`, `width` columns per head.
 fn output(body: &Graph, k: usize, acc: Access, width: usize) -> Operand {
     let n = body.inputs().len();
+
     Operand {
         row: n + k,
         ty: body.type_of(body.outputs()[k]).clone(),
@@ -166,11 +183,13 @@ fn unsupported(dropout: bool, dtype: DType) -> Result<(), String> {
     if dropout {
         return Err("flash attention on TPU: dropout does not run on TPU yet".into());
     }
+
     if !matches!(dtype, DType::F32 | DType::BF16) {
         return Err(format!(
             "flash attention on TPU: operands of float32 or bfloat16, got {dtype}"
         ));
     }
+
     Ok(())
 }
 
@@ -179,6 +198,7 @@ fn unsupported(dropout: bool, dtype: DType) -> Result<(), String> {
 pub(crate) fn kernel(name: &str, body: &Graph) -> Result<(&'static str, String), String> {
     // The TPU kernels read their operands contiguous.
     let strides = Strides::default();
+
     match name {
         "flash_attention" => {
             let a = attention::of_body(body)
@@ -203,17 +223,21 @@ impl AttentionCodegen for Tpu {
     /// elementwise epilogue on the output and an optional log-sum-exp output.
     fn forward(body: &Graph, a: &Attention, _: &Strides) -> Result<Self::Code, String> {
         unsupported(a.dropout.is_some(), a.dtype)?;
+
         let views = [
             view("q", &operand(body, &a.q, a.h), &a.batch, Some(a.sq))?,
             view("k", &operand(body, &a.k, a.h), &a.batch, Some(a.sk))?,
             view("v", &operand(body, &a.v, a.hv), &a.batch, Some(a.sk))?,
         ];
+
         // The log-sum-exp, when produced, is the last output.
         let lse_k = a.lse.map(|_| body.outputs().len() - 1);
         let (mut raw, mut ends) = ("null".to_string(), ("null".to_string(), "null".to_string()));
+
         for k in (0..body.outputs().len()).filter(|&k| Some(k) != lse_k) {
             let chain = path(body, a.out.base, k)
                 .ok_or("flash attention on TPU: an output written through other than its layout")?;
+
             let acc = written_at(body, &a.out, &a.batch, k)?.1;
             let shown = view(
                 "the output",
@@ -221,11 +245,13 @@ impl AttentionCodegen for Tpu {
                 &a.batch,
                 Some(a.sq),
             )?;
+
             match epilogue(&chain) {
                 true => ends = (shown, epilogue_spec(body, &chain, a.out.base)?),
                 false => raw = shown,
             }
         }
+
         let lse = match lse_k {
             Some(k) => {
                 let ty = body.type_of(body.outputs()[k]).clone();
@@ -234,6 +260,7 @@ impl AttentionCodegen for Tpu {
             }
             None => "null".into(),
         };
+
         let spec = format!(
             "\"kind\": \"forward\", \"batch\": {:?}, \"sq\": {}, \"sk\": {}, \"h\": {}, \"hv\": {}, \"blocks\": [{}, {}], \
              \"scores\": {}, \"causal\": {}, \"q\": {}, \"k\": {}, \"v\": {}, \"o\": {raw}, \"e\": {}, \"epilogue\": {}, \
@@ -254,6 +281,7 @@ impl AttentionCodegen for Tpu {
             ends.1,
             a.out_dtype.full_name(),
         );
+
         Ok(("forward", spec))
     }
 
@@ -261,6 +289,7 @@ impl AttentionCodegen for Tpu {
     /// fusion `body`.
     fn backward(body: &Graph, b: &Backward, _: &Strides) -> Result<Self::Code, String> {
         unsupported(b.dropout.is_some(), b.dtype)?;
+
         let ins = [
             view("q", &operand(body, &b.q, b.h), &b.batch, Some(b.sq))?,
             view("k", &operand(body, &b.k, b.h), &b.batch, Some(b.sk))?,
@@ -268,6 +297,7 @@ impl AttentionCodegen for Tpu {
             view("dO", &operand(body, &b.d_o, b.hv), &b.batch, Some(b.sq))?,
             view("the log-sum-exp", &operand(body, &b.lse, 1), &b.batch, None)?,
         ];
+
         // Delta is either a body input or rowsum(dO * o), which the kernel recomputes from o.
         let delta = match rows_of(body, &b.delta, usize::MAX) {
             usize::MAX => {
@@ -282,11 +312,13 @@ impl AttentionCodegen for Tpu {
                 view("delta", &operand(body, &b.delta, 1), &b.batch, None)?
             ),
         };
+
         let kind = match (&b.dq_out, &b.dk_out, &b.dv_out) {
             (Some(_), None, None) => "dq",
             (None, Some(_), Some(_)) => "dkv",
             _ => return Err("flash attention backward on TPU: dq alone, or dk and dv".into()),
         };
+
         let out = |name: &str,
                    out: &Option<(usize, Access)>,
                    width: usize,
@@ -296,6 +328,7 @@ impl AttentionCodegen for Tpu {
             let (k, acc) = written(body, acc, &b.batch)?;
             view(name, &output(body, k, acc, width), &b.batch, Some(seq))
         };
+
         let outs = match kind {
             "dq" => format!("\"dq\": {}", out("dq", &b.dq_out, b.h, b.sq)?),
             _ => format!(
@@ -305,6 +338,7 @@ impl AttentionCodegen for Tpu {
                 group(&written(body, &b.dk_out.as_ref().expect("dk").1, &b.batch)?.1)
             ),
         };
+
         let spec = format!(
             "\"kind\": \"{kind}\", \"batch\": {:?}, \"sq\": {}, \"sk\": {}, \"h\": {}, \"hv\": {}, \"blocks\": [{}, {}], \
              \"scores\": {}, \"causal\": {}, \"ds_scale\": {:?}, \"q\": {}, \"k\": {}, \"v\": {}, \"do\": {}, \
@@ -325,6 +359,7 @@ impl AttentionCodegen for Tpu {
             ins[3],
             ins[4],
         );
+
         Ok((kind, spec))
     }
 }
@@ -339,10 +374,12 @@ fn inside(
 ) -> Result<Access, String> {
     let failed =
         || Err("flash attention backward on TPU: delta neither an operand nor rowsum(dO o)".into());
+
     let producer = |v: Var| body.nodes().iter().find(|n| n.output == v);
     let Some(dot) = producer(delta.base) else {
         return failed();
     };
+
     let Primitive::DotGeneral {
         lhs_batch,
         rhs_batch,
@@ -353,9 +390,11 @@ fn inside(
     else {
         return failed();
     };
+
     // Follows reshapes and transposes back to the value they view.
     let based = |mut v: Var| {
         let mut chain = Vec::new();
+
         while let Some(n) = producer(v).filter(|n| {
             matches!(
                 n.primitive,
@@ -365,8 +404,10 @@ fn inside(
             chain.push(n);
             v = n.inputs[0];
         }
+
         (v, chain)
     };
+
     let side = match (
         based(dot.inputs[0]).0 == d_o.base,
         based(dot.inputs[1]).0 == d_o.base,
@@ -375,13 +416,16 @@ fn inside(
         (false, true) => 0,
         _ => return failed(),
     };
+
     let (dims, contracting) = match side {
         0 => (lhs_batch, lhs_contracting),
         _ => (rhs_batch, rhs_contracting),
     };
+
     let operand = dot.inputs[side];
     let (base, chain) = based(operand);
     let shape = body.type_of(operand).shape.clone();
+
     // Maps an element offset of the dot operand back through its transposes to its base.
     let through = |mut a: usize| {
         for n in &chain {
@@ -390,6 +434,7 @@ fn inside(
                     &body.type_of(n.output).shape,
                     &body.type_of(n.inputs[0]).shape,
                 );
+
                 let (fs, ts) = (contiguous_strides(from), contiguous_strides(to));
                 a = (0..from.len())
                     .map(|d| ((a / fs[d]) % from[d]) * ts[permutation[d]])
@@ -398,10 +443,12 @@ fn inside(
         }
         a
     };
+
     let out = body.type_of(dot.output).shape.clone();
     if contracting.len() != 1 || out.len() != dims.len() {
         return failed();
     }
+
     let (strides, out_strides) = (contiguous_strides(&shape), contiguous_strides(&out));
     let at = |a: usize, h: usize| {
         let mut address = h * strides[contracting[0]];
@@ -410,6 +457,7 @@ fn inside(
         }
         through(address)
     };
+
     let offset = at(delta.offset, 0);
     // Fit each batch dim's step as (stride, period): heads within one period read the same place.
     let mut fitted = Vec::new();
@@ -418,11 +466,14 @@ fn inside(
         let of = |i: usize| at(delta.offset + (i / div) * stride, 0);
         let period = (1..size).find(|&i| of(i) != of(0)).unwrap_or(size);
         let scaled = if period < size { of(period) - of(0) } else { 0 };
+
         if (0..size).any(|i| of(i) != of(0) + (i / period) * scaled) {
             return failed();
         }
+
         fitted.push((scaled, period));
     }
+
     let o = Access {
         base,
         offset,
@@ -430,23 +481,27 @@ fn inside(
         row: at(delta.offset + delta.col, 0) - offset,
         col: at(delta.offset, 1) - offset,
     };
+
     // Check the first and last query row of every head against the fitted access.
     let heads: usize = batch.iter().product();
     for g in 0..heads {
         for q in [0, sq - 1] {
             let (mut rest, mut from, mut to) =
                 (g, delta.offset + q * delta.col, o.offset + q * o.row);
+
             for d in (0..batch.len()).rev() {
                 let idx = rest % batch[d];
                 rest /= batch[d];
                 from += (idx / delta.batch[d].1) * delta.batch[d].0;
                 to += (idx / o.batch[d].1) * o.batch[d].0;
             }
+
             if at(from, 0) != to {
                 return failed();
             }
         }
     }
+
     Ok(o)
 }
 
@@ -462,20 +517,25 @@ fn path(body: &Graph, from: Var, k: usize) -> Option<Vec<&Node>> {
     for n in body.nodes() {
         depends[n.output] |= n.inputs.iter().any(|&v| depends[v]);
     }
+
     let producer = |v: Var| body.nodes().iter().find(|n| n.output == v);
     let (mut chain, mut v) = (Vec::new(), body.outputs()[k]);
+
     while v != from {
         let n = producer(v)?;
         let step = matches!(
             n.primitive,
             Primitive::Reshape { .. } | Primitive::ReduceSum { .. }
         ) || elementwise(&n.primitive);
+
         if !step {
             return None;
         }
+
         chain.push(n);
         v = *n.inputs.iter().find(|&&x| depends[x])?;
     }
+
     chain.reverse();
     Some(chain)
 }
@@ -495,15 +555,18 @@ fn epilogue_spec(body: &Graph, chain: &[&Node], from: Var) -> Result<String, Str
     let failed = || Err("flash attention on TPU: an epilogue reading other than scalars".into());
     let nodes = body.nodes();
     let producer = |v: Var| nodes.iter().position(|n| n.output == v);
+
     let on_path: Vec<Var> = std::iter::once(from)
         .chain(chain.iter().map(|n| n.output))
         .collect();
+
     let mut needed = vec![false; nodes.len()];
     let mut stack: Vec<Var> = chain
         .iter()
         .flat_map(|n| n.inputs.iter().copied())
         .filter(|v| !on_path.contains(v))
         .collect();
+
     let mut scalars: Vec<Var> = Vec::new();
     // Collect the non-path values the chain reads, failing on any non-scalar body input.
     while let Some(v) = stack.pop() {
@@ -521,27 +584,34 @@ fn epilogue_spec(body: &Graph, chain: &[&Node], from: Var) -> Result<String, Str
             None => return failed(),
         }
     }
+
     let mut value: std::collections::HashMap<Var, usize> =
         std::collections::HashMap::from([(from, 0)]);
+
     for (k, &v) in scalars.iter().enumerate() {
         value.insert(v, k + 1);
     }
+
     let mut shown = Vec::new();
+
     for (i, n) in nodes.iter().enumerate() {
         let wanted = needed[i] || chain.iter().any(|m| m.output == n.output);
         if !wanted {
             continue;
         }
+
         // Reshapes don't change a block's elements, so they alias their operand.
         if matches!(n.primitive, Primitive::Reshape { .. }) {
             let x = value[&n.inputs[0]];
             value.insert(n.output, x);
             continue;
         }
+
         let args: Vec<usize> = n.inputs.iter().map(|v| value[v]).collect();
         shown.push(crate::codegen::tpu::node(&n.primitive, &args));
         value.insert(n.output, scalars.len() + shown.len());
     }
+
     let rows: Vec<String> = scalars
         .iter()
         .map(|&v| {
@@ -553,7 +623,9 @@ fn epilogue_spec(body: &Graph, chain: &[&Node], from: Var) -> Result<String, Str
             format!("[{row}, \"{}\"]", body.type_of(v).dtype.full_name())
         })
         .collect();
+
     let end = chain.last().expect("a step").output;
+
     Ok(format!(
         "{{\"scalars\": [{}], \"nodes\": [{}], \"result\": {}}}",
         rows.join(", "),
@@ -567,6 +639,7 @@ fn written(body: &Graph, acc: &Access, batch: &[usize]) -> Result<(usize, Access
     let k = (0..body.outputs().len())
         .find(|&k| path(body, acc.base, k).is_some_and(|c| !epilogue(&c)))
         .ok_or("flash attention on TPU: an output written through other than reshapes and sums")?;
+
     written_at(body, acc, batch, k)
 }
 
@@ -580,9 +653,11 @@ fn written_at(
 ) -> Result<(usize, Access), String> {
     let failed =
         || Err("flash attention on TPU: an output written through other than its layout".into());
+
     let Some(chain) = path(body, acc.base, k) else {
         return failed();
     };
+
     // Maps an element offset through each reduce_sum on the path, dropping the reduced axes.
     let f = |mut a: usize| {
         for n in &chain {
@@ -591,18 +666,23 @@ fn written_at(
                 let to = contiguous_strides(&body.type_of(n.output).shape);
                 let mut out = 0;
                 let mut kept = 0;
+
                 for (d, s) in contiguous_strides(from).iter().enumerate() {
                     let idx = (a / s) % from[d];
+
                     if !axes.contains(&d) {
                         out += idx * to[kept];
                         kept += 1;
                     }
                 }
+
                 a = out;
             }
         }
+
         a
     };
+
     let offset = f(acc.offset);
     let step = |s: usize| {
         if s == 0 {
@@ -611,18 +691,23 @@ fn written_at(
             f(acc.offset + s) - offset
         }
     };
+
     let mut dims = Vec::new();
+
     // Fit each batch dim's step as (stride, period): heads within one period write the same place.
     for (d, &(stride, div)) in acc.batch.iter().enumerate() {
         let size = batch[d];
         let at = |i: usize| f(acc.offset + (i / div) * stride);
         let period = (1..size).find(|&i| at(i) != at(0)).unwrap_or(size);
         let scaled = if period < size { at(period) - at(0) } else { 0 };
+
         if (0..size).any(|i| at(i) != at(0) + (i / period) * scaled) {
             return failed();
         }
+
         dims.push((scaled, period));
     }
+
     let mapped = Access {
         base: body.outputs()[k],
         offset,
@@ -630,18 +715,22 @@ fn written_at(
         row: step(acc.row),
         col: step(acc.col),
     };
+
     let heads: usize = batch.iter().product();
     for g in 0..heads {
         let (mut rest, mut before, mut after) = (g, acc.offset, mapped.offset);
+
         for d in (0..batch.len()).rev() {
             let idx = rest % batch[d];
             rest /= batch[d];
             before += (idx / acc.batch[d].1) * acc.batch[d].0;
             after += (idx / mapped.batch[d].1) * mapped.batch[d].0;
         }
+
         if f(before) != after {
             return failed();
         }
     }
+
     Ok((k, mapped))
 }

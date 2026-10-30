@@ -87,9 +87,11 @@ fn attention_output(
     let at = address(&a.out, &a.batch)?;
     let root = body.nodes()[a.root].output;
     let t = triton_type(body.type_of(root).dtype).expect("a Triton dtype");
+
     let leaves: Vec<usize> = (0..body.inputs().len())
         .filter(|&k| a.offset != Some(body.inputs()[k]))
         .collect();
+
     let mut loads = String::new();
     let mut code = formatdoc!(
         "
@@ -97,24 +99,33 @@ fn attention_output(
         r = value.to({t})
         "
     );
+
     if raw {
         writeln!(code, "tl.store(EXTRA[{}] + at, r, mask=mask)", leaves.len()).unwrap();
     }
+
     for (e, &k) in leaves.iter().enumerate() {
         let ty = body.type_of(body.inputs()[k]);
+
         let strides = match strides.inputs.get(&k) {
             Some(strides) => strides.clone(),
             None => contiguous_strides(&ty.shape),
         };
+
         let (name, source) = load(&ty.shape, &strides);
         loads += &(source.replace(&format!("def {name}("), &format!("def LOAD{k}(")) + "\n\n");
+
         writeln!(code, "in{k} = EXTRA[{e}]").unwrap();
     }
+
     let by_value = vec![false; body.inputs().len()];
+
     let mut emitter = Emitter::new(body, &by_value);
     emitter.values.insert((root, "j".into()), "r".into());
+
     let value = emitter.value(body.outputs()[0], "j".into());
     let (code, lines) = (indented(&code), emitter.lines);
+
     Ok(named(
         "attention_output",
         formatdoc!(
@@ -249,6 +260,7 @@ impl AttentionCodegen for super::Triton {
                 "ADD_DQ" => attention_atomic_add(acc, &b.batch)?,
                 _ => attention_store(acc, &b.batch)?,
             };
+
             code.push((param.into(), helper));
         }
 
