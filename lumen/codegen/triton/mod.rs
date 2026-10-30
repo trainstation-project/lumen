@@ -24,7 +24,6 @@ pub(crate) use crate::codegen::dot_general::triton::row::{
 pub(crate) use crate::codegen::dot_general::triton::{
     EpilogueFlags, Layouts, gemm, gemm_dot, gemm_flags,
 };
-pub(crate) use crate::codegen::indexing::triton::{scatter_add, update, updates};
 pub(crate) use crate::codegen::kinds::reduction_root;
 pub(crate) use crate::codegen::reduction::triton::scan;
 pub(crate) use crate::codegen::row::triton::{row_count, row_groups, row_looped};

@@ -2,8 +2,10 @@
 //! touches, and whether the touched region can stay resident in VMEM.
 use crate::DType;
 use crate::codegen::dot_general::tpu::block;
+use crate::codegen::indexing::IndexingCodegen;
+use crate::codegen::tpu::Tpu;
 use crate::device::tpu::layout::Layout;
-use crate::graph::Primitive;
+use crate::graph::{Graph, Primitive, TensorType};
 use crate::graph_compiler::plan::Step;
 use crate::kernels::tpu::{Launch, launch};
 use crate::tensor::scalar::Scalar;
@@ -22,16 +24,48 @@ const DEPTH: usize = 8;
 /// Most bytes of the output region all updates touch that may be kept in VMEM.
 const RESIDENT: usize = 48 << 20;
 
-/// Launches the `dynamic_update_slice` kernel for `step`: one update at runtime int32 starts, or
-/// a fusion of several updates at constant starts (clamped into range here).
-pub(crate) fn encode(
-    index: usize,
-    step: &Step,
-    inputs: &[*const u8],
-    output: *mut u8,
-) -> Result<(), String> {
-    let (operand, update) = (&step.inputs[0].1, &step.inputs[1].1);
+/// The constant starts of the updates in `updates` fusion `body`, clamped into range, each update's after
+/// the one before.
+fn starts(body: &Graph, operand: &TensorType, update: &TensorType) -> Vec<i32> {
+    let nodes = body.nodes();
 
+    let value = |v| match nodes.iter().find(|n| n.output == v).map(|n| &n.primitive) {
+        Some(Primitive::Full {
+            fill_value: Scalar::Int(i),
+            ..
+        }) => *i,
+        _ => unreachable!("a constant start"),
+    };
+
+    nodes
+        .iter()
+        .filter(|n| matches!(n.primitive, Primitive::DynamicUpdateSlice))
+        .flat_map(|n| {
+            n.inputs[2..]
+                .iter()
+                .enumerate()
+                .map(|(d, &v)| (d, value(v)))
+        })
+        .map(|(d, s)| s.clamp(0, (operand.shape[d] - update.shape[d]) as i64) as i32)
+        .collect()
+}
+
+/// A TPU `dynamic_update_slice` program: its kernel name, its spec (but for whether the operand is copied,
+/// which the launch knows) and the constant starts it reads as scalars.
+pub(crate) struct Program {
+    pub(crate) kernel: String,
+    pub(crate) spec: String,
+    pub(crate) scalars: Vec<i32>,
+}
+
+/// The program writing `count` updates of `update`'s type into `operand`: at the constant starts `fixed`
+/// (each update's after the one before), or at runtime int32 starts when `None`.
+fn program(
+    operand: &TensorType,
+    update: &TensorType,
+    fixed: Option<Vec<i32>>,
+    count: usize,
+) -> Result<Program, String> {
     let failed = |what: &str| {
         Err(format!(
             "{what} does not run on TPU yet: {update} into {operand}"
@@ -40,57 +74,14 @@ pub(crate) fn encode(
 
     let rank = operand.shape.len();
 
-    // A fusion carries its updates' starts as constants; read and clamp them at compile time.
-    let fixed: Option<Vec<i32>> = match &step.primitive {
-        Primitive::Fusion { body, .. } => {
-            let nodes = body.nodes();
-
-            let value = |v| match nodes.iter().find(|n| n.output == v).map(|n| &n.primitive) {
-                Some(Primitive::Full {
-                    fill_value: Scalar::Int(i),
-                    ..
-                }) => *i,
-                _ => unreachable!("a constant start"),
-            };
-
-            let starts = nodes
-                .iter()
-                .filter(|n| matches!(n.primitive, Primitive::DynamicUpdateSlice))
-                .flat_map(|n| {
-                    n.inputs[2..]
-                        .iter()
-                        .enumerate()
-                        .map(|(d, &v)| (d, value(v)))
-                })
-                .map(|(d, s)| s.clamp(0, (operand.shape[d] - update.shape[d]) as i64) as i32)
-                .collect();
-
-            Some(starts)
-        }
-        _ => None,
-    };
-
-    let count = match fixed {
-        Some(_) => step.inputs.len() - 1,
-        None => 1,
-    };
-
     if rank < 2 {
         return failed("a dynamic_update_slice of fewer than 2 dimensions");
-    }
-
-    if fixed.is_none() && step.inputs[2..].iter().any(|(_, t)| t.dtype != DType::I32) {
-        return failed("a dynamic_update_slice at other than int32 indices");
     }
 
     let layout = Layout::new(operand.dtype, &operand.shape)?;
 
     if layout.stored.bits() < 16 {
         return failed("a dynamic_update_slice of 8-bit elements");
-    }
-
-    if update.numel() == 0 {
-        return Ok(());
     }
 
     // Sizes padded to whole TPU tiles (`tile` rows by `LANES` columns).
@@ -193,8 +184,6 @@ pub(crate) fn encode(
         false => None,
     };
 
-    let copy = inputs[0] != output.cast_const();
-
     let rows_block = |length: usize| {
         let cap = (COPY_BYTES / (cp * layout.stored.size_of()) / tile * tile).max(tile);
         block(length, tile, cap).unwrap_or(tile)
@@ -224,7 +213,7 @@ pub(crate) fn encode(
     );
 
     let spec = format!(
-        "\"shape\": {:?}, \"update\": {:?}, \"dtype\": \"{}\", \"tile\": {tile}, \"bm\": {bm}, \"bn\": {bn}, \"gm\": {gm}, \"width\": {width}, \"copy\": {copy}, \"copied_rows\": [{}], \"count\": {count}, \"static\": {}, \"depth\": {DEPTH}, \"ordered\": {ordered}, \"resident\": {resident}",
+        "\"shape\": {:?}, \"update\": {:?}, \"dtype\": \"{}\", \"tile\": {tile}, \"bm\": {bm}, \"bn\": {bn}, \"gm\": {gm}, \"width\": {width}, \"copied_rows\": [{}], \"count\": {count}, \"static\": {}, \"depth\": {DEPTH}, \"ordered\": {ordered}, \"resident\": {resident}",
         operand.shape,
         update.shape,
         operand.dtype.full_name(),
@@ -232,6 +221,75 @@ pub(crate) fn encode(
         fixed.is_some(),
     );
 
+    Ok(Program {
+        kernel: format!(
+            "dynamic_update_slice_{count}x{}_{bm}x{bn}_{gm}",
+            operand.dtype
+        ),
+        spec,
+        scalars: fixed.unwrap_or_default(),
+    })
+}
+
+/// TPU indexing: the fixed `dynamic_update_slice` Pallas program, specialized by a spec of the operand,
+/// the updates and their blocks.
+impl IndexingCodegen for Tpu {
+    type Code = Program;
+
+    /// The program writing the `updates` fusion `body`'s updates at their constant starts.
+    fn updates(body: &Graph) -> Result<Program, String> {
+        let ty = |k: usize| body.type_of(body.inputs()[k]);
+        let (operand, update) = (ty(0), ty(1));
+        let fixed = starts(body, operand, update);
+
+        program(operand, update, Some(fixed), body.inputs().len() - 1)
+    }
+
+    /// The program writing `update` into `operand` at runtime int32 starts.
+    fn update(operand: &TensorType, update: &TensorType, _: &[bool]) -> Result<Program, String> {
+        program(operand, update, None, 1)
+    }
+
+    /// No TPU scatter-add yet.
+    fn scatter_add(operand: &TensorType, _: usize, _: usize) -> Result<Program, String> {
+        Err(format!(
+            "scatter_add does not run on TPU yet: into {operand}"
+        ))
+    }
+}
+
+/// Launches the `dynamic_update_slice` kernel for `step`: one update at runtime int32 starts, or
+/// a fusion of several updates at constant starts (clamped into range here).
+pub(crate) fn encode(
+    index: usize,
+    step: &Step,
+    inputs: &[*const u8],
+    output: *mut u8,
+) -> Result<(), String> {
+    let (operand, update) = (&step.inputs[0].1, &step.inputs[1].1);
+    let fixed = matches!(step.primitive, Primitive::Fusion { .. });
+
+    let failed = |what: &str| {
+        Err(format!(
+            "{what} does not run on TPU yet: {update} into {operand}"
+        ))
+    };
+
+    if !fixed && step.inputs[2..].iter().any(|(_, t)| t.dtype != DType::I32) {
+        return failed("a dynamic_update_slice at other than int32 indices");
+    }
+
+    if update.numel() == 0 {
+        return Ok(());
+    }
+
+    let p = match &step.primitive {
+        Primitive::Fusion { body, .. } => Tpu::updates(body)?,
+        _ => Tpu::update(operand, update, &[])?,
+    };
+
+    let copy = inputs[0] != output.cast_const();
+    let spec = format!("{}, \"copy\": {copy}", p.spec);
     let n = step.inputs.len();
 
     let rows_of: Vec<*const u8> = inputs[..n]
@@ -242,13 +300,10 @@ pub(crate) fn encode(
 
     let launched = Launch {
         module: "lumen.codegen.indexing.tpu.dynamic_slice",
-        kernel: format!(
-            "dynamic_update_slice_{count}x{}_{bm}x{bn}_{gm}",
-            operand.dtype
-        ),
+        kernel: p.kernel,
         spec,
         rows: &rows_of,
-        scalars: fixed.as_deref().unwrap_or(&[]),
+        scalars: &p.scalars,
         host: &[],
         sparse: None,
     };

@@ -24,7 +24,6 @@ mod stores;
 mod transpose;
 
 pub(crate) use crate::codegen::dot_general::mps::*;
-pub(crate) use crate::codegen::indexing::mps::updates_kernel;
 pub(crate) use crate::codegen::kinds::reduction_root;
 pub(crate) use crate::codegen::reduction::mps::{has_epilogue, split_launches};
 pub(crate) use crate::codegen::row::mps::*;

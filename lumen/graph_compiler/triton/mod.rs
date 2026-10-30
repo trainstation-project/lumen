@@ -47,6 +47,7 @@ use super::pass::{Module, Pipeline};
 use super::plan::{Buffer, Step, Tuned};
 use super::{CompilerConfig, Options, Plan, plan_options, positions};
 use crate::codegen::elementwise::ElementwiseCodegen;
+use crate::codegen::indexing::IndexingCodegen;
 use crate::codegen::reduction::ReductionCodegen;
 use crate::codegen::row::RowCodegen;
 use crate::codegen::triton::{self as codegen, LOOP_CONFIGS, LoopConfig, UNTUNED_LOOP};
@@ -294,9 +295,9 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
 
     let (name, source, lanes, splits) = match &step.primitive {
         Primitive::Fusion { name, body, .. } if name == UPDATES => {
-            let chain = crate::graph_compiler::common::updates::starts(body);
-            let starts: Vec<Vec<i64>> = chain.iter().map(|(_, s)| s.clone()).collect();
-            let (name, source) = codegen::updates(&step.inputs[0].1, &step.inputs[1].1, &starts);
+            let (name, source) =
+                codegen::Triton::updates(body).expect("a Triton kernel of every updates body");
+
             (name, source, 1, 1)
         }
         Primitive::Fusion { body, .. } if codegen::gemm_dot(body).is_some() => return None,
@@ -332,12 +333,16 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
             (name, source, lanes, 1)
         }
         Primitive::DynamicUpdateSlice => {
-            let (name, source) = codegen::update(&step.inputs[0].1, &step.inputs[1].1, &by_value);
+            let (name, source) =
+                codegen::Triton::update(&step.inputs[0].1, &step.inputs[1].1, &by_value)
+                    .expect("a Triton kernel of every dynamic_update_slice");
+
             (name, source, 1, 1)
         }
         Primitive::ScatterAdd { axis } => {
             let (name, source) =
-                codegen::scatter_add(&step.inputs[0].1, *axis, step.inputs[1].1.numel());
+                codegen::Triton::scatter_add(&step.inputs[0].1, *axis, step.inputs[1].1.numel())
+                    .expect("a Triton kernel of every scatter_add");
 
             (name, source, 1, 1)
         }
