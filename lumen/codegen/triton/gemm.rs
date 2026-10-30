@@ -6,7 +6,7 @@ use std::fmt::Write;
 use indoc::formatdoc;
 
 use super::utils::indented;
-use super::{Emitter, at, gather_index, load, named, triton_type};
+use super::{Emitter, gather_index, load, named, stored_at, triton_type};
 use crate::codegen::regions::{Columns, Region, gemm_expanded, gemm_regions};
 use crate::graph::{Graph, Node, Primitive, Var};
 
@@ -62,7 +62,10 @@ pub(crate) fn gemm(dot: &Primitive, lhs: Layout, rhs: Layout, out: Layout) -> Ge
             .map(|&(idx, (shape, strides), dims)| {
                 let shape: Vec<usize> = dims.iter().map(|&d| shape[d]).collect();
                 let strides: Vec<usize> = dims.iter().map(|&d| strides[d]).collect();
+                // A coordinate of one element is read at 0, its own index there; a broadcast one keeps
+                // its tile's shape with zeros.
                 match gather_index(idx, &shape, &strides).as_str() {
+                    "0" if shape.iter().product::<usize>() == 1 => idx.to_string(),
                     "0" => format!("tl.zeros_like({idx})"),
                     offset => offset.to_string(),
                 }
@@ -342,7 +345,7 @@ pub(crate) fn epilogue(
                     stores,
                     "    tl.store({} + {}, {value}, mask=r{r}_keep)",
                     pointers[o],
-                    at(index, shape, strides)
+                    stored_at(index, shape, strides)
                 )
                 .unwrap();
             }

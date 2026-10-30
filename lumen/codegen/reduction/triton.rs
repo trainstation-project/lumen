@@ -52,8 +52,14 @@ impl ReductionCodegen for Triton {
             false => 1,
         };
         let tile = Tile::new(&x.shape, |d| axes.contains(&d), count, splits > 1);
-        let o_at = gather_index("o", &shape(&kept), &stride(&kept));
-        let r_at = gather_index("r", &shape(&reduced), &stride(&reduced));
+        // Offsets of the kept and reduced parts: an expression in `o` or `r` of its shape, or, of one element,
+        // `o` or `r` itself, 0 wherever it is read.
+        let at = |idx: &str, ds: &[usize]| match gather_index(idx, &shape(ds), &stride(ds)).as_str()
+        {
+            "0" => idx.to_string(),
+            at => at.to_string(),
+        };
+        let (o_at, r_at) = (at("o", &kept), at("r", &reduced));
 
         let mut prologue = Emitter::new(body, by_value);
         let element = prologue.value(root.inputs[0], "j".into());
@@ -127,12 +133,12 @@ impl ReductionCodegen for Triton {
             {kernel_params}):
                 s = tl.program_id(0) // tl.cdiv(n, {outputs})
                 o = ({block}).to(tl.int64) * ({outputs}) + tl.arange(0, {outputs})
-                jo = ({o_at}) + tl.zeros_like(o)
+                jo = {o_at}
                 empty = tl.full([], {init}, {acc})
                 acc = tl.full({tile_shape}, {init}, {acc})
                 for start in range({range}):
                     r = start + tl.arange(0, {lanes})
-                    jr = ({r_at}) + tl.zeros_like(r)
+                    jr = {r_at}
                     j = {j}
                     mask = {mask}
             {lines}        acc = NAME_combine(acc, tl.where(mask, {element}, empty))

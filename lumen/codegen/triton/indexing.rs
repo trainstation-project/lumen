@@ -31,7 +31,7 @@ pub(crate) fn update(x: &TensorType, update: &TensorType, by_value: &[bool]) -> 
         })
         .collect();
     let at = match terms.is_empty() {
-        true => "tl.zeros_like(j)".to_string(),
+        true => "j".to_string(),
         false => terms.join(" + "),
     };
     let params = params(by_value, None, 1);
@@ -104,7 +104,7 @@ pub(crate) fn updates(
         .map(|d| format!("c{d} * {}", strides[d]))
         .collect();
     let at = match terms.is_empty() {
-        true => "tl.zeros_like(j)".to_string(),
+        true => "j".to_string(),
         false => terms.join(" + "),
     };
     writeln!(code, "    at = {at}").unwrap();

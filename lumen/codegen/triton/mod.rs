@@ -141,15 +141,19 @@ pub(crate) fn fill(dtype: DType) -> (String, String) {
     named("fill", source)
 }
 
-/// Generates a jit helper loading flat logical index `i` from a tensor with the given strides.
+/// Generates a jit helper loading flat logical index `i` from a tensor with the given strides; a tensor
+/// broadcast along every dim is loaded once and broadcast to the mask's shape.
 pub(crate) fn load(shape: &[usize], strides: &[usize]) -> (String, String) {
+    let load = match at("i", shape, strides) {
+        Some(at) => format!("tl.load(ptr + {at}, mask=mask)"),
+        None => "tl.broadcast_to(tl.load(ptr), mask.shape)".into(),
+    };
     let source = formatdoc!(
         "
         @triton.jit
         def NAME(ptr, i, mask):
-            return tl.load(ptr + {}, mask=mask)
-        ",
-        at("i", shape, strides)
+            return {load}
+        "
     );
     named("load", source)
 }
@@ -162,20 +166,26 @@ pub(crate) fn store(shape: &[usize], strides: &[usize]) -> (String, String) {
         def NAME(ptr, i, value, mask):
             tl.store(ptr + {}, value, mask=mask)
         ",
-        at("i", shape, strides)
+        stored_at("i", shape, strides)
     );
     named("store", source)
 }
 
-/// Address expression for flat logical index `idx`, or `idx` itself when the layout is contiguous.
-fn at(idx: &str, shape: &[usize], strides: &[usize]) -> String {
-    match strides == contiguous_strides(shape) {
-        true => idx.to_string(),
-        // `tl.zeros_like(idx)` keeps a block-shaped offset when every dim is broadcast.
-        false => match gather_index(idx, shape, strides).as_str() {
-            "0" => format!("tl.zeros_like({idx})"),
-            offset => offset.to_string(),
-        },
+/// Address expression storing flat logical index `idx`: an output is written at distinct elements, never
+/// broadcast.
+pub(crate) fn stored_at(idx: &str, shape: &[usize], strides: &[usize]) -> String {
+    at(idx, shape, strides).expect("an output written at distinct elements")
+}
+
+/// Address expression for flat logical index `idx`: `idx` itself when the layout is contiguous or holds one
+/// element (its index is 0 wherever the mask reads), or `None` when every dim is broadcast.
+fn at(idx: &str, shape: &[usize], strides: &[usize]) -> Option<String> {
+    if strides == contiguous_strides(shape) || shape.iter().product::<usize>() == 1 {
+        return Some(idx.to_string());
+    }
+    match gather_index(idx, shape, strides).as_str() {
+        "0" => None,
+        offset => Some(offset.to_string()),
     }
 }
 
@@ -626,8 +636,9 @@ impl<'a> Emitter<'a> {
                     .zip(&x_strides)
                     .map(|(s, st)| s * st)
                     .sum();
+                // A slice of one element is read at index 0, which its own index is wherever it is read.
                 let i = match gather_index(&idx, &ty.shape, &x_strides).as_str() {
-                    "0" => format!("tl.zeros_like({idx})"),
+                    "0" => idx.clone(),
                     i => i.to_string(),
                 };
                 self.index(format!("{start} + {i}"))
@@ -769,8 +780,9 @@ impl<'a> Emitter<'a> {
                                 strides[d]
                             ));
                         }
+                        // Of one element, the slice is read at index 0, which its own index is wherever it is read.
                         let i = match terms.is_empty() {
-                            true => format!("tl.zeros_like({idx})"),
+                            true => idx.clone(),
                             false => terms.join(" + "),
                         };
                         let i = self.index(i);
