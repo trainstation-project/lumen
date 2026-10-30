@@ -3,6 +3,7 @@
 use super::config::{
     COLUMN_LANES, MOST_SPLITS, ROW_LANES, SPLIT_BELOW, SPLIT_ROW_LANES, SPLIT_SPAN,
 };
+use super::utils::indented;
 use super::*;
 use crate::graph::TensorType;
 
@@ -107,11 +108,6 @@ pub(super) fn lowest(dtype: DType) -> String {
         }
         _ => "0".into(),
     }
-}
-
-/// Indents every line of `lines` by four spaces.
-pub(super) fn indented(lines: &str) -> String {
-    lines.lines().map(|l| format!("    {l}\n")).collect()
 }
 
 /// Generates a kernel reducing `root`'s operand (computed by the prologue part of `body`) and applying

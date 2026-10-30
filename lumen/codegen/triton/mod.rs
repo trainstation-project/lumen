@@ -22,6 +22,7 @@ mod gemm;
 mod indexing;
 mod reduction;
 mod row;
+mod utils;
 
 pub(crate) use attention::gradients;
 pub(crate) use config::{

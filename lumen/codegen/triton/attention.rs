@@ -5,7 +5,7 @@ use std::fmt::Write;
 
 use indoc::formatdoc;
 
-use super::reduction::indented;
+use super::utils::indented;
 use super::{Emitter, constant, load, named, triton_type};
 use crate::Scalar;
 use crate::codegen::AttentionCodegen;
