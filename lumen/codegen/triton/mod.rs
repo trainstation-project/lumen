@@ -16,16 +16,14 @@ use crate::tensor::dtype::dispatch_dtype;
 use crate::tensor::storage::as_bytes;
 use crate::{DType, Element, Scalar};
 
-mod attention;
 mod config;
 mod cross_entropy;
 mod gemm;
 mod indexing;
 mod reduction;
 mod row;
-mod utils;
+pub(crate) mod utils;
 
-pub(crate) use attention::gradients;
 pub(crate) use config::{
     ATTENTION_CONFIGS, AttentionConfig, CONFIGS, Config, LOOP_CONFIGS, LoopConfig, ROW_PARTIALS,
     UNTUNED, UNTUNED_LOOP, loop_configs, partial_tile, row_gemm_configs, untuned_attention,
@@ -301,7 +299,7 @@ pub(crate) fn bits(dtype: DType, value: Scalar) -> u64 {
 
 /// Substitutes `NAME` in `source` with `kind` plus a hash of the source, so identical kernels share
 /// a name and compile cache entry. Returns `(name, source)`.
-fn named(kind: &str, source: String) -> (String, String) {
+pub(crate) fn named(kind: &str, source: String) -> (String, String) {
     let mut hasher = DefaultHasher::new();
     source.hash(&mut hasher);
     let name = format!("{kind}_{:016x}", hasher.finish());
@@ -320,16 +318,16 @@ fn raw_type(dtype: DType) -> &'static str {
 
 /// Builds the Python statements computing body values at symbolic flat indices, memoising each
 /// `(var, index)` so shared subexpressions are emitted once.
-struct Emitter<'a> {
+pub(crate) struct Emitter<'a> {
     body: &'a Graph,
     /// Per body input, whether it is passed as a scalar argument rather than a tensor.
     by_value: &'a [bool],
     /// Position in `body.nodes()` of each var's producer.
     producer: HashMap<Var, usize>,
     /// Emitted statements, each indented for a kernel body.
-    lines: String,
+    pub(crate) lines: String,
     /// Local name already holding `(var, index expression)`.
-    values: HashMap<(Var, String), String>,
+    pub(crate) values: HashMap<(Var, String), String>,
     /// Local name already holding each index expression.
     indices: HashMap<String, String>,
     /// Counter for fresh local names.
@@ -345,7 +343,7 @@ struct Emitter<'a> {
 
 impl<'a> Emitter<'a> {
     /// Emitter for `body` with no statements yet and the mask named `mask`.
-    fn new(body: &'a Graph, by_value: &'a [bool]) -> Self {
+    pub(crate) fn new(body: &'a Graph, by_value: &'a [bool]) -> Self {
         Emitter {
             body,
             by_value,
@@ -747,7 +745,7 @@ impl<'a> Emitter<'a> {
     }
 
     /// Name of a local holding `v` at flat index `idx`, emitting the statements that compute it.
-    fn value(&mut self, v: Var, idx: String) -> String {
+    pub(crate) fn value(&mut self, v: Var, idx: String) -> String {
         let key = (v, idx.clone());
         if let Some(name) = self.values.get(&key).or_else(|| self.reduced.get(&v)) {
             return name.clone();
@@ -968,7 +966,7 @@ fn unsigned(bits: usize) -> &'static str {
 }
 
 /// Triton expression for the scalar `value` of `dtype`, built bit-exactly from its raw bits.
-fn constant(dtype: DType, value: Scalar) -> String {
+pub(crate) fn constant(dtype: DType, value: Scalar) -> String {
     let (bits, raw) = (bits(dtype, value), raw_type(dtype));
     match dtype {
         DType::Bool => format!("tl.full([], {}, tl.int1)", (bits != 0) as u8),

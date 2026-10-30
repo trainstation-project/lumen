@@ -4,7 +4,7 @@
 use std::sync::OnceLock;
 
 use super::{Function, Launches, TritonModule, copy, fill};
-use crate::codegen::AttentionCodegen;
+use crate::codegen::attention::AttentionCodegen;
 use crate::codegen::triton::{
     self as codegen, ATTENTION_CONFIGS, AttentionConfig, untuned_attention,
 };
@@ -219,7 +219,7 @@ fn prepare(step: &Step, strides: &Strides) -> Result<Prepared, String> {
     }
     let b =
         attention::backward_of_body_strided(body, strides).ok_or("a backward flash attention")?;
-    let gradients = codegen::gradients(&b);
+    let gradients = crate::codegen::attention::triton::gradients(&b);
     if gradients.is_empty() {
         return Err(format!("{}: computes no gradient", step.label));
     }

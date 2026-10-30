@@ -11,14 +11,13 @@ use indoc::{formatdoc, indoc, writedoc};
 use crate::codegen::ElementwiseCodegen;
 use crate::graph::{Graph, Node, Primitive, UnaryOp, Var};
 use crate::graph_compiler::MpsConfig;
-use crate::graph_compiler::common::attention::{Access, Attention, Backward, Dropout, Score};
+use crate::graph_compiler::common::attention::{Attention, Backward};
 use crate::graph_compiler::mps::fusion;
 use crate::kernels::mps::element_arg;
 use crate::kernels::reduction::mps as reduce;
 use crate::tensor::contiguous_strides;
 use crate::{DType, Scalar};
 
-mod attention;
 mod config;
 mod elementwise;
 mod emitter;
@@ -31,6 +30,7 @@ mod updates;
 
 pub(crate) use config::*;
 use elementwise::*;
+pub(crate) use emitter::Emitter;
 use emitter::*;
 pub(crate) use gemm::*;
 pub(crate) use gemm_row::*;
