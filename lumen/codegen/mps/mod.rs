@@ -10,19 +10,16 @@ use indoc::{formatdoc, indoc, writedoc};
 
 use crate::codegen::elementwise::ElementwiseCodegen;
 use crate::codegen::reduction::ReductionCodegen;
+use crate::codegen::row::RowCodegen;
 use crate::graph::{Graph, Node, Primitive, UnaryOp, Var};
 use crate::graph_compiler::MpsConfig;
 use crate::graph_compiler::common::attention::{Attention, Backward};
-use crate::graph_compiler::mps::fusion;
 use crate::kernels::mps::element_arg;
-use crate::kernels::reduction::mps as reduce;
 use crate::tensor::contiguous_strides;
 use crate::{DType, Scalar};
 
 mod config;
 mod emitter;
-mod gemm_row;
-mod row;
 mod stores;
 mod transpose;
 mod updates;
@@ -30,11 +27,10 @@ mod updates;
 pub(crate) use crate::codegen::dot_general::mps::*;
 pub(crate) use crate::codegen::kinds::reduction_root;
 pub(crate) use crate::codegen::reduction::mps::{has_epilogue, split_launches};
+pub(crate) use crate::codegen::row::mps::*;
 pub(crate) use config::*;
 pub(crate) use emitter::Emitter;
 use emitter::*;
-pub(crate) use gemm_row::*;
-pub(crate) use row::*;
 pub(crate) use stores::written;
 pub(crate) use transpose::*;
 pub(crate) use updates::updates_kernel;
@@ -89,10 +85,8 @@ pub(crate) fn kernel(
         return gemm_kernel(body, by_value, dot);
     }
 
-    let rows = row_reductions(body);
-
-    if !rows.is_empty() {
-        return row_kernel(body, by_value, &rows, config, None);
+    if !row_reductions(body).is_empty() {
+        return Mps::row(body, by_value, config).expect("a Metal row kernel of every row body");
     }
 
     if let Some(root) = reduction_root(body) {

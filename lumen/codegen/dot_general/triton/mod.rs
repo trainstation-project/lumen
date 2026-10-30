@@ -1,6 +1,8 @@
 //! Triton GEMMs: operand prologues, the output epilogue, and fused elementwise epilogues that consume
 //! column regions of the GEMM output.
 
+pub(crate) mod row;
+
 use std::fmt::Write;
 
 use indoc::formatdoc;

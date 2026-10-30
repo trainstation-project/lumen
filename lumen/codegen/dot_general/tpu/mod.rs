@@ -3,6 +3,7 @@
 use crate::DType;
 use crate::codegen::dot_general::GemmCodegen;
 pub(crate) mod codegen;
+pub(crate) mod row;
 
 use crate::codegen::tpu::Tpu;
 use crate::graph::Primitive;

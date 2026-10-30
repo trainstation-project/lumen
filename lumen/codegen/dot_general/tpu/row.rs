@@ -2,9 +2,9 @@
 
 use std::collections::HashMap;
 
-use super::row::{Kind, kinds, readable, row_node, rows};
 use crate::DType;
 use crate::codegen::dot_general::tpu::{block, caps};
+use crate::codegen::row::tpu::{Kind, kinds, readable, row_node, rows};
 use crate::device::tpu::layout::Layout;
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::plan::Step;

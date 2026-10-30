@@ -868,10 +868,10 @@ pub(crate) fn encode(
             super::reduction::tpu::encode(index, step, inputs, output)
         }
         Primitive::Fusion { ref name, .. } if name == "dot_row" => {
-            crate::codegen::tpu::gemm_row::encode(index, step, inputs, output)
+            crate::codegen::dot_general::tpu::row::encode(index, step, inputs, output)
         }
         Primitive::Fusion { ref name, .. } if name == "row" => {
-            crate::codegen::tpu::row::encode(index, step, inputs, output)
+            crate::codegen::row::tpu::encode(index, step, inputs, output)
         }
         Primitive::Fusion { ref name, .. } if name == crate::graph::UPDATES => {
             super::dynamic_slice::tpu::encode(index, step, inputs, output)

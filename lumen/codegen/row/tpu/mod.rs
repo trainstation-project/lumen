@@ -1,9 +1,16 @@
 //! TPU row fusions: elementwise work around reductions over each row's last axis (norms, softmax),
-//! with every value classified by how it lines up with the rows.
+//! with every value classified by how it lines up with the rows, generated as a spec for the Pallas row
+//! program and launched.
 
 #[cfg(lumen_tpu_linked)]
 use std::collections::HashMap;
 
+#[cfg(lumen_tpu_linked)]
+use crate::codegen::dot_general::tpu::block;
+#[cfg(lumen_tpu_linked)]
+use crate::codegen::row::RowCodegen;
+#[cfg(lumen_tpu_linked)]
+use crate::codegen::tpu::Tpu;
 use crate::device::tpu::layout::Layout;
 #[cfg(lumen_tpu_linked)]
 use crate::graph::Var;
@@ -53,7 +60,7 @@ pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
         .chain([&node.output])
         .all(|&v| graph.type_of(v).dtype.bits() <= 32);
 
-    let row_op = super::fusible(&node.primitive)
+    let row_op = crate::codegen::tpu::fusible(&node.primitive)
         || matches!(
             node.primitive,
             Reshape { .. } | BroadcastInDim { .. } | ReduceSum { .. } | ReduceMax { .. }
@@ -281,6 +288,93 @@ pub(crate) fn row_node(node: &Node, args: &[usize], kind: Kind) -> String {
     }
 }
 
+/// TPU row fusions: the fixed Pallas row program, specialized by a spec of the rows, their block and the
+/// body's nodes, each classified by how it lines up with the rows.
+#[cfg(lumen_tpu_linked)]
+impl RowCodegen for Tpu {
+    /// The kernel's name and spec.
+    type Code = (String, String);
+    type Options = ();
+
+    /// The spec of the row fusion `body`. Inputs are read as their buffers.
+    fn row(body: &Graph, _: &[bool], _: &()) -> Result<(String, String), String> {
+        let failed = |why: &str| format!("a row fusion on TPU: {why}");
+        let (rows, n) = rows(body).ok_or_else(|| failed("no reduction over rows"))?;
+        let kinds = kinds(body).ok_or_else(|| failed("values not of whole rows"))?;
+
+        let mut value: HashMap<Var, usize> = body
+            .inputs()
+            .iter()
+            .enumerate()
+            .map(|(k, &v)| (v, k))
+            .collect();
+
+        let mut nodes = Vec::new();
+
+        for node in body.nodes() {
+            let args: Vec<usize> = node.inputs.iter().map(|v| value[v]).collect();
+            nodes.push(row_node(node, &args, kinds[node.output]));
+            value.insert(node.output, body.inputs().len() + nodes.len() - 1);
+        }
+
+        let operand = |v: &Var| {
+            format!(
+                "[\"{}\", \"{}\"]",
+                body.type_of(*v).dtype.full_name(),
+                kinds[*v].name()
+            )
+        };
+
+        let operands: Vec<String> = body.inputs().iter().map(operand).collect();
+
+        let outputs: Vec<String> = body
+            .outputs()
+            .iter()
+            .map(|v| {
+                format!(
+                    "[{}, \"{}\", \"{}\"]",
+                    value[v],
+                    body.type_of(*v).dtype.full_name(),
+                    kinds[*v].name()
+                )
+            })
+            .collect();
+
+        // Block rows come in multiples of the tallest tile among the operand dtypes.
+        let unit = body
+            .inputs()
+            .iter()
+            .chain(body.outputs())
+            .filter_map(|&v| Layout::new(body.type_of(v).dtype, &[1, 1]).ok())
+            .map(|l| l.rows)
+            .max()
+            .unwrap_or(8);
+
+        let bm = block_rows(rows, n, unit).map_err(|e| failed(&e))?;
+
+        let spec = format!(
+            "\"height\": {rows}, \"n\": {n}, \"block\": {bm}, \"inputs\": [{}], \"nodes\": [{}], \"outputs\": [{}]",
+            operands.join(", "),
+            nodes.join(", "),
+            outputs.join(", "),
+        );
+
+        Ok((format!("row_{rows}x{n}_{bm}"), spec))
+    }
+}
+
+/// Picks how many of `rows` rows of `n` elements a step holds: a multiple of `unit` dividing `rows` within the
+/// ROW_BYTES budget (counted at 4 bytes an element), or all rows when there are fewer than `unit`.
+#[cfg(lumen_tpu_linked)]
+pub(crate) fn block_rows(rows: usize, n: usize, unit: usize) -> Result<usize, String> {
+    if rows < unit {
+        return Ok(rows);
+    }
+
+    let cap = (ROW_BYTES / (n * 4)).max(unit);
+    block(rows, unit, cap).ok_or_else(|| "its rows have no block of whole tiles".into())
+}
+
 /// Launches the row fusion `step` on TPU `index`, writing into `output`.
 #[cfg(lumen_tpu_linked)]
 pub(crate) fn encode(
@@ -293,67 +387,7 @@ pub(crate) fn encode(
         unreachable!("a row fusion")
     };
 
-    let failed = |why: &str| format!("{} on TPU: {why}", step.label);
-    let (rows, n) = rows(body).ok_or_else(|| failed("no reduction over rows"))?;
-    let kinds = kinds(body).ok_or_else(|| failed("values not of whole rows"))?;
-
-    let mut value: HashMap<Var, usize> = body
-        .inputs()
-        .iter()
-        .enumerate()
-        .map(|(k, &v)| (v, k))
-        .collect();
-
-    let mut nodes = Vec::new();
-
-    for node in body.nodes() {
-        let args: Vec<usize> = node.inputs.iter().map(|v| value[v]).collect();
-        nodes.push(row_node(node, &args, kinds[node.output]));
-        value.insert(node.output, body.inputs().len() + nodes.len() - 1);
-    }
-
-    let operand = |v: &Var| {
-        format!(
-            "[\"{}\", \"{}\"]",
-            body.type_of(*v).dtype.full_name(),
-            kinds[*v].name()
-        )
-    };
-
-    let operands: Vec<String> = body.inputs().iter().map(operand).collect();
-
-    let outputs: Vec<String> = body
-        .outputs()
-        .iter()
-        .map(|v| {
-            format!(
-                "[{}, \"{}\", \"{}\"]",
-                value[v],
-                body.type_of(*v).dtype.full_name(),
-                kinds[*v].name()
-            )
-        })
-        .collect();
-
-    // Block rows come in multiples of the tallest tile among the operand dtypes.
-    let unit = body
-        .inputs()
-        .iter()
-        .chain(body.outputs())
-        .filter_map(|&v| Layout::new(body.type_of(v).dtype, &[1, 1]).ok())
-        .map(|l| l.rows)
-        .max()
-        .unwrap_or(8);
-
-    let bm = crate::kernels::row::tpu::block_rows(rows, n, unit).map_err(|e| failed(&e))?;
-
-    let spec = format!(
-        "\"height\": {rows}, \"n\": {n}, \"block\": {bm}, \"inputs\": [{}], \"nodes\": [{}], \"outputs\": [{}]",
-        operands.join(", "),
-        nodes.join(", "),
-        outputs.join(", "),
-    );
-
+    let (kernel, spec) = Tpu::row(body, &[], &()).map_err(|e| format!("{}: {e}", step.label))?;
     let n_in = step.inputs.len();
 
     let rows_of: Vec<*const u8> = inputs[..n_in]
@@ -364,8 +398,8 @@ pub(crate) fn encode(
         .collect();
 
     let launched = Launch {
-        module: "lumen.kernels.row.tpu",
-        kernel: format!("row_{rows}x{n}_{bm}"),
+        module: "lumen.codegen.row.tpu",
+        kernel,
         spec,
         rows: &rows_of,
         scalars: &[],

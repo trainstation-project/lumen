@@ -105,8 +105,8 @@ fn rows_fuse_where_what_others_read_of_them_is_written() {
 
     // `e`, `totals` and `ties` are read by several diamonds, so a fusion must expose them as outputs.
     let (fusible, fits) = (
-        crate::codegen::tpu::row::fusible,
-        crate::codegen::tpu::row::fits,
+        crate::codegen::row::tpu::fusible,
+        crate::codegen::row::tpu::fits,
     );
 
     let rows = crate::graph_compiler::common::diamonds::diamonds(&g, fusible);

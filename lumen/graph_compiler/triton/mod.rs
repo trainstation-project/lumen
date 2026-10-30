@@ -48,6 +48,7 @@ use super::plan::{Buffer, Step, Tuned};
 use super::{CompilerConfig, Options, Plan, plan_options, positions};
 use crate::codegen::elementwise::ElementwiseCodegen;
 use crate::codegen::reduction::ReductionCodegen;
+use crate::codegen::row::RowCodegen;
 use crate::codegen::triton::{self as codegen, LOOP_CONFIGS, LoopConfig, UNTUNED_LOOP};
 use crate::graph::{Graph, Primitive, TensorType, UPDATES};
 use crate::graph_compiler::common::diamonds::Row;
@@ -300,7 +301,9 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
         }
         Primitive::Fusion { body, .. } if codegen::gemm_dot(body).is_some() => return None,
         Primitive::Fusion { name, body, .. } if name == ROW => {
-            let r = codegen::row(body, &by_value);
+            let r = codegen::Triton::row(body, &by_value, &())
+                .expect("a Triton row kernel of every row body");
+
             (r.name, r.source, r.lanes, r.splits)
         }
         Primitive::Fusion { body, .. } => match codegen::reduction_root(body) {

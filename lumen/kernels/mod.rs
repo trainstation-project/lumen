@@ -11,7 +11,6 @@ pub(crate) mod mps;
 pub mod python;
 pub mod reduction;
 pub mod reference;
-pub(crate) mod row;
 pub mod scan;
 pub mod scatter_add;
 #[cfg(test)]
