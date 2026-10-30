@@ -23,7 +23,6 @@ fn address(acc: &Access, batch: &[usize]) -> Result<String, String> {
         .map(|term| match term {
             Term::Offset(offset) => offset.to_string(),
             Term::Outer(stride) => format!("BLOCK_ID_B * {stride}"),
-            Term::Heads { stride, divisor: 1 } => format!("BLOCK_ID_H * {stride}"),
             Term::Heads { stride, divisor } => format!("(BLOCK_ID_H // {divisor}) * {stride}"),
         })
         .collect();

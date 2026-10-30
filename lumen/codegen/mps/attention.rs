@@ -42,7 +42,6 @@ pub(super) fn ix_method(name: &str, acc: &Access, batch: &[usize]) -> Result<Str
         .map(|term| match term {
             Term::Offset(offset) => format!("{offset}ul"),
             Term::Outer(stride) => format!("ulong(b) * {stride}ul"),
-            Term::Heads { stride, divisor: 1 } => format!("ulong(h) * {stride}ul"),
             Term::Heads { stride, divisor } => format!("ulong(h / {divisor}u) * {stride}ul"),
         })
         .collect();
