@@ -1,7 +1,16 @@
 //! Metal source for a matmul fused with row reductions over its output (e.g. a projection
 //! followed by softmax or a norm), either in one tile or across column tiles.
-use super::*;
+use std::collections::HashMap;
+use std::fmt::Write;
+
+use indoc::{formatdoc, writedoc};
+
+use crate::DType;
 use crate::codegen::dot_general::mps::{Algorithm, GemmConfig, mpp_transposes};
+use crate::codegen::mps::*;
+use crate::codegen::row::mps::*;
+use crate::graph::{Graph, Node, Primitive, Var};
+use crate::graph_compiler::MpsConfig;
 
 /// Output columns one threadgroup tile covers; wider rows are reduced across tiles.
 pub(crate) const ROW_TILE: usize = 64;
@@ -47,7 +56,7 @@ pub(crate) fn row_dot(body: &Graph) -> Option<&Node> {
 
 /// Indices of the leading row reductions that can be partially reduced per tile (none reads an
 /// earlier one's result), or `None` if a softmax pair or a non-SIMD-reducible dtype prevents it.
-pub(super) fn tile_reductions(body: &Graph) -> Option<Vec<usize>> {
+pub(crate) fn tile_reductions(body: &Graph) -> Option<Vec<usize>> {
     let reductions = row_reductions(body);
     let first = crate::graph_compiler::common::diamonds::tile_reductions(body, &reductions)?;
 
@@ -88,7 +97,7 @@ pub(crate) fn tile_scratch(body: &Graph) -> Option<(Vec<usize>, usize)> {
 /// Generates `NAME_tiles`, the first pass of a multi-tile row matmul: computes the dot, stores
 /// its value to `dotv` and each per-tile partial of the `first` reductions to `tiles{k}`.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn gemm_tiles(
+pub(crate) fn gemm_tiles(
     body: &Graph,
     by_value: &[bool],
     dot: &Node,
@@ -329,7 +338,7 @@ pub(crate) fn gemm_row_kernel(
 
 /// Replaces each call to input `k`'s load helper in `source` with `staged(index)`, leaving
 /// occurrences inside longer identifiers alone.
-pub(super) fn read_staged(source: &str, k: usize, staged: impl Fn(&str) -> String) -> String {
+pub(crate) fn read_staged(source: &str, k: usize, staged: impl Fn(&str) -> String) -> String {
     let name = load(k);
     let (mut out, mut rest) = (String::new(), source);
 
@@ -372,7 +381,7 @@ pub(super) fn read_staged(source: &str, k: usize, staged: impl Fn(&str) -> Strin
 
 /// Generates a single-tile row matmul: each threadgroup stages a `ROW_TILE` x `n` block of the
 /// dot in threadgroup memory, then runs the row `source` over its rows.
-pub(super) fn gemm_rows(
+pub(crate) fn gemm_rows(
     body: &Graph,
     by_value: &[bool],
     dot: &Node,

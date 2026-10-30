@@ -151,7 +151,7 @@ pub(crate) const SPLIT_SPAN: usize = 8192;
 pub(crate) const MOST_SPLITS: usize = 512;
 /// Widest row a normalization row kernel holds whole in registers (XMA's `MAX_TRITON_BLOCK_SIZE`);
 /// wider rows are walked in chunks of `BLOCK_SIZE`, a pass a reduction.
-pub(super) const MOST_WHOLE_ROW: usize = 65536;
+pub(crate) const MOST_WHOLE_ROW: usize = 65536;
 
 /// How column sums (a norm weight's gradient) ride along row kernels: rows up to 8192 wide, each
 /// program holding a partial per column, split into 32 to 256 row groups.
@@ -196,7 +196,7 @@ pub(crate) fn untuned_loop(lanes: usize) -> LoopConfig {
 /// and normalized by a row kernel. On an H100 (bf16, autotuned) the fused kernel matches a GEMM and a
 /// row kernel at 256 but is slower at 512 (121 vs 112 µs) and 1024 (252 vs 132 µs): a tile of whole
 /// wide rows leaves too few programs.
-pub(super) const MOST_GEMM_ROW: usize = 256;
+pub(crate) const MOST_GEMM_ROW: usize = 256;
 
 /// Most accumulator elements a row-epilogue GEMM tile holds (`BLOCK_SIZE_M x BLOCK_SIZE_N`).
 const ROW_TILE_ELEMENTS: usize = 32 << 10;

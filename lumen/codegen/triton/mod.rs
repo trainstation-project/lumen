@@ -18,12 +18,15 @@ pub(crate) mod config;
 mod cross_entropy;
 mod indexing;
 pub(crate) mod reduction;
-mod row;
 pub(crate) mod utils;
 
+pub(crate) use crate::codegen::dot_general::triton::row::{
+    dot_row_fits, partials_epilogue, row_epilogue,
+};
 pub(crate) use crate::codegen::dot_general::triton::{
     EpilogueFlags, Layouts, gemm, gemm_dot, gemm_flags,
 };
+pub(crate) use crate::codegen::row::triton::{row_count, row_groups, row_looped};
 pub(crate) use config::{
     ATTENTION_CONFIGS, AttentionConfig, CONFIGS, Config, LOOP_CONFIGS, LoopConfig, ROW_PARTIALS,
     UNTUNED, UNTUNED_LOOP, loop_configs, partial_tile, row_gemm_configs, untuned_attention,
@@ -32,9 +35,6 @@ pub(crate) use config::{
 pub(crate) use cross_entropy::{cross_entropy_combine, cross_entropy_epilogue};
 pub(crate) use indexing::{scatter_add, update, updates};
 pub(crate) use reduction::{reduction_root, scan};
-pub(crate) use row::{
-    dot_row_fits, partials_epilogue, row, row_count, row_epilogue, row_groups, row_looped,
-};
 
 /// The Triton code generator.
 pub(crate) struct Triton;
@@ -233,7 +233,7 @@ fn raw_type(dtype: DType) -> &'static str {
 /// Builds the Python statements computing body values at symbolic flat indices, memoising each
 /// `(var, index)` so shared subexpressions are emitted once.
 pub(crate) struct Emitter<'a> {
-    body: &'a Graph,
+    pub(crate) body: &'a Graph,
     /// Per body input, whether it is passed as a scalar argument rather than a tensor.
     by_value: &'a [bool],
     /// Position in `body.nodes()` of each var's producer.
@@ -249,10 +249,10 @@ pub(crate) struct Emitter<'a> {
     /// Mask expression guarding loads at the current point.
     pub(crate) mask: String,
     /// Local holding each row reduction already computed, read at any index (a row kernel's rows).
-    reduced: HashMap<Var, String>,
+    pub(crate) reduced: HashMap<Var, String>,
     /// The product a GEMM row epilogue holds whole rows of, at flat index `j` of its tile: a gather
     /// picking one element of each row from it is a masked sum along the tile's rows.
-    tile: Option<Var>,
+    pub(crate) tile: Option<Var>,
 }
 
 impl<'a> Emitter<'a> {
@@ -284,7 +284,7 @@ impl<'a> Emitter<'a> {
     }
 
     /// Emits `expr` into a new local and returns its name.
-    fn local(&mut self, expr: String) -> String {
+    pub(crate) fn local(&mut self, expr: String) -> String {
         let name = self.fresh("t");
         writeln!(self.lines, "    {name} = {expr}").unwrap();
         name

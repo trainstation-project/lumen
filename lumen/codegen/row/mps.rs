@@ -1,12 +1,23 @@
 //! Metal source for row kernels: bodies whose reductions run over the last axis (softmax, norms),
 //! computed one row per threadgroup or SIMD group with values kept in registers between passes.
-use super::*;
+use super::RowCodegen;
+use std::collections::HashMap;
+use std::fmt::Write;
+
+use indoc::{formatdoc, writedoc};
+
+use crate::DType;
 use crate::codegen::dot_general::mps::GemmConfig;
 pub(crate) use crate::codegen::kinds::{row_partials, row_reductions};
+use crate::codegen::mps::*;
+use crate::graph::{Graph, Node, Primitive, Var};
+use crate::graph_compiler::MpsConfig;
 use crate::graph_compiler::common::diamonds::{depends_on, softmax_pair};
+use crate::graph_compiler::mps::fusion;
+use crate::kernels::reduction::mps as reduce;
 
 /// Rows and row length of the first row reduction's operand.
-pub(super) fn row_shape(body: &Graph) -> (usize, usize) {
+pub(crate) fn row_shape(body: &Graph) -> (usize, usize) {
     let reductions = row_reductions(body);
     let x = body.type_of(reductions.first().expect("a row reduction").inputs[0]);
     let n = x.shape.last().copied().unwrap_or(1).max(1);
@@ -26,10 +37,10 @@ pub(crate) fn row_groups(body: &Graph) -> usize {
 }
 
 /// Rows one threadgroup handles in the SIMD form, one per SIMD group.
-pub(super) const SIMD_ROWS: usize = 8;
+pub(crate) const SIMD_ROWS: usize = 8;
 
 /// Longest row the SIMD form handles with one SIMD group per row.
-pub(super) const SIMD_ROW: usize = 256;
+pub(crate) const SIMD_ROW: usize = 256;
 
 /// Whether rows are short enough and reductions SIMD-reducible to give each row one SIMD group.
 pub(crate) fn simd_rows(body: &Graph) -> bool {
@@ -49,7 +60,7 @@ pub(crate) fn simd_rows(body: &Graph) -> bool {
 /// Generates the row kernel for `body`: one pass over each row per group of independent
 /// reductions, then a final pass writing the outputs. `tile` carries the original body, dot and
 /// GEMM config when the rows come from a fused matmul.
-pub(super) fn row_kernel(
+pub(crate) fn row_kernel(
     body: &Graph,
     by_value: &[bool],
     reductions: &[&Node],
@@ -628,7 +639,7 @@ pub(super) fn row_kernel(
 
 /// Values that later passes recompute from an earlier pass's inputs, each with the first pass
 /// that computes it, so they can be kept in registers instead.
-pub(super) fn kept_values(
+pub(crate) fn kept_values(
     body: &Graph,
     invariant: &[bool],
     roots: &[Vec<Var>],
@@ -682,9 +693,31 @@ pub(super) fn kept_values(
 }
 
 /// Metal functor that combines a reduction's values.
-pub(super) fn functor_of_reduction(p: &Primitive) -> &'static str {
+pub(crate) fn functor_of_reduction(p: &Primitive) -> &'static str {
     match p {
         Primitive::ReduceSum { .. } => "Add",
         _ => "Max",
+    }
+}
+
+/// Metal row fusions: one generated kernel per body, a row a threadgroup or SIMD group.
+impl RowCodegen for Mps {
+    /// The kernel's name and source.
+    type Code = (String, String);
+    type Options = MpsConfig;
+
+    /// The row kernel of `body` for `config`.
+    fn row(
+        body: &Graph,
+        by_value: &[bool],
+        config: &MpsConfig,
+    ) -> Result<(String, String), String> {
+        Ok(row_kernel(
+            body,
+            by_value,
+            &row_reductions(body),
+            config,
+            None,
+        ))
     }
 }

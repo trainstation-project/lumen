@@ -1,9 +1,6 @@
 //! TPU code generation: the Rust side that turns fused steps into JSON specs for the Pallas kernels.
 
-#[cfg(lumen_tpu_linked)]
-pub(crate) mod gemm_row;
 pub(crate) mod indexing;
-pub(crate) mod row;
 
 use crate::Scalar;
 use crate::graph::Primitive;

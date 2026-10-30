@@ -1,6 +1,6 @@
 //! Fuses normalization diamonds (row reductions broadcast back over their rows) into `row` kernels.
 use super::TpuModule;
-use crate::codegen::tpu::row::{fits, fusible};
+use crate::codegen::row::tpu::{fits, fusible};
 use crate::graph_compiler::common::diamonds::{diamonds, fused};
 use crate::graph_compiler::pass::CompilerPass;
 

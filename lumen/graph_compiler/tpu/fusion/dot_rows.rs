@@ -1,6 +1,6 @@
 //! Fuses a matmul into the normalization `row` fusion that consumes its whole output rows.
 use super::super::TpuModule;
-use crate::codegen::tpu::row::{Kind, kinds};
+use crate::codegen::row::tpu::{Kind, kinds};
 use crate::graph::Graph;
 use crate::graph_compiler::common::dot_rows::dot_rows;
 use crate::graph_compiler::pass::CompilerPass;

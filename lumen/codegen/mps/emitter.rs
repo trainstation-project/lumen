@@ -3,19 +3,19 @@ use super::*;
 
 /// Builds Metal locals for body values, memoizing each `(value, index)` pair.
 pub(crate) struct Emitter<'a> {
-    pub(super) body: &'a Graph,
+    pub(crate) body: &'a Graph,
     /// Node index producing each non-input value.
-    pub(super) producer: HashMap<Var, usize>,
+    pub(crate) producer: HashMap<Var, usize>,
     /// Emitted statements, in order.
     pub(crate) lines: String,
     /// Local already holding each value at each index expression.
-    pub(super) values: HashMap<(Var, String), String>,
+    pub(crate) values: HashMap<(Var, String), String>,
     /// Local already holding each index expression.
-    pub(super) indices: HashMap<String, String>,
+    pub(crate) indices: HashMap<String, String>,
     /// Counter for fresh local names.
-    pub(super) locals: usize,
+    pub(crate) locals: usize,
     /// Inputs passed as constant scalars rather than buffers.
-    pub(super) by_value: &'a [bool],
+    pub(crate) by_value: &'a [bool],
     /// Values that are constant across the inner index (per row), computed once into `hoisted`.
     pub(crate) invariant: Vec<bool>,
     /// Locals holding invariant values, or values supplied by the enclosing kernel.
@@ -23,7 +23,7 @@ pub(crate) struct Emitter<'a> {
     /// Statements computing invariant values, emitted before the inner loop.
     pub(crate) hoisted: String,
     /// Whether any tensor exceeds `u32` elements, so indices need `ulong`.
-    pub(super) wide: bool,
+    pub(crate) wide: bool,
 }
 
 impl<'a> Emitter<'a> {
@@ -50,14 +50,14 @@ impl<'a> Emitter<'a> {
     }
 
     /// Returns a new unique local name starting with `prefix`.
-    pub(super) fn fresh(&mut self, prefix: &str) -> String {
+    pub(crate) fn fresh(&mut self, prefix: &str) -> String {
         self.locals += 1;
         format!("{prefix}{}", self.locals - 1)
     }
 
     /// Binds an index expression to a local (reused if already bound); plain `j` and literals
     /// are returned as is.
-    pub(super) fn index(&mut self, expr: String) -> String {
+    pub(crate) fn index(&mut self, expr: String) -> String {
         if expr == "j" || expr.parse::<u64>().is_ok() {
             return expr;
         }
@@ -74,7 +74,7 @@ impl<'a> Emitter<'a> {
     }
 
     /// Index into a layout node's operand for output index `idx`.
-    pub(super) fn operand_index(&mut self, node: &Node, idx: String) -> String {
+    pub(crate) fn operand_index(&mut self, node: &Node, idx: String) -> String {
         use Primitive::*;
         let body = self.body;
         let (x, ty) = (body.type_of(node.inputs[0]), body.type_of(node.output));
@@ -147,7 +147,7 @@ impl<'a> Emitter<'a> {
     }
 
     /// Emits the statements computing `v` at flat index `idx` and returns the local holding it.
-    pub(super) fn element(&mut self, v: Var, idx: String) -> String {
+    pub(crate) fn element(&mut self, v: Var, idx: String) -> String {
         let key = (v, idx.clone());
 
         if let Some(name) = self.values.get(&key) {
