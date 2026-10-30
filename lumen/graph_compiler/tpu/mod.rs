@@ -22,7 +22,7 @@ use super::common::merge_dots_backward::MergeDotsBackward;
 use super::common::simplify::Simplify;
 use super::pass::{Module, Pipeline};
 use super::plan::DeviceLayout;
-use super::{CompilerConfig, Options, positions};
+use super::{CompilerConfig, Options, plan_options, positions};
 use crate::graph::{Graph, Var};
 use crate::graph_compiler::{Plan, PlanOptions};
 
@@ -156,25 +156,16 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         interleaved,
         ..
     } = module;
-    // Packed weight blocks are extra inputs and count as parameters.
-    let parameters = options.parameters.clone().map(|mut p| {
-        p.resize(graph.inputs().len(), true);
-        p
-    });
+    let config = &options.config.tpu;
     let plan = PlanOptions {
-        scratch: None,
-        donate: options.donate.clone(),
-        donate_into: options.donate_into.clone(),
-        parameters,
-        scalars: positions(&options.scalars),
-        memory_limit: options.config.tpu.memory_limit(),
-        // Packed blocks were appended as the last graph inputs, in order.
-        blocks: packed
-            .iter()
-            .enumerate()
-            .map(|(k, (members, _))| (graph.inputs().len() - packed.len() + k, members.clone()))
-            .collect(),
         layout: Some(LAYOUT),
+        ..plan_options(
+            &graph,
+            options,
+            config,
+            &packed,
+            positions(&options.scalars),
+        )
     };
     let mut plan = Plan::compile_with(&graph, &plan);
     plan.packed = packed;

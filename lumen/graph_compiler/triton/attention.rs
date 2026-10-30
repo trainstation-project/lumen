@@ -1,5 +1,5 @@
-//! Flash attention on Triton: the pass fusing attention backward into dK/dV and dQ kernels, and
-//! running the forward and backward fusions through the Python Triton kernels.
+//! Flash attention on Triton: which kernels the attention passes fuse into, and running the forward
+//! and backward fusions through the Python Triton kernels.
 
 use std::sync::OnceLock;
 
@@ -8,10 +8,9 @@ use crate::codegen::triton::{
     self as codegen, ATTENTION_CONFIGS, AttentionConfig, untuned_attention,
 };
 use crate::graph::{Primitive, Var};
-use crate::graph_compiler::common::attention::{self, Access, Epilogues, Strides};
+use crate::graph_compiler::common::attention::{self, Access, Backward, Strides};
 use crate::graph_compiler::common::autotune::Kernels;
-use crate::graph_compiler::common::flash_attention::Attentions;
-use crate::graph_compiler::pass::CompilerPass;
+use crate::graph_compiler::common::flash_attention::{AttentionBackwards, Attentions};
 use crate::graph_compiler::plan::{Step, Tuned};
 use crate::tensor::contiguous_strides;
 use crate::{Scalar, Tensor, TensorOptions};
@@ -63,15 +62,6 @@ impl Attentions for TritonModule<'_> {
         true
     }
 
-    /// Any leaf, read at the output's flat index; the chain keeps the attention's shape.
-    fn epilogues(&self) -> Epilogues {
-        Epilogues {
-            leaves: |_, _| true,
-            reshaped: false,
-            transposed: true,
-        }
-    }
-
     /// Graph values of the by-value scalar inputs.
     fn scalars(&self) -> Vec<Var> {
         super::super::positions(&self.options.scalars)
@@ -84,28 +74,20 @@ impl Attentions for TritonModule<'_> {
     fn kernel(&mut self) -> String {
         FORWARD.into()
     }
-
-    /// The forward kernel reads a causal offset from a buffer at run time.
-    fn runtime_offsets(&self) -> bool {
-        true
-    }
 }
 
-/// Pass replacing each attention backward with one kernel adding dQ atomically as it computes dK and
-/// dV, or, when `cuda.deterministic`, a dK/dV kernel and a dQ kernel.
-pub(super) struct FlashAttentionBackward;
-
-impl CompilerPass<TritonModule<'_>> for FlashAttentionBackward {
-    /// Pass name used in profiler ranges and dumps.
-    fn name(&self) -> &'static str {
-        "flash_attention_backward"
+/// Each attention backward runs as one kernel adding dQ atomically as it computes dK and dV, or, when
+/// `cuda.deterministic`, a dK/dV kernel and a dQ kernel.
+impl AttentionBackwards for TritonModule<'_> {
+    /// Every backward runs as one kernel unless deterministic, so dQ is summed over key blocks in a fixed order.
+    fn together(&self) -> impl Fn(&Backward) -> bool + 'static {
+        let deterministic = self.options.config.cuda.deterministic;
+        move |_| !deterministic
     }
 
-    /// Fuses each backward into one kernel, or two so dQ is summed over key blocks in a fixed order.
-    fn apply(&mut self, m: &mut TritonModule<'_>) -> Result<(), String> {
-        let deterministic = m.options.config.cuda.deterministic;
-        m.graph = attention::fuse_backward(&m.graph, |_| !deterministic, |_| BACKWARD.into());
-        Ok(())
+    /// Every backward fusion runs on the backward kernels.
+    fn backward_kernel(&mut self) -> String {
+        BACKWARD.into()
     }
 }
 

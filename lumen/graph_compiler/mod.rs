@@ -24,6 +24,7 @@ use crate::Device;
 use crate::graph::{FUSION_SEPARATOR, Graph, Primitive, Var, intern};
 
 use common::cse::Cse;
+use common::merge_dots::Packs;
 use common::simplify::Simplify;
 pub use config::{CompilerConfig, Configs, CpuConfig, CudaConfig, MpsConfig, TpuConfig};
 use pass::{GraphModule, Pipeline};
@@ -102,6 +103,37 @@ fn device_compile(graph: &Graph, device: Device, options: &Options) -> Result<Pl
 /// Indices of the `true` entries of `mask`.
 fn positions(mask: &[bool]) -> Vec<usize> {
     (0..mask.len()).filter(|&i| mask[i]).collect()
+}
+
+/// Options planning `graph`, compiled under `options` and `config`, with `scalars` passed by value:
+/// the `packed` weight blocks dot merging appended as its last inputs count as parameters, and a
+/// member is kept while its block is read. No scratch, dense row-major layout.
+fn plan_options(
+    graph: &Graph,
+    options: &Options,
+    config: &dyn CompilerConfig,
+    packed: &Packs,
+    scalars: Vec<usize>,
+) -> PlanOptions {
+    let parameters = options.parameters.clone().map(|mut p| {
+        p.resize(graph.inputs().len(), true);
+        p
+    });
+    let first_block = graph.inputs().len() - packed.len();
+    PlanOptions {
+        scratch: None,
+        donate: options.donate.clone(),
+        donate_into: options.donate_into.clone(),
+        parameters,
+        scalars,
+        memory_limit: config.memory_limit(),
+        blocks: packed
+            .iter()
+            .enumerate()
+            .map(|(k, (members, _))| (first_block + k, members.clone()))
+            .collect(),
+        layout: None,
+    }
 }
 
 /// Whether `p` is an elementwise primitive that fusion can merge into a loop.

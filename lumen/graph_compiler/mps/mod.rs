@@ -5,7 +5,6 @@ pub(crate) mod ane;
 mod autotune;
 mod canonicalize_dots;
 mod diamonds;
-mod flash_attention_backward;
 pub(crate) mod fusion;
 mod horizontal;
 mod kernel_codegen;
@@ -34,8 +33,10 @@ use super::{CompilerConfig, MpsConfig, Options};
 use crate::codegen::mps as codegen;
 use crate::codegen::mps::Tuning;
 use crate::graph::{Graph, Node, Primitive, TensorType, Var, View};
-use crate::graph_compiler::common::attention;
-use crate::graph_compiler::common::flash_attention::{Attentions, FlashAttention};
+use crate::graph_compiler::common::attention::{self, Backward};
+use crate::graph_compiler::common::flash_attention::{
+    AttentionBackwards, Attentions, FlashAttention, FlashAttentionBackward,
+};
 use crate::graph_compiler::common::horizontal::segments;
 use crate::graph_compiler::common::updates::Updates;
 use crate::graph_compiler::plan::{Buffer, Step};
@@ -49,7 +50,6 @@ use crate::{DType, Scalar, Tensor};
 use canonicalize_dots::CanonicalizeDots;
 #[cfg(test)]
 use canonicalize_dots::canonicalize_dots;
-use flash_attention_backward::FlashAttentionBackward;
 use kernel_codegen::Codegen;
 use place_concats::PlaceConcats;
 use place_views::PlaceViews;
@@ -109,15 +109,6 @@ impl Attentions for MpsModule<'_> {
         self.options.config.mps.contraction_epilogues
     }
 
-    /// Any epilogue leaf may be fused, without reshapes.
-    fn epilogues(&self) -> attention::Epilogues {
-        attention::Epilogues {
-            leaves: |_, _| true,
-            reshaped: false,
-            transposed: true,
-        }
-    }
-
     /// Graph values of the by-value scalar inputs.
     fn scalars(&self) -> Vec<Var> {
         self.scalars
@@ -130,10 +121,18 @@ impl Attentions for MpsModule<'_> {
     fn kernel(&mut self) -> String {
         request(&mut self.kernels, Kernel::Attention)
     }
+}
 
-    /// MPS attention kernels take KV offsets at run time.
-    fn runtime_offsets(&self) -> bool {
-        true
+impl AttentionBackwards for MpsModule<'_> {
+    /// Backwards whose dQ fits the dK/dV kernel, unless deterministic mode forbids its atomic dQ accumulation.
+    fn together(&self) -> impl Fn(&Backward) -> bool + 'static {
+        let deterministic = self.options.config.mps.deterministic;
+        move |b| !deterministic && codegen::backward_block_with_dq(b).is_some()
+    }
+
+    /// Requests an attention backward kernel, returning its pending name.
+    fn backward_kernel(&mut self) -> String {
+        request(&mut self.kernels, Kernel::AttentionBackward)
     }
 }
 
@@ -321,23 +320,9 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         tunable,
         ..
     } = module;
-    let parameters = options.parameters.clone().map(|mut p| {
-        p.resize(fused.inputs().len(), true);
-        p
-    });
     let plan = PlanOptions {
         scratch: Some(scratch_bytes),
-        donate: options.donate.clone(),
-        donate_into: options.donate_into.clone(),
-        parameters,
-        scalars,
-        memory_limit: config.memory_limit(),
-        blocks: packed
-            .iter()
-            .enumerate()
-            .map(|(k, (members, _))| (fused.inputs().len() - packed.len() + k, members.clone()))
-            .collect(),
-        layout: None,
+        ..super::plan_options(&fused, options, config, &packed, scalars)
     };
     let mut plan = Plan::compile_with(&fused, &plan);
     if config.autotune {
