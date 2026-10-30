@@ -1,8 +1,8 @@
 //! Metal encoding of `Cumsum`, splitting long scans into chunks scanned in three passes.
+use crate::codegen::reduction::mps::kernel_dtype;
 use crate::graph::{Primitive, TensorType};
 use crate::graph_compiler::plan::Step;
 use crate::kernels::mps::{Grid, launch, u32_arg, u64_arg};
-use crate::kernels::reduction::mps::kernel_dtype;
 use crate::{DType, Tensor};
 
 /// Scan length above which a contiguous axis uses the threadgroup row kernel.

@@ -10,11 +10,11 @@ use crate::DType;
 use crate::codegen::dot_general::mps::GemmConfig;
 pub(crate) use crate::codegen::kinds::{row_partials, row_reductions};
 use crate::codegen::mps::*;
+use crate::codegen::reduction::mps as reduce;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::MpsConfig;
 use crate::graph_compiler::common::diamonds::{depends_on, softmax_pair};
 use crate::graph_compiler::mps::fusion;
-use crate::kernels::reduction::mps as reduce;
 
 /// Rows and row length of the first row reduction's operand.
 pub(crate) fn row_shape(body: &Graph) -> (usize, usize) {

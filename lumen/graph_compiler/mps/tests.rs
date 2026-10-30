@@ -531,7 +531,7 @@ fn transposes_in_fusions_are_tiled() {
 /// Reductions pick row, column or grouped kernels after squeezing unit axes, with matching scratch.
 #[test]
 fn reductions_are_normalized() {
-    use crate::kernels::reduction::mps::scratch_bytes;
+    use crate::codegen::reduction::mps::scratch_bytes;
 
     for (shape, axes, kernel) in [
         (vec![400, 1, 300], vec![0, 2], "reduce_rows"),
@@ -581,7 +581,7 @@ fn reductions_are_normalized() {
 /// Half-precision reductions accumulate in float only when asked, including inside norm and softmax rows.
 #[test]
 fn hierarchical_reductions_keep_their_dtype() {
-    use crate::kernels::reduction::mps::scratch_bytes;
+    use crate::codegen::reduction::mps::scratch_bytes;
 
     let mentions = |source: &str, word: &str| {
         source

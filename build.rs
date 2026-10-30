@@ -162,7 +162,7 @@ fn build_mps_shim() {
 /// Metal sources concatenated into the shim's `kPrimitiveKernels` string.
 const PRIMITIVE_KERNELS: &[&str] = &[
     "lumen/kernels/mps/kernels.metal",
-    "lumen/kernels/reduction/mps/kernels.metal",
+    "lumen/codegen/reduction/mps/kernels.metal",
     "lumen/kernels/scan/mps/kernels.metal",
     "lumen/codegen/dot_general/mps/integer/matmul.metal",
     "lumen/codegen/dot_general/mps/integer/matmul_wide.metal",
