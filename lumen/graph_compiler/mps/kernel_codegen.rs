@@ -5,9 +5,10 @@ use std::collections::HashMap;
 use super::autotune::Tunable;
 use super::place_concats::in_place_concats;
 use super::{Kernel, MpsModule, PENDING, codegen, request};
+use crate::codegen::AttentionCodegen;
 use crate::graph::{Primitive, Var};
 use crate::graph_compiler::common::alone::wrapped;
-use crate::graph_compiler::common::attention;
+use crate::graph_compiler::common::attention::{self, Strides};
 use crate::graph_compiler::pass::CompilerPass;
 
 /// Compiler pass turning pending kernel requests into generated kernels.
@@ -92,13 +93,16 @@ impl<'a> CompilerPass<MpsModule<'a>> for Codegen {
                 }
                 Kernel::Attention => {
                     let a = attention::of_body(body).expect("an attention");
-                    codegen::attention_kernel(body, &a)
+                    codegen::Mps::forward(body, &a, &Strides::default())?
                 }
                 Kernel::AttentionBackward => {
-                    let views = views.remove(&output).unwrap_or_default();
-                    let b = attention::backward_of_body_into(body, views)
+                    let strides = Strides {
+                        outputs: views.remove(&output).unwrap_or_default(),
+                        ..Strides::default()
+                    };
+                    let b = attention::backward_of_body_strided(body, &strides)
                         .expect("an attention backward");
-                    codegen::attention_backward_kernel(body, &b)
+                    codegen::Mps::backward(body, &b, &strides)?
                 }
             };
             super::record_launch(&kernel, body, codegen::tuning_of(body));

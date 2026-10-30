@@ -23,9 +23,7 @@ mod indexing;
 mod reduction;
 mod row;
 
-pub(crate) use attention::{
-    attention_atomic_add, attention_load, attention_output, attention_score, attention_store,
-};
+pub(crate) use attention::{gradients, operands};
 pub(crate) use config::{
     ATTENTION_CONFIGS, AttentionConfig, CONFIGS, Config, LOOP_CONFIGS, LoopConfig, ROW_PARTIALS,
     UNTUNED, UNTUNED_LOOP, loop_configs, partial_tile, row_gemm_configs, untuned_attention,
@@ -38,6 +36,9 @@ pub(crate) use reduction::{reduction, reduction_root, scan};
 pub(crate) use row::{
     dot_row_fits, partials_epilogue, row, row_count, row_epilogue, row_groups, row_looped,
 };
+
+/// The Triton code generator.
+pub(crate) struct Triton;
 
 /// Triton element type for `dtype`, or `None` when Triton can't hold it.
 pub(crate) fn triton_type(dtype: DType) -> Option<&'static str> {

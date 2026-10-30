@@ -19,6 +19,9 @@ use crate::graph_compiler::plan::Step;
 #[cfg(lumen_tpu_linked)]
 pub(crate) use elementwise::encode;
 
+/// The TPU code generator.
+pub(crate) struct Tpu;
+
 /// Whether `p` can run inside a plain elementwise TPU loop (only scalar broadcasts among layout ops).
 pub(crate) fn fusible(p: &Primitive) -> bool {
     use Primitive::*;

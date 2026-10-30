@@ -1,10 +1,12 @@
 //! TPU flash attention: checks that each attention operand and output is read or written as whole
 //! tiles per head and encodes the forward and backward kernel specs.
 
+use super::Tpu;
 use crate::DType;
+use crate::codegen::AttentionCodegen;
 use crate::device::tpu::layout::Layout;
 use crate::graph::{Graph, Node, Primitive, TensorType, Var};
-use crate::graph_compiler::common::attention::{self, Access, Score};
+use crate::graph_compiler::common::attention::{self, Access, Attention, Backward, Score, Strides};
 use crate::graph_compiler::elementwise;
 use crate::kernels::attention::tpu::blocks;
 use crate::tensor::contiguous_strides;
@@ -172,136 +174,159 @@ fn unsupported(dropout: bool, dtype: DType) -> Result<(), String> {
     Ok(())
 }
 
-/// The forward kernel's kind and spec for the attention fusion `body`, with an optional
-/// elementwise epilogue on the output and an optional log-sum-exp output.
-pub(crate) fn forward(body: &Graph) -> Result<(&'static str, String), String> {
-    let a = attention::of_body(body).ok_or("flash attention on TPU: no attention in its body")?;
-    unsupported(a.dropout.is_some(), a.dtype)?;
-    let views = [
-        view("q", &operand(body, &a.q, a.h), &a.batch, Some(a.sq))?,
-        view("k", &operand(body, &a.k, a.h), &a.batch, Some(a.sk))?,
-        view("v", &operand(body, &a.v, a.hv), &a.batch, Some(a.sk))?,
-    ];
-    // The log-sum-exp, when produced, is the last output.
-    let lse_k = a.lse.map(|_| body.outputs().len() - 1);
-    let (mut raw, mut ends) = ("null".to_string(), ("null".to_string(), "null".to_string()));
-    for k in (0..body.outputs().len()).filter(|&k| Some(k) != lse_k) {
-        let chain = path(body, a.out.base, k)
-            .ok_or("flash attention on TPU: an output written through other than its layout")?;
-        let acc = written_at(body, &a.out, &a.batch, k)?.1;
-        let shown = view(
-            "the output",
-            &output(body, k, acc, a.hv),
-            &a.batch,
-            Some(a.sq),
-        )?;
-        match epilogue(&chain) {
-            true => ends = (shown, epilogue_spec(body, &chain, a.out.base)?),
-            false => raw = shown,
+/// The kernel's kind and spec for the attention fusion `body` named `name`: `flash_attention` or
+/// `flash_attention_backward`.
+pub(crate) fn kernel(name: &str, body: &Graph) -> Result<(&'static str, String), String> {
+    // The TPU kernels read their operands contiguous.
+    let strides = Strides::default();
+    match name {
+        "flash_attention" => {
+            let a = attention::of_body(body)
+                .ok_or("flash attention on TPU: no attention in its body")?;
+            Tpu::forward(body, &a, &strides)
+        }
+        _ => {
+            let b = attention::backward_of_body(body)
+                .ok_or("flash attention backward on TPU: no attention backward in its body")?;
+            Tpu::backward(body, &b, &strides)
         }
     }
-    let lse = match lse_k {
-        Some(k) => {
-            let ty = body.type_of(body.outputs()[k]).clone();
-            let acc = per_head(&ty, &a.batch);
-            view("the log-sum-exp", &output(body, k, acc, 1), &a.batch, None)?
-        }
-        None => "null".into(),
-    };
-    let spec = format!(
-        "\"kind\": \"forward\", \"batch\": {:?}, \"sq\": {}, \"sk\": {}, \"h\": {}, \"hv\": {}, \"blocks\": [{}, {}], \
-         \"scores\": {}, \"causal\": {}, \"q\": {}, \"k\": {}, \"v\": {}, \"o\": {raw}, \"e\": {}, \"epilogue\": {}, \
-         \"o_dtype\": \"{}\", \"lse\": {lse}",
-        a.batch,
-        a.sq,
-        a.sk,
-        a.h,
-        a.hv,
-        blocks(a.sq, a.sk).0,
-        blocks(a.sq, a.sk).1,
-        scores(&a.scores),
-        a.causal.map_or("null".into(), |c| c.to_string()),
-        views[0],
-        views[1],
-        views[2],
-        ends.0,
-        ends.1,
-        a.out_dtype.full_name(),
-    );
-    Ok(("forward", spec))
 }
 
-/// The backward kernel's kind (`dq`, or `dkv` for dk and dv) and spec for the attention backward
-/// fusion `body`.
-pub(crate) fn backward(body: &Graph) -> Result<(&'static str, String), String> {
-    let b = attention::backward_of_body(body)
-        .ok_or("flash attention backward on TPU: no attention backward in its body")?;
-    unsupported(b.dropout.is_some(), b.dtype)?;
-    let ins = [
-        view("q", &operand(body, &b.q, b.h), &b.batch, Some(b.sq))?,
-        view("k", &operand(body, &b.k, b.h), &b.batch, Some(b.sk))?,
-        view("v", &operand(body, &b.v, b.hv), &b.batch, Some(b.sk))?,
-        view("dO", &operand(body, &b.d_o, b.hv), &b.batch, Some(b.sq))?,
-        view("the log-sum-exp", &operand(body, &b.lse, 1), &b.batch, None)?,
-    ];
-    // Delta is either a body input or rowsum(dO * o), which the kernel recomputes from o.
-    let delta = match rows_of(body, &b.delta, usize::MAX) {
-        usize::MAX => {
-            let o = inside(body, &b.delta, &b.d_o, &b.batch, b.sq)?;
-            format!(
-                "\"delta\": null, \"o\": {}",
-                view("o", &operand(body, &o, b.hv), &b.batch, Some(b.sq))?
-            )
+/// The Pallas flash-attention kernels are fixed; each fusion gets a JSON spec of how they read and write
+/// its operands.
+impl AttentionCodegen for Tpu {
+    /// The kernel's kind and its JSON spec.
+    type Code = (&'static str, String);
+
+    /// The forward kernel's kind and spec for the attention fusion `body`, with an optional
+    /// elementwise epilogue on the output and an optional log-sum-exp output.
+    fn forward(body: &Graph, a: &Attention, _: &Strides) -> Result<Self::Code, String> {
+        unsupported(a.dropout.is_some(), a.dtype)?;
+        let views = [
+            view("q", &operand(body, &a.q, a.h), &a.batch, Some(a.sq))?,
+            view("k", &operand(body, &a.k, a.h), &a.batch, Some(a.sk))?,
+            view("v", &operand(body, &a.v, a.hv), &a.batch, Some(a.sk))?,
+        ];
+        // The log-sum-exp, when produced, is the last output.
+        let lse_k = a.lse.map(|_| body.outputs().len() - 1);
+        let (mut raw, mut ends) = ("null".to_string(), ("null".to_string(), "null".to_string()));
+        for k in (0..body.outputs().len()).filter(|&k| Some(k) != lse_k) {
+            let chain = path(body, a.out.base, k)
+                .ok_or("flash attention on TPU: an output written through other than its layout")?;
+            let acc = written_at(body, &a.out, &a.batch, k)?.1;
+            let shown = view(
+                "the output",
+                &output(body, k, acc, a.hv),
+                &a.batch,
+                Some(a.sq),
+            )?;
+            match epilogue(&chain) {
+                true => ends = (shown, epilogue_spec(body, &chain, a.out.base)?),
+                false => raw = shown,
+            }
         }
-        _ => format!(
-            "\"delta\": {}",
-            view("delta", &operand(body, &b.delta, 1), &b.batch, None)?
-        ),
-    };
-    let kind = match (&b.dq_out, &b.dk_out, &b.dv_out) {
-        (Some(_), None, None) => "dq",
-        (None, Some(_), Some(_)) => "dkv",
-        _ => return Err("flash attention backward on TPU: dq alone, or dk and dv".into()),
-    };
-    let out = |name: &str,
-               out: &Option<(usize, Access)>,
-               width: usize,
-               seq: usize|
-     -> Result<String, String> {
-        let (_, acc) = out.as_ref().expect("an output");
-        let (k, acc) = written(body, acc, &b.batch)?;
-        view(name, &output(body, k, acc, width), &b.batch, Some(seq))
-    };
-    let outs = match kind {
-        "dq" => format!("\"dq\": {}", out("dq", &b.dq_out, b.h, b.sq)?),
-        _ => format!(
-            "\"dk\": {}, \"dv\": {}, \"group\": {}",
-            out("dk", &b.dk_out, b.h, b.sk)?,
-            out("dv", &b.dv_out, b.hv, b.sk)?,
-            group(&written(body, &b.dk_out.as_ref().expect("dk").1, &b.batch)?.1)
-        ),
-    };
-    let spec = format!(
-        "\"kind\": \"{kind}\", \"batch\": {:?}, \"sq\": {}, \"sk\": {}, \"h\": {}, \"hv\": {}, \"blocks\": [{}, {}], \
-         \"scores\": {}, \"causal\": {}, \"ds_scale\": {:?}, \"q\": {}, \"k\": {}, \"v\": {}, \"do\": {}, \
-         \"lse\": {}, {delta}, {outs}",
-        b.batch,
-        b.sq,
-        b.sk,
-        b.h,
-        b.hv,
-        blocks(b.sq, b.sk).0,
-        blocks(b.sq, b.sk).1,
-        scores(&b.scores),
-        b.causal.map_or("null".into(), |c| c.to_string()),
-        b.ds_scale,
-        ins[0],
-        ins[1],
-        ins[2],
-        ins[3],
-        ins[4],
-    );
-    Ok((kind, spec))
+        let lse = match lse_k {
+            Some(k) => {
+                let ty = body.type_of(body.outputs()[k]).clone();
+                let acc = per_head(&ty, &a.batch);
+                view("the log-sum-exp", &output(body, k, acc, 1), &a.batch, None)?
+            }
+            None => "null".into(),
+        };
+        let spec = format!(
+            "\"kind\": \"forward\", \"batch\": {:?}, \"sq\": {}, \"sk\": {}, \"h\": {}, \"hv\": {}, \"blocks\": [{}, {}], \
+             \"scores\": {}, \"causal\": {}, \"q\": {}, \"k\": {}, \"v\": {}, \"o\": {raw}, \"e\": {}, \"epilogue\": {}, \
+             \"o_dtype\": \"{}\", \"lse\": {lse}",
+            a.batch,
+            a.sq,
+            a.sk,
+            a.h,
+            a.hv,
+            blocks(a.sq, a.sk).0,
+            blocks(a.sq, a.sk).1,
+            scores(&a.scores),
+            a.causal.map_or("null".into(), |c| c.to_string()),
+            views[0],
+            views[1],
+            views[2],
+            ends.0,
+            ends.1,
+            a.out_dtype.full_name(),
+        );
+        Ok(("forward", spec))
+    }
+
+    /// The backward kernel's kind (`dq`, or `dkv` for dk and dv) and spec for the attention backward
+    /// fusion `body`.
+    fn backward(body: &Graph, b: &Backward, _: &Strides) -> Result<Self::Code, String> {
+        unsupported(b.dropout.is_some(), b.dtype)?;
+        let ins = [
+            view("q", &operand(body, &b.q, b.h), &b.batch, Some(b.sq))?,
+            view("k", &operand(body, &b.k, b.h), &b.batch, Some(b.sk))?,
+            view("v", &operand(body, &b.v, b.hv), &b.batch, Some(b.sk))?,
+            view("dO", &operand(body, &b.d_o, b.hv), &b.batch, Some(b.sq))?,
+            view("the log-sum-exp", &operand(body, &b.lse, 1), &b.batch, None)?,
+        ];
+        // Delta is either a body input or rowsum(dO * o), which the kernel recomputes from o.
+        let delta = match rows_of(body, &b.delta, usize::MAX) {
+            usize::MAX => {
+                let o = inside(body, &b.delta, &b.d_o, &b.batch, b.sq)?;
+                format!(
+                    "\"delta\": null, \"o\": {}",
+                    view("o", &operand(body, &o, b.hv), &b.batch, Some(b.sq))?
+                )
+            }
+            _ => format!(
+                "\"delta\": {}",
+                view("delta", &operand(body, &b.delta, 1), &b.batch, None)?
+            ),
+        };
+        let kind = match (&b.dq_out, &b.dk_out, &b.dv_out) {
+            (Some(_), None, None) => "dq",
+            (None, Some(_), Some(_)) => "dkv",
+            _ => return Err("flash attention backward on TPU: dq alone, or dk and dv".into()),
+        };
+        let out = |name: &str,
+                   out: &Option<(usize, Access)>,
+                   width: usize,
+                   seq: usize|
+         -> Result<String, String> {
+            let (_, acc) = out.as_ref().expect("an output");
+            let (k, acc) = written(body, acc, &b.batch)?;
+            view(name, &output(body, k, acc, width), &b.batch, Some(seq))
+        };
+        let outs = match kind {
+            "dq" => format!("\"dq\": {}", out("dq", &b.dq_out, b.h, b.sq)?),
+            _ => format!(
+                "\"dk\": {}, \"dv\": {}, \"group\": {}",
+                out("dk", &b.dk_out, b.h, b.sk)?,
+                out("dv", &b.dv_out, b.hv, b.sk)?,
+                group(&written(body, &b.dk_out.as_ref().expect("dk").1, &b.batch)?.1)
+            ),
+        };
+        let spec = format!(
+            "\"kind\": \"{kind}\", \"batch\": {:?}, \"sq\": {}, \"sk\": {}, \"h\": {}, \"hv\": {}, \"blocks\": [{}, {}], \
+             \"scores\": {}, \"causal\": {}, \"ds_scale\": {:?}, \"q\": {}, \"k\": {}, \"v\": {}, \"do\": {}, \
+             \"lse\": {}, {delta}, {outs}",
+            b.batch,
+            b.sq,
+            b.sk,
+            b.h,
+            b.hv,
+            blocks(b.sq, b.sk).0,
+            blocks(b.sq, b.sk).1,
+            scores(&b.scores),
+            b.causal.map_or("null".into(), |c| c.to_string()),
+            b.ds_scale,
+            ins[0],
+            ins[1],
+            ins[2],
+            ins[3],
+            ins[4],
+        );
+        Ok((kind, spec))
+    }
 }
 
 /// Where `o` is read, when `delta` is computed in the body as a dot of `dO` with `o`; fails otherwise.

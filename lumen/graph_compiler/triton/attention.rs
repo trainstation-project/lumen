@@ -4,15 +4,15 @@
 use std::sync::OnceLock;
 
 use super::{Function, Launches, TritonModule, copy, fill};
+use crate::codegen::AttentionCodegen;
 use crate::codegen::triton::{
     self as codegen, ATTENTION_CONFIGS, AttentionConfig, untuned_attention,
 };
 use crate::graph::{Primitive, Var};
-use crate::graph_compiler::common::attention::{self, Access, Backward, Strides};
+use crate::graph_compiler::common::attention::{self, Backward, Strides};
 use crate::graph_compiler::common::autotune::Kernels;
 use crate::graph_compiler::common::flash_attention::{AttentionBackwards, Attentions};
 use crate::graph_compiler::plan::{Step, Tuned};
-use crate::tensor::contiguous_strides;
 use crate::{Scalar, Tensor, TensorOptions};
 
 /// Name of a forward flash-attention fusion.
@@ -128,21 +128,6 @@ fn last_contiguous(t: &Tensor) -> bool {
     t.strides().last().is_none_or(|&s| s == 1) || t.shape().last() == Some(&1)
 }
 
-/// Where the forward kernel writes each query row's log-sum-exp, `[batch.., sq]`: at `strides`, or
-/// contiguous.
-fn per_row(batch: &[usize], sq: usize, strides: Option<&[usize]>) -> Access {
-    let mut shape = batch.to_vec();
-    shape.push(sq);
-    let strides = strides.map_or_else(|| contiguous_strides(&shape), <[usize]>::to_vec);
-    Access {
-        base: 0,
-        offset: 0,
-        batch: strides[..batch.len()].iter().map(|&s| (s, 1)).collect(),
-        row: strides[batch.len()],
-        col: 0,
-    }
-}
-
 /// Where a flash-attention kernel's tensor comes from: the step's input or output at an index.
 #[derive(Clone, Copy)]
 enum Source {
@@ -183,11 +168,9 @@ fn prepare(step: &Step, strides: &Strides) -> Result<Prepared, String> {
         let k = body.outputs().iter().position(|&u| u == v);
         Source::Output(k.expect("an output of the attention"))
     };
-    let load = |param: &str, acc: &Access, batch: &[usize]| {
-        Function::new(param, codegen::attention_load(acc, batch))
-    };
-    let store = |param: &str, acc: &Access, batch: &[usize]| {
-        Function::new(param, codegen::attention_store(acc, batch))
+    let functions = |code: Vec<(String, (String, String))>| {
+        let functions = code.into_iter().map(|(param, f)| Function::new(param, f));
+        functions.collect()
     };
     let dropout = format!(
         "{}: dropout in attention has no Triton kernel (random_bits)",
@@ -200,10 +183,6 @@ fn prepare(step: &Step, strides: &Strides) -> Result<Prepared, String> {
         }
         let root = body.nodes()[a.root].output;
         let lse = a.lse.map(|n| output(body.nodes()[n].output));
-        let lse_strides = lse.and_then(|source| match source {
-            Source::Output(k) => strides.outputs.get(&k).map(|(_, s)| s.as_slice()),
-            Source::Input(_) => None,
-        });
         // The body's inputs but the offset, which the epilogue may read, then the attention values
         // when the body outputs them too (`EXTRA`).
         let raw = body.outputs()[1..].contains(&root);
@@ -228,14 +207,7 @@ fn prepare(step: &Step, strides: &Strides) -> Result<Prepared, String> {
             kernel: "forward",
             tensors,
             zeroed: Vec::new(),
-            functions: vec![
-                load("LOAD_Q", &a.q, &a.batch),
-                load("LOAD_K", &a.k, &a.batch),
-                load("LOAD_V", &a.v, &a.batch),
-                Function::new("STORE_O", codegen::attention_output(body, &a, raw, strides)),
-                store("STORE_LSE", &per_row(&a.batch, a.sq, lse_strides), &a.batch),
-                Function::new("SCORE", codegen::attention_score(&a.scores)),
-            ],
+            functions: functions(codegen::Triton::forward(body, &a, strides)?),
             sizes: [a.batch.iter().product(), a.sq, a.sk, a.h, a.hv],
             causal: a.causal,
             scale: 1.0,
@@ -248,49 +220,26 @@ fn prepare(step: &Step, strides: &Strides) -> Result<Prepared, String> {
     if b.dropout.is_some() {
         return Err(dropout);
     }
-    let operands = [
-        ("Q", &b.q),
-        ("K", &b.k),
-        ("V", &b.v),
-        ("DO", &b.d_o),
-        ("LSE", &b.lse),
-        ("DELTA", &b.delta),
-    ];
-    // With dK and dV, dQ is added atomically into a zeroed float32 buffer as each key block computes it.
-    let gradients = match (&b.dk_out, &b.dv_out, &b.dq_out) {
-        (Some(dk), Some(dv), dq) => [("STORE_DK", dk), ("STORE_DV", dv)]
-            .into_iter()
-            .chain(dq.as_ref().map(|dq| ("ADD_DQ", dq)))
-            .collect(),
-        (_, _, Some(dq)) => vec![("STORE_DQ", dq)],
-        _ => return Err(format!("{}: computes no gradient", step.label)),
-    };
-    let mut tensors: Vec<Option<Source>> = operands
+    let gradients = codegen::gradients(&b);
+    if gradients.is_empty() {
+        return Err(format!("{}: computes no gradient", step.label));
+    }
+    let mut tensors: Vec<Option<Source>> = codegen::operands(&b)
         .iter()
         .map(|(_, acc)| Some(input(acc.base)))
         .collect();
-    let mut functions: Vec<Function> = operands
-        .iter()
-        .map(|(name, acc)| load(&format!("LOAD_{name}"), acc, &b.batch))
-        .collect();
     let mut zeroed = Vec::new();
-    for (param, (node, acc)) in &gradients {
-        let code = match *param {
-            "ADD_DQ" => {
-                zeroed.push(tensors.len());
-                codegen::attention_atomic_add(acc, &b.batch)
-            }
-            _ => codegen::attention_store(acc, &b.batch),
-        };
+    for (param, (node, _)) in &gradients {
+        if *param == "ADD_DQ" {
+            zeroed.push(tensors.len());
+        }
         tensors.push(Some(output(body.nodes()[*node].output)));
-        functions.push(Function::new(*param, code));
     }
-    functions.push(Function::new("SCORE", codegen::attention_score(&b.scores)));
     Ok(Prepared {
         kernel: if b.dk_out.is_some() { "dkdv" } else { "dq" },
         tensors,
         zeroed,
-        functions,
+        functions: functions(codegen::Triton::backward(body, &b, strides)?),
         sizes: [b.batch.iter().product(), b.sq, b.sk, b.h, b.hv],
         causal: b.causal,
         scale: b.ds_scale,

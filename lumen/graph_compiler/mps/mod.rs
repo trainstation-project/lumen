@@ -30,6 +30,7 @@ use super::common::simplify::Simplify;
 use super::common::take_along_axis::TakeAlongAxis;
 use super::pass::{Module, Pipeline};
 use super::{CompilerConfig, MpsConfig, Options};
+use crate::codegen::AttentionCodegen;
 use crate::codegen::mps as codegen;
 use crate::codegen::mps::Tuning;
 use crate::graph::{Graph, Node, Primitive, TensorType, Var, View};
@@ -740,11 +741,11 @@ fn attention_variant(
     let (variant, source) = match launch {
         Launch::Attention => {
             let a = attention::of_body_strided(body, &strides).ok_or_else(unmatched)?;
-            codegen::attention_kernel(body, &a)
+            codegen::Mps::forward(body, &a, &strides)?
         }
         _ => {
             let b = attention::backward_of_body_strided(body, &strides).ok_or_else(unmatched)?;
-            codegen::attention_backward_kernel(body, &b)
+            codegen::Mps::backward(body, &b, &strides)?
         }
     };
     let compiled = SOURCES
