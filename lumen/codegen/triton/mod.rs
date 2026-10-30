@@ -16,7 +16,6 @@ use crate::{DType, Element, Scalar};
 
 pub(crate) mod config;
 mod cross_entropy;
-pub(crate) mod utils;
 
 pub(crate) use crate::codegen::dot_general::triton::row::{
     dot_row_fits, partials_epilogue, row_epilogue,

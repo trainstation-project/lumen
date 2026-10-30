@@ -10,8 +10,8 @@ use crate::DType;
 use crate::codegen::triton::config::{
     COLUMN_LANES, MOST_SPLITS, ROW_LANES, SPLIT_BELOW, SPLIT_ROW_LANES, SPLIT_SPAN,
 };
-use crate::codegen::triton::utils::indented;
 use crate::codegen::triton::*;
+use crate::codegen::utils::triton::indented;
 use crate::graph::{Graph, Node, Primitive, TensorType};
 use crate::tensor::contiguous_strides;
 
