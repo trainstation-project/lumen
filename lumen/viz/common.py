@@ -5,7 +5,8 @@ import re
 
 import lumen
 
-KERNELS = pathlib.Path(lumen.__file__).parent / "kernels"
+LUMEN = pathlib.Path(lumen.__file__).parent
+KERNELS = LUMEN / "kernels"
 
 # Short dtype names used in visualizations, mapped to lumen dtype names.
 DTYPES = {
@@ -31,27 +32,35 @@ def type_text(dtype, shape):
     return f"{SHORT.get(dtype, dtype)}[{','.join(map(str, shape))}]"
 
 
-# (kernel name pattern, source file under lumen/kernels, line prefix where its code starts); first match wins.
+# (kernel name pattern, source file under lumen/, line prefix where its code starts); first match wins.
 _SOURCES = [
-    (r"^matmul_atomic_", "dot_general/mps/tiled/matmul_atomic.metal", "#define MATMUL_ATOMIC"),
-    (r"^lce_partials", "dot_general/mps/linear_cross_entropy/linear_cross_entropy.metal", "#define LCE_PARTIALS"),
-    (r"^lce_combine", "dot_general/mps/linear_cross_entropy/linear_cross_entropy.metal", "kernel void lce_combine"),
-    (r"^dynamic_slice_copy_", "dynamic_slice/mps/kernels.metal", "#define DS_COPY"),
-    (r"^dynamic_update_slice_", "dynamic_slice/mps/kernels.metal", "#define DYNAMIC_UPDATE_SLICE"),
-    (r"^dynamic_slice_", "dynamic_slice/mps/kernels.metal", "#define DYNAMIC_SLICE"),
-    (r"^scatter_add_scan_", "scatter_add/mps/kernels.metal", "#define SCATTER_ADD_SCAN"),
-    (r"^scatter_add_", "scatter_add/mps/kernels.metal", "#define SCATTER_ADD("),
-    (r"^random_bits", "factory/mps/kernels.metal", "kernel void random_bits"),
-    (r"^matmul_(u64|i64)$", "dot_general/mps/integer/matmul_wide.metal", "inline void matmul_wide_impl"),
-    (r"^matmul_(u8|u16|u32|i8|i16|i32)$", "dot_general/mps/integer/matmul.metal", "inline void matmul_impl"),
-    (r"^reduce_\w+_rows_", "reduction/mps/kernels.metal", "inline void reduce_rows"),
-    (r"^reduce_\w+_cols_", "reduction/mps/kernels.metal", "inline void reduce_cols"),
-    (r"^reduce_\w+_grouped_", "reduction/mps/kernels.metal", "inline void reduce_grouped"),
-    (r"^reduce_", "reduction/mps/kernels.metal", "inline void reduce("),
-    (r"^gather_", "layout/mps/kernels.metal", "#define GATHER"),
-    (r"^transpose_", "layout/mps/kernels.metal", "#define TRANSPOSE"),
-    (r"^fill_\d$", "factory/mps/kernels.metal", "#define FULL"),
-    (r"^iota_", "factory/mps/kernels.metal", "#define IOTA"),
+    (r"^matmul_atomic_", "codegen/dot_general/mps/tiled/matmul_atomic.metal", "#define MATMUL_ATOMIC"),
+    (
+        r"^lce_partials",
+        "codegen/dot_general/mps/linear_cross_entropy/linear_cross_entropy.metal",
+        "#define LCE_PARTIALS",
+    ),
+    (
+        r"^lce_combine",
+        "codegen/dot_general/mps/linear_cross_entropy/linear_cross_entropy.metal",
+        "kernel void lce_combine",
+    ),
+    (r"^dynamic_slice_copy_", "codegen/indexing/mps/dynamic_slice.metal", "#define DS_COPY"),
+    (r"^dynamic_update_slice_", "codegen/indexing/mps/dynamic_slice.metal", "#define DYNAMIC_UPDATE_SLICE"),
+    (r"^dynamic_slice_", "codegen/indexing/mps/dynamic_slice.metal", "#define DYNAMIC_SLICE"),
+    (r"^scatter_add_scan_", "codegen/indexing/mps/scatter_add.metal", "#define SCATTER_ADD_SCAN"),
+    (r"^scatter_add_", "codegen/indexing/mps/scatter_add.metal", "#define SCATTER_ADD("),
+    (r"^random_bits", "kernels/factory/mps/kernels.metal", "kernel void random_bits"),
+    (r"^matmul_(u64|i64)$", "codegen/dot_general/mps/integer/matmul_wide.metal", "inline void matmul_wide_impl"),
+    (r"^matmul_(u8|u16|u32|i8|i16|i32)$", "codegen/dot_general/mps/integer/matmul.metal", "inline void matmul_impl"),
+    (r"^reduce_\w+_rows_", "codegen/reduction/mps/kernels.metal", "inline void reduce_rows"),
+    (r"^reduce_\w+_cols_", "codegen/reduction/mps/kernels.metal", "inline void reduce_cols"),
+    (r"^reduce_\w+_grouped_", "codegen/reduction/mps/kernels.metal", "inline void reduce_grouped"),
+    (r"^reduce_", "codegen/reduction/mps/kernels.metal", "inline void reduce("),
+    (r"^gather_", "kernels/layout/mps/kernels.metal", "#define GATHER"),
+    (r"^transpose_", "kernels/layout/mps/kernels.metal", "#define TRANSPOSE"),
+    (r"^fill_\d$", "kernels/factory/mps/kernels.metal", "#define FULL"),
+    (r"^iota_", "kernels/factory/mps/kernels.metal", "#define IOTA"),
 ]
 
 
