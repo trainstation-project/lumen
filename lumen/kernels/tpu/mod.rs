@@ -770,7 +770,7 @@ pub(crate) fn encode(
 ) -> Result<(), String> {
     match step.primitive {
         Primitive::Fusion { ref name, .. } if name.starts_with("flash_attention") => {
-            super::attention::tpu::encode(index, step, inputs, output)
+            crate::codegen::attention::tpu::encode(index, step, inputs, output)
         }
         Primitive::Fusion { ref name, .. } if name == "reduction" => {
             super::reduction::tpu::encode(index, step, inputs, output)

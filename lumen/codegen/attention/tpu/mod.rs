@@ -1,5 +1,9 @@
-//! TPU flash attention: checks that each attention operand and output is read or written as whole
-//! tiles per head and encodes the forward and backward kernel specs.
+//! TPU flash attention: the Pallas forward and backward programs (`forward.py`, `backward.py` and their
+//! helpers in `__init__.py`, beside this file) and the specs generated per fusion for them: each attention
+//! operand and output checked to be read or written as whole tiles per head, and the blocks chosen
+//! (`config.rs`); and launching an attention fusion's program (`encode`).
+
+mod config;
 
 use super::AttentionCodegen;
 use crate::DType;
@@ -10,8 +14,12 @@ use crate::graph_compiler::common::attention::{
     self, Access, Attention, Backward, Dropout, Score, Strides,
 };
 use crate::graph_compiler::elementwise;
-use crate::kernels::attention::tpu::blocks;
+#[cfg(lumen_tpu_linked)]
+use crate::graph_compiler::plan::Step;
+#[cfg(lumen_tpu_linked)]
+use crate::kernels::tpu::{Launch, launch};
 use crate::tensor::contiguous_strides;
+use config::blocks;
 
 /// Lanes of a TPU vreg; head widths are whole multiples of it unless a head spans its rows.
 const LANES: usize = 128;
@@ -525,6 +533,7 @@ fn group(dk: &Access) -> usize {
 fn path(body: &Graph, from: Var, k: usize) -> Option<Vec<&Node>> {
     let mut depends = vec![false; body.types.len()];
     depends[from] = true;
+
     for n in body.nodes() {
         depends[n.output] |= n.inputs.iter().any(|&v| depends[v]);
     }
@@ -744,4 +753,63 @@ fn written_at(
     }
 
     Ok((k, mapped))
+}
+
+/// Launches the Python attention kernel `kind` (`forward` or `backward`) with buffer pointers `rows`.
+#[cfg(lumen_tpu_linked)]
+fn run(index: usize, kind: &str, spec: String, rows: &[*const u8]) -> Result<(), String> {
+    let module = match kind {
+        "forward" => "lumen.codegen.attention.tpu.forward",
+        _ => "lumen.codegen.attention.tpu.backward",
+    };
+
+    let launched = Launch {
+        module,
+        kernel: format!("flash_attention_{kind}"),
+        spec,
+        rows,
+        scalars: &[],
+        host: &[],
+        sparse: None,
+    };
+
+    launch(index, launched)
+}
+
+/// Encodes an attention fusion step, binding its inputs, then its output, then any extra outputs.
+#[cfg(lumen_tpu_linked)]
+pub(crate) fn encode(
+    index: usize,
+    step: &Step,
+    inputs: &[*const u8],
+    output: *mut u8,
+) -> Result<(), String> {
+    let Primitive::Fusion { name, body, .. } = &step.primitive else {
+        unreachable!("an attention fusion")
+    };
+
+    // The kernels read each operand's heads and head dim (its last two dims) contiguous.
+    for (strides, (_, ty)) in step.input_strides().iter().zip(&step.inputs) {
+        let rank = ty.shape.len();
+        let contiguous = contiguous_strides(&ty.shape);
+
+        if rank > 0 && strides[rank.saturating_sub(2)..] != contiguous[rank.saturating_sub(2)..] {
+            return Err(format!(
+                "{}: flash attention on TPU reads its operands' last two dims (heads, head dim) \
+                 contiguous; one has strides {strides:?}",
+                step.label
+            ));
+        }
+    }
+
+    let n = step.inputs.len();
+    let rows: Vec<*const u8> = inputs[..n]
+        .iter()
+        .copied()
+        .chain([output.cast_const()])
+        .chain(inputs[n..].iter().copied())
+        .collect();
+
+    let (kind, spec) = kernel(name, body)?;
+    run(index, kind, spec, &rows)
 }

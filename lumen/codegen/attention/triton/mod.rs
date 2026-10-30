@@ -1,5 +1,6 @@
-//! Triton helpers for the flash-attention kernels: loads and stores of an operand tile through its
-//! matched layout, and the traced score ops, generated per fusion by `Triton`'s `AttentionCodegen`.
+//! Triton flash attention: the kernels (`__init__.py` beside this file) and the helpers generated per fusion
+//! by `Triton`'s `AttentionCodegen` for them to call: loads and stores of an operand tile through its matched
+//! layout, and the traced score ops.
 
 use std::fmt::Write;
 
