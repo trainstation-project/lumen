@@ -13,51 +13,51 @@ use crate::graph::Graph;
 use crate::graph_compiler::common::attention::{Access, Attention, Backward, Score, Strides};
 use crate::tensor::contiguous_strides;
 
-/// Statements setting `at`, the element offset of `acc`'s tile at flat batch index `b`, rows `rows`
+/// The statement setting `at`, the element offset of `acc`'s tile at flat batch index `b`, rows `rows`
 /// and columns `cols`; `batch` holds the batch extents, outermost first.
 fn address(acc: &Access, batch: &[usize]) -> String {
-    let mut code = formatdoc!(
-        "
-        rest = b
-        at = {offset}
-        ",
-        offset = acc.offset
-    );
-
-    // Peel batch dims innermost first; a divisor maps a broadcast dim (shared KV heads) onto a smaller one.
-    for (k, (&size, &(stride, divisor))) in batch.iter().zip(&acc.batch).enumerate().rev() {
-        let index = match k {
-            0 => "rest".to_string(),
-            _ => format!("(rest % {size})"),
-        };
-
-        if stride != 0 {
-            let index = match divisor {
-                1 => index,
-                _ => format!("({index} // {divisor})"),
-            };
-
-            writeln!(code, "at += {index} * {stride}").unwrap();
-        }
-
-        if k > 0 {
-            writeln!(code, "rest = rest // {size}").unwrap();
-        }
+    let mut terms: Vec<String> = Vec::new();
+    if acc.offset != 0 {
+        terms.push(acc.offset.to_string());
     }
 
-    let mut terms: Vec<String> = [("rows", acc.row), ("cols", acc.col)]
+    // A batch dim's index is `b` over the dims inside it, modulo its size (the outermost needs none); a
+    // divisor maps a broadcast dim (shared KV heads) onto a smaller one.
+    for (k, (&size, &(stride, divisor))) in batch.iter().zip(&acc.batch).enumerate() {
+        if stride == 0 {
+            continue;
+        }
+
+        let inner: usize = batch[k + 1..].iter().product();
+        let mut index = match inner {
+            1 => "b".to_string(),
+            _ => format!("(b // {inner})"),
+        };
+
+        if k > 0 {
+            index = format!("({index} % {size})");
+        }
+
+        if divisor != 1 {
+            index = format!("({index} // {divisor})");
+        }
+
+        terms.push(format!("{index} * {stride}"));
+    }
+
+    let mut tile: Vec<String> = [("rows", acc.row), ("cols", acc.col)]
         .into_iter()
         .filter(|&(_, stride)| stride != 0)
         .map(|(name, stride)| format!("{name} * {stride}"))
         .collect();
 
     // Both strides zero (one query row of a per-row tensor): zero offsets still shaped like the tile.
-    if terms.is_empty() {
-        terms = vec!["rows * 0".into(), "cols * 0".into()];
+    if tile.is_empty() {
+        tile = vec!["rows * 0".into(), "cols * 0".into()];
     }
 
-    writeln!(code, "at = at + {}", terms.join(" + ")).unwrap();
-    indented(&code)
+    terms.extend(tile);
+    indented(&format!("at = {}\n", terms.join(" + ")))
 }
 
 /// A jit helper loading the tile at `rows` and `cols` of operand `acc` for batch `b`, zero where masked.

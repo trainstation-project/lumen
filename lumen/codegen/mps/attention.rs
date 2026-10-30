@@ -35,46 +35,42 @@ pub(super) fn dropout_functor(d: &Dropout, dtype: DType, sq: usize, sk: usize) -
 /// index `b`, plus its row and column strides.
 pub(super) fn ix_method(name: &str, acc: &Access, batch: &[usize]) -> String {
     let up = name.to_uppercase();
-    let mut code = formatdoc!(
+    let mut terms = Vec::new();
+    if acc.offset != 0 {
+        terms.push(format!("{}ul", acc.offset));
+    }
+    // A batch dim's index is `b` over the dims inside it, modulo its size (the outermost needs none);
+    // `div` maps broadcast batch dims (e.g. shared KV heads) onto the operand's smaller dim.
+    for (k, (&size, &(stride, div))) in batch.iter().zip(&acc.batch).enumerate() {
+        if stride == 0 {
+            continue;
+        }
+        let inner: usize = batch[k + 1..].iter().product();
+        let mut idx = match inner {
+            1 => "b".to_string(),
+            _ => format!("(b / {inner}u)"),
+        };
+        if k > 0 {
+            idx = format!("({idx} % {size}u)");
+        }
+        if div != 1 {
+            idx = format!("({idx} / {div}u)");
+        }
+        terms.push(format!("ulong({idx}) * {stride}ul"));
+    }
+    if terms.is_empty() {
+        terms.push("0ul".into());
+    }
+    formatdoc!(
         "
         static constant constexpr uint {up}_ROW = {}u, {up}_COL = {}u;
         inline ulong {name}(uint b) const {{
-            ulong o = {}ul;
-        ",
+            return {};
+        }}",
         acc.row,
         acc.col,
-        acc.offset
-    );
-    if !batch.is_empty() {
-        writeln!(code, "uint rest = b;").unwrap();
-    }
-    // Peel batch dims from innermost to outermost; `div` maps broadcast batch dims (e.g. shared KV
-    // heads) onto the operand's smaller dim.
-    for (k, (&size, &(stride, div))) in batch.iter().zip(&acc.batch).enumerate().rev() {
-        let last = k == 0;
-        let idx = match last {
-            true => "rest".to_string(),
-            false => format!("(rest % {size}u)"),
-        };
-        if stride != 0 {
-            let idx = match div {
-                1 => idx,
-                _ => format!("({idx} / {div}u)"),
-            };
-            writeln!(code, "        o += ulong({idx}) * {stride}ul;").unwrap();
-        }
-        if !last {
-            writeln!(code, "        rest /= {size}u;").unwrap();
-        }
-    }
-    writedoc!(
-        code,
-        "
-            return o;
-        }}"
+        terms.join(" + ")
     )
-    .unwrap();
-    code
 }
 
 /// Metal functor applying the score transforms (rounding casts and scalings) in order.
