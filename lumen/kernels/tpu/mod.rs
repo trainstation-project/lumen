@@ -874,7 +874,7 @@ pub(crate) fn encode(
             crate::codegen::row::tpu::encode(index, step, inputs, output)
         }
         Primitive::Fusion { ref name, .. } if name == crate::graph::UPDATES => {
-            super::dynamic_slice::tpu::encode(index, step, inputs, output)
+            crate::codegen::indexing::tpu::dynamic_slice::encode(index, step, inputs, output)
         }
         Primitive::Fusion { ref name, .. } if name == "loop" => {
             encode_loop(index, step, inputs, output)
@@ -883,9 +883,11 @@ pub(crate) fn encode(
             crate::codegen::dot_general::tpu::encode(index, step, inputs, output)
         }
         Primitive::Reshape { .. } => super::layout::tpu::encode(index, step, inputs, output),
-        Primitive::Gather { .. } => super::gather::tpu::encode(index, step, inputs, output),
+        Primitive::Gather { .. } => {
+            crate::codegen::indexing::tpu::gather::encode(index, step, inputs, output)
+        }
         Primitive::DynamicUpdateSlice => {
-            super::dynamic_slice::tpu::encode(index, step, inputs, output)
+            crate::codegen::indexing::tpu::dynamic_slice::encode(index, step, inputs, output)
         }
         Primitive::PallasCall { kernel, .. } => {
             // Pallas kernels see their inputs, then the output, then any scratch buffers.

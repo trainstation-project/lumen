@@ -1,21 +1,33 @@
 //! TPU elementwise loops: each fused loop generated as `lumen.pallas` source, a `program(device)` the TPU
 //! runtime traces to Mosaic.
 
+pub(crate) mod grid;
+
+#[cfg(lumen_tpu_linked)]
 use std::collections::HashMap;
 
+#[cfg(lumen_tpu_linked)]
 use indoc::formatdoc;
 
+#[cfg(lumen_tpu_linked)]
 use super::ElementwiseCodegen;
+#[cfg(lumen_tpu_linked)]
 use crate::codegen::dot_general::tpu::block;
-use crate::codegen::tpu::indexing::{Dim, Plan, layout, plan};
+#[cfg(lumen_tpu_linked)]
 use crate::codegen::tpu::{Tpu, fusible, window_at};
+#[cfg(lumen_tpu_linked)]
 use crate::device::tpu::layout::Layout;
+#[cfg(lumen_tpu_linked)]
 use crate::graph::{Graph, Node, Primitive, TensorType, UnaryOp, Var};
+#[cfg(lumen_tpu_linked)]
 use crate::{DType, Scalar};
+#[cfg(lumen_tpu_linked)]
+use grid::{Dim, Plan, layout, plan};
 
 /// A TPU loop: its kernel name, the `lumen.pallas` source of its `program(device)`, and whether it reads its
 /// operands through the indexing plan (it then takes its inputs, then its output; a plain loop takes its
 /// output right after the step's own inputs).
+#[cfg(lumen_tpu_linked)]
 pub(crate) struct Loop {
     pub(crate) kernel: String,
     pub(crate) source: String,
@@ -23,13 +35,16 @@ pub(crate) struct Loop {
 }
 
 /// Upper bound in bytes on one block including its batched leading dimension.
+#[cfg(lumen_tpu_linked)]
 const BLOCK_BYTES: usize = 1 << 20;
 
 /// Byte budget for all operand blocks streamed together, split evenly across dtypes.
+#[cfg(lumen_tpu_linked)]
 const STREAM_BYTES: usize = 32 << 20;
 
 /// Picks a Pallas block shape for an elementwise op over `shape`: one block length for rank < 2,
 /// otherwise `[leading, rows, columns]` made of whole TPU tiles for every dtype in `dtypes`.
+#[cfg(lumen_tpu_linked)]
 pub(crate) fn blocks(shape: &[usize], dtypes: &[DType]) -> Result<Vec<usize>, String> {
     let failed = |what: &str| format!("elementwise on TPU: {what} has no block of whole tiles");
 
@@ -84,6 +99,7 @@ pub(crate) fn blocks(shape: &[usize], dtypes: &[DType]) -> Result<Vec<usize>, St
 }
 
 /// Greatest common divisor of `a` and `b`.
+#[cfg(lumen_tpu_linked)]
 pub(crate) fn gcd(a: usize, b: usize) -> usize {
     match b {
         0 => a,
@@ -92,6 +108,7 @@ pub(crate) fn gcd(a: usize, b: usize) -> usize {
 }
 
 /// The kernel-level helper copying `src` to `dst` by DMA and waiting for it.
+#[cfg(lumen_tpu_linked)]
 const COPY: &str = "def copy(src, dst):
     c = pl.make_async_copy(src, dst, pl.scratch(pl.SemaphoreType.DMA))
     c.start()
@@ -99,12 +116,14 @@ const COPY: &str = "def copy(src, dst):
 ";
 
 /// `dims` as a Python tuple.
+#[cfg(lumen_tpu_linked)]
 fn tuple(dims: &[usize]) -> String {
     let items: Vec<String> = dims.iter().map(usize::to_string).collect();
     tuple_of(&items)
 }
 
 /// `items` as a Python tuple.
+#[cfg(lumen_tpu_linked)]
 fn tuple_of(items: &[String]) -> String {
     match items {
         [item] => format!("({item},)"),
@@ -113,17 +132,20 @@ fn tuple_of(items: &[String]) -> String {
 }
 
 /// The statement assigning `values` to the constants `names`, or `None` when there are none.
+#[cfg(lumen_tpu_linked)]
 fn constants(names: &[String], values: &[usize]) -> Option<String> {
     let values: Vec<String> = values.iter().map(usize::to_string).collect();
     (!names.is_empty()).then(|| format!("{} = {}", names.join(", "), values.join(", ")))
 }
 
 /// `name` suffixed by each of `suffixes`.
+#[cfg(lumen_tpu_linked)]
 fn named(name: &str, suffixes: &[String]) -> Vec<String> {
     suffixes.iter().map(|s| format!("{name}_{s}")).collect()
 }
 
 /// `value` as a Python literal.
+#[cfg(lumen_tpu_linked)]
 fn literal(value: Scalar) -> String {
     match value {
         Scalar::Bool(b) => if b { "True" } else { "False" }.into(),
@@ -137,6 +159,7 @@ fn literal(value: Scalar) -> String {
 }
 
 /// The keyword parameters `prims.bind` rebuilds `p` with, besides its operands.
+#[cfg(lumen_tpu_linked)]
 fn params(p: &Primitive) -> Vec<String> {
     match p {
         Primitive::Full {
@@ -158,6 +181,7 @@ fn params(p: &Primitive) -> Vec<String> {
 }
 
 /// `prims.bind` of node `p` on `args` with `extra` keyword parameters after its own.
+#[cfg(lumen_tpu_linked)]
 fn bind(p: &Primitive, args: &[&str], extra: &[String]) -> String {
     let mut operands = vec![format!("\"{}\"", p.name())];
     operands.extend(args.iter().map(|a| a.to_string()));
@@ -167,6 +191,7 @@ fn bind(p: &Primitive, args: &[&str], extra: &[String]) -> String {
 }
 
 /// The shape an elementwise node's value takes from its operands' `shapes`: the widest of them.
+#[cfg(lumen_tpu_linked)]
 fn widest(shapes: &[&Vec<usize>]) -> Vec<usize> {
     shapes
         .iter()
@@ -175,11 +200,13 @@ fn widest(shapes: &[&Vec<usize>]) -> Vec<usize> {
 }
 
 /// The values of a loop as its kernel holds them: each one's name and block shape, by graph value.
+#[cfg(lumen_tpu_linked)]
 struct Values {
     names: HashMap<Var, String>,
     shapes: HashMap<Var, Vec<usize>>,
 }
 
+#[cfg(lumen_tpu_linked)]
 impl Values {
     /// The names of `node`'s operands.
     fn args(&self, node: &Node) -> Vec<&str> {
@@ -210,6 +237,7 @@ impl Values {
 
 /// Statements computing each node of a plain loop on blocks of shape `block`, a scalar broadcast only
 /// widened when its operand isn't already of the block's shape.
+#[cfg(lumen_tpu_linked)]
 fn plain_nodes(body: &Graph, values: &mut Values, block: &[usize]) -> Vec<String> {
     let mut lines = Vec::new();
 
@@ -246,6 +274,7 @@ fn plain_nodes(body: &Graph, values: &mut Values, block: &[usize]) -> Vec<String
 
 /// The `program(device)` of a plain loop over `out`'s shape in `blocks`, each operand of `out`'s shape or
 /// a scalar (`broadcast`), its first output written in `window` when it has one.
+#[cfg(lumen_tpu_linked)]
 fn plain(
     body: &Graph,
     out: &TensorType,
@@ -441,6 +470,7 @@ fn plain(
 }
 
 /// Statements computing each node of an indexed loop on its block of `plan`, `ids` naming the program ids.
+#[cfg(lumen_tpu_linked)]
 fn indexed_nodes(body: &Graph, values: &mut Values, plan: &Plan) -> Vec<String> {
     let block = |v: Var| match body.type_of(v).shape.is_empty() {
         true => Vec::new(),
@@ -562,6 +592,7 @@ fn indexed_nodes(body: &Graph, values: &mut Values, plan: &Plan) -> Vec<String> 
 
 /// The `program(device)` of a loop with layout primitives (slices, transposes, broadcasts), each value read
 /// in blocks placed by the indexing plan, writing `out` in `window` when it has one.
+#[cfg(lumen_tpu_linked)]
 fn indexed(body: &Graph, out: &TensorType, window: Option<(usize, usize)>) -> Result<Loop, String> {
     let plan = plan(body, window.map_or(0, |w| w.1)).map_err(|e| format!("a loop on TPU: {e}"))?;
 
@@ -728,6 +759,7 @@ fn indexed(body: &Graph, out: &TensorType, window: Option<(usize, usize)>) -> Re
 
 /// A loop's whole source: `program(device)` defining `specs`, then its `kernel(rows, memory, result)` of
 /// the `kernel` statements, traced on the device's memory.
+#[cfg(lumen_tpu_linked)]
 fn program(specs: &[String], kernel: &[String]) -> String {
     let indent = |lines: &[String], by: &str| -> String {
         lines
@@ -772,6 +804,7 @@ fn program(specs: &[String], kernel: &[String]) -> String {
 
 /// TPU loops: one Pallas program a fusion, generated with its shapes, blocks and nodes written out, its
 /// blocks chosen from the shapes.
+#[cfg(lumen_tpu_linked)]
 impl ElementwiseCodegen for Tpu {
     type Code = Loop;
     type Schedule = ();

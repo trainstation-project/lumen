@@ -6,7 +6,7 @@ import re
 
 import lumen
 
-from .common import KERNELS, _traced_at, source_of, type_text
+from .common import KERNELS, LUMEN, _traced_at, source_of, type_text
 
 
 def _slug(text):
@@ -43,7 +43,7 @@ def _launch_code(step, kernel, code):
     src = source_of(kernel)
     if src is not None:
         path, anchor = src
-        return f"// {path}\n" + _snippet((KERNELS / path).read_text(), anchor), "metal"
+        return f"// {path}\n" + _snippet((LUMEN / path).read_text(), anchor), "metal"
     return step["text"] + "\n", "txt"
 
 

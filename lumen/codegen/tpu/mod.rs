@@ -1,7 +1,5 @@
 //! TPU code generation: the Rust side that turns fused steps into JSON specs for the Pallas kernels.
 
-pub(crate) mod indexing;
-
 use crate::Scalar;
 use crate::graph::Primitive;
 use crate::graph::UnaryOp;

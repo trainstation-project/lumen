@@ -1,8 +1,6 @@
 //! Kernel modules per op family and the dispatch table mapping an op and device to its kernel.
 pub mod dummy_op;
-pub mod dynamic_slice;
 pub mod factory;
-pub mod gather;
 pub(crate) mod launched;
 pub mod layout;
 #[cfg(lumen_mps_linked)]
@@ -11,7 +9,6 @@ pub(crate) mod mps;
 pub mod python;
 pub mod reference;
 pub mod scan;
-pub mod scatter_add;
 #[cfg(test)]
 mod tests;
 #[cfg(lumen_tpu_linked)]

@@ -171,8 +171,8 @@ const PRIMITIVE_KERNELS: &[&str] = &[
     "lumen/codegen/dot_general/mps/skinny/matmul_skinny.metal",
     "lumen/codegen/dot_general/mps/linear_cross_entropy/linear_cross_entropy.metal",
     "lumen/kernels/layout/mps/kernels.metal",
-    "lumen/kernels/dynamic_slice/mps/kernels.metal",
-    "lumen/kernels/scatter_add/mps/kernels.metal",
+    "lumen/codegen/indexing/mps/dynamic_slice.metal",
+    "lumen/codegen/indexing/mps/scatter_add.metal",
     "lumen/kernels/factory/mps/kernels.metal",
 ];
 
