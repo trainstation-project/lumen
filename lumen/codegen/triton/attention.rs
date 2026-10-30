@@ -13,9 +13,9 @@ use crate::graph::Graph;
 use crate::graph_compiler::common::attention::{Access, Attention, Backward, Score, Strides};
 use crate::tensor::contiguous_strides;
 
-/// The statement setting `at`, the element offset of `acc`'s tile at outer batch index `b`, head `h`,
-/// rows `rows` and columns `cols`, on the grid `grid_batch` gives `batch`. A divisor maps the heads onto
-/// fewer (shared KV heads). Fails when the outer batch dims don't step as one dim.
+/// The statement setting `at`, the element offset of `acc`'s tile at outer batch index `BLOCK_ID_B`,
+/// head `BLOCK_ID_H`, rows `rows` and columns `cols`, on the grid `grid_batch` gives `batch`. A divisor
+/// maps the heads onto fewer (shared KV heads). Fails when the outer batch dims don't step as one dim.
 fn address(acc: &Access, batch: &[usize]) -> Result<String, String> {
     let (outer, (heads, divisor)) = acc.grid_strides(batch).ok_or(
         "flash attention on Triton: batch dims before the heads that don't step as one dim",
@@ -27,13 +27,13 @@ fn address(acc: &Access, batch: &[usize]) -> Result<String, String> {
     }
 
     if outer != 0 {
-        terms.push(format!("b * {outer}"));
+        terms.push(format!("BLOCK_ID_B * {outer}"));
     }
 
     if heads != 0 {
         let h = match divisor {
-            1 => "h".to_string(),
-            _ => format!("(h // {divisor})"),
+            1 => "BLOCK_ID_H".to_string(),
+            _ => format!("(BLOCK_ID_H // {divisor})"),
         };
 
         terms.push(format!("{h} * {heads}"));
@@ -54,8 +54,8 @@ fn address(acc: &Access, batch: &[usize]) -> Result<String, String> {
     Ok(indented(&format!("at = {}\n", terms.join(" + "))))
 }
 
-/// A jit helper loading the tile at `rows` and `cols` of operand `acc` for batch `b` and head `h`, zero
-/// where masked.
+/// A jit helper loading the tile at `rows` and `cols` of operand `acc` for batch `BLOCK_ID_B` and head
+/// `BLOCK_ID_H`, zero where masked.
 fn attention_load(acc: &Access, batch: &[usize]) -> Result<(String, String), String> {
     let at = address(acc, batch)?;
     Ok(named(
@@ -63,7 +63,7 @@ fn attention_load(acc: &Access, batch: &[usize]) -> Result<(String, String), Str
         formatdoc!(
             "
             @triton.jit
-            def NAME(ptr, b, h, rows, cols, mask):
+            def NAME(ptr, BLOCK_ID_B, BLOCK_ID_H, rows, cols, mask):
             {at}    return tl.load(ptr + at, mask=mask, other=0)
             "
         ),
@@ -78,7 +78,7 @@ fn attention_store(acc: &Access, batch: &[usize]) -> Result<(String, String), St
         formatdoc!(
             "
             @triton.jit
-            def NAME(ptr, b, h, rows, cols, value, mask):
+            def NAME(ptr, BLOCK_ID_B, BLOCK_ID_H, rows, cols, value, mask):
             {at}    tl.store(ptr + at, value.to(ptr.dtype.element_ty), mask=mask)
             "
         ),
@@ -132,7 +132,7 @@ fn attention_output(
         formatdoc!(
             "
             {loads}@triton.jit
-            def NAME(ptr, EXTRA, b, h, rows, cols, value, mask):
+            def NAME(ptr, EXTRA, BLOCK_ID_B, BLOCK_ID_H, rows, cols, value, mask):
             {at}{code}{lines}    tl.store(ptr + at, {value}.to(ptr.dtype.element_ty), mask=mask)
             "
         ),
@@ -147,7 +147,7 @@ fn attention_atomic_add(acc: &Access, batch: &[usize]) -> Result<(String, String
         formatdoc!(
             "
             @triton.jit
-            def NAME(ptr, b, h, rows, cols, value, mask):
+            def NAME(ptr, BLOCK_ID_B, BLOCK_ID_H, rows, cols, value, mask):
             {at}    tl.atomic_add(ptr + at, value, mask=mask, sem=\"relaxed\")
             "
         ),

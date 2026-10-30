@@ -1,9 +1,10 @@
 """Triton flash attention (FlashAttention-2): a forward kernel writing each query row's log-sum-exp, and
-backward kernels for dK with dV and for dQ that recompute the probabilities from it. Operands are read and
-written through generated helpers that know their layouts (``LOAD_Q(ptr, b, h, rows, cols, mask)``,
-``STORE_O(ptr, EXTRA, b, h, rows, cols, value, mask)``, applying the fused epilogue to the tensors in ``EXTRA``),
-and ``SCORE`` applies the traced score ops (casts, scales). Each program takes one block of queries (keys for
-dK and dV) of head ``BLOCK_ID_H`` of the outer batch ``BLOCK_ID_B``."""
+backward kernels for dK with dV and for dQ that recompute the probabilities from it. Each program takes one
+block of queries (keys for dK and dV) of head ``BLOCK_ID_H`` of the outer batch ``BLOCK_ID_B``. Operands are
+read and written through generated helpers that know their layouts
+(``LOAD_Q(ptr, BLOCK_ID_B, BLOCK_ID_H, rows, cols, mask)``,
+``STORE_O(ptr, EXTRA, BLOCK_ID_B, BLOCK_ID_H, rows, cols, value, mask)``, applying the fused epilogue to the
+tensors in ``EXTRA``), and ``SCORE`` applies the traced score ops (casts, scales)."""
 
 import triton
 import triton.language as tl
