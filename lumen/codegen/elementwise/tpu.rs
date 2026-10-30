@@ -6,11 +6,11 @@ use std::collections::HashMap;
 use indoc::formatdoc;
 
 use super::ElementwiseCodegen;
+use crate::codegen::dot_general::tpu::block;
 use crate::codegen::tpu::indexing::{Dim, Plan, layout, plan};
 use crate::codegen::tpu::{Tpu, fusible, window_at};
 use crate::device::tpu::layout::Layout;
 use crate::graph::{Graph, Node, Primitive, TensorType, UnaryOp, Var};
-use crate::kernels::dot_general::tpu::block;
 use crate::{DType, Scalar};
 
 /// A TPU loop: its kernel name, the `lumen.pallas` source of its `program(device)`, and whether it reads its

@@ -1,8 +1,8 @@
 //! Encodes reshapes of TPU-tiled tensors that split or merge the last dimension.
 
+use crate::codegen::dot_general::tpu::block;
 use crate::device::tpu::layout::Layout;
 use crate::graph_compiler::plan::Step;
-use crate::kernels::dot_general::tpu::block;
 use crate::kernels::tpu::{Launch, launch};
 
 /// Encodes a reshape that splits a last dim `a * w` into `[a, w]` or merges it back; other reshapes

@@ -31,6 +31,7 @@ use super::common::take_along_axis::TakeAlongAxis;
 use super::pass::{Module, Pipeline};
 use super::{CompilerConfig, MpsConfig, Options};
 use crate::codegen::attention::AttentionCodegen;
+use crate::codegen::dot_general::mps::GemmConfig;
 use crate::codegen::mps as codegen;
 use crate::codegen::mps::Tuning;
 use crate::graph::{Graph, Node, Primitive, TensorType, Var, View};
@@ -42,7 +43,6 @@ use crate::graph_compiler::common::horizontal::segments;
 use crate::graph_compiler::common::updates::Updates;
 use crate::graph_compiler::plan::{Buffer, Step};
 use crate::graph_compiler::{Plan, PlanOptions};
-use crate::kernels::dot_general::mps::GemmConfig;
 use crate::kernels::mps::{
     Grid, dims_arg, element_arg, elementwise_grid, launch, scratch_bytes, u32_arg,
 };
@@ -72,13 +72,13 @@ const PRELUDE: &str = concat!(
         "
     ),
     include_str!("../../kernels/reduction/mps/kernels.metal"),
-    include_str!("../../kernels/dot_general/mps/integer/matmul.metal"),
-    include_str!("../../kernels/dot_general/mps/integer/matmul_wide.metal"),
-    include_str!("../../kernels/dot_general/mps/tiled/matmul_sg.metal"),
-    include_str!("../../kernels/dot_general/mps/tiled/matmul_atomic.metal"),
-    include_str!("../../kernels/dot_general/mps/skinny/matmul_skinny.metal"),
-    include_str!("../../kernels/dot_general/mps/gemv/matmul_gemv.metal"),
-    include_str!("../../kernels/dot_general/mps/linear_cross_entropy/linear_cross_entropy.metal"),
+    include_str!("../../codegen/dot_general/mps/integer/matmul.metal"),
+    include_str!("../../codegen/dot_general/mps/integer/matmul_wide.metal"),
+    include_str!("../../codegen/dot_general/mps/tiled/matmul_sg.metal"),
+    include_str!("../../codegen/dot_general/mps/tiled/matmul_atomic.metal"),
+    include_str!("../../codegen/dot_general/mps/skinny/matmul_skinny.metal"),
+    include_str!("../../codegen/dot_general/mps/gemv/matmul_gemv.metal"),
+    include_str!("../../codegen/dot_general/mps/linear_cross_entropy/linear_cross_entropy.metal"),
     include_str!("../../codegen/attention/mps/forward.metal"),
     include_str!("../../codegen/attention/mps/backward.metal"),
 );
@@ -465,7 +465,7 @@ fn feeding(primitive: &Primitive, p: usize, inputs: usize) -> Vec<usize> {
 }
 
 /// Metal Performance Primitives matmul templates, compiled only into MPP kernels.
-const MPP: &str = include_str!("../../kernels/dot_general/mps/mpp/matmul_mpp.metal");
+const MPP: &str = include_str!("../../codegen/dot_general/mps/mpp/matmul_mpp.metal");
 
 /// Compiles `sources` against the standard prelude.
 fn compile_kernels(sources: BTreeMap<String, String>) -> Result<(), String> {
@@ -990,7 +990,7 @@ pub(super) fn encode_with(
         let ty = |v: Var| body.type_of(v);
         let (lhs, rhs) = (ty(dot.inputs[0]), ty(dot.inputs[1]));
 
-        let plan = crate::kernels::dot_general::mps::plan_matmul(
+        let plan = crate::codegen::dot_general::mps::plan_matmul(
             &dot.primitive,
             lhs,
             rhs,
@@ -1061,7 +1061,7 @@ pub(super) fn encode_with(
             .map(|&(_, c)| c)
             .or_else(|| codegen::gemv_config(body));
 
-        let plan = crate::kernels::dot_general::mps::plan_matmul(
+        let plan = crate::codegen::dot_general::mps::plan_matmul(
             &dot.primitive,
             lhs,
             rhs,
@@ -1101,7 +1101,7 @@ pub(super) fn encode_with(
             let name = tuned.as_ref().map_or(name, |(tuned, _)| tuned);
 
             let grid = match config {
-                Some(c) if c.algorithm != crate::kernels::dot_general::mps::Algorithm::Tiled => {
+                Some(c) if c.algorithm != crate::codegen::dot_general::mps::Algorithm::Tiled => {
                     Grid::GroupsOf {
                         groups: [n.div_ceil(c.bn), m.div_ceil(c.bm), 1],
                         threads: c.threads,

@@ -1,11 +1,11 @@
 //! Pass that turns slices read only by GEMMs into strided views instead of copies.
 
 use super::{MpsModule, codegen};
+use crate::codegen::dot_general::mps::reads_strided;
 use crate::graph::{Graph, Primitive};
 use crate::graph_compiler::common::attention;
 use crate::graph_compiler::common::place_views::{self, place_views};
 use crate::graph_compiler::pass::CompilerPass;
-use crate::kernels::dot_general::mps::reads_strided;
 
 /// Compiler pass marking slices as views where their readers allow it.
 pub(super) struct PlaceViews;

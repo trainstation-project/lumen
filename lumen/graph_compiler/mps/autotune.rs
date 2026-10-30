@@ -5,12 +5,12 @@ use std::sync::PoisonError;
 
 use super::{SOURCES, Tuning, codegen, compile_kernels, compile_mpp_kernels, record_launch};
 use crate::allocator::Scratch;
+use crate::codegen::dot_general::mps::{self as gemm, GemmConfig};
 use crate::device::Device;
 use crate::graph::{Primitive, TensorType, View};
 use crate::graph_compiler::MpsConfig;
 use crate::graph_compiler::common::autotune::{Kernels, Timer};
 use crate::graph_compiler::plan::{Buffer, Step, Tuned};
-use crate::kernels::dot_general::mps::{self as gemm, GemmConfig};
 use crate::kernels::mps::Encode;
 
 /// What a tunable loop fusion needs to regenerate its kernel under another tuning.

@@ -2156,8 +2156,8 @@ fn skinny_dots_split_their_contraction() {
 #[test]
 fn every_gemm_candidate_matches_the_reference() {
     use super::autotune::{Gemms, matmul_of};
+    use crate::codegen::dot_general::mps as gemm;
     use crate::graph_compiler::common::autotune::Kernels;
-    use crate::kernels::dot_general::mps as gemm;
 
     if !available() {
         return;
@@ -2276,8 +2276,8 @@ fn every_gemm_candidate_matches_the_reference() {
 #[test]
 fn every_tiled_gemm_stores_regions_halves_and_expansions_along_rows_and_columns() {
     use super::autotune::{Gemms, matmul_of};
+    use crate::codegen::dot_general::mps as gemm;
     use crate::graph_compiler::common::autotune::Kernels;
-    use crate::kernels::dot_general::mps as gemm;
 
     if !available() {
         return;
@@ -2460,8 +2460,8 @@ fn every_tiled_gemm_stores_regions_halves_and_expansions_along_rows_and_columns(
 #[test]
 fn every_tuned_paired_and_wide_norm_gemm_matches_the_reference() {
     use super::autotune::{Gemms, matmul_of};
+    use crate::codegen::dot_general::mps::Algorithm;
     use crate::graph_compiler::common::autotune::Kernels;
-    use crate::kernels::dot_general::mps::Algorithm;
 
     if !available() || !super::mpp_available() {
         return;
@@ -2667,8 +2667,8 @@ fn every_tuned_paired_and_wide_norm_gemm_matches_the_reference() {
 #[test]
 fn every_tuned_gemm_kernel_stores_every_epilogue() {
     use super::autotune::{Gemms, matmul_of};
+    use crate::codegen::dot_general::mps::{Algorithm, GemmConfig};
     use crate::graph_compiler::common::autotune::Kernels;
-    use crate::kernels::dot_general::mps::{Algorithm, GemmConfig};
 
     if !available() || !super::mpp_available() {
         return;
@@ -3202,8 +3202,8 @@ fn a_reduction_feeding_a_norm_of_other_rows_is_its_own_kernel() {
 #[test]
 fn every_gemv_candidate_stores_every_epilogue() {
     use super::autotune::{Gemms, matmul_of};
+    use crate::codegen::dot_general::mps::Algorithm;
     use crate::graph_compiler::common::autotune::Kernels;
-    use crate::kernels::dot_general::mps::Algorithm;
 
     if !available() {
         return;

@@ -5,14 +5,14 @@ use std::fmt::Write;
 
 use indoc::{formatdoc, writedoc};
 
-use super::GemmCodegen;
-use crate::codegen::mps::*;
-use crate::graph::{Graph, Node, Primitive, Var};
-use crate::graph_compiler::MpsConfig;
-use crate::kernels::dot_general::mps::{
+use crate::codegen::dot_general::GemmCodegen;
+use crate::codegen::dot_general::mps::{
     Algorithm, DEFAULT_CONFIGS, GemmConfig, gemv, gemv_default, gemv_rows, gemv_tiles_default,
     mpp_transposes, plan_matmul,
 };
+use crate::codegen::mps::*;
+use crate::graph::{Graph, Node, Primitive, Var};
+use crate::graph_compiler::MpsConfig;
 use crate::tensor::contiguous_strides;
 
 pub(crate) use crate::codegen::kinds::gemm_dot;

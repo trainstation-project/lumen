@@ -1,6 +1,6 @@
 //! Block sizes for the TPU row-fusion kernels.
+use crate::codegen::dot_general::tpu::block;
 use crate::codegen::tpu::row::ROW_BYTES;
-use crate::kernels::dot_general::tpu::block;
 
 /// Picks how many of `rows` rows of `n` elements a step holds: a multiple of `unit` dividing `rows` within the
 /// ROW_BYTES budget (counted at 4 bytes an element), or all rows when there are fewer than `unit`.

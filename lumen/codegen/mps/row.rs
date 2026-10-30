@@ -1,9 +1,9 @@
 //! Metal source for row kernels: bodies whose reductions run over the last axis (softmax, norms),
 //! computed one row per threadgroup or SIMD group with values kept in registers between passes.
 use super::*;
+use crate::codegen::dot_general::mps::GemmConfig;
 pub(crate) use crate::codegen::kinds::{row_partials, row_reductions};
 use crate::graph_compiler::common::diamonds::{depends_on, softmax_pair};
-use crate::kernels::dot_general::mps::GemmConfig;
 
 /// Rows and row length of the first row reduction's operand.
 pub(super) fn row_shape(body: &Graph) -> (usize, usize) {

@@ -1,8 +1,8 @@
 //! Pass that transposes `DotGeneral` operands whose layout can't be collapsed into a plain batched matmul.
 
+use crate::codegen::dot_general::mps::{collapsed, matmul_order};
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::pass::{CompilerPass, Module};
-use crate::kernels::dot_general::mps::{collapsed, matmul_order};
 use crate::tensor::contiguous_strides;
 
 /// Rebuilds `graph` with explicit transposes in front of dot operands that `collapsed` can't view as a matrix,

@@ -1,10 +1,10 @@
 //! Plans the Pallas `dynamic_update_slice` kernel on TPU: block sizes, the windows each update
 //! touches, and whether the touched region can stay resident in VMEM.
 use crate::DType;
+use crate::codegen::dot_general::tpu::block;
 use crate::device::tpu::layout::Layout;
 use crate::graph::Primitive;
 use crate::graph_compiler::plan::Step;
-use crate::kernels::dot_general::tpu::block;
 use crate::kernels::tpu::{Launch, launch};
 use crate::tensor::scalar::Scalar;
 

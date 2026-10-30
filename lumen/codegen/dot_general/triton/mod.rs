@@ -5,7 +5,7 @@ use std::fmt::Write;
 
 use indoc::formatdoc;
 
-use super::GemmCodegen;
+use crate::codegen::dot_general::GemmCodegen;
 use crate::codegen::regions::{Columns, Region, gemm_expanded, gemm_regions};
 use crate::codegen::triton::utils::indented;
 use crate::codegen::triton::{Emitter, Triton, gather_index, load, named, stored_at, triton_type};

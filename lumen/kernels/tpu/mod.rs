@@ -880,7 +880,7 @@ pub(crate) fn encode(
             encode_loop(index, step, inputs, output)
         }
         Primitive::DotGeneral { .. } | Primitive::Fusion { .. } => {
-            super::dot_general::tpu::encode(index, step, inputs, output)
+            crate::codegen::dot_general::tpu::encode(index, step, inputs, output)
         }
         Primitive::Reshape { .. } => super::layout::tpu::encode(index, step, inputs, output),
         Primitive::Gather { .. } => super::gather::tpu::encode(index, step, inputs, output),

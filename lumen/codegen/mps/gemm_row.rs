@@ -1,7 +1,7 @@
 //! Metal source for a matmul fused with row reductions over its output (e.g. a projection
 //! followed by softmax or a norm), either in one tile or across column tiles.
 use super::*;
-use crate::kernels::dot_general::mps::{Algorithm, GemmConfig, mpp_transposes};
+use crate::codegen::dot_general::mps::{Algorithm, GemmConfig, mpp_transposes};
 
 /// Output columns one threadgroup tile covers; wider rows are reduced across tiles.
 pub(crate) const ROW_TILE: usize = 64;

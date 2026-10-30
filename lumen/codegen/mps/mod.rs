@@ -27,7 +27,7 @@ mod stores;
 mod transpose;
 mod updates;
 
-pub(crate) use crate::codegen::gemm::mps::*;
+pub(crate) use crate::codegen::dot_general::mps::*;
 pub(crate) use crate::codegen::kinds::reduction_root;
 pub(crate) use crate::codegen::reduction::mps::{has_epilogue, split_launches};
 pub(crate) use config::*;

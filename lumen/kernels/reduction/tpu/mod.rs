@@ -1,13 +1,13 @@
 //! The TPU Pallas reduction kernels: their block sizes, and launching a reduction fusion's program.
 
 use crate::DType;
+use crate::codegen::dot_general::tpu::block;
 use crate::codegen::reduction::ReductionCodegen;
 use crate::codegen::reduction::tpu::{Layout, axes};
 use crate::codegen::tpu::Tpu;
 use crate::device::tpu::layout::Layout as Tiles;
 use crate::graph::Primitive;
 use crate::graph_compiler::plan::Step;
-use crate::kernels::dot_general::tpu::block;
 use crate::kernels::tpu::{Launch, launch};
 
 /// Target bytes of one operand block in VMEM.

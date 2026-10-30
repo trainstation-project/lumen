@@ -1,5 +1,6 @@
 //! Metal `dot_general` kernels: picking the tile, collapsing operands into batched matmul form and launching.
 
+mod codegen;
 mod config;
 mod gemv;
 mod linear_cross_entropy;
@@ -7,6 +8,7 @@ mod mpp;
 mod skinny;
 mod tiled;
 
+pub(crate) use codegen::*;
 pub(crate) use config::*;
 pub(crate) use gemv::*;
 pub(crate) use linear_cross_entropy::*;

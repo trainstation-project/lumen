@@ -277,7 +277,7 @@ pub(crate) fn encode(
         return crate::graph_compiler::mps::encode(step, inputs, output, scratch, keep);
     }
     if let LinearCrossEntropy = step.primitive {
-        return super::dot_general::mps::encode_linear_cross_entropy(
+        return crate::codegen::dot_general::mps::encode_linear_cross_entropy(
             step, inputs, output, scratch, keep,
         );
     }
@@ -320,7 +320,7 @@ pub(crate) fn encode(
         AllReduce { .. } | AllGather { .. } | ReduceScatter { .. } | DeviceWait => {
             unreachable!("rejected above")
         }
-        DotGeneral { .. } => super::dot_general::mps::encode,
+        DotGeneral { .. } => crate::codegen::dot_general::mps::encode,
 
         Reshape { .. } | BroadcastInDim { .. } | Transpose { .. } | Slice { .. } => {
             super::layout::mps::encode
@@ -354,7 +354,7 @@ pub(crate) fn scratch_bytes(p: &Primitive, inputs: &[&TensorType], _output: &Ten
         } => super::scan::mps::scratch_bytes(inputs[0], *axis, *accum_dtype),
         Primitive::Fusion { body, .. } => crate::graph_compiler::mps::fusion_scratch_bytes(body),
         Primitive::LinearCrossEntropy => {
-            super::dot_general::mps::linear_cross_entropy_scratch(inputs[0], inputs[1])
+            crate::codegen::dot_general::mps::linear_cross_entropy_scratch(inputs[0], inputs[1])
         }
         _ => 0,
     }

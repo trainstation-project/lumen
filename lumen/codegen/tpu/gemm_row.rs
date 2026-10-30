@@ -4,10 +4,10 @@ use std::collections::HashMap;
 
 use super::row::{Kind, kinds, readable, row_node, rows};
 use crate::DType;
+use crate::codegen::dot_general::tpu::{block, caps};
 use crate::device::tpu::layout::Layout;
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::plan::Step;
-use crate::kernels::dot_general::tpu::{block, caps};
 use crate::kernels::tpu::{Launch, launch};
 
 /// VMEM budget, in bytes, a GEMM-row block may use.
@@ -204,7 +204,7 @@ pub(crate) fn encode(
         .collect();
 
     let launched = Launch {
-        module: "lumen.kernels.dot_general.tpu.row",
+        module: "lumen.codegen.dot_general.tpu.row",
         kernel: format!("matmul_row_{}_{height}x{n}x{k}_{bm}x{bk}", lhs.dtype),
         spec,
         rows: &rows_of,

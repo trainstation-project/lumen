@@ -1,8 +1,9 @@
 //! TPU `dot_general` (with a fused elementwise epilogue): block sizes, and launching the Pallas program.
 
 use crate::DType;
-use crate::codegen::gemm::GemmCodegen;
-use crate::codegen::gemm::tpu as gemm;
+use crate::codegen::dot_general::GemmCodegen;
+pub(crate) mod codegen;
+
 use crate::codegen::tpu::Tpu;
 use crate::graph::Primitive;
 use crate::graph_compiler::plan::Step;
@@ -52,7 +53,7 @@ pub(crate) fn encode(
 
             Tpu::gemm(body, dot, &[], step)?
         }
-        p => gemm::spec(
+        p => codegen::spec(
             step,
             p,
             &step.inputs[0].1,
@@ -72,7 +73,7 @@ pub(crate) fn encode(
         .collect();
 
     let launched = Launch {
-        module: "lumen.kernels.dot_general.tpu",
+        module: "lumen.codegen.dot_general.tpu",
         kernel,
         spec,
         rows: &rows,

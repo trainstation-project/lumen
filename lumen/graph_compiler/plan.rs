@@ -1236,7 +1236,7 @@ impl Plan {
 
                             view.is_none()
                                 && operands[k].shape == self.inputs[i].shape
-                                && crate::kernels::dot_general::mps::reads_strided(
+                                && crate::codegen::dot_general::mps::reads_strided(
                                     &s.primitive,
                                     operands,
                                     k,

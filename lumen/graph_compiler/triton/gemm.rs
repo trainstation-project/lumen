@@ -3,7 +3,7 @@
 use std::sync::OnceLock;
 
 use super::{Function, Launches};
-use crate::codegen::gemm::GemmCodegen;
+use crate::codegen::dot_general::GemmCodegen;
 use crate::codegen::triton::{self as codegen, CONFIGS, Config, UNTUNED};
 use crate::graph::{Graph, Node, Primitive};
 use crate::graph_compiler::common::autotune::Kernels;
@@ -201,7 +201,7 @@ fn gemm(
 ) -> Result<(), String> {
     let launch = GEMM
         .get()
-        .ok_or("the Triton backend's GEMM is Python's (lumen.kernels.dot_general.triton): none is installed")?;
+        .ok_or("the Triton backend's GEMM is Python's (lumen.codegen.dot_general.triton): none is installed")?;
 
     if let Primitive::LinearCrossEntropy = step.primitive {
         let config = tuned.copied().unwrap_or(CONFIGS[UNTUNED]);

@@ -1,10 +1,10 @@
 //! Encodes row gathers from `[vocab, width]` tables on TPU, on the SparseCore when the layout allows.
 
 use crate::DType;
+use crate::codegen::dot_general::tpu::block;
 use crate::device::tpu::layout::Layout;
 use crate::graph::Primitive;
 use crate::graph_compiler::plan::Step;
-use crate::kernels::dot_general::tpu::block;
 use crate::kernels::tpu::{Indices, Launch, SPARSE_CORE_MESH, SparseCore, Values, launch};
 
 /// TPU lane width.

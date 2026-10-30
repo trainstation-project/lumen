@@ -1,15 +1,15 @@
 //! TPU GEMMs: a dot's form and VMEM-sized blocks, and a fused GEMM's epilogue (the dot's output pieces and
-//! the elementwise nodes after it), encoded as a spec for `lumen.kernels.dot_general.tpu`.
+//! the elementwise nodes after it), encoded as a spec for `lumen.codegen.dot_general.tpu`.
 
 use std::collections::HashMap;
 
-use super::GemmCodegen;
 use crate::DType;
+use crate::codegen::dot_general::GemmCodegen;
+use crate::codegen::dot_general::tpu::{block, caps};
 use crate::codegen::tpu::{Tpu, window};
 use crate::device::tpu::layout::Layout;
 use crate::graph::{Graph, Node, Primitive, TensorType, Var};
 use crate::graph_compiler::plan::Step;
-use crate::kernels::dot_general::tpu::{block, caps};
 
 /// A fused GEMM's structure: a concatenated lhs, the dot output's slices and the nodes applied to them.
 pub(crate) struct Epilogue {
