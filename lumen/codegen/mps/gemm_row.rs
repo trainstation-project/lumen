@@ -256,7 +256,7 @@ pub(super) fn gemm_tiles(
 
 /// Generates the row kernel for a matmul fused with row reductions, by rebuilding the body with
 /// the dot's value as an extra input and handing the dot to the row kernel.
-pub(super) fn gemm_row_kernel(
+pub(crate) fn gemm_row_kernel(
     body: &Graph,
     by_value: &[bool],
     dot: &Node,

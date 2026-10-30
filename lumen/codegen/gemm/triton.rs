@@ -1,14 +1,16 @@
-//! Triton GEMM helpers: operand prologues, the output epilogue, and fused elementwise epilogues
-//! that consume column regions of the GEMM output.
+//! Triton GEMMs: operand prologues, the output epilogue, and fused elementwise epilogues that consume
+//! column regions of the GEMM output.
 
 use std::fmt::Write;
 
 use indoc::formatdoc;
 
-use super::utils::indented;
-use super::{Emitter, gather_index, load, named, stored_at, triton_type};
+use super::GemmCodegen;
 use crate::codegen::regions::{Columns, Region, gemm_expanded, gemm_regions};
+use crate::codegen::triton::utils::indented;
+use crate::codegen::triton::{Emitter, Triton, gather_index, load, named, stored_at, triton_type};
 use crate::graph::{Graph, Node, Primitive, Var};
+use crate::tensor::contiguous_strides;
 
 /// Generated pieces of one GEMM kernel.
 pub(crate) struct GemmCode {
@@ -24,6 +26,53 @@ pub(crate) struct GemmCode {
 
 /// A tensor's `(shape, strides)` in elements.
 type Layout<'a> = (&'a [usize], &'a [usize]);
+
+/// A tensor's shape and strides, owned.
+type Owned = (Vec<usize>, Vec<usize>);
+
+/// The layouts a GEMM fusion's code is generated for: its dot's operands', its inputs' and its outputs'.
+pub(crate) struct Layouts {
+    pub(crate) lhs: Owned,
+    pub(crate) rhs: Owned,
+    pub(crate) inputs: Vec<Owned>,
+    pub(crate) outputs: Vec<Owned>,
+}
+
+/// An owned layout, borrowed.
+fn view((shape, strides): &Owned) -> Layout<'_> {
+    (shape, strides)
+}
+
+/// Triton GEMMs: the fixed GEMM kernel reading the dot's operands through generated prologues for their
+/// layouts, the product computed into a contiguous tile and stored by a generated epilogue applying the
+/// fusion's elementwise ops.
+impl GemmCodegen for Triton {
+    /// The prologues and the epilogue.
+    type Code = GemmCode;
+    type Options = Layouts;
+
+    /// The prologues for the operands' layouts and the epilogue writing the fusion's outputs at theirs.
+    fn gemm(
+        body: &Graph,
+        dot: &Node,
+        by_value: &[bool],
+        layouts: &Layouts,
+    ) -> Result<GemmCode, String> {
+        let product = body.type_of(dot.output);
+        let contiguous = contiguous_strides(&product.shape);
+        let mut code = gemm(
+            &dot.primitive,
+            view(&layouts.lhs),
+            view(&layouts.rhs),
+            (&product.shape, &contiguous),
+        );
+        let [_, rows, _, cols] = code.sizes;
+        let inputs: Vec<Layout> = layouts.inputs.iter().map(view).collect();
+        let outputs: Vec<Layout> = layouts.outputs.iter().map(view).collect();
+        code.epilogue = epilogue(body, by_value, dot, &inputs, &outputs, [rows, cols]);
+        Ok(code)
+    }
+}
 
 /// Lowers a `dot_general` with arbitrary batch/free/contracting dims and strided operands to a
 /// `[l, m, k] x [l, k, n]` GEMM by generating strided load and store helpers.

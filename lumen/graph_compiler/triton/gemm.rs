@@ -3,6 +3,7 @@
 use std::sync::OnceLock;
 
 use super::{Function, Launches};
+use crate::codegen::gemm::GemmCodegen;
 use crate::codegen::triton::{self as codegen, CONFIGS, Config, UNTUNED};
 use crate::graph::{Graph, Node, Primitive};
 use crate::graph_compiler::common::autotune::Kernels;
@@ -96,37 +97,53 @@ fn prepare(step: &Step, inputs: &[Tensor], out: &Tensor, outs: &[Tensor]) -> Pre
     // A fusion: the dot computes into a contiguous tile and the epilogue writes the fusion's outputs.
     let dot = codegen::gemm_dot(body).expect("a GEMM epilogue's dot");
     let (lhs, rhs) = operands(body, dot, inputs);
-    let product = body.type_of(dot.output);
-    let contiguous = contiguous_strides(&product.shape);
-    let code = codegen::gemm(
-        &dot.primitive,
-        layout(lhs),
-        layout(rhs),
-        (&product.shape, &contiguous),
-    );
     let by_value: Vec<bool> = step
         .inputs
         .iter()
         .map(|(b, _)| matches!(b, Buffer::Scalar(_)))
         .collect();
-    let layouts: Vec<_> = inputs.iter().map(layout).collect();
-    let [_, rows, _, cols] = code.sizes;
-    let outputs: Vec<_> = std::iter::once(out).chain(outs).map(layout).collect();
-    let epilogue = match name.as_str() {
-        DOT_PARTIALS => {
-            let width = codegen::partial_tile(cols).expect("a partial tile width");
-            codegen::partials_epilogue(
-                body,
-                &by_value,
-                dot,
-                &layouts,
-                &outputs,
-                [rows, cols],
-                width,
-            )
+    let code = match name.as_str() {
+        // A GEMM whose rows a normalization reads: the row kernel's epilogues.
+        DOT_PARTIALS | DOT_ROW => {
+            let product = body.type_of(dot.output);
+            let contiguous = contiguous_strides(&product.shape);
+            let mut code = codegen::gemm(
+                &dot.primitive,
+                layout(lhs),
+                layout(rhs),
+                (&product.shape, &contiguous),
+            );
+            let layouts: Vec<_> = inputs.iter().map(layout).collect();
+            let [_, rows, _, cols] = code.sizes;
+            let outputs: Vec<_> = std::iter::once(out).chain(outs).map(layout).collect();
+            code.epilogue = match name.as_str() {
+                DOT_PARTIALS => {
+                    let width = codegen::partial_tile(cols).expect("a partial tile width");
+                    codegen::partials_epilogue(
+                        body,
+                        &by_value,
+                        dot,
+                        &layouts,
+                        &outputs,
+                        [rows, cols],
+                        width,
+                    )
+                }
+                _ => codegen::row_epilogue(body, &by_value, dot, &layouts, &outputs, [rows, cols]),
+            };
+            code
         }
-        DOT_ROW => codegen::row_epilogue(body, &by_value, dot, &layouts, &outputs, [rows, cols]),
-        _ => codegen::epilogue(body, &by_value, dot, &layouts, &outputs, [rows, cols]),
+        _ => {
+            let owned = |t: &Tensor| (t.shape().to_vec(), t.strides().to_vec());
+            let layouts = codegen::Layouts {
+                lhs: owned(lhs),
+                rhs: owned(rhs),
+                inputs: inputs.iter().map(owned).collect(),
+                outputs: std::iter::once(out).chain(outs).map(owned).collect(),
+            };
+            codegen::Triton::gemm(body, dot, &by_value, &layouts)
+                .expect("a Triton GEMM of every GEMM body")
+        }
     };
     let flags = match name == DOT_ROW || name == DOT_PARTIALS {
         true => codegen::EpilogueFlags {
@@ -139,7 +156,7 @@ fn prepare(step: &Step, inputs: &[Tensor], out: &Tensor, outs: &[Tensor]) -> Pre
         functions: vec![
             Function::new("PROLOGUE_A", code.prologue_a),
             Function::new("PROLOGUE_B", code.prologue_b),
-            Function::new("EPILOGUE", epilogue),
+            Function::new("EPILOGUE", code.epilogue),
         ],
         sizes: code.sizes,
         flags,

@@ -16,19 +16,18 @@ use crate::{DType, Element, Scalar};
 
 pub(crate) mod config;
 mod cross_entropy;
-mod gemm;
 mod indexing;
 pub(crate) mod reduction;
 mod row;
 pub(crate) mod utils;
 
+pub(crate) use crate::codegen::gemm::triton::{EpilogueFlags, Layouts, gemm, gemm_dot, gemm_flags};
 pub(crate) use config::{
     ATTENTION_CONFIGS, AttentionConfig, CONFIGS, Config, LOOP_CONFIGS, LoopConfig, ROW_PARTIALS,
     UNTUNED, UNTUNED_LOOP, loop_configs, partial_tile, row_gemm_configs, untuned_attention,
     untuned_loop, untuned_row_gemm,
 };
 pub(crate) use cross_entropy::{cross_entropy_combine, cross_entropy_epilogue};
-pub(crate) use gemm::{EpilogueFlags, epilogue, gemm, gemm_dot, gemm_flags};
 pub(crate) use indexing::{scatter_add, update, updates};
 pub(crate) use reduction::{reduction_root, scan};
 pub(crate) use row::{

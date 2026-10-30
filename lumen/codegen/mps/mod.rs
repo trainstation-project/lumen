@@ -21,19 +21,18 @@ use crate::{DType, Scalar};
 
 mod config;
 mod emitter;
-mod gemm;
 mod gemm_row;
 mod row;
 mod stores;
 mod transpose;
 mod updates;
 
+pub(crate) use crate::codegen::gemm::mps::*;
 pub(crate) use crate::codegen::kinds::reduction_root;
 pub(crate) use crate::codegen::reduction::mps::{has_epilogue, split_launches};
 pub(crate) use config::*;
 pub(crate) use emitter::Emitter;
 use emitter::*;
-pub(crate) use gemm::*;
 pub(crate) use gemm_row::*;
 pub(crate) use row::*;
 pub(crate) use stores::written;
