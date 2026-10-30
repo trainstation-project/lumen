@@ -23,6 +23,61 @@ pub(crate) struct Access {
     pub col: usize,
 }
 
+/// The batch extents as the attention kernels' grid launches them: the dims before the last merged into
+/// one, and the last (the heads); 1 for an absent one.
+pub(crate) fn grid_batch(batch: &[usize]) -> (usize, usize) {
+    match batch.split_last() {
+        Some((&heads, outer)) => (outer.iter().product(), heads),
+        None => (1, 1),
+    }
+}
+
+/// A term of an operand's element offset on the attention grid, each kernel writing it in its own syntax.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Term {
+    /// The view's first element.
+    Offset(usize),
+    /// The outer batch index times this stride.
+    Outer(usize),
+    /// The head index, divided by `divisor` (heads sharing a KV head), times `stride`.
+    Heads { stride: usize, divisor: usize },
+}
+
+impl Access {
+    /// The non-zero batch terms of the access's element offset on the grid `grid_batch` gives `batch`: its
+    /// offset, the merged outer dims' stride and the heads' stride with its divisor. Fails when the outer
+    /// dims don't step as one dim (each over the whole of the one inside it) or carry a divisor.
+    pub(crate) fn batch_terms(&self, batch: &[usize]) -> Result<Vec<Term>, String> {
+        let mut terms = Vec::new();
+        if self.offset != 0 {
+            terms.push(Term::Offset(self.offset));
+        }
+        let Some((&(stride, divisor), outer)) = self.batch.split_last() else {
+            return Ok(terms);
+        };
+        // The outer dims of more than one element, outermost first.
+        let dims: Vec<(usize, (usize, usize))> = batch
+            .iter()
+            .copied()
+            .zip(outer.iter().copied())
+            .filter(|&(n, _)| n != 1)
+            .collect();
+        let steps = dims.windows(2).all(|w| w[0].1.0 == w[1].1.0 * w[1].0);
+        if !steps || dims.iter().any(|&(_, (_, divisor))| divisor != 1) {
+            return Err(
+                "flash attention: batch dims before the heads that don't step as one dim".into(),
+            );
+        }
+        if let Some(&(_, (outer, _))) = dims.last().filter(|&&(_, (s, _))| s != 0) {
+            terms.push(Term::Outer(outer));
+        }
+        if stride != 0 {
+            terms.push(Term::Heads { stride, divisor });
+        }
+        Ok(terms)
+    }
+}
+
 /// A matched `softmax(scores(Q K^T)) V` attention.
 #[derive(Debug, Clone)]
 pub(crate) struct Attention {

@@ -7,7 +7,8 @@
 use indoc::writedoc;
 
 use super::config::{MOST_GEMM_ROW, MOST_WHOLE_ROW};
-use super::reduction::{Reduction, combine, indented, lowest, reduce_along};
+use super::reduction::{Reduction, combine, lowest, reduce_along};
+use super::utils::indented;
 use super::*;
 use crate::codegen::kinds::{row_partials, row_reductions};
 use crate::graph::TensorType;

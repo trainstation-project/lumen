@@ -362,7 +362,7 @@ fn triton_gemm(
 ) -> Result<(), String> {
     crate::kernels::launched::launched("dot_general", || {
         let template = format!(
-            "# @triton.jit: lumen/kernels/dot_general/triton.py's kernel, BLOCK_M={} BLOCK_N={} BLOCK_K={} GROUP_M={} stages={} warps={}\n",
+            "# @triton.jit: lumen/kernels/dot_general/triton.py's kernel, BLOCK_SIZE_M={} BLOCK_SIZE_N={} BLOCK_SIZE_K={} GROUP_SIZE_M={} stages={} warps={}\n",
             config.block_m,
             config.block_n,
             config.block_k,
@@ -566,7 +566,7 @@ fn triton_attention(launch: &super::triton::Launch) -> Result<(), String> {
     let config = launch.config;
     crate::kernels::launched::launched("flash_attention", || {
         let template = format!(
-            "# @triton.jit: lumen/kernels/attention/triton.py's {} kernel, BLOCK_M={} BLOCK_N={} stages={} warps={}\n",
+            "# @triton.jit: lumen/kernels/attention/triton.py's {} kernel, BLOCK_SIZE_M={} BLOCK_SIZE_N={} stages={} warps={}\n",
             launch.kernel, config.block_m, config.block_n, config.stages, config.warps
         );
         Some(triton_code(&template, launch.functions))
@@ -603,7 +603,7 @@ fn triton_attention(launch: &super::triton::Launch) -> Result<(), String> {
     #[cfg(lumen_cuda_linked)]
     {
         use super::triton::direct::Value;
-        let [batch, sq, sk, h, hv] = launch.sizes;
+        let [batch, heads, sq, sk, h, hv] = launch.sizes;
         // The dK/dV kernel always takes a dQ; one it doesn't read, like any absent tensor, is the first.
         let mut tensors: Vec<Option<&crate::Tensor>> =
             launch.tensors.iter().map(Option::as_ref).collect();
@@ -651,7 +651,7 @@ fn triton_attention(launch: &super::triton::Launch) -> Result<(), String> {
             identity,
             device,
             &values,
-            [blocks, batch, 1],
+            [blocks, heads, batch],
             |py, kw| call(py, Some(kw)),
         )? {
             return Ok(());

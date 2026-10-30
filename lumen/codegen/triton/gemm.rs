@@ -5,6 +5,7 @@ use std::fmt::Write;
 
 use indoc::formatdoc;
 
+use super::utils::indented;
 use super::{Emitter, at, gather_index, load, named, triton_type};
 use crate::codegen::regions::{Columns, Region, gemm_expanded, gemm_regions};
 use crate::graph::{Graph, Node, Primitive, Var};
@@ -211,11 +212,6 @@ fn split(code: &mut String, x: &str, k: usize, columns: bool, name: &str) -> Vec
     }
     parts.sort_by_key(|&(_, member)| member);
     parts.into_iter().map(|(p, _)| p).collect()
-}
-
-/// Indents every line of `lines` by four spaces.
-fn indented(lines: &str) -> String {
-    lines.lines().map(|l| format!("    {l}\n")).collect()
 }
 
 /// Generates the GEMM epilogue jit function that computes the fused body's outputs from the

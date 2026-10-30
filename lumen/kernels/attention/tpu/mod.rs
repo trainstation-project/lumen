@@ -62,9 +62,6 @@ pub(crate) fn encode(
         .chain([output.cast_const()])
         .chain(inputs[n..].iter().copied())
         .collect();
-    let (kind, spec) = match name.as_str() {
-        "flash_attention" => crate::codegen::tpu::attention::forward(body)?,
-        _ => crate::codegen::tpu::attention::backward(body)?,
-    };
+    let (kind, spec) = crate::codegen::tpu::attention::kernel(name, body)?;
     run(index, kind, spec, &rows)
 }

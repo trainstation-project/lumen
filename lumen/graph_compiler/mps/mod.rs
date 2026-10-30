@@ -30,6 +30,7 @@ use super::common::simplify::Simplify;
 use super::common::take_along_axis::TakeAlongAxis;
 use super::pass::{Module, Pipeline};
 use super::{CompilerConfig, MpsConfig, Options};
+use crate::codegen::AttentionCodegen;
 use crate::codegen::mps as codegen;
 use crate::codegen::mps::Tuning;
 use crate::graph::{Graph, Node, Primitive, TensorType, Var, View};
@@ -740,11 +741,11 @@ fn attention_variant(
     let (variant, source) = match launch {
         Launch::Attention => {
             let a = attention::of_body_strided(body, &strides).ok_or_else(unmatched)?;
-            codegen::attention_kernel(body, &a)
+            codegen::Mps::forward(body, &a, &strides)?
         }
         _ => {
             let b = attention::backward_of_body_strided(body, &strides).ok_or_else(unmatched)?;
-            codegen::attention_backward_kernel(body, &b)
+            codegen::Mps::backward(body, &b, &strides)?
         }
     };
     let compiled = SOURCES
@@ -846,19 +847,19 @@ pub(super) fn encode_with(
     }
     if kind == Launch::Attention {
         let a = attention::of_body(body).expect("an attention");
-        let batch: usize = a.batch.iter().product();
+        let (outer, heads) = attention::grid_batch(&a.batch);
         // Decode attention runs one threadgroup per query, otherwise one per 64 queries.
         let queries = match codegen::decodes(&a) {
             true => a.sq,
             false => a.sq.div_ceil(64),
         };
         let buffers = attention_buffers(a.dropout.is_some())?;
-        let grid = Grid::Groups([queries, batch, 1]);
+        let grid = Grid::Groups([queries, heads, outer]);
         return launch(name, &buffers, &scalars, grid, keep, step.label);
     }
     if kind == Launch::AttentionBackward {
         let b = attention::backward_of_body(body).expect("an attention backward");
-        let batch: usize = b.batch.iter().product();
+        let (outer, heads) = attention::grid_batch(&b.batch);
         let rows = if b.dv_out.is_some() { b.sk } else { b.sq };
         let buffers = attention_buffers(b.dropout.is_some())?;
         // The fused dK/dV kernel accumulates dQ atomically, so dQ starts at zero.
@@ -871,7 +872,7 @@ pub(super) fn encode_with(
             let grid = elementwise_grid(n, DType::F32);
             launch("fill_4", &[extra[1]], &args, grid, Vec::new(), "full (dQ)")?;
         }
-        let grid = Grid::Groups([rows.div_ceil(64), batch, 1]);
+        let grid = Grid::Groups([rows.div_ceil(64), heads, outer]);
         return launch(name, &buffers, &scalars, grid, keep, step.label);
     }
     if kind == Launch::AtomicDot {

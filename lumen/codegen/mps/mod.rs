@@ -28,7 +28,6 @@ mod row;
 mod transpose;
 mod updates;
 
-pub(crate) use attention::*;
 pub(crate) use config::*;
 use elementwise::*;
 use emitter::*;
@@ -38,6 +37,9 @@ pub(crate) use reduction::*;
 pub(crate) use row::*;
 pub(crate) use transpose::*;
 pub(crate) use updates::updates_kernel;
+
+/// The Metal code generator.
+pub(crate) struct Mps;
 
 /// Threadgroup, thread, simdgroup and lane position parameters shared by generated kernels.
 pub(crate) const THREAD_ARGS: &str = indoc! {"
