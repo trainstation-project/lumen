@@ -1,11 +1,12 @@
 //! Triton loop fusion: the shared loop fusion (`common::fusion`, as MPS runs it) with the Triton
-//! kernels' limits and shapes, and the nodes left outside any fusion wrapped in one-node kernels.
+//! kernels' limits and shapes, and which nodes left outside any fusion need one-node kernels.
 
 use super::TritonModule;
 use crate::codegen::kinds::row_reductions;
 use crate::codegen::regions::expansion;
 use crate::codegen::triton::{self as codegen, dot_row_fits, fusible};
 use crate::graph::{Graph, Node, Primitive, Var};
+use crate::graph_compiler::common::alone::Lone;
 use crate::graph_compiler::common::fusion::{Backend, fuse};
 use crate::graph_compiler::common::place_views::place_views;
 use crate::graph_compiler::pass::CompilerPass;
@@ -88,78 +89,27 @@ impl CompilerPass<TritonModule<'_>> for PlaceViews {
     }
 }
 
-/// Compiler pass wrapping each node left outside any fusion that a Triton loop kernel computes in a
-/// fusion of its own: Triton has no other kernel for it.
-pub(super) struct Alone;
-
-impl CompilerPass<TritonModule<'_>> for Alone {
-    /// Pass name used in profiler ranges and dumps.
-    fn name(&self) -> &'static str {
-        "alone"
+impl Lone for TritonModule<'_> {
+    /// Whether lone `n` is one a Triton loop kernel computes (Triton has no other kernel for it): every
+    /// fusible node but views of their operand (reshapes, slices placed as views) and in-place
+    /// concatenations.
+    fn alone(graph: &Graph, n: &Node) -> bool {
+        fusible(graph, n)
+            && !matches!(
+                n.primitive,
+                Primitive::Reshape { .. }
+                    | Primitive::Slice { view: true, .. }
+                    | Primitive::Concatenate { in_place: true, .. }
+            )
     }
 
-    /// Wraps every lone fusible node but views of their operand (reshapes, slices placed as views) and
-    /// in-place concatenations.
-    fn apply(&mut self, m: &mut TritonModule<'_>) -> Result<(), String> {
-        m.graph = wrapped(&m.graph, |graph, n| {
-            fusible(graph, n)
-                && !matches!(
-                    n.primitive,
-                    Primitive::Reshape { .. }
-                        | Primitive::Slice { view: true, .. }
-                        | Primitive::Concatenate { in_place: true, .. }
-                )
-        });
-        Ok(())
+    /// Triton passes no inputs by value.
+    fn scalars(&mut self) -> Option<&mut Vec<usize>> {
+        None
     }
-}
 
-/// `graph` with each node `wraps` accepts replaced by a fusion whose body is that node alone, its
-/// operands read once each.
-fn wrapped(graph: &Graph, wraps: impl Fn(&Graph, &Node) -> bool) -> Graph {
-    let mut out = Graph::new();
-    let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
-    for &v in graph.inputs() {
-        map[v] = out.input(graph.type_of(v).clone());
+    /// Names the kernel by the body's kind.
+    fn kernel(&mut self, body: &Graph, _: &[bool]) -> String {
+        named(body)
     }
-    for node in graph.nodes() {
-        out.set_origin(node);
-        if !wraps(graph, node) {
-            let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
-            map[node.output] = out
-                .apply(node.primitive.clone(), &inputs)
-                .expect("a node of the graph");
-            out.set_label(map[node.output], node.label);
-            continue;
-        }
-        let mut reads: Vec<Var> = Vec::new();
-        for &v in &node.inputs {
-            if !reads.contains(&v) {
-                reads.push(v);
-            }
-        }
-        let mut body = Graph::new();
-        let ins: Vec<Var> = reads
-            .iter()
-            .map(|&v| body.input(graph.type_of(v).clone()))
-            .collect();
-        let operands: Vec<Var> = node
-            .inputs
-            .iter()
-            .map(|v| ins[reads.iter().position(|r| r == v).expect("a read")])
-            .collect();
-        let value = body
-            .apply(node.primitive.clone(), &operands)
-            .expect("the node alone");
-        body.set_outputs(&[value]).expect("its value");
-        let name = named(&body);
-        let label = graph.label(node);
-        let reads: Vec<Var> = reads.iter().map(|&v| map[v]).collect();
-        map[node.output] = out
-            .apply(Primitive::Fusion { name, label, body }, &reads)
-            .expect("a fusion typed as the node");
-    }
-    let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
-    out.set_outputs(&outputs).expect("values of the graph");
-    out
 }

@@ -1,5 +1,6 @@
 //! Device-independent graph passes shared by the backend compilers.
 
+pub(crate) mod alone;
 #[cfg_attr(not(all(feature = "python", lumen_mps_linked)), allow(dead_code))]
 pub(crate) mod attention;
 #[cfg_attr(not(lumen_mps_linked), allow(dead_code))]

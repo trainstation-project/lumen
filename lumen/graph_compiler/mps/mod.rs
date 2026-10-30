@@ -1,7 +1,6 @@
 //! MPS graph compiler: the pass pipeline that fuses a graph into Metal kernels, kernel compilation,
 //! and the encoder that launches each fused step with the right grid.
 
-mod alone;
 pub(crate) mod ane;
 mod autotune;
 mod canonicalize_dots;
@@ -21,6 +20,7 @@ use std::ffi::{CString, c_char};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
+use super::common::alone::{Alone, Lone};
 use super::common::chunked_cross_entropy::ChunkedCrossEntropy;
 use super::common::clamp_indices::ClampIndices;
 use super::common::dot_strength::DotStrength;
@@ -33,7 +33,7 @@ use super::pass::{Module, Pipeline};
 use super::{CompilerConfig, MpsConfig, Options};
 use crate::codegen::mps as codegen;
 use crate::codegen::mps::Tuning;
-use crate::graph::{Graph, Primitive, TensorType, Var, View};
+use crate::graph::{Graph, Node, Primitive, TensorType, Var, View};
 use crate::graph_compiler::common::attention;
 use crate::graph_compiler::common::flash_attention::{Attentions, FlashAttention};
 use crate::graph_compiler::common::horizontal::segments;
@@ -46,7 +46,6 @@ use crate::kernels::mps::{
 };
 use crate::tensor::contiguous_strides;
 use crate::{DType, Scalar, Tensor};
-use alone::Alone;
 use canonicalize_dots::CanonicalizeDots;
 #[cfg(test)]
 use canonicalize_dots::canonicalize_dots;
@@ -142,6 +141,38 @@ impl Blocks for MpsModule<'_> {
     /// Packed and interleaved weight block tables the dot merge passes fill.
     fn blocks(&mut self) -> (&mut Packs, &mut Vec<Vec<usize>>) {
         (&mut self.packed, &mut self.interleaved)
+    }
+}
+
+impl Lone for MpsModule<'_> {
+    /// Whether `n` needs its own kernel: a float GEMM, a copying concatenation, a gather or an elementwise op.
+    fn alone(graph: &Graph, n: &Node) -> bool {
+        let float = |v: Var| {
+            matches!(
+                graph.type_of(v).dtype,
+                DType::F16 | DType::BF16 | DType::F32
+            )
+        };
+        let gemm = matches!(n.primitive, Primitive::DotGeneral { .. })
+            && n.inputs.iter().all(|&v| float(v))
+            && float(n.output);
+        gemm || matches!(
+            n.primitive,
+            Primitive::Concatenate {
+                in_place: false,
+                ..
+            } | Primitive::Gather { .. }
+        ) || super::elementwise(&n.primitive)
+    }
+
+    /// Graph input indices passed to kernels by value.
+    fn scalars(&mut self) -> Option<&mut Vec<usize>> {
+        Some(&mut self.scalars)
+    }
+
+    /// Requests a loop kernel with the by-value flags, returning its pending name.
+    fn kernel(&mut self, _: &Graph, by_value: &[bool]) -> String {
+        request(&mut self.kernels, Kernel::Loop(by_value.to_vec()))
     }
 }
 

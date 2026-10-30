@@ -1,27 +1,39 @@
-//! Pass that wraps lone GEMMs, concatenations, gathers and elementwise nodes left outside any fusion into single-node `Fusion` kernels.
+//! Pass that wraps the nodes left outside any fusion that only a generated kernel computes into
+//! single-node `Fusion` kernels.
 
-use super::{Kernel, MpsModule, request};
-use crate::DType;
 use crate::graph::{Graph, Node, Primitive, Var};
-use crate::graph_compiler::elementwise;
-use crate::graph_compiler::pass::CompilerPass;
+use crate::graph_compiler::pass::{CompilerPass, Module};
 
-/// Compiler pass wrapping every remaining kernel-worthy node in its own one-node fusion.
-pub(super) struct Alone;
+/// What a backend tells the `Alone` pass: which lone nodes need a generated kernel, which inputs its
+/// kernels take by value, and the name of each kernel.
+pub(crate) trait Lone: Module {
+    /// Whether lone `node` of `graph` runs only as a generated kernel.
+    fn alone(graph: &Graph, node: &Node) -> bool;
 
-impl<'a> CompilerPass<MpsModule<'a>> for Alone {
+    /// Graph input indices passed to kernels by value, when the backend passes any.
+    fn scalars(&mut self) -> Option<&mut Vec<usize>>;
+
+    /// Names the kernel of the one-node fusion `body`, given whether each input is by value.
+    fn kernel(&mut self, body: &Graph, by_value: &[bool]) -> String;
+}
+
+/// Compiler pass wrapping every lone node the backend has no other kernel for in its own one-node fusion.
+pub(crate) struct Alone;
+
+impl<M: Lone> CompilerPass<M> for Alone {
+    /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "alone"
     }
 
-    /// Drops by-value scalars that some unfused consumer still reads, then wraps lone nodes in `Loop` kernels.
-    fn apply(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
-        let graph = &m.graph;
+    /// Drops by-value scalars that some unfused consumer still reads, then wraps the lone nodes.
+    fn apply(&mut self, m: &mut M) -> Result<(), String> {
+        let graph = std::mem::replace(m.graph_mut(), Graph::new());
         // A scalar input can stay by-value only if every reader becomes a fusion kernel that takes it as a constant.
         let by_value = |i: &usize| {
             let v = graph.inputs()[*i];
             let fused =
-                |n: &Node| matches!(n.primitive, Primitive::Fusion { .. }) || alone(graph, n);
+                |n: &Node| matches!(n.primitive, Primitive::Fusion { .. }) || M::alone(&graph, n);
             !graph.outputs().contains(&v)
                 && graph
                     .nodes()
@@ -29,46 +41,31 @@ impl<'a> CompilerPass<MpsModule<'a>> for Alone {
                     .filter(|n| n.inputs.contains(&v))
                     .all(fused)
         };
-        m.scalars.retain(by_value);
-        let scalars: Vec<Var> = m.scalars.iter().map(|&i| graph.inputs()[i]).collect();
-        let kernels = &mut m.kernels;
-        m.graph = wrapped(
-            graph,
+        let scalars: Vec<Var> = match m.scalars() {
+            Some(scalars) => {
+                scalars.retain(by_value);
+                scalars.iter().map(|&i| graph.inputs()[i]).collect()
+            }
+            None => Vec::new(),
+        };
+        *m.graph_mut() = wrapped(
+            &graph,
             &scalars,
-            |n| alone(graph, n),
-            |by_value| request(kernels, Kernel::Loop(by_value.to_vec())),
+            |n| M::alone(&graph, n),
+            |body, by_value| m.kernel(body, by_value),
         );
         Ok(())
     }
 }
 
-/// Whether `n` needs its own kernel: a float GEMM, a copying concatenation, a gather or an elementwise op.
-fn alone(graph: &Graph, n: &Node) -> bool {
-    let float = |v: Var| {
-        matches!(
-            graph.type_of(v).dtype,
-            DType::F16 | DType::BF16 | DType::F32
-        )
-    };
-    let gemm = matches!(n.primitive, Primitive::DotGeneral { .. })
-        && n.inputs.iter().all(|&v| float(v))
-        && float(n.output);
-    gemm || matches!(
-        n.primitive,
-        Primitive::Concatenate {
-            in_place: false,
-            ..
-        } | Primitive::Gather { .. }
-    ) || elementwise(&n.primitive)
-}
-
 /// Rebuilds `graph`, replacing each node `wraps` accepts by a `Fusion` whose body is that node alone.
-/// `kernel` gets one flag per distinct input saying whether it is in `scalars` and returns the kernel name.
-pub(super) fn wrapped(
+/// `kernel` gets the body and one flag per distinct input saying whether it is in `scalars`, and
+/// returns the kernel name.
+pub(crate) fn wrapped(
     graph: &Graph,
     scalars: &[Var],
     wraps: impl Fn(&Node) -> bool,
-    mut kernel: impl FnMut(&[bool]) -> String,
+    mut kernel: impl FnMut(&Graph, &[bool]) -> String,
 ) -> Graph {
     let mut out = Graph::new();
     let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
@@ -100,7 +97,7 @@ pub(super) fn wrapped(
                 .expect("the node alone");
             body.set_outputs(&[value]).expect("its value");
             let by_value: Vec<bool> = reads.iter().map(|v| scalars.contains(v)).collect();
-            let name = kernel(&by_value);
+            let name = kernel(&body, &by_value);
             let label = graph.label(node);
             let reads: Vec<Var> = reads.iter().map(|&v| map[v]).collect();
             map[node.output] = out

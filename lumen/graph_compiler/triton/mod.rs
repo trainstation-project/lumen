@@ -23,7 +23,7 @@ use attention::{FlashAttentionBackward, Tiles};
 #[cfg(feature = "python")]
 pub(crate) use attention::{Launch, set_attention};
 use diamonds::Diamonds;
-use fusion::{Alone, LoopFusion, PlaceViews};
+use fusion::{LoopFusion, PlaceViews};
 #[cfg(feature = "python")]
 pub(crate) use gemm::{Epilogue, set_gemm};
 use horizontal::HorizontalFusion;
@@ -31,6 +31,7 @@ use place_concats::PlaceConcats;
 use split_k::SplitK;
 use wide_rows::WideRows;
 
+use super::common::alone::Alone;
 use super::common::autotune::{Autotuner, Kernels, Timer};
 use super::common::chunked_cross_entropy::ChunkedCrossEntropy;
 use super::common::clamp_indices::ClampIndices;
