@@ -85,7 +85,10 @@ def program_source(graph, name="program"):
 
 
 def _pallas(step, at, module, spec):
-    """Python script that rebuilds a launch's Mosaic program from its Pallas template ``module`` and JSON ``spec``."""
+    """Python script that rebuilds a launch's Mosaic program from its Pallas template ``module`` and JSON ``spec``,
+    or, for a generated program (``module`` ``generated``), its source run on the device's memory (``spec``)."""
+    if module == "generated":
+        return _header(step, at, "txt") + spec
     return (
         _header(step, at, "txt")
         + f"import json\n\nfrom {module} import program\n\n"
@@ -121,6 +124,9 @@ def dump_code(graph, plan, run, device, directory):
             module, spec = template
             pallas = name.rsplit(".", 1)[0] + ".pallas.py"
             (directory / pallas).write_text(_pallas(steps[at], at, module, spec))
+            if module == "generated":
+                index.append(f"{n:04d}  {' ' * 9}  its Pallas: its generated program  {pallas}")
+                continue
             index.append(f"{n:04d}  {' ' * 9}  its Pallas: {module}'s program(spec)  {pallas}")
             templates.add(module)
     for module in sorted(templates):

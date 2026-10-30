@@ -9,7 +9,7 @@ use crate::device::tpu::layout::Layout;
 use crate::graph::Primitive;
 use crate::graph_compiler::plan::Step;
 use crate::kernels::dot_general::tpu::block;
-use crate::kernels::tpu::{Launch, launch};
+use crate::kernels::tpu::{GENERATED, Launch, launch};
 
 /// Upper bound in bytes on one block including its batched leading dimension.
 const BLOCK_BYTES: usize = 1 << 20;
@@ -104,9 +104,9 @@ pub(crate) fn encode(
         .chain(inputs[n..].iter().copied())
         .collect();
     let launched = Launch {
-        module: "lumen.kernels.elementwise.tpu",
+        module: GENERATED,
         kernel: code.kernel,
-        spec: code.spec,
+        spec: code.source,
         rows: &rows,
         scalars: &[],
         host: &[],

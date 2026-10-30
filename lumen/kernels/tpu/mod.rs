@@ -22,6 +22,30 @@ fn lower(module: &str, spec: &str) -> Result<String, String> {
     .map_err(|e| e.to_string())
 }
 
+/// Mosaic source of the generated program `source` (defining `program(device)`), traced on a device with
+/// `scalars` scalars, `host_rows` host rows and `rows` memory rows by `lumen.kernels.tpu.pallas`.
+#[cfg(feature = "python")]
+fn lower_source(
+    source: &str,
+    scalars: usize,
+    host_rows: Option<usize>,
+    rows: usize,
+) -> Result<String, String> {
+    use pyo3::prelude::*;
+    Python::attach(|py| {
+        py.import("lumen.kernels.tpu.pallas")?
+            .call_method1("lower_source", (source, scalars, host_rows, rows))?
+            .extract::<String>()
+    })
+    .map_err(|e| e.to_string())
+}
+
+/// Fails: TPU kernels are traced from Python.
+#[cfg(not(feature = "python"))]
+fn lower_source(_: &str, _: usize, _: Option<usize>, _: usize) -> Result<String, String> {
+    Err("generated TPU kernels are lumen.pallas programs, traced from Python: run lumen from Python".into())
+}
+
 /// Fails: TPU kernels are traced from Python.
 #[cfg(not(feature = "python"))]
 fn lower(module: &str, _spec: &str) -> Result<String, String> {
@@ -450,10 +474,18 @@ struct Executable(*mut c_void);
 // SAFETY: the handle is only used under the TPU runtime's own locking.
 unsafe impl Send for Executable {}
 
+/// The `module` of a launch whose `spec` is the generated source of its program rather than a spec for a
+/// module's.
+pub(crate) const GENERATED: &str = "generated";
+
 /// Mosaic of `module` for `spec`, cached per `(module, spec)`.
 fn lowered(module: &str, spec: &str) -> Result<Arc<str>, String> {
+    cached(format!("{module} {spec}"), || lower(module, spec))
+}
+
+/// Mosaic cached under `key`, lowered by `lower` the first time.
+fn cached(key: String, lower: impl FnOnce() -> Result<String, String>) -> Result<Arc<str>, String> {
     static CACHE: OnceLock<Mutex<HashMap<String, Arc<str>>>> = OnceLock::new();
-    let key = format!("{module} {spec}");
     let cache = || {
         CACHE
             .get_or_init(Default::default)
@@ -463,7 +495,7 @@ fn lowered(module: &str, spec: &str) -> Result<Arc<str>, String> {
     if let Some(mosaic) = cache().get(&key) {
         return Ok(Arc::clone(mosaic));
     }
-    let mosaic: Arc<str> = lower(module, spec)?.into();
+    let mosaic: Arc<str> = lower()?.into();
     cache().insert(key, Arc::clone(&mosaic));
     Ok(mosaic)
 }
@@ -598,11 +630,12 @@ impl Drop for Batch {
 
 /// One kernel launch request.
 pub(crate) struct Launch<'a> {
-    /// Python module whose `program(spec)` lowers the kernel.
+    /// Python module whose `program(spec)` lowers the kernel, or `GENERATED` for a generated program.
     pub(crate) module: &'a str,
     /// Name shown in profiles.
     pub(crate) kernel: String,
-    /// JSON object fields describing the kernel (without braces); the device fields are added.
+    /// JSON object fields describing the kernel (without braces), to which the device fields are added; a
+    /// generated program's source.
     pub(crate) spec: String,
     /// Buffers the kernel reads and writes, passed as their row offsets.
     pub(crate) rows: &'a [*const u8],
@@ -624,12 +657,20 @@ pub(crate) fn launch(index: usize, launch: Launch) -> Result<(), String> {
         "\"scalars\": {scalars}, \"host_rows\": {}, \"rows\": {rows}",
         host.map_or("null".to_string(), |h| h.to_string())
     );
-    let spec = match launch.spec.as_str() {
-        "" => format!("{{{device}}}"),
-        fields => format!("{{{fields}, {device}}}"),
+    let spec = match (launch.module, launch.spec.as_str()) {
+        (GENERATED, source) => source.to_owned(),
+        (_, "") => format!("{{{device}}}"),
+        (_, fields) => format!("{{{fields}, {device}}}"),
+    };
+    // A generated program's Mosaic depends on the device's memory as well as its source.
+    let mosaic = match launch.module {
+        GENERATED => cached(format!("{scalars} {host:?} {rows}\n{spec}"), || {
+            lower_source(&spec, scalars, host, rows)
+        }),
+        module => lowered(module, &spec),
     };
     let lowered = Lowered {
-        mosaic: lowered(launch.module, &spec).map_err(|e| format!("{}: {e}", launch.module))?,
+        mosaic: mosaic.map_err(|e| format!("{}: {e}", launch.kernel))?,
         module: launch.module.to_owned(),
         spec,
         scalars: [
@@ -641,7 +682,17 @@ pub(crate) fn launch(index: usize, launch: Launch) -> Result<(), String> {
     };
     crate::profiler::tpu::launched(index, &launch.kernel);
     crate::kernels::launched::templated(&launch.kernel, || {
-        let template = (lowered.module.clone(), lowered.spec.clone());
+        // A generated program's script is its source, run on this device's memory.
+        let template = match launch.module {
+            GENERATED => {
+                let host = host.map_or("None".to_string(), |h| h.to_string());
+                let device =
+                    format!("{{\"scalars\": {scalars}, \"host_rows\": {host}, \"rows\": {rows}}}");
+                let script = format!("{}\nmosaic = program({device})\n", lowered.spec);
+                (GENERATED.to_owned(), script)
+            }
+            _ => (lowered.module.clone(), lowered.spec.clone()),
+        };
         (Some(lowered.mosaic.to_string()), Some(template))
     });
     let batched = BATCHES.with(|b| match b.borrow_mut().last_mut() {
