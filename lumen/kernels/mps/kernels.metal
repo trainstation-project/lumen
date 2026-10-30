@@ -457,9 +457,9 @@ template <typename T> constexpr uint per_thread() {
 }
 /// Kernel arguments for an elementwise loop: element count `n` at buffer `N`, thread index and grid size.
 #define ELEMENTWISE_ARGS(N) \
-    constant uint &n [[buffer(N)]], uint BLOCK_ID [[thread_position_in_grid]], uint NUM_BLOCKS [[threads_per_grid]]
-/// Loops `j` over this thread's elements: `per_thread<T>()` of them, `NUM_BLOCKS` apart, bounded by `n`.
-#define FOR_EACH_ELEMENT(j, T) for (uint j = BLOCK_ID, k_ = 0; k_ < per_thread<T>() && j < n; ++k_, j += NUM_BLOCKS)
+    constant uint &n [[buffer(N)]], uint THREAD_ID [[thread_position_in_grid]], uint NUM_THREADS [[threads_per_grid]]
+/// Loops `j` over this thread's elements: `per_thread<T>()` of them, `NUM_THREADS` apart, bounded by `n`.
+#define FOR_EACH_ELEMENT(j, T) for (uint j = THREAD_ID, k_ = 0; k_ < per_thread<T>() && j < n; ++k_, j += NUM_THREADS)
 
 /// Storage offset of row-major flat index `idx` in a strided view with `ndim` dims.
 inline ulong offset_of(ulong idx, uint ndim, constant ulong *sizes, constant ulong *strides) {

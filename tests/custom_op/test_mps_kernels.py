@@ -204,7 +204,7 @@ def test_autotuned_loops_match_untuned_and_dump_their_launch(tmp_path, dtype):
         lumen.compile(lambda x: -x * 2).dump_code(str(tmp_path), x)
         source = "".join(p.read_text() for p in tmp_path.glob("*fusion_*.metal"))
         assert "[[max_total_threads_per_threadgroup(" in source
-        assert "for (uint j = i" in source and "; k < " in source
+        assert "for (uint j = THREAD_ID" in source and "; k < ELEMENTS_PER_THREAD" in source
     finally:
         compiler.autotune = True
 

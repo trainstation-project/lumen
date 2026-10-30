@@ -17,10 +17,10 @@ impl ElementwiseCodegen for Mps {
     type Code = (String, String);
     type Schedule = Tuning;
 
-    /// Generates a loop kernel computing every body output elementwise under `tuning`: thread `BLOCK_ID` of
-    /// `NUM_BLOCKS` computes a block of `BLOCK_SIZE` elements (`per_thread`), contiguous or `NUM_BLOCKS`
+    /// Generates a loop kernel computing every body output elementwise under `tuning`: thread `THREAD_ID`
+    /// of `NUM_THREADS` computes `ELEMENTS_PER_THREAD` (`per_thread`) elements, contiguous or `NUM_THREADS`
     /// apart. Outputs of different element counts split the grid: each `segments` group runs on its own
-    /// consecutive range of `cdiv(count, BLOCK_SIZE)` threads, with `n` and `NUM_BLOCKS` its own.
+    /// consecutive range of `cdiv(count, ELEMENTS_PER_THREAD)` threads, with `n` and `NUM_THREADS` its own.
     fn elementwise(
         body: &Graph,
         by_value: &[bool],
@@ -33,13 +33,13 @@ impl ElementwiseCodegen for Mps {
             contiguous,
         } = *tuning;
 
-        let each = |block_id: &str| match contiguous {
+        let each = |thread_id: &str| match contiguous {
             true => format!(
-                "for (uint j = {block_id} * BLOCK_SIZE, k = 0; k < BLOCK_SIZE && j < n; ++k, ++j)"
+                "for (uint j = {thread_id} * ELEMENTS_PER_THREAD, k = 0; k < ELEMENTS_PER_THREAD && j < n; ++k, ++j)"
             ),
             false => {
                 format!(
-                    "for (uint j = {block_id}, k = 0; k < BLOCK_SIZE && j < n; ++k, j += NUM_BLOCKS)"
+                    "for (uint j = {thread_id}, k = 0; k < ELEMENTS_PER_THREAD && j < n; ++k, j += NUM_THREADS)"
                 )
             }
         };
@@ -66,7 +66,7 @@ impl ElementwiseCodegen for Mps {
         let code = match segments.as_slice() {
             [_] => format!(
                 "{} {{\n{}{}\n}}",
-                each("BLOCK_ID"),
+                each("THREAD_ID"),
                 lines[0],
                 writes.join("\n")
             ),
@@ -79,21 +79,21 @@ impl ElementwiseCodegen for Mps {
                     let end = start + threads;
 
                     let branch = match s {
-                        0 => format!("if (BLOCK_ID < {end}u)"),
+                        0 => format!("if (THREAD_ID < {end}u)"),
                         s if s == segments.len() - 1 => " else".to_string(),
-                        _ => format!(" else if (BLOCK_ID < {end}u)"),
+                        _ => format!(" else if (THREAD_ID < {end}u)"),
                     };
 
                     let stored: Vec<&str> = outputs.iter().map(|&k| writes[k]).collect();
-                    let block_id = match start {
-                        0 => "BLOCK_ID".to_string(),
-                        start => format!("BLOCK_ID - {start}u"),
+                    let thread_id = match start {
+                        0 => "THREAD_ID".to_string(),
+                        start => format!("THREAD_ID - {start}u"),
                     };
 
                     write!(
                         code,
-                        "{branch} {{\nconst uint SEGMENT_BLOCK_ID = {block_id}, n = {numel}u, NUM_BLOCKS = {threads}u;\n{} {{\n{}{}\n}}\n}}",
-                        each("SEGMENT_BLOCK_ID"),
+                        "{branch} {{\nconst uint SEGMENT_THREAD_ID = {thread_id}, n = {numel}u, NUM_THREADS = {threads}u;\n{} {{\n{}{}\n}}\n}}",
+                        each("SEGMENT_THREAD_ID"),
                         lines[s],
                         stored.join("\n"),
                     )
@@ -110,7 +110,7 @@ impl ElementwiseCodegen for Mps {
             {stores}
             [[max_total_threads_per_threadgroup({group})]]
             kernel void NAME({params}ELEMENTWISE_ARGS({args})) {{
-                constexpr uint BLOCK_SIZE = {per_thread}u;
+                constexpr uint ELEMENTS_PER_THREAD = {per_thread}u;
                 {code}
             }}
             "
