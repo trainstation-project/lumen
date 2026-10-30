@@ -11,8 +11,8 @@ pub(super) fn random_state(first: usize) -> [String; 2] {
     ]
 }
 
-/// Metal `NAME_ix` method returning the element offset of operand `name` for outer batch index `b` and
-/// head `h`, on the grid `grid_batch` gives `batch`, plus its row and column strides. A divisor maps the
+/// Metal `NAME_ix` method returning the element offset of operand `name` for outer batch index `BLOCK_ID_B`
+/// and head `BLOCK_ID_H`, on the grid `grid_batch` gives `batch`, plus its row and column strides. A divisor maps the
 /// heads onto fewer (shared KV heads). Fails when the outer batch dims don't step as one dim.
 pub(super) fn ix_method(name: &str, acc: &Access, batch: &[usize]) -> Result<String, String> {
     let up = name.to_uppercase();
@@ -22,8 +22,10 @@ pub(super) fn ix_method(name: &str, acc: &Access, batch: &[usize]) -> Result<Str
         .into_iter()
         .map(|term| match term {
             Term::Offset(offset) => format!("{offset}ul"),
-            Term::Outer(stride) => format!("ulong(b) * {stride}ul"),
-            Term::Heads { stride, divisor } => format!("ulong(h / {divisor}u) * {stride}ul"),
+            Term::Outer(stride) => format!("ulong(BLOCK_ID_B) * {stride}ul"),
+            Term::Heads { stride, divisor } => {
+                format!("ulong(BLOCK_ID_H / {divisor}u) * {stride}ul")
+            }
         })
         .collect();
 
@@ -34,7 +36,7 @@ pub(super) fn ix_method(name: &str, acc: &Access, batch: &[usize]) -> Result<Str
     Ok(formatdoc!(
         "
         static constant constexpr uint {up}_ROW = {}u, {up}_COL = {}u;
-        inline ulong {name}(uint b, uint h) const {{
+        inline ulong {name}(uint BLOCK_ID_B, uint BLOCK_ID_H) const {{
             return {};
         }}",
         acc.row,

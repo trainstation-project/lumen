@@ -1,13 +1,14 @@
 // Flash attention backward templates: a key-block kernel computing dK and dV (and optionally dQ atomically)
 // and a query-block kernel computing dQ.
 
-/// Computes dK and dV for a block of ATTN_BQ keys of head `h` of batch `b`, streaming BQ queries at a time.
+/// Computes dK and dV for key block `BLOCK_ID_N` of BLOCK_SIZE_N (ATTN_BQ) keys of head `BLOCK_ID_H` of batch
+/// `BLOCK_ID_B`, streaming BLOCK_SIZE_M queries at a time.
 /// Recomputes probabilities from `lse`; `delta` holds the per-query rowsum of dO * O.
 /// With `DQ`, also adds each block's dS * K into `dq` with float atomics, so `dq` must start zeroed.
 template <typename T,
           uint D,
           uint DV,
-          uint BQ,
+          uint BLOCK_SIZE_M,
           bool CAUSAL,
           bool DQ,
           typename Ix,
@@ -35,33 +36,34 @@ inline void flash_attention_dkdv(device const T *q,
                                  threadgroup float *deltas,
                                  threadgroup T *ks,
                                  threadgroup T *dss,
-                                 uint kblock,
-                                 uint b,
-                                 uint h,
-                                 uint heads,
+                                 uint BLOCK_ID_N,
+                                 uint BLOCK_ID_B,
+                                 uint BLOCK_ID_H,
+                                 uint NUM_BLOCKS_H,
                                  uint sg,
                                  uint lane,
                                  uint t,
                                  Score score,
                                  Drop drop = Drop()) {
+    constexpr uint BLOCK_SIZE_N = ATTN_BQ;
     // The flat batch index, as dropout's stream and the log-sum-exp's row count it.
-    const uint bh = b * heads + h;
-    q += ix.q(b, h);
-    k += ix.k(b, h);
-    v += ix.v(b, h);
-    g += ix.g(b, h);
-    lse += ix.lse(b, h);
-    delta += ix.delta(b, h);
-    dk += ix.dk(b, h);
-    dv += ix.dv(b, h);
+    const uint bh = BLOCK_ID_B * NUM_BLOCKS_H + BLOCK_ID_H;
+    q += ix.q(BLOCK_ID_B, BLOCK_ID_H);
+    k += ix.k(BLOCK_ID_B, BLOCK_ID_H);
+    v += ix.v(BLOCK_ID_B, BLOCK_ID_H);
+    g += ix.g(BLOCK_ID_B, BLOCK_ID_H);
+    lse += ix.lse(BLOCK_ID_B, BLOCK_ID_H);
+    delta += ix.delta(BLOCK_ID_B, BLOCK_ID_H);
+    dk += ix.dk(BLOCK_ID_B, BLOCK_ID_H);
+    dv += ix.dv(BLOCK_ID_B, BLOCK_ID_H);
     const uint fr = frag_row(lane), fc = frag_col(lane);
-    const uint row = kblock * ATTN_BQ + sg * ATTN_ROWS + fr;
+    const uint row = BLOCK_ID_N * BLOCK_SIZE_N + sg * ATTN_ROWS + fr;
     const bool in_rows = row < sk;
     // The dQ path keeps this block's keys in threadgroup memory for the dS * K product.
     if constexpr (DQ) {
-        dq += ix.dq(b, h);
-        for (uint e = t; e < ATTN_BQ * D; e += 256) {
-            uint j = e / D, d = e % D, key = kblock * ATTN_BQ + j;
+        dq += ix.dq(BLOCK_ID_B, BLOCK_ID_H);
+        for (uint e = t; e < BLOCK_SIZE_N * D; e += 256) {
+            uint j = e / D, d = e % D, key = BLOCK_ID_N * BLOCK_SIZE_N + j;
             ks[e] = key < sk ? k[key * Ix::K_ROW + d * Ix::K_COL] : T(0);
         }
     }
@@ -79,29 +81,29 @@ inline void flash_attention_dkdv(device const T *q,
     simdgroup_matrix<float, 8, 8> dkm[D / 8], dvm[DV / 8];
     ATTN_UNROLL for (uint c = 0; c < D / 8; ++c) { dkm[c] = simdgroup_matrix<float, 8, 8>(0); }
     ATTN_UNROLL for (uint c = 0; c < DV / 8; ++c) { dvm[c] = simdgroup_matrix<float, 8, 8>(0); }
-    // Causal: queries before `kblock`'s first key minus `offset` see none of its keys.
+    // Causal: queries before `BLOCK_ID_N`'s first key minus `offset` see none of its keys.
     uint first = 0;
     if (CAUSAL) {
-        long lo = long(kblock * ATTN_BQ) - long(offset);
-        first = uint(clamp(lo, 0l, long(sq))) / BQ * BQ;
+        long lo = long(BLOCK_ID_N * BLOCK_SIZE_N) - long(offset);
+        first = uint(clamp(lo, 0l, long(sq))) / BLOCK_SIZE_M * BLOCK_SIZE_M;
     }
-    for (uint q0 = first; q0 < sq; q0 += BQ) {
+    for (uint q0 = first; q0 < sq; q0 += BLOCK_SIZE_M) {
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        for (uint e = t; e < BQ * D; e += 256) {
+        for (uint e = t; e < BLOCK_SIZE_M * D; e += 256) {
             uint i = e / D, d = e % D;
             qs[e] = q0 + i < sq ? q[(q0 + i) * Ix::Q_ROW + d * Ix::Q_COL] : T(0);
         }
-        for (uint e = t; e < BQ * DV; e += 256) {
+        for (uint e = t; e < BLOCK_SIZE_M * DV; e += 256) {
             uint i = e / DV, d = e % DV;
             gs[e] = q0 + i < sq ? g[(q0 + i) * Ix::G_ROW + d * Ix::G_COL] : T(0);
         }
-        for (uint i = t; i < BQ; i += 256) {
+        for (uint i = t; i < BLOCK_SIZE_M; i += 256) {
             lses[i] = q0 + i < sq ? lse[(q0 + i) * Ix::LSE_COL] : 0.0f;
             deltas[i] = q0 + i < sq ? delta[(q0 + i) * Ix::DELTA_COL] : 0.0f;
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
         // Work transposed: S^T = K Q^T and dP^T = V dO^T so rows stay keys.
-        ATTN_UNROLL for (uint ic = 0; ic < BQ / 8; ++ic) {
+        ATTN_UNROLL for (uint ic = 0; ic < BLOCK_SIZE_M / 8; ++ic) {
             simdgroup_matrix<float, 8, 8> st(0), dpt(0);
             ATTN_UNROLL for (uint c = 0; c < D / 8; ++c) {
                 simdgroup_matrix<T, 8, 8> qt;
@@ -138,17 +140,17 @@ inline void flash_attention_dkdv(device const T *q,
             }
             // Stage dS^T for the cross-simdgroup dQ product below.
             if constexpr (DQ) {
-                simdgroup_store(dsm, dss + sg * ATTN_ROWS * BQ + ic * 8, BQ);
+                simdgroup_store(dsm, dss + sg * ATTN_ROWS * BLOCK_SIZE_M + ic * 8, BLOCK_SIZE_M);
             }
         }
         if constexpr (DQ) {
             threadgroup_barrier(mem_flags::mem_threadgroup);
-            for (uint tile = sg; tile < BQ / 8 * (D / 8); tile += ATTN_GROUPS) {
+            for (uint tile = sg; tile < BLOCK_SIZE_M / 8 * (D / 8); tile += ATTN_GROUPS) {
                 uint i = tile / (D / 8), c = tile % (D / 8);
                 simdgroup_matrix<float, 8, 8> acc(0);
-                ATTN_UNROLL for (uint j = 0; j < ATTN_BQ / 8; ++j) {
+                ATTN_UNROLL for (uint j = 0; j < BLOCK_SIZE_N / 8; ++j) {
                     simdgroup_matrix<T, 8, 8> dsq, km;
-                    simdgroup_load(dsq, dss + j * 8 * BQ + i * 8, BQ, ulong2(0, 0), true);
+                    simdgroup_load(dsq, dss + j * 8 * BLOCK_SIZE_M + i * 8, BLOCK_SIZE_M, ulong2(0, 0), true);
                     simdgroup_load(km, ks + j * 8 * D + c * 8, D);
                     simdgroup_multiply_accumulate(acc, dsq, km, acc);
                 }
@@ -175,12 +177,13 @@ inline void flash_attention_dkdv(device const T *q,
     }
 }
 
-/// Computes dQ for a block of ATTN_BQ queries of head `h` of batch `b`, streaming BK keys at a time.
+/// Computes dQ for query block `BLOCK_ID_M` of BLOCK_SIZE_M (ATTN_BQ) queries of head `BLOCK_ID_H` of batch
+/// `BLOCK_ID_B`, streaming BLOCK_SIZE_N keys at a time.
 /// Recomputes probabilities from `lse`; `delta` holds the per-query rowsum of dO * O.
 template <typename T,
           uint D,
           uint DV,
-          uint BK,
+          uint BLOCK_SIZE_N,
           bool CAUSAL,
           typename Ix,
           typename Score,
@@ -200,26 +203,27 @@ inline void flash_attention_dq(device const T *q,
                                float ds_scale,
                                threadgroup T *ks,
                                threadgroup T *vs,
-                               uint qblock,
-                               uint b,
-                               uint h,
-                               uint heads,
+                               uint BLOCK_ID_M,
+                               uint BLOCK_ID_B,
+                               uint BLOCK_ID_H,
+                               uint NUM_BLOCKS_H,
                                uint sg,
                                uint lane,
                                uint t,
                                Score score,
                                Drop drop = Drop()) {
+    constexpr uint BLOCK_SIZE_M = ATTN_BQ;
     // The flat batch index, as dropout's stream and the log-sum-exp's row count it.
-    const uint bh = b * heads + h;
-    q += ix.q(b, h);
-    k += ix.k(b, h);
-    v += ix.v(b, h);
-    g += ix.g(b, h);
-    lse += ix.lse(b, h);
-    delta += ix.delta(b, h);
-    dq += ix.dq(b, h);
+    const uint bh = BLOCK_ID_B * NUM_BLOCKS_H + BLOCK_ID_H;
+    q += ix.q(BLOCK_ID_B, BLOCK_ID_H);
+    k += ix.k(BLOCK_ID_B, BLOCK_ID_H);
+    v += ix.v(BLOCK_ID_B, BLOCK_ID_H);
+    g += ix.g(BLOCK_ID_B, BLOCK_ID_H);
+    lse += ix.lse(BLOCK_ID_B, BLOCK_ID_H);
+    delta += ix.delta(BLOCK_ID_B, BLOCK_ID_H);
+    dq += ix.dq(BLOCK_ID_B, BLOCK_ID_H);
     const uint fr = frag_row(lane), fc = frag_col(lane);
-    const uint row = qblock * ATTN_BQ + sg * ATTN_ROWS + fr;
+    const uint row = BLOCK_ID_M * BLOCK_SIZE_M + sg * ATTN_ROWS + fr;
     const bool in_rows = row < sq;
     simdgroup_matrix<T, 8, 8> qm[D / 8], gm[DV / 8];
     ATTN_UNROLL for (uint c = 0; c < D / 8; ++c) {
@@ -238,21 +242,21 @@ inline void flash_attention_dq(device const T *q,
     ATTN_UNROLL for (uint c = 0; c < D / 8; ++c) { dqm[c] = simdgroup_matrix<float, 8, 8>(0); }
     uint last = sk;
     if (CAUSAL) {
-        long hi = long(min(qblock * ATTN_BQ + ATTN_BQ, sq)) + long(offset);
+        long hi = long(min(BLOCK_ID_M * BLOCK_SIZE_M + BLOCK_SIZE_M, sq)) + long(offset);
         last = uint(clamp(hi, 0l, long(sk)));
     }
-    for (uint k0 = 0; k0 < last; k0 += BK) {
+    for (uint k0 = 0; k0 < last; k0 += BLOCK_SIZE_N) {
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        for (uint e = t; e < BK * D; e += 256) {
+        for (uint e = t; e < BLOCK_SIZE_N * D; e += 256) {
             uint j = e / D, d = e % D;
             ks[e] = k0 + j < sk ? k[(k0 + j) * Ix::K_ROW + d * Ix::K_COL] : T(0);
         }
-        for (uint e = t; e < BK * DV; e += 256) {
+        for (uint e = t; e < BLOCK_SIZE_N * DV; e += 256) {
             uint j = e / DV, d = e % DV;
             vs[e] = k0 + j < sk ? v[(k0 + j) * Ix::V_ROW + d * Ix::V_COL] : T(0);
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        ATTN_UNROLL for (uint jc = 0; jc < BK / 8; ++jc) {
+        ATTN_UNROLL for (uint jc = 0; jc < BLOCK_SIZE_N / 8; ++jc) {
             simdgroup_matrix<float, 8, 8> s(0), dp(0);
             ATTN_UNROLL for (uint c = 0; c < D / 8; ++c) {
                 simdgroup_matrix<T, 8, 8> kt;
