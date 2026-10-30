@@ -31,17 +31,22 @@ empty :=
 space := $(empty) $(empty)
 DEVICE_FEATURES := $(strip $(if $(HAS_CUDA),cuda) $(if $(HAS_TPU),tpu))
 CARGO_TEST_FEATURES := $(if $(DEVICE_FEATURES),--features $(subst $(space),$(comma),$(DEVICE_FEATURES)))
-MATURIN_FEATURES := $(if $(DEVICE_FEATURES),--features $(subst $(space),$(comma),python $(DEVICE_FEATURES)) --extras $(subst $(space),$(comma),$(DEVICE_FEATURES)))
-TPU_ENV := $(if $(HAS_TPU),TPU_LIBRARY_PATH="$${TPU_LIBRARY_PATH:-$$(python -c 'import libtpu, os; print(os.path.join(os.path.dirname(libtpu.__file__), "libtpu.so"))')}")
+MATURIN_FEATURES := $(if $(DEVICE_FEATURES),--features $(subst $(space),$(comma),python $(DEVICE_FEATURES)))
+EXTRAS := $(foreach e,test dev $(DEVICE_FEATURES),--extra $(e))
+# The checkout's virtualenv, which `install` makes (uv sync) and the tests run.
+PYTHON := $(CURDIR)/.venv/bin/python
+TPU_ENV := $(if $(HAS_TPU),TPU_LIBRARY_PATH="$${TPU_LIBRARY_PATH:-$$($(PYTHON) -c 'import libtpu, os; print(os.path.join(os.path.dirname(libtpu.__file__), "libtpu.so"))')}")
 # The build Linux CI gets: the Metal backend is compiled only on macOS, so
 # building without it here catches code that breaks when it is cfg'd out.
 NO_METAL_FEATURES := --no-default-features --features cuda
 
-## install: lumen built in release mode and installed into the active
-## virtualenv (maturin develop --release), with the device features of the
-## machine's hardware. Benchmarks and the dashboard measure this build.
+## install: the whole package into the checkout's .venv, which uv makes on
+## Python 3.12 (.python-version) when missing: lumen, built by maturin in
+## release mode with the device features of the machine's hardware (rebuilt
+## every time: uv would not notice changed Rust sources), and its test, dev
+## and device extras. Benchmarks and the dashboard measure this build.
 install:
-	maturin develop --release $(MATURIN_FEATURES)
+	MATURIN_PEP517_ARGS="$(MATURIN_FEATURES)" uv sync --reinstall-package lumen $(EXTRAS)
 
 ## test: every test: the unit and doc tests, then the Python tests. CPU
 ## tests always run; MPS, CUDA and TPU ones run where the device is
@@ -53,11 +58,11 @@ install:
 ## a worker per CPU core (tests/conftest.py); then, serially, the tests
 ## needing every device (`all_devices`).
 test: install
-	$(if $(HAS_TPU),$(TPU_ENV) python -c "import lumen$(comma) sys; sys.exit(0 if lumen.tpu.is_available() else 'TPU hardware found but lumen sees no TPU: is libtpu installed (pip install libtpu) or TPU_LIBRARY_PATH set?')")
+	$(if $(HAS_TPU),$(TPU_ENV) $(PYTHON) -c "import lumen$(comma) sys; sys.exit(0 if lumen.tpu.is_available() else 'TPU hardware found but lumen sees no TPU: is libtpu installed (pip install libtpu) or TPU_LIBRARY_PATH set?')")
 	$(TPU_ENV) cargo test --lib $(CARGO_TEST_FEATURES) -- --format=terse
 	cargo test --doc
-	$(TPU_ENV) python -m pytest tests -q -rs -n auto -m "not all_devices"
-	$(TPU_ENV) python -m pytest tests -q -rs -m all_devices
+	$(TPU_ENV) $(PYTHON) -m pytest tests -q -rs -n auto -m "not all_devices"
+	$(TPU_ENV) $(PYTHON) -m pytest tests -q -rs -m all_devices
 
 fmt-check:
 	cargo fmt --all -- --check

@@ -32,7 +32,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.14"
+          python-version: "3.12"
       - run: pip install clang-format==21.1.6
       - run: make clang-format-check
 
@@ -61,15 +61,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.14"
-      # `make test` builds the bindings with `maturin develop`, which
-      # installs into the active virtualenv, then runs pytest.
-      - name: Set up virtualenv
-        run: |
-          python -m venv .venv
-          .venv/bin/pip install maturin pytest pytest-xdist numpy
-          echo "VIRTUAL_ENV=$PWD/.venv" >> "$GITHUB_ENV"
-          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+          python-version: "3.12"
+      # `make test` installs lumen and its test extras into .venv with uv
+      # (`make install`), then runs the tests with that virtualenv's Python.
+      - uses: astral-sh/setup-uv@v6
       # No GPU here: the MPS and CUDA tests skip.
       - run: make test
 

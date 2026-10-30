@@ -66,19 +66,17 @@ re-export them.
 
 ## Build and test
 
-Requires a Rust toolchain, Python >= 3.10 in an active virtualenv, and
-`maturin`, `pytest`, `pytest-xdist`, `numpy` (what CI installs):
+Requires a Rust toolchain and [uv](https://docs.astral.sh/uv/), which makes
+the checkout's `.venv` on Python 3.12 and installs everything into it:
 
 ```bash
 curl https://sh.rustup.rs -sSf | sh   # Rust, if `rustc` is not on PATH
-uv venv && source .venv/bin/activate
-uv pip install maturin pytest pytest-xdist numpy
 make test
 ```
 
 | Command | What it does |
 | --- | --- |
-| `make install` | `maturin develop --release` with the machine's device features: lumen built in release mode into the active virtualenv. Benchmarks (`dashboard/bench.py`, `serve.py`) must run on this build; a debug build is several times slower per call. |
+| `make install` | `uv sync` into `.venv` (made on Python 3.12 when missing): lumen built by maturin in release mode with the machine's device features, and its `test`, `dev` and device extras. Benchmarks (`dashboard/bench.py`, `serve.py`) must run on this build; a debug build is several times slower per call. |
 | `make test` | `make install`, then `cargo test --lib`, `cargo test --doc` and `python -m pytest tests -q -rs -n auto` (a worker per TPU or CUDA chip, or per CPU core; then the `all_devices` tests serially), with the device features of the machine's hardware (CUDA, TPU) detected. **Always run this after a change** (AGENTS.md). |
 | `make ci` | Every CI job locally: `fmt-check`, `clang-format-check`, `clippy`, `test`, `miri`. |
 | `make fmt-check` | `cargo fmt --all -- --check`. |
