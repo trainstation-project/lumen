@@ -1,7 +1,5 @@
 //! Encodes reshapes of TPU-tiled tensors that split or merge the last dimension.
 
-use std::collections::HashMap;
-
 use crate::codegen::dot_general::tpu::block;
 use crate::codegen::layout::LayoutCodegen;
 use crate::codegen::utils::tpu::Tpu;
