@@ -291,6 +291,7 @@ pub(crate) fn gemm_regions_kernel(
 
     let interleaved = regions_interleaved(regions, dot);
     let mut store = String::new();
+
     for (c, ends) in regions.iter().zip(&ends) {
         let (offset, size, limit, k) = (c.offset, c.size(), c.offset + c.width, c.k());
         // Builds one epilogue element: binds the region's accumulator reads to locals and stores every
@@ -298,17 +299,22 @@ pub(crate) fn gemm_regions_kernel(
         let element = |locals: &[(Var, String)], index: &str| {
             let mut e = Emitter::new(body, by_value);
             let mut declared = String::new();
+
             for (t, (v, read)) in locals.iter().enumerate() {
                 e.invariant[*v] = true;
                 e.row_locals.insert(*v, format!("r{t}"));
                 writeln!(declared, "{o} r{t} = {read};").unwrap();
             }
+
             let mut stores = String::new();
+
             for &end in ends {
                 let value = e.value(outputs[end], "j".into());
                 writeln!(stores, "out{end}[j] = {value};").unwrap();
             }
+
             let (hoisted, lines) = (&e.hoisted, &e.lines);
+
             formatdoc!(
                 "
                 {{
@@ -317,10 +323,12 @@ pub(crate) fn gemm_regions_kernel(
                 "
             )
         };
+
         let branch = match rows {
             false => {
                 // The epilogue receives two adjacent columns per call as `row[c / 2][c % 2]`.
                 let read = |column: &str| format!("row[({column}) / 2][({column}) % 2]");
+
                 match &c.region {
                     Region::Group(members) => {
                         let locals: Vec<(Var, String)> = members
@@ -328,6 +336,7 @@ pub(crate) fn gemm_regions_kernel(
                             .enumerate()
                             .map(|(t, m)| (m.output, read(&format!("c + {t}"))))
                             .collect();
+
                         let one = element(&locals, &format!("m * {size} + (n - {offset}) / {k}"));
                         format!("if (c % {k} == 0) {one}")
                     }
@@ -336,10 +345,12 @@ pub(crate) fn gemm_regions_kernel(
                             &[(slice.output, read("c"))],
                             &format!("m * {size} + (n - {offset})"),
                         );
+
                         let second = element(
                             &[(slice.output, read("c + 1"))],
                             &format!("m * {size} + (n - {offset}) + 1"),
                         );
+
                         format!("{first}{second}")
                     }
                 }
@@ -350,6 +361,7 @@ pub(crate) fn gemm_regions_kernel(
                     1 => format!("(m - {offset}) * {columns} + n"),
                     _ => format!("(m - {offset}) / {k} * {columns} + n"),
                 };
+
                 let column = |q: usize| {
                     let locals: Vec<(Var, String)> = members
                         .iter()
@@ -358,17 +370,20 @@ pub(crate) fn gemm_regions_kernel(
                         .collect();
                     element(&locals, &format!("{at} + {q}"))
                 };
+
                 let (first, second) = (column(0), column(1));
                 let both = formatdoc!(
                     "
                     {first}if (n + 1 < {columns}) {second}"
                 );
+
                 match k {
                     1 => both,
                     _ => format!("if (c % {k} == 0) {{\n{both}}}\n"),
                 }
             }
         };
+
         writedoc!(
             store,
             "
@@ -379,28 +394,37 @@ pub(crate) fn gemm_regions_kernel(
         )
         .unwrap();
     }
+
     let (mut fields, mut members) = (String::new(), Vec::new());
+
     for (k, &v) in body.inputs().iter().enumerate() {
         let vt = metal_type(body.type_of(v).dtype);
+
         match by_value.get(k) == Some(&true) {
             true => writeln!(fields, "    {vt} in{k};").unwrap(),
             false => writeln!(fields, "    device const {vt} *in{k};").unwrap(),
         }
+
         members.push(format!("in{k}"));
     }
+
     for (k, &v) in outputs[1..].iter().enumerate() {
         let vt = metal_type(body.type_of(v).dtype);
         writeln!(fields, "    device {vt} *out{};", k + 1).unwrap();
         members.push(format!("out{}", k + 1));
     }
+
     writeln!(fields, "    device {w} *out0;").unwrap();
     members.push("out".into());
+
     let operand = |v: Var| {
         let k = body.inputs().iter().position(|&i| i == v);
         format!("in{}", k.expect("a dot's operands are the fusion's inputs"))
     };
+
     let (lhs, rhs) = (operand(dot.inputs[0]), operand(dot.inputs[1]));
     let members = members.join(", ");
+
     let mut source = formatdoc!(
         "
         struct NAME_epi {{
@@ -410,12 +434,16 @@ pub(crate) fn gemm_regions_kernel(
         }};
         "
     );
+
     let flags = gemm_flags(body, dot);
+
     for &(suffix, c) in variants {
         let (bm, bn, bk, threads, cols, simds) =
             (c.bm, c.bn, c.bk, c.threads, c.cols, c.threads / 32);
+
         let prefetch = c.prefetch;
         let (params, first) = io_params(body, by_value, w, &[]);
+
         let call = match c.algorithm {
             Algorithm::Tiled => formatdoc!(
                 "
@@ -440,6 +468,7 @@ pub(crate) fn gemm_regions_kernel(
                 &members,
             ),
         };
+
         writedoc!(
             source,
             "
@@ -451,6 +480,7 @@ pub(crate) fn gemm_regions_kernel(
         )
         .unwrap();
     }
+
     named(source)
 }
 
@@ -461,6 +491,7 @@ pub(crate) fn gemm_kernel(body: &Graph, by_value: &[bool], dot: &Node) -> (Strin
         Some(c) => Mps::gemm(body, dot, by_value, &[("", c)]),
         None => Mps::gemm(body, dot, by_value, &DEFAULT_CONFIGS),
     };
+
     code.expect("a Metal GEMM of every GEMM body")
 }
 
@@ -470,7 +501,9 @@ pub(crate) fn gemv_config(body: &Graph) -> Option<GemmConfig> {
     if row_dot(body).is_some() && tile_scratch(body).is_none() {
         return None;
     }
+
     let (vector_lhs, _) = gemv_of(body, gemm_dot(body)?)?;
+
     match tile_scratch(body) {
         Some(_) => vector_lhs.then(gemv_tiles_default),
         None => Some(gemv_default(vector_lhs)),
@@ -488,6 +521,7 @@ pub(crate) fn gemm_variant(
         let dot = row_dot(body).expect("a matmul with row reductions");
         return gemm_row_kernel(body, by_value, dot, mps, Some(config));
     }
+
     let dot = gemm_dot(body).expect("a matmul");
     Mps::gemm(body, dot, by_value, &[("", config)]).expect("a Metal GEMM of every GEMM body")
 }
@@ -509,30 +543,39 @@ impl GemmCodegen for Mps {
         variants: &[(&'static str, GemmConfig)],
     ) -> Result<(String, String), String> {
         let pair = gemm_pair(body, dot);
+
         if let Some(regions) = gemm_regions(body, dot).filter(|_| pair.is_none()) {
             return Ok(gemm_regions_kernel(body, by_value, dot, &regions, variants));
         }
+
         let Primitive::DotGeneral { accum_dtype, .. } = dot.primitive else {
             unreachable!("a dot")
         };
+
         // Epilogue outputs must have the dot's element count, or half or double it for paired outputs.
         let elements = body.type_of(dot.output).numel();
         let indexed =
             |v: &Var| [elements, elements / 2, 2 * elements].contains(&body.type_of(*v).numel());
+
         assert!(
             body.outputs().iter().all(indexed),
             "a contraction's epilogue writes values of its index space: {body}"
         );
+
         let out = body.outputs()[0];
+
         let (t, a) = (
             metal_type(body.type_of(dot.inputs[0]).dtype),
             metal_type(accum_dtype),
         );
+
         let (o, w) = (
             metal_type(body.type_of(dot.output).dtype),
             metal_type(body.type_of(out).dtype),
         );
+
         let mut e = Emitter::new(body, by_value);
+
         match pair {
             Some((first, second)) => {
                 for (v, name) in [(first.output, "r1"), (second.output, "r2")] {
@@ -545,12 +588,16 @@ impl GemmCodegen for Mps {
                 e.row_locals.insert(dot.output, "r".into());
             }
         }
+
         let mut stores = String::new();
+
         for (k, &v) in body.outputs()[1..].iter().enumerate() {
             let value = e.value(v, "j".into());
             writeln!(stores, "        out{}[i] = {value};", k + 1).unwrap();
         }
+
         let expanded = gemm_expanded(body, dot);
+
         let value = match expanded {
             Some(([a, b], _)) => {
                 let (va, vb) = (e.value(a, "j".into()), e.value(b, "j".into()));
@@ -558,15 +605,20 @@ impl GemmCodegen for Mps {
             }
             None => e.value(out, "j".into()),
         };
+
         let (mut fields, mut members) = (String::new(), Vec::new());
+
         for (k, &v) in body.inputs().iter().enumerate() {
             let vt = metal_type(body.type_of(v).dtype);
+
             match by_value.get(k) == Some(&true) {
                 true => writeln!(fields, "    {vt} in{k};").unwrap(),
                 false => writeln!(fields, "    device const {vt} *in{k};").unwrap(),
             }
+
             members.push(format!("in{k}"));
         }
+
         for (k, &v) in body.outputs()[1..].iter().enumerate() {
             writeln!(
                 fields,
@@ -575,27 +627,35 @@ impl GemmCodegen for Mps {
                 k + 1
             )
             .unwrap();
+
             members.push(format!("out{}", k + 1));
         }
+
         let operand = |v: Var| {
             let k = body.inputs().iter().position(|&i| i == v);
             format!("in{}", k.expect("a dot's operands are the fusion's inputs"))
         };
+
         let (lhs, rhs) = (operand(dot.inputs[0]), operand(dot.inputs[1]));
         let members = members.join(", ");
         let layout = expanded.map(|(_, layout)| layout);
+
         let (operands, group, interleaved) = match pair {
             Some((first, _)) => (format!("{o} r1, {o} r2"), 2, first.inputs[0] != dot.output),
             None => (format!("{o} r"), 1, layout == Some(Expansion::Pairs)),
         };
+
         let rows = layout == Some(Expansion::Rows);
         let expanded_flag = expanded.is_some();
+
         let flags =
             format!("NAME_epi, false, {expanded_flag}, false, {interleaved}, {group}, {rows}");
+
         let returns = match expanded {
             Some(_) => format!("Pair<{w}>"),
             None => w.to_string(),
         };
+
         let (hoisted, lines) = (&e.hoisted, &e.lines);
         let mut source = formatdoc!(
             "
@@ -607,13 +667,17 @@ impl GemmCodegen for Mps {
             }};
             "
         );
+
         let mpp_pair = gemm_mpp_pair(body, dot);
         let epilogue = gemm_flags(body, dot);
+
         for &(suffix, c) in variants {
             let (bm, bn, bk, threads, cols, simds) =
                 (c.bm, c.bn, c.bk, c.threads, c.cols, c.threads / 32);
+
             let prefetch = c.prefetch;
             let (params, first) = io_params(body, by_value, w, &[]);
+
             let call = match c.algorithm {
                 Algorithm::Tiled => formatdoc!(
                     "
@@ -638,6 +702,7 @@ impl GemmCodegen for Mps {
                     &members,
                 ),
             };
+
             writedoc!(
                 source,
                 "
@@ -649,6 +714,7 @@ impl GemmCodegen for Mps {
             )
             .unwrap();
         }
+
         Ok(named(source))
     }
 }
