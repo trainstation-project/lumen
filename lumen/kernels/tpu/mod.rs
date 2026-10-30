@@ -6,6 +6,8 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::codegen::elementwise::ElementwiseCodegen;
+use crate::codegen::tpu::Tpu;
 use crate::device::tpu::{error, ffi};
 use crate::graph::Primitive;
 use crate::graph_compiler::plan::Step;
@@ -715,6 +717,50 @@ pub(crate) fn launch(index: usize, launch: Launch) -> Result<(), String> {
     }
 }
 
+/// Launches the fused elementwise loop `step` on TPU `index`, writing into `output`.
+fn encode_loop(
+    index: usize,
+    step: &Step,
+    inputs: &[*const u8],
+    output: *mut u8,
+) -> Result<(), String> {
+    let Primitive::Fusion { body, .. } = &step.primitive else {
+        unreachable!("a loop fusion")
+    };
+    if step.output.1.numel() == 0 {
+        return Ok(());
+    }
+    let views: HashMap<usize, (usize, Vec<usize>)> = step
+        .output_views
+        .iter()
+        .enumerate()
+        .filter_map(|(k, v)| v.as_ref().map(|v| (k, (v.offset, v.strides.clone()))))
+        .collect();
+    let code =
+        Tpu::elementwise(body, &[], &views, &()).map_err(|e| format!("{}: {e}", step.label))?;
+    // An indexed loop takes its inputs, then its output; a plain one its output after the step's own inputs.
+    let n = match code.indexed {
+        true => inputs.len(),
+        false => step.inputs.len(),
+    };
+    let rows: Vec<*const u8> = inputs[..n]
+        .iter()
+        .copied()
+        .chain([output.cast_const()])
+        .chain(inputs[n..].iter().copied())
+        .collect();
+    let launched = Launch {
+        module: GENERATED,
+        kernel: code.kernel,
+        spec: code.source,
+        rows: &rows,
+        scalars: &[],
+        host: &[],
+        sparse: None,
+    };
+    launch(index, launched)
+}
+
 /// Runs plan `step` on TPU device `index`, dispatching to the kernel for its primitive or fusion kind.
 pub(crate) fn encode(
     index: usize,
@@ -739,7 +785,7 @@ pub(crate) fn encode(
             super::dynamic_slice::tpu::encode(index, step, inputs, output)
         }
         Primitive::Fusion { ref name, .. } if name == "loop" => {
-            super::elementwise::tpu::encode(index, step, inputs, output)
+            encode_loop(index, step, inputs, output)
         }
         Primitive::DotGeneral { .. } | Primitive::Fusion { .. } => {
             super::dot_general::tpu::encode(index, step, inputs, output)
