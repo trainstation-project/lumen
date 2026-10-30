@@ -28,8 +28,9 @@ cuda = [
 tpu = ["libtpu==0.0.48.1; sys_platform == 'linux'"]
 # `make style`: the pre-commit hooks (.pre-commit-config.yaml).
 dev = ["pre-commit"]
-# `make test`: the Python tests' runner and reference values.
-test = ["pytest", "pytest-xdist", "numpy"]
+# `make test`: the Python tests' runner and reference values (ml_dtypes for
+# the float8 and other narrow dtypes numpy lacks).
+test = ["pytest", "pytest-xdist", "numpy", "ml_dtypes"]
 
 [tool.maturin]
 # Mixed Rust/Python project in one folder: the crate, built with the
