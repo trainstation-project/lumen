@@ -773,7 +773,7 @@ pub(crate) fn encode(
             super::attention::tpu::encode(index, step, inputs, output)
         }
         Primitive::Fusion { ref name, .. } if name == "reduction" => {
-            crate::codegen::tpu::reduction::encode(index, step, inputs, output)
+            super::reduction::tpu::encode(index, step, inputs, output)
         }
         Primitive::Fusion { ref name, .. } if name == "dot_row" => {
             crate::codegen::tpu::gemm_row::encode(index, step, inputs, output)

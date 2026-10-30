@@ -7,10 +7,11 @@
 use indoc::writedoc;
 
 use super::config::{MOST_GEMM_ROW, MOST_WHOLE_ROW};
-use super::reduction::{Reduction, combine, lowest, reduce_along};
+use super::reduction::{combine, lowest, reduce_along};
 use super::utils::indented;
 use super::*;
 use crate::codegen::kinds::{row_partials, row_reductions};
+use crate::codegen::reduction::triton::Reduction;
 use crate::graph::TensorType;
 use crate::graph_compiler::common::diamonds::softmax_pair;
 use crate::graph_compiler::elementwise;
@@ -514,7 +515,7 @@ pub(crate) fn row_epilogue(
             emitter.lines,
             "    tl.store({} + {}, {value}, mask={mask})",
             pointers[o],
-            at(index, shape, strides)
+            stored_at(index, shape, strides)
         )
         .unwrap();
     }
@@ -623,7 +624,7 @@ pub(crate) fn partials_epilogue(
     writeln!(
         emitter.lines,
         "    tl.store(ptr + {}, {value}, mask=mask)\n    blocks = tl.min(n, 1)[:, None] // {tile} + tl.arange(0, value.shape[1] // {tile})[None, :]",
-        at("j", shape, strides)
+        stored_at("j", shape, strides)
     )
     .unwrap();
     let mut combines = String::new();
@@ -640,7 +641,7 @@ pub(crate) fn partials_epilogue(
                 emitter.lines,
                 "    tl.store({} + {}, {value}, mask=mask)",
                 pointers[k],
-                at("j", shape, strides)
+                stored_at("j", shape, strides)
             )
             .unwrap();
             continue;
@@ -671,7 +672,7 @@ pub(crate) fn partials_epilogue(
             emitter.lines,
             "    tl.store({} + {}, {partial}, mask=row_mask & (blocks < {tiles}))",
             pointers[k],
-            at(&index, shape, strides)
+            stored_at(&index, shape, strides)
         )
         .unwrap();
     }

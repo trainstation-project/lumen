@@ -35,9 +35,10 @@ fn address(acc: &Access, batch: &[usize]) -> Result<String, String> {
         .map(|(name, stride)| format!("{name} * {stride}"))
         .collect();
 
-    // Both strides zero (one query row of a per-row tensor): zero offsets still shaped like the tile.
+    // Both strides zero (one query row of a per-row tensor): its rows and columns are read at 0, their own
+    // indices wherever they are read, which keep the tile's shape.
     if tile.is_empty() {
-        tile = vec!["rows * 0".into(), "cols * 0".into()];
+        tile = vec!["rows".into(), "cols".into()];
     }
 
     terms.extend(tile);

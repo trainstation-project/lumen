@@ -5,7 +5,7 @@
 
 use indoc::formatdoc;
 
-use super::{at, load, named};
+use super::{load, named, stored_at};
 
 /// Generates the GEMM epilogue of a linear cross entropy over `rows` rows of `classes` logits, whose
 /// labels have layout `target`: a tile of `BLOCK_SIZE_N` classes writes, per row, its max to `ptr` and
@@ -39,7 +39,7 @@ pub(crate) fn cross_entropy_epilogue(
                 tl.store(ptr + at, peak, mask=row_mask)
                 tl.store(sums + at, total, mask=row_mask)
                 hit = mask & (n == LOAD_LABEL(labels, m, row_mask).to(tl.int64))
-                tl.store(picked + m + n * 0, value, mask=hit)
+                tl.store(picked + m + tl.zeros_like(n), value, mask=hit)
             "
         ),
     )
@@ -49,8 +49,8 @@ pub(crate) fn cross_entropy_epilogue(
 /// maxes, their sums of exponentials and the label's logit) into each row's loss and `logsumexp`, the
 /// rows' `[2, n]` result: one row a program, `BLOCK_SIZE` tiles at a time.
 pub(crate) fn cross_entropy_combine(tiles: usize, out: (&[usize], &[usize])) -> (String, String) {
-    let lse = at("n + o", out.0, out.1);
-    let loss = at("o", out.0, out.1);
+    let lse = stored_at("n + o", out.0, out.1);
+    let loss = stored_at("o", out.0, out.1);
     named(
         "cross_entropy_combine",
         formatdoc!(

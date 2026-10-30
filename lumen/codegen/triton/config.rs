@@ -140,11 +140,11 @@ pub(super) const SPLIT_ROW_LANES: usize = 512;
 /// Most lanes per output when the reduced axis is strided (outputs are contiguous instead).
 pub(super) const COLUMN_LANES: usize = 16;
 /// Reductions with fewer outputs than this are split across programs to fill the GPU.
-pub(super) const SPLIT_BELOW: usize = 1024;
+pub(crate) const SPLIT_BELOW: usize = 1024;
 /// Reduced elements each split aims to cover.
-pub(super) const SPLIT_SPAN: usize = 8192;
+pub(crate) const SPLIT_SPAN: usize = 8192;
 /// Upper bound on splits per output.
-pub(super) const MOST_SPLITS: usize = 512;
+pub(crate) const MOST_SPLITS: usize = 512;
 /// Widest row a normalization row kernel holds whole in registers (XMA's `MAX_TRITON_BLOCK_SIZE`);
 /// wider rows are walked in chunks of `BLOCK_SIZE`, a pass a reduction.
 pub(super) const MOST_WHOLE_ROW: usize = 65536;

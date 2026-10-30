@@ -14,11 +14,11 @@ use crate::tensor::dtype::dispatch_dtype;
 use crate::tensor::storage::as_bytes;
 use crate::{DType, Element, Scalar};
 
-mod config;
+pub(crate) mod config;
 mod cross_entropy;
 mod gemm;
 mod indexing;
-mod reduction;
+pub(crate) mod reduction;
 mod row;
 pub(crate) mod utils;
 
@@ -30,7 +30,7 @@ pub(crate) use config::{
 pub(crate) use cross_entropy::{cross_entropy_combine, cross_entropy_epilogue};
 pub(crate) use gemm::{EpilogueFlags, epilogue, gemm, gemm_dot, gemm_flags};
 pub(crate) use indexing::{scatter_add, update, updates};
-pub(crate) use reduction::{reduction, reduction_root, scan};
+pub(crate) use reduction::{reduction_root, scan};
 pub(crate) use row::{
     dot_row_fits, partials_epilogue, row, row_count, row_epilogue, row_groups, row_looped,
 };
@@ -141,15 +141,19 @@ pub(crate) fn fill(dtype: DType) -> (String, String) {
     named("fill", source)
 }
 
-/// Generates a jit helper loading flat logical index `i` from a tensor with the given strides.
+/// Generates a jit helper loading flat logical index `i` from a tensor with the given strides; a tensor
+/// broadcast along every dim is loaded once and broadcast to the mask's shape.
 pub(crate) fn load(shape: &[usize], strides: &[usize]) -> (String, String) {
+    let load = match at("i", shape, strides) {
+        Some(at) => format!("tl.load(ptr + {at}, mask=mask)"),
+        None => "tl.broadcast_to(tl.load(ptr), mask.shape)".into(),
+    };
     let source = formatdoc!(
         "
         @triton.jit
         def NAME(ptr, i, mask):
-            return tl.load(ptr + {}, mask=mask)
-        ",
-        at("i", shape, strides)
+            return {load}
+        "
     );
     named("load", source)
 }
@@ -162,20 +166,26 @@ pub(crate) fn store(shape: &[usize], strides: &[usize]) -> (String, String) {
         def NAME(ptr, i, value, mask):
             tl.store(ptr + {}, value, mask=mask)
         ",
-        at("i", shape, strides)
+        stored_at("i", shape, strides)
     );
     named("store", source)
 }
 
-/// Address expression for flat logical index `idx`, or `idx` itself when the layout is contiguous.
-fn at(idx: &str, shape: &[usize], strides: &[usize]) -> String {
-    match strides == contiguous_strides(shape) {
-        true => idx.to_string(),
-        // `idx * 0` keeps a block-shaped offset when every dim is broadcast.
-        false => match gather_index(idx, shape, strides).as_str() {
-            "0" => format!("{idx} * 0"),
-            offset => offset.to_string(),
-        },
+/// Address expression storing flat logical index `idx`: an output is written at distinct elements, never
+/// broadcast.
+pub(crate) fn stored_at(idx: &str, shape: &[usize], strides: &[usize]) -> String {
+    at(idx, shape, strides).expect("an output written at distinct elements")
+}
+
+/// Address expression for flat logical index `idx`: `idx` itself when the layout is contiguous or holds one
+/// element (its index is 0 wherever the mask reads), or `None` when every dim is broadcast.
+fn at(idx: &str, shape: &[usize], strides: &[usize]) -> Option<String> {
+    if strides == contiguous_strides(shape) || shape.iter().product::<usize>() == 1 {
+        return Some(idx.to_string());
+    }
+    match gather_index(idx, shape, strides).as_str() {
+        "0" => None,
+        offset => Some(offset.to_string()),
     }
 }
 
@@ -222,7 +232,7 @@ pub(crate) struct Emitter<'a> {
     /// Local name already holding each index expression.
     pub(crate) indices: HashMap<String, String>,
     /// Counter for fresh local names.
-    locals: usize,
+    pub(crate) locals: usize,
     /// Mask expression guarding loads at the current point.
     pub(crate) mask: String,
     /// Local holding each row reduction already computed, read at any index (a row kernel's rows).
@@ -626,8 +636,9 @@ impl<'a> Emitter<'a> {
                     .zip(&x_strides)
                     .map(|(s, st)| s * st)
                     .sum();
+                // A slice of one element is read at index 0, which its own index is wherever it is read.
                 let i = match gather_index(&idx, &ty.shape, &x_strides).as_str() {
-                    "0" => format!("{idx} * 0"),
+                    "0" => idx.clone(),
                     i => i.to_string(),
                 };
                 self.index(format!("{start} + {i}"))
@@ -769,8 +780,9 @@ impl<'a> Emitter<'a> {
                                 strides[d]
                             ));
                         }
+                        // Of one element, the slice is read at index 0, which its own index is wherever it is read.
                         let i = match terms.is_empty() {
-                            true => format!("{idx} * 0"),
+                            true => idx.clone(),
                             false => terms.join(" + "),
                         };
                         let i = self.index(i);
@@ -871,7 +883,7 @@ pub(crate) fn constant(dtype: DType, value: Scalar) -> String {
 
 /// Offset expression for flat logical index `idx` of a tensor with `shape` and element `strides`.
 /// Adjacent dims that stay contiguous with each other are merged so fewer div/mod terms are emitted.
-fn gather_index(idx: &str, shape: &[usize], strides: &[usize]) -> String {
+pub(crate) fn gather_index(idx: &str, shape: &[usize], strides: &[usize]) -> String {
     let spans = contiguous_strides(shape);
     /// Consecutive dims `first..=last` addressable as one dim of `size` with `stride`.
     struct Run {

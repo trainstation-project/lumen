@@ -9,6 +9,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use indoc::{formatdoc, indoc, writedoc};
 
 use crate::codegen::elementwise::ElementwiseCodegen;
+use crate::codegen::reduction::ReductionCodegen;
 use crate::graph::{Graph, Node, Primitive, UnaryOp, Var};
 use crate::graph_compiler::MpsConfig;
 use crate::graph_compiler::common::attention::{Attention, Backward};
@@ -22,18 +23,18 @@ mod config;
 mod emitter;
 mod gemm;
 mod gemm_row;
-mod reduction;
 mod row;
 mod stores;
 mod transpose;
 mod updates;
 
+pub(crate) use crate::codegen::kinds::reduction_root;
+pub(crate) use crate::codegen::reduction::mps::{has_epilogue, split_launches};
 pub(crate) use config::*;
 pub(crate) use emitter::Emitter;
 use emitter::*;
 pub(crate) use gemm::*;
 pub(crate) use gemm_row::*;
-pub(crate) use reduction::*;
 pub(crate) use row::*;
 pub(crate) use stores::written;
 pub(crate) use transpose::*;
@@ -92,7 +93,8 @@ pub(crate) fn kernel(
         return row_kernel(body, by_value, &rows, config, None);
     }
     if let Some(root) = reduction_root(body) {
-        return reduction(body, by_value, root);
+        return Mps::reduction(body, by_value, root)
+            .expect("a Metal reduction of every reduction body");
     }
     if let Some(tiling) = transpose_tiling(body) {
         return transpose_kernel(body, by_value, &tiling, views);

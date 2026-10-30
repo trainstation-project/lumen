@@ -1,6 +1,6 @@
 //! Turns the planned fusion groups into `loop` and `reduction` fusion nodes.
 use super::groups::{Groups, planned};
-use crate::codegen::tpu::reduction::reducible;
+use crate::codegen::reduction::tpu::reducible;
 use crate::graph::Graph;
 use crate::graph_compiler::common::loops::fused;
 
