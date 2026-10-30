@@ -354,7 +354,7 @@ impl<'a> Emitter<'a> {
 
 /// Metal expression of the strided offset for flat index `idx` into `shape`, merging adjacent
 /// dims that stay contiguous under `strides` into one divide/modulo term.
-pub(super) fn gather_index(idx: &str, shape: &[usize], strides: &[usize]) -> String {
+pub(crate) fn gather_index(idx: &str, shape: &[usize], strides: &[usize]) -> String {
     let spans = contiguous_strides(shape);
 
     struct Run {

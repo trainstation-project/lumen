@@ -55,7 +55,7 @@ pub(crate) fn encode(
     let rows = [inputs[0], output.cast_const()];
 
     let launched = Launch {
-        module: "lumen.kernels.layout.tpu",
+        module: "lumen.codegen.layout.tpu",
         kernel: format!("reshape_{}_{a}x{w}", if split { "split" } else { "merge" }),
         spec,
         rows: &rows,

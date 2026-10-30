@@ -21,17 +21,15 @@ use crate::{DType, Scalar};
 mod config;
 mod emitter;
 mod stores;
-mod transpose;
 
 pub(crate) use crate::codegen::dot_general::mps::*;
 pub(crate) use crate::codegen::kinds::reduction_root;
+pub(crate) use crate::codegen::layout::mps::transpose::*;
 pub(crate) use crate::codegen::reduction::mps::{has_epilogue, split_launches};
 pub(crate) use crate::codegen::row::mps::*;
 pub(crate) use config::*;
-pub(crate) use emitter::Emitter;
-use emitter::*;
+pub(crate) use emitter::{Emitter, gather_index};
 pub(crate) use stores::written;
-pub(crate) use transpose::*;
 
 /// The Metal code generator.
 pub(crate) struct Mps;

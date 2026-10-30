@@ -2,7 +2,6 @@
 pub mod dummy_op;
 pub mod factory;
 pub(crate) mod launched;
-pub mod layout;
 #[cfg(lumen_mps_linked)]
 pub(crate) mod mps;
 #[cfg(feature = "python")]

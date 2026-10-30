@@ -882,7 +882,9 @@ pub(crate) fn encode(
         Primitive::DotGeneral { .. } | Primitive::Fusion { .. } => {
             crate::codegen::dot_general::tpu::encode(index, step, inputs, output)
         }
-        Primitive::Reshape { .. } => super::layout::tpu::encode(index, step, inputs, output),
+        Primitive::Reshape { .. } => {
+            crate::codegen::layout::tpu::encode(index, step, inputs, output)
+        }
         Primitive::Gather { .. } => {
             crate::codegen::indexing::tpu::gather::encode(index, step, inputs, output)
         }

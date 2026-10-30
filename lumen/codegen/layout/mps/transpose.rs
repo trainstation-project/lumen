@@ -1,6 +1,13 @@
 //! Metal source for transposes fused with elementwise ops, staged through threadgroup tiles so
 //! both the reads and the writes are coalesced.
-use super::*;
+use std::collections::HashMap;
+use std::fmt::Write;
+
+use indoc::formatdoc;
+
+use crate::codegen::mps::*;
+use crate::graph::{Graph, Node, Primitive, Var};
+use crate::tensor::contiguous_strides;
 
 /// How a body's output is tiled for a transpose kernel.
 pub(crate) struct TransposeTiling {
@@ -153,7 +160,7 @@ pub(crate) fn transpose_tiling(body: &Graph) -> Option<TransposeTiling> {
 
 /// Generates the tiled transpose kernel: loads each hero transpose's input into a tile at input
 /// order, then computes and stores the outputs reading the tile transposed.
-pub(super) fn transpose_kernel(
+pub(crate) fn transpose_kernel(
     body: &Graph,
     by_value: &[bool],
     tiling: &TransposeTiling,

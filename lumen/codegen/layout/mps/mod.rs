@@ -1,5 +1,7 @@
 //! Encodes layout primitives (reshape, broadcast, transpose, slice) on MPS as strided copies.
 
+pub(crate) mod transpose;
+
 use crate::Tensor;
 use crate::graph::Primitive::*;
 use crate::graph_compiler::plan::Step;
