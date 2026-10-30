@@ -277,7 +277,7 @@ pub(crate) fn row_node(node: &Node, args: &[usize], kind: Kind) -> String {
         | Primitive::BroadcastInDim { .. } => named(String::new()),
         // Splice the kind into the plain node's closing brace.
         p => {
-            let plain = super::node(p, args);
+            let plain = crate::codegen::tpu::node(p, args);
 
             format!(
                 "{}, \"kind\": \"{}\"}}",
