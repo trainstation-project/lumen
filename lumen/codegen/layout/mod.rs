@@ -20,6 +20,7 @@ pub(crate) trait LayoutCodegen {
     /// Code for the fusion `body` whose output is computed elementwise from transposes, staged through
     /// tiles; the inputs flagged in `by_value` are passed as scalars and the outputs in `views` written at
     /// their (offset, strides).
+    #[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
     fn transpose(
         body: &Graph,
         by_value: &[bool],
