@@ -325,9 +325,7 @@ pub(crate) fn encode(
         Reshape { .. } | BroadcastInDim { .. } | Transpose { .. } | Slice { .. } => {
             crate::codegen::layout::mps::encode
         }
-        DynamicSlice { .. } | DynamicUpdateSlice => {
-            crate::codegen::indexing::mps::dynamic_slice::encode
-        }
+        DynamicSlice { .. } | DynamicUpdateSlice => crate::codegen::dynamic_slice::mps::encode,
         ScatterAdd { .. } => crate::codegen::indexing::mps::scatter_add::encode,
         HostWait => super::wait::encode,
         ToHost | ToDevice => {

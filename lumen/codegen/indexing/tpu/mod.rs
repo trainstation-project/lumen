@@ -1,4 +1,3 @@
-//! TPU indexing: the gather and dynamic-slice Pallas programs and their launchers.
+//! TPU indexing: the gather Pallas program and its launcher.
 
-pub(crate) mod dynamic_slice;
 pub(crate) mod gather;

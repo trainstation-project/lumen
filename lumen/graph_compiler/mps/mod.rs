@@ -933,7 +933,7 @@ pub(super) fn encode_with(
         if output.cast_const() != inputs[0] {
             let x = &step.inputs[0].1;
 
-            crate::codegen::indexing::mps::dynamic_slice::copy(
+            crate::codegen::dynamic_slice::mps::copy(
                 inputs[0],
                 output,
                 x,

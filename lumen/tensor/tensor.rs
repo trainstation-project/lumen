@@ -804,13 +804,7 @@ impl Tensor {
             if self.numel() > 0 && self.data_ptr() != src.data_ptr() {
                 let (from, to) = (src.data_ptr().cast_const(), self.data_ptr());
                 let keep = vec![src.clone(), self.clone()];
-                crate::codegen::indexing::mps::dynamic_slice::copy(
-                    from,
-                    to,
-                    &self.ty(),
-                    keep,
-                    "copy_",
-                )?;
+                crate::codegen::dynamic_slice::mps::copy(from, to, &self.ty(), keep, "copy_")?;
             }
 
             return Ok(self);

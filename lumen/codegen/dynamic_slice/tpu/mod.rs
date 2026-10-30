@@ -2,7 +2,7 @@
 //! touches, and whether the touched region can stay resident in VMEM.
 use crate::DType;
 use crate::codegen::dot_general::tpu::block;
-use crate::codegen::indexing::IndexingCodegen;
+use crate::codegen::dynamic_slice::DynamicSliceCodegen;
 use crate::codegen::utils::tpu::Tpu;
 use crate::device::tpu::layout::Layout;
 use crate::graph::{Graph, Primitive, TensorType};
@@ -231,9 +231,9 @@ fn program(
     })
 }
 
-/// TPU indexing: the fixed `dynamic_update_slice` Pallas program, specialized by a spec of the operand,
+/// TPU dynamic slices: the fixed `dynamic_update_slice` Pallas program, specialized by a spec of the operand,
 /// the updates and their blocks.
-impl IndexingCodegen for Tpu {
+impl DynamicSliceCodegen for Tpu {
     type Code = Program;
 
     /// The program writing the `updates` fusion `body`'s updates at their constant starts.
@@ -248,13 +248,6 @@ impl IndexingCodegen for Tpu {
     /// The program writing `update` into `operand` at runtime int32 starts.
     fn update(operand: &TensorType, update: &TensorType, _: &[bool]) -> Result<Program, String> {
         program(operand, update, None, 1)
-    }
-
-    /// No TPU scatter-add yet.
-    fn scatter_add(operand: &TensorType, _: usize, _: usize) -> Result<Program, String> {
-        Err(format!(
-            "scatter_add does not run on TPU yet: into {operand}"
-        ))
     }
 }
 
@@ -299,7 +292,7 @@ pub(crate) fn encode(
         .collect();
 
     let launched = Launch {
-        module: "lumen.codegen.indexing.tpu.dynamic_slice",
+        module: "lumen.codegen.dynamic_slice.tpu",
         kernel: p.kernel,
         spec,
         rows: &rows_of,

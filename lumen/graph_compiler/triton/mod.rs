@@ -46,6 +46,7 @@ use super::common::updates::Updates;
 use super::pass::{Module, Pipeline};
 use super::plan::{Buffer, Step, Tuned};
 use super::{CompilerConfig, Options, Plan, plan_options, positions};
+use crate::codegen::dynamic_slice::DynamicSliceCodegen;
 use crate::codegen::elementwise::ElementwiseCodegen;
 use crate::codegen::indexing::IndexingCodegen;
 use crate::codegen::layout::{LayoutCodegen, TILE, transpose_tiling};

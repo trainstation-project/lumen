@@ -52,13 +52,7 @@ pub(crate) fn encode(
     if output.cast_const() != inputs[0] {
         let name = step.label;
 
-        crate::codegen::indexing::mps::dynamic_slice::copy(
-            inputs[0],
-            output,
-            x,
-            keep.clone(),
-            name,
-        )?;
+        crate::codegen::dynamic_slice::mps::copy(inputs[0], output, x, keep.clone(), name)?;
     }
 
     let kernel = match scan {
