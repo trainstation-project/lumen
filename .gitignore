@@ -3,3 +3,5 @@ __pycache__
 *.so
 .pytest_cache
 .DS_Store
+.coverage
+*.profraw

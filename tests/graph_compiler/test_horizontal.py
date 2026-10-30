@@ -212,3 +212,25 @@ def test_in_place_updates_fused(device, compiler):
         np.testing.assert_array_equal(f, a)
         np.testing.assert_array_equal(f, b)
         np.testing.assert_allclose(f, w, rtol=1e-5, atol=1e-6)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_independent_transposes_are_one_kernel(device, compiler):
+    """Independent fusions each transposing an operand of one shape are one
+    tiled kernel on MPS while their transposes stay within its limit (4):
+    three are one step, six two. Each output the CPU's."""
+    arrays = [rand(256, 384, seed=k) for k in range(6)]
+    args = _device(device, *arrays)
+
+    def f(*xs):
+        """A transpose of each input, each through its own elementwise op."""
+        return tuple(F.exp(x.t()) if k % 2 else x.t() * float(k + 2) for k, x in enumerate(xs))
+
+    if device == "mps":
+        (step,) = _steps(device, lambda a, b, c: f(a, b, c), *args[:3])
+        assert _merged(step["label"]) and len(step["extra_outputs"]) == 2, step["label"]
+        assert len(_steps(device, f, *args)) == 2, [s["label"] for s in _steps(device, f, *args)]
+    got = lumen.compile(f)(*args)
+    want = lumen.compile(f, device="cpu")(*(lumen.from_numpy(a) for a in arrays))
+    for g, w in zip(got, want):
+        np.testing.assert_allclose(lumen.to_numpy(g), lumen.to_numpy(w), rtol=1e-6)

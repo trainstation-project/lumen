@@ -98,7 +98,7 @@ impl Function {
 /// The kernels a step's launches were compiled for, kept with its generated helpers: the launcher finds
 /// a run's kernel here by its config and argument classes instead of building a key each run.
 #[derive(Default)]
-#[cfg_attr(not(lumen_cuda_linked), allow(dead_code))]
+#[cfg_attr(any(not(lumen_cuda_linked), not(feature = "python")), allow(dead_code))]
 pub struct Launches(pub(crate) Mutex<Vec<Arc<dyn Any + Send + Sync>>>);
 
 /// Launches a loop kernel over `n` outputs on `programs` programs with the given helper functions,

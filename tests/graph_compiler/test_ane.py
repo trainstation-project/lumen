@@ -8,6 +8,7 @@ import pytest
 
 import lumen
 import lumen.functional as F
+from lumen import prims
 
 pytestmark = pytest.mark.skipif(
     platform.system() != "Darwin" or platform.machine() != "arm64", reason="the Neural Engine is Apple silicon's"
@@ -175,3 +176,82 @@ def test_neural_engine_steps_are_profiled(neural_engine, tmp_path):
     names = {e["pid"]: e["args"]["name"] for e in events if e.get("name") == "process_name"}
     runs = [e for e in events if e.get("cat") == "kernel" and e["name"].startswith("coreml →")]
     assert runs and all(names[e["pid"]] == "Neural Engine" for e in runs), names
+
+
+class _Weights(lumen.nn.Module):
+    """An MLP's float16 weights ``w``, ``b``, ``w2`` and a float32 copy of ``w``'s shape, ``w32``."""
+
+    w: lumen.Tensor
+    w32: lumen.Tensor
+    b: lumen.Tensor
+    w2: lumen.Tensor
+
+
+# Ops after an MLP's first dot, each an extra output beside the MLP's own (or, for the weights, how the first dot
+# reads them): each lowered into the Core ML program, and in it where Core ML runs them on the Neural Engine.
+_TAILS = {
+    "sub, mul and div": (True, lambda h, i, s: ((h - 1.0) * s / 2.0,)),
+    "div": (True, lambda h, i, s: (h / (h * h + 1.0),)),
+    "transpose": (True, lambda h, i, s: (h.t() * 2.0,)),
+    "tanh and logistic": (True, lambda h, i, s: (F.tanh(h) + F.sigmoid(h),)),
+    "exp of a negation": (True, lambda h, i, s: (F.exp(-h),)),
+    "log and sqrt": (False, lambda h, i, s: (F.log(F.sigmoid(h)) + F.sqrt(F.sigmoid(h)),)),
+    "select of lt": (True, lambda h, i, s: (F.where(h < 0.0, h, h * 2.0),)),
+    "select of eq": (True, lambda h, i, s: (F.where(h == 0.0, h, h * 2.0),)),
+    "gather of int32 indices": (True, lambda h, i, s: (prims.gather(h, i, 0),)),
+    "gather of an iota": (True, lambda h, i, s: (prims.gather(h, prims.iota("int32", (M,), 0), 0),)),
+    "sum": (True, lambda h, i, s: (F.sum(h, -1),)),
+    "max": (True, lambda h, i, s: (F.amax(h, -1),)),
+    "reshape and slice": (True, lambda h, i, s: (h.reshape(M, K, 2)[:, :8],)),
+    "concatenate": (True, lambda h, i, s: (F.cat([h[:, :8], h[:, 8:16]], 1),)),
+    "two outputs": (True, lambda h, i, s: (h * 2.0, h + 1.0)),
+    "a transposed weight": (True, None),
+    "a float32 weight": (False, None),
+}
+
+
+@pytest.mark.parametrize("tail", list(_TAILS))
+def test_neural_engine_lowers_each_op(neural_engine, tail):
+    """Each op Core ML programs run, after an MLP's first dot of fixed
+    weights (``relu(x @ w + b) @ w2``) and reading it, is lowered into its
+    program: one Core ML step of the MLP and the op where Core ML places
+    them all on the Neural Engine (int32 indices and a float16 scalar read
+    from the step's inputs; a transposed weight transposed in it), the MLP
+    on lumen's kernels where it does not (log and sqrt, a float32 weight
+    cast). The results lumen's MPS kernels' (the flag off) to float16's
+    precision: the CPU reference of these dots is too slow to compare."""
+    on_ane, ops = _TAILS[tail]
+
+    def f(m, x, i, s):
+        """The MLP of ``x`` and the tail's outputs of its first dot."""
+        w = {"a transposed weight": m.w.t().t(), "a float32 weight": m.w32.to(dtype="float16")}.get(tail, m.w)
+        h = F.matmul(x, w, "float32", "float16")
+        out = F.matmul(F.relu(h + m.b), m.w2, "float32", "float16")
+        return (out,) + (ops(h, i, s) if ops else ())
+
+    rng = np.random.default_rng(0)
+    w1, b1, w2 = _values()
+    values = (w1, w1.astype(np.float32), b1, w2)
+    args = ((rng.standard_normal((M, K)) / 4).astype(np.float16), rng.integers(0, M, M).astype(np.int32))
+    args += (np.array(0.5, np.float16),)
+    metas = [lumen.empty(list(a.shape), str(a.dtype), device="meta") for a in args]
+    results = {}
+    for ane in (False, True):
+        lumen.config.compiler.mps.neural_engine = ane
+        model = _Weights(*(lumen.empty(list(v.shape), str(v.dtype), device="meta") for v in values))
+        try:
+            compiled = lumen.compile(f, device="mps")
+            compiled(model, *metas)
+        except RuntimeError as e:
+            pytest.skip(str(e))
+        _load(model, values)
+        out = compiled(model, *(lumen.from_numpy(a).to("mps") for a in args))
+        results[ane] = [lumen.to_numpy(o.to("cpu")).astype(np.float32) for o in out]
+    graph = lumen.make_graph(f)(
+        _Weights(*(lumen.empty(list(v.shape), str(v.dtype), device="meta") for v in values)), *metas
+    )
+    plan = lumen.graph_compiler.Plan(graph, "mps", parameters=[3, 4, 5, 6])
+    coreml = [s["label"] for s in plan.steps() if s["label"].startswith("coreml")]
+    assert plan.neural_engine == on_ane and len(coreml) == int(on_ane), [s["label"] for s in plan.steps()]
+    for got, want in zip(results[True], results[False]):
+        np.testing.assert_allclose(got, want, rtol=2e-2, atol=2e-2 * max(1.0, np.abs(want).max() / 64))

@@ -226,6 +226,37 @@ def test_flash_attention_checks_its_operands():
         call(m(1, 4, 2, 8, dtype="int32"), m(1, 4, 2, 8, dtype="int32"), m(1, 4, 2, 8, dtype="int32"))
 
 
+@pytest.mark.parametrize(
+    "f, shapes, error",
+    [
+        (lambda q, k, v: F.attention_decode(q, k, v, 0), [(4, 3, 8), (1, 4, 2, 8), (1, 4, 2, 8)], r"query must be"),
+        (lambda q, k, v: F.attention_decode(q, k, v, 1.5), [(1, 1, 2, 8), (1, 4, 2, 8), (1, 4, 2, 8)], "start must"),
+        (
+            lambda q, k, v: F.attention_decode(q, k, v, 0),
+            [(1, 1, 3, 8), (1, 4, 2, 8), (1, 4, 2, 8)],
+            "multiple of Nkv",
+        ),
+        (lambda q, k, v: F.naive_attention(q, k, v), [(1, 4, 2, 8), (4, 2, 8), (1, 4, 2, 8)], r"key must be"),
+        (lambda q, k, v: F.naive_attention(q, k, v), [(1, 1, 2, 8), (1, 4, 2, 4), (1, 4, 2, 8)], "multiple of Nkv"),
+    ],
+)
+def test_decode_and_naive_attention_check_their_operands(f, shapes, error):
+    """Decode and naive attention reject operands that are not 4-d, a start
+    that is not an int, and mismatched shapes or head counts."""
+    with pytest.raises(ValueError, match=error):
+        lumen.make_graph(f)(*(lumen.empty(list(s), device="meta") for s in shapes))
+
+
+def test_attention_decode_start_is_an_int_or_a_0d_integer_tensor():
+    """A start that is a tensor must be a 0-d integer one."""
+    m = lambda *s, dtype="float32": lumen.empty(list(s), dtype=dtype, device="meta")  # noqa: E731
+    q, k, v = m(1, 1, 2, 8), m(1, 4, 2, 8), m(1, 4, 2, 8)
+    for start in (m(1, dtype="int32"), m(dtype="float32")):
+        with pytest.raises(ValueError, match="start must be an int or a 0-d integer tensor"):
+            lumen.make_graph(F.attention_decode)(q, k, v, start)
+    lumen.make_graph(F.attention_decode)(q, k, v, m(dtype="int32"))
+
+
 @pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize(
     "f, sq",
@@ -686,3 +717,204 @@ def test_flash_attention_training_has_no_precision_warning():
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         lumen.make_graph(lumen.grad(loss, (0, 1, 2)))(*m)
+
+
+def _scaled_scores(q, k, scale=0.125):
+    """``q k^T * scale`` of [B, N, S, H] operands, accumulated in and written as float32."""
+    return F.matmul(q, k.transpose(-1, -2), "float32", "float32") * scale
+
+
+def _weighted(p, v):
+    """``p v`` accumulated in and written as float32."""
+    return F.matmul(p, v, "float32", "float32")
+
+
+def _coordinates(s):
+    """Query and key index of every score of ``s`` [B, N, Sq, Sk], as int64 iotas."""
+    return prims.iota("int64", s.shape, 2), prims.iota("int64", s.shape, 3)
+
+
+def _strict_mask(q, k, v):
+    """Causal attention masked with ``key < query + 1`` (one ``lt``)."""
+    s = _scaled_scores(q, k)
+    rows, cols = _coordinates(s)
+    return _weighted(F.softmax(F.where(cols < rows + 1, s, float("-inf")), -1), v)
+
+
+def _broadcast_mask(q, k, v):
+    """Causal attention whose mask compares a [Sq, 1] int32 iota (cast to
+    int64) with a [1, Sk] one and is reshaped and broadcast onto the scores."""
+    s = _scaled_scores(q, k)
+    sq, sk = s.shape[2], s.shape[3]
+    rows = prims.iota("int32", (sq,), 0).reshape((sq, 1)).to(dtype="int64")
+    cols = prims.iota("int64", (1, sk), 1)
+    mask = F.le(cols, rows).reshape((1, 1, sq, sk))
+    return _weighted(F.softmax(F.where(mask, s, float("-inf")), -1), v)
+
+
+def _diagonal_mask(q, k, v):
+    """Attention to the diagonal only (``key == query``): not a causal mask."""
+    s = _scaled_scores(q, k)
+    rows, cols = _coordinates(s)
+    return _weighted(F.softmax(F.where(cols == rows, s, float("-inf")), -1), v)
+
+
+def _finite_fill(q, k, v):
+    """Causal attention masking with -1e9 instead of -inf."""
+    s = _scaled_scores(q, k)
+    rows, cols = _coordinates(s)
+    return _weighted(F.softmax(F.where(cols <= rows, s, -1e9), -1), v)
+
+
+def _biased(q, k, v):
+    """Attention with a constant added to its scores."""
+    return _weighted(F.softmax(_scaled_scores(q, k) + 0.5, -1), v)
+
+
+def _negatively_scaled(q, k, v):
+    """Attention with its scores scaled by a negative constant."""
+    return _weighted(F.softmax(_scaled_scores(q, k, -0.125), -1), v)
+
+
+def _unmasked_scores_returned(q, k, v):
+    """Causal attention that also returns its scores before the mask."""
+    s = _scaled_scores(q, k)
+    rows, cols = _coordinates(s)
+    return _weighted(F.softmax(F.where(cols <= rows, s, float("-inf")), -1), v), s
+
+
+def _scores_returned(q, k, v):
+    """Attention that also returns the scores its softmax reads."""
+    s = _scaled_scores(q, k)
+    return _weighted(F.softmax(s, -1), v), s
+
+
+def _exponentials_returned(q, k, v):
+    """Attention with its softmax written out, also returning its exponentials."""
+    s = _scaled_scores(q, k)
+    e = F.exp(s - F.amax(s, -1, keepdim=True))
+    return _weighted(e / F.sum(e, -1, keepdim=True), v), e
+
+
+def _other_sum(q, k, v):
+    """Exponentials divided by the sum of other values (scaled ones): not a softmax."""
+    s = _scaled_scores(q, k)
+    e = F.exp(s - F.amax(s, -1, keepdim=True))
+    return _weighted(e / F.sum(e * 1.5, -1, keepdim=True), v)
+
+
+def _other_max(q, k, v):
+    """Exponentials of the scores shifted by the maximum of other values (scaled ones)."""
+    s = _scaled_scores(q, k)
+    e = F.exp(s - F.amax(s * 1.5, -1, keepdim=True))
+    return _weighted(e / F.sum(e, -1, keepdim=True), v)
+
+
+def _mixed_dtypes(q, k, v):
+    """float32 scores weighting bfloat16 values: the operands' dtypes differ."""
+    p = F.softmax(_scaled_scores(q, k), -1).to(dtype="bfloat16")
+    return F.matmul(p, v.to(dtype="bfloat16"), "float32", "float32")
+
+
+WRITTEN_VARIANTS = [
+    (_strict_mask, True),
+    (_broadcast_mask, True),
+    (_diagonal_mask, False),
+    (_finite_fill, False),
+    (_biased, False),
+    (_negatively_scaled, False),
+    (_unmasked_scores_returned, False),
+    (_scores_returned, False),
+    (_exponentials_returned, False),
+    (_other_sum, False),
+    (_other_max, False),
+    (_mixed_dtypes, False),
+]
+
+
+@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("f, fused", WRITTEN_VARIANTS, ids=[f.__name__.strip("_") for f, _ in WRITTEN_VARIANTS])
+def test_written_attention_fuses_only_as_the_kernel_computes_it(f, fused, device, triton_on_cuda):
+    """Written-out attention is one flash-attention kernel when its mask is a
+    causal one however it is built (``lt``, broadcast iotas, casts, unit
+    reshapes), and runs as traced when the kernel would compute something
+    else (another mask or fill, a bias, a negative scale, a different
+    dtype, a sum or max of other values) or when a value it keeps inside
+    is read too; agreeing with the CPU either way."""
+    ts, arrays = tensors(device, "float32", (1, 2, 16, 32), (1, 2, 16, 32), (1, 2, 16, 32))
+    labels = steps(f, *ts, device=device)
+    assert ("flash_attention" in labels) == fused, labels
+    got = lumen.compile(f)(*ts)
+    want = lumen.compile(f, device="cpu")(*(lumen.from_numpy(a) for a in arrays))
+    got, want = (r if isinstance(r, tuple) else (r,) for r in (got, want))
+    for g, w in zip(got, want):
+        g, w = (lumen.to_numpy(t.to(dtype="float32").to("cpu")) for t in (g, w))
+        np.testing.assert_allclose(g, w, rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_attention_epilogue_stops_where_its_value_is_read_first(device, triton_on_cuda):
+    """An epilogue whose chain reads the attention's value through another
+    op first (``o * 2 + tanh(o)``) is not fused: the attention is its own
+    kernel; and a by-value scalar operand ends an epilogue too. Both agree
+    with the CPU."""
+    ts, arrays = tensors(device, "float32", (1, 16, 2, 32), (1, 16, 2, 32), (1, 16, 2, 32))
+    cpu = [lumen.from_numpy(a) for a in arrays]
+
+    def read_first(q, k, v):
+        """The attention doubled plus its tanh."""
+        o = F.flash_attention(q, k, v)
+        return o * 2.0 + F.tanh(o)
+
+    def scaled(q, k, v, c):
+        """The attention times the runtime scalar `c`."""
+        return F.flash_attention(q, k, v) * c
+
+    labels = steps(read_first, *ts, device=device)
+    assert "flash_attention" in labels and not any(s.startswith("flash_attention →") for s in labels), labels
+    c = lumen.Tensor.full([], 0.5, "float32")
+    plan = lumen.graph_compiler.Plan(lumen.make_graph(scaled)(*ts, c), device, scalars=[3])
+    labels = [s["label"] for s in plan.steps()]
+    assert "flash_attention" in labels and not any(s.startswith("flash_attention →") for s in labels), labels
+    for f, args in ((read_first, ()), (scaled, (0.5,))):
+        got = lumen.to_numpy(lumen.compile(f)(*ts, *args).to("cpu"))
+        want = lumen.to_numpy(lumen.compile(f, device="cpu")(*cpu, *args))
+        np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_attention_reads_a_query_it_cannot_view_from_a_copy(device, triton_on_cuda):
+    """A query merged from heads and positions of a transposed tensor (no
+    strided view of the input) is made contiguous first, then attended in
+    one kernel; agreeing with the CPU."""
+    ts, arrays = tensors(device, "float32", (1, 16, 2, 32), (1, 32, 32), (1, 32, 32))
+
+    def merged(x, k, v):
+        """Single-batch attention whose query is ``x`` [B, S, N, H] as [B, N*S, H]."""
+        q = x.permute(0, 2, 1, 3).reshape((1, 32, 32))
+        return _weighted(F.softmax(_scaled_scores(q, k), -1), v)
+
+    labels = steps(merged, *ts, device=device)
+    assert "flash_attention" in labels and len(labels) == 2, labels
+    got = lumen.to_numpy(lumen.compile(merged)(*ts).to("cpu"))
+    want = lumen.to_numpy(lumen.compile(merged, device="cpu")(*(lumen.from_numpy(a) for a in arrays)))
+    np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("argnums, h", [((0,), 32), ((1, 2), 32), ((0, 1, 2), 160)], ids=["dq", "dk dv", "head 160"])
+def test_attention_backward_the_kernels_cannot_take_runs_as_traced(argnums, h, device, triton_on_cuda):
+    """A backward asking for only some of dQ, dK and dV, or with a head
+    dimension past the backward kernels' (128, the forward taking it), runs
+    as traced after the fused forward; agreeing with the CPU."""
+    ts, arrays = tensors(device, "float32", *[(1, 24, 2, h)] * 3)
+    grad = lumen.grad(lambda q, k, v: F.sum(F.tanh(F.flash_attention(q, k, v, is_causal=True))), argnums)
+    labels = steps(grad, *ts, device=device)
+    assert labels[0].startswith("flash_attention"), labels
+    assert not any(s.startswith("flash_attention_backward") for s in labels), labels
+    got = lumen.compile(grad)(*ts)
+    want = lumen.compile(grad, device="cpu")(*(lumen.from_numpy(a) for a in arrays))
+    got, want = (r if isinstance(r, tuple) else (r,) for r in (got, want))
+    assert len(got) == len(argnums)
+    for g, w in zip(got, want):
+        np.testing.assert_allclose(lumen.to_numpy(g.to("cpu")), lumen.to_numpy(w), rtol=1e-5, atol=1e-5)

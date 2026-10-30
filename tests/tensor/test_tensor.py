@@ -271,3 +271,78 @@ def test_to_numpy_copies():
     assert lumen.to_numpy(lumen.tensor(2.5)).shape == ()
     with pytest.raises(TypeError, match="bfloat16"):
         lumen.to_numpy(lumen.tensor([1.0], dtype="bfloat16"))
+
+
+ALL_DTYPES = [
+    "float32", "float64", "float16", "bfloat16", "int8", "int16", "int32", "int64", "uint8", "uint16", "uint32",
+    "uint64", "bool", "int2", "int4", "uint2", "uint4", "float8_e4m3fn", "float8_e5m2", "float8_e4m3b11fnuz",
+]  # fmt: skip
+
+
+@pytest.mark.parametrize("dtype", ALL_DTYPES)
+def test_every_dtype_reads_writes_and_copies_its_elements(dtype):
+    """Each dtype's elements read and write through ``t[i, j]``, ``get``
+    and ``set`` (negative indices count from the end) as Python numbers of
+    its kind, and a transposed view's ``contiguous`` copy holds them in
+    the new order."""
+    if dtype == "bool":
+        data, value, kind = [[True, False], [False, False]], True, bool
+    elif dtype.startswith(("int", "uint")):
+        data, value, kind = [[0, 1], [1, 0]], 1, int
+    else:
+        data, value, kind = [[0.5, 1.0], [-1.0, 0.0]], 1.5, float
+    t = Tensor(data, dtype=dtype)
+    assert t.ndim == 2
+    assert t[0, 1] == t.get([-2, -1]) == data[0][1] and type(t[0, 1]) is kind
+    t.set([1, -1], value)
+    assert t[1, 1] == value
+    t[1, 0] = value
+    assert t.get([1, 0]) == value
+    expected = [[data[0][0], value], [data[0][1], value]]
+    copy = t.transpose(0, 1).contiguous()
+    assert copy.is_contiguous() and copy.storage_id != t.storage_id and copy.tolist() == expected
+
+
+def test_bad_indices_and_elements_raise():
+    """Elements that are not numbers, a key that is neither an int nor a
+    tuple of ints, and a wrong number of indices raise."""
+    with pytest.raises(TypeError, match="cannot infer dtype of element 'a'"):
+        Tensor(["a"])
+    t = Tensor([[1.0, 2.0], [3.0, 4.0]])
+    with pytest.raises(TypeError, match="indices must be an int"):
+        t[1.5]
+    with pytest.raises(IndexError, match="expected 2 indices, got 1"):
+        t.get([1])
+    with pytest.raises(IndexError, match="expected 2 indices, got 3"):
+        t.set([0, 0, 0], 1.0)
+
+
+def test_full_of_a_traced_scalar_broadcasts_it():
+    """Inside a trace, ``lumen.full`` of a 0-d traced value broadcasts it,
+    cast to ``dtype`` when given."""
+    import lumen.functional as F
+
+    x = lumen.tensor([1.0, 2.0, 3.5])
+    same, cast = lumen.compile(lambda x: (lumen.full([2, 2], F.sum(x)), lumen.full([3], F.sum(x), dtype="int32")))(x)
+    assert (same.dtype, same.shape, same.tolist()) == ("float32", [2, 2], [[6.5, 6.5], [6.5, 6.5]])
+    assert (cast.dtype, cast.tolist()) == ("int32", [6, 6, 6])
+
+
+def test_numpy_array_protocol_casts_to_the_dtype_asked():
+    """``np.asarray(t, dtype)`` reads the tensor and casts it to ``dtype``."""
+    a = np.asarray(lumen.tensor([1, 2]), dtype=np.float64)
+    assert a.dtype == np.float64 and a.tolist() == [1.0, 2.0]
+    assert np.asarray(lumen.tensor([1, 2])).dtype == np.int64
+
+
+@pytest.mark.parametrize("dtype", ["int2", "int4", "uint2", "uint4", "float8_e4m3fn", "float8_e5m2"])
+def test_numpy_round_trips_ml_dtypes(dtype):
+    """Narrow dtypes numpy reads through ``ml_dtypes`` convert element by
+    element, both ways."""
+    ml_dtypes = pytest.importorskip("ml_dtypes")
+    data = [[1, 0], [1, 1]] if dtype.startswith("u") else [[1, -1], [0, 1]]
+    t = lumen.tensor(data, dtype=dtype)
+    a = lumen.to_numpy(t)
+    assert a.dtype == np.dtype(getattr(ml_dtypes, dtype)) and a.astype(np.float32).tolist() == data
+    back = lumen.from_numpy(a)
+    assert back.dtype == dtype and back.tolist() == t.tolist()

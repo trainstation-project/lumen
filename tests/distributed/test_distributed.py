@@ -101,6 +101,7 @@ def test_a_mesh_of_one_process():
         ("gpu", [0], None, "device_type"),
         ("cuda:0", [0], None, "device_type"),
         ("cpu", [[0, 1], [2]], None, "rectangular"),
+        ("cpu", [[0, 1], 2], None, "rectangular"),
         ("cpu", [0, 0], None, "more than once"),
         ("cpu", [0, 1], None, "outside the world"),
         ("cpu", [-1], None, "negative"),
@@ -456,3 +457,126 @@ def test_collectives_across_gpus_match_numpy(world_size):
         if n == 8:
             dp, tp = divmod(rank, 4)
             assert r["mesh"] == [[float(sum(range(4 * dp, 4 * dp + 4)))] * 2, [float(tp + tp + 4)] * 2, [28.0] * 2]
+
+
+def test_collectives_over_a_mesh_span_its_ranks():
+    """A ``DeviceMesh`` as a collective's group spans the mesh's ranks: over a mesh of this one process, each
+    collective is its operand."""
+    x = np.arange(24, dtype=np.float32).reshape(2, 3, 4)
+    mesh = DeviceMesh("cpu", [[0]], mesh_dim_names=("dp", "tp"))
+
+    def f(t):
+        """Every collective of ``t`` over the mesh and over its ``tp`` slice."""
+        return all_reduce(t, group=mesh), all_gather(t, 1, group=mesh["tp"]), reduce_scatter(t, 2, group=mesh)
+
+    for out in lumen.compile(f)(lumen.from_numpy(x)):
+        np.testing.assert_array_equal(lumen.to_numpy(out), x)
+
+
+@pytest.mark.parametrize(
+    "f, shape, expected",
+    [
+        (
+            lambda x: all_gather(x, 1, group=[0, 1]),
+            (3, 4),
+            ["f32[2,3,4] = all_gather[ranks=(0, 1)]", "f32[3,2,4] = transpose[permutation=(1, 0, 2)]", "f32[3,8]"],
+        ),
+        (lambda x: all_gather(x, -3, group=[0, 1]), (3, 4, 5), ["f32[2,3,4,5] = all_gather", "f32[6,4,5] = reshape"]),
+        (
+            lambda x: reduce_scatter(x, 1, group=[0, 1]),
+            (3, 4),
+            ["f32[3,2,2] = reshape", "f32[2,3,2] = transpose[permutation=(1, 0, 2)]", "f32[3,2] = reduce_scatter"],
+        ),
+        (
+            lambda x: reduce_scatter(x, 0, "max", group=[0, 1]),
+            (4, 3),
+            ["f32[2,2,3] = reshape", "f32[2,3] = reduce_scatter[op=max ranks=(0, 1)]"],
+        ),
+    ],
+)
+def test_gather_and_scatter_along_any_dim(f, shape, expected):
+    """``all_gather`` and ``reduce_scatter`` over several processes along any dim (negative ones too): the
+    gathered process axis moves next to ``dim`` and merges into it; the scattered ``dim`` splits into one block
+    per process, its process axis moved first. No transpose when ``dim`` is 0."""
+    text = str(lumen.make_graph(f)(meta(*shape)))
+    for line in expected:
+        assert line in text, text
+    assert "device_wait" in text and (("transpose" in text) == any("transpose" in line for line in expected))
+
+
+def test_reduce_scatter_needs_a_dim_that_splits_over_the_processes():
+    """``reduce_scatter`` raises when ``dim`` doesn't split into a block per process."""
+    with pytest.raises(ValueError, match="dimension 1 of size 5 doesn't split over 2 processes"):
+        lumen.make_graph(lambda x: reduce_scatter(x, 1, group=[0, 1]))(meta(3, 5))
+
+
+def test_tpu_launch_env_counts_the_chips(monkeypatch):
+    """Without ``nproc_per_node``, ``set_tpu_launch_env`` counts the local TPU chips in a fresh interpreter,
+    and raises where there are none."""
+    monkeypatch.setattr(os, "environ", {})
+    if lumen.distributed._tpu_chips():
+        pytest.skip("a TPU host: its chips are counted")
+    with pytest.raises(ValueError, match="expected TPU devices, got none"):
+        lumen.distributed.set_tpu_launch_env()
+
+
+def test_the_cli_prints_the_tpu_launch_variables(monkeypatch, capsys):
+    """``python -m lumen.distributed`` prints each launch variable as a ``NAME="value"`` line to export."""
+    import runpy
+
+    monkeypatch.setattr(os, "environ", {"LUMEN_TPU_SLICEBUILDER_ADDRESSES": "h:1,h:2,h:3,h:4"})
+    monkeypatch.setattr(lumen.distributed, "_tpu_chips", lambda: 4)
+    runpy.run_module("lumen.distributed", run_name="__main__")
+    assert capsys.readouterr().out.splitlines() == [
+        'LUMEN_TPU_TOPOLOGY="2,2,1"',
+        'LUMEN_TPU_SLICEBUILDER_ADDRESSES="h:1,h:2,h:3,h:4"',
+        'WORLD_SIZE="4"',
+    ]
+
+
+def test_mesh_dims_are_names_or_indices_in_range():
+    """A mesh dimension is a name or an index (negative from the end) in range; a mesh is indexed by names."""
+    mesh = DeviceMesh("cpu", [[0]], mesh_dim_names=("dp", "tp"))
+    assert (mesh.size(-2), mesh.get_local_rank(1)) == (1, 0)
+    with pytest.raises(TypeError, match="mesh_dim must be an int or a mesh dimension name"):
+        mesh.size(1.5)
+    for dim in (2, -3):
+        with pytest.raises(IndexError, match=f"mesh_dim {dim} is out of range for a 2-dimensional DeviceMesh"):
+            mesh.get_local_rank(dim)
+    with pytest.raises(TypeError, match="index a DeviceMesh by a mesh dimension name or a tuple of them"):
+        mesh[0]
+    with pytest.raises(TypeError, match="nested sequence of ranks"):
+        DeviceMesh("cpu", 1.5)
+
+
+def test_init_process_group_checks_its_arguments():
+    """A negative rank or world size (other than -1, unset), a negative timeout, and both a store and an
+    init method are rejected; a store reports its host and port."""
+    store = TCPStore("127.0.0.1", 0, is_master=True, timeout=10)
+    assert store.host == "127.0.0.1" and store.port > 0
+    with pytest.raises(ValueError, match="rank must not be negative, got -2"):
+        lumen.distributed.init_process_group(rank=-2, world_size=1)
+    with pytest.raises(ValueError, match="world_size must not be negative, got -5"):
+        lumen.distributed.init_process_group(world_size=-5)
+    with pytest.raises(ValueError, match="non-negative duration, got -1"):
+        lumen.distributed.init_process_group(store=store, rank=0, world_size=1, timeout=-1)
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        lumen.distributed.init_process_group(init_method="env://", store=store, rank=0, world_size=1)
+    assert not is_initialized()
+
+
+@pytest.mark.mps
+@pytest.mark.parametrize("collective", ["all_reduce", "all_gather"])
+def test_mps_refuses_collectives_across_processes(collective):
+    """MPS runs in one process: a collective over two processes' ranks
+    raises naming it and that collectives across processes run on CUDA."""
+    try:
+        x = lumen.from_numpy(np.ones(4, np.float32)).to("mps")
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    op = {
+        "all_reduce": lambda t: prims.all_reduce(t, "sum", [0, 1]),
+        "all_gather": lambda t: prims.all_gather(t, [0, 1]),
+    }
+    with pytest.raises(ValueError, match=f"{collective}: collectives across processes run on CUDA \\(NCCL\\)"):
+        lumen.compile(op[collective])(x)

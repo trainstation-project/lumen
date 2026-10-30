@@ -38,6 +38,15 @@ fn every_device_has_a_backend() {
     assert!(super::cpu::Cpu.check(1).is_err());
 }
 
+/// Backends with a single implicit device accept `set_device` as a no-op.
+#[test]
+fn set_device_is_a_no_op_without_device_contexts() {
+    for device in [Device::Cpu(0), Device::Meta(0)] {
+        device.backend().set_device(0);
+        assert!(device.check().is_ok());
+    }
+}
+
 /// Tests of the TPU tiled memory layout.
 mod tpu_layout {
     use crate::DType;

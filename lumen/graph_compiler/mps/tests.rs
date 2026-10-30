@@ -3518,3 +3518,53 @@ fn every_gemv_candidate_stores_every_epilogue() {
         }
     }
 }
+
+/// GEMV is only picked for float dots (not another primitive, not an integer dot), and MPP only reads
+/// operands with one of their dimensions contiguous: a transposed `[1, m]` row (`k == 1`) has neither.
+#[test]
+fn gemv_and_mpp_pick_only_the_layouts_they_read() {
+    use crate::kernels::dot_general::mps as gemm;
+    let dot = |lc: usize, accum: DType| DotGeneral {
+        lhs_contracting: vec![lc],
+        rhs_contracting: vec![lc],
+        lhs_batch: vec![],
+        rhs_batch: vec![],
+        accum_dtype: accum,
+        output_dtype: accum,
+    };
+    let (vector, matrix, out) = (
+        ty(DType::F32, &[1, 256]),
+        ty(DType::F32, &[64, 256]),
+        ty(DType::F32, &[1, 64]),
+    );
+    assert_eq!(
+        gemm::gemv(&dot(1, DType::F32), &vector, &matrix, &out),
+        Some(true)
+    );
+    assert_eq!(gemm::gemv(&Add, &vector, &matrix, &out), None);
+    let ints = |s: &[usize]| ty(DType::I32, s);
+    let int_dot = dot(1, DType::I32);
+    assert_eq!(
+        gemm::gemv(
+            &int_dot,
+            &ints(&[1, 256]),
+            &ints(&[64, 256]),
+            &ints(&[1, 64])
+        ),
+        None
+    );
+    // lhs [1, 300] contracting dim 0 of size 1 (an outer product): its M stride is 1 but its K a single element
+    let (row, col, outer) = (
+        ty(DType::F32, &[1, 300]),
+        ty(DType::F32, &[1, 200]),
+        ty(DType::F32, &[300, 200]),
+    );
+    assert_eq!(
+        gemm::mpp_transposes(&dot(0, DType::F32), &row, &col, &outer),
+        None
+    );
+    assert_eq!(
+        gemm::mpp_transposes(&dot(1, DType::F32), &vector, &matrix, &out),
+        Some((false, true))
+    );
+}

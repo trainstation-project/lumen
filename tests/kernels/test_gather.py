@@ -108,17 +108,18 @@ def test_gather_of_a_table_of_as_many_elements_as_rows(device):
 
 
 @pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("index_dtype", [np.int32, np.int64])
 @pytest.mark.parametrize("dtype", ["float32", "int32"])
 @pytest.mark.parametrize("axis", [0, 1])
-def test_scatter_add(device, dtype, axis):
+def test_scatter_add(device, dtype, axis, index_dtype):
     """Each update added at its index (clamped as the gather's), those at
-    one entry summed."""
+    one entry summed, for int32 or int64 indices."""
     rng = np.random.default_rng(1)
     x = (rng.standard_normal((4, 5, 3)) * 4).astype(np.float32)
     u = (rng.standard_normal(np.take(x, IDS, axis=axis, mode="clip").shape) * 4).astype(np.float32)
     xt, ut = _tensor(x, device, dtype), _tensor(u, device, dtype)
     x, u = (lumen.to_numpy(t.to(dtype="float32")) for t in (xt, ut))
-    ids = _tensor(IDS.astype(np.int64), device)
+    ids = _tensor(IDS.astype(index_dtype), device)
     got = lumen.compile(lambda x, i, u: prims.scatter_add(x, i, u, axis))(xt, ids, ut)
     want = x.copy()
     clipped = np.clip(IDS, 0, x.shape[axis] - 1)
@@ -162,13 +163,14 @@ def test_gather_checks_its_operands():
 
 
 @pytest.mark.parametrize("device", [MPS, CUDA])
-@pytest.mark.parametrize("width, rows", [(64, 5), (7, 5)])
+@pytest.mark.parametrize("width, rows", [(64, 5), (7, 5), (7, 300)])
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16", "int32"])
 def test_scatter_add_is_deterministic(device, dtype, width, rows):
     """A scatter_add adds each element's updates in index order (on MPS a
     thread an element scanning the indices, its SIMD group's lanes 32 at a
     time when they share a row: rows of 64; else one at a time: rows of 7;
-    of many rows and updates, a thread a column; on Triton a lane a column
+    of many rows and updates (300 rows of 300 updates), a thread a column
+    walking the updates in order; on Triton a lane a column
     walking the updates in order; no atomics): the CPU's result bit for bit,
     for any dtype (bfloat16 too, each sum rounded as the reference rounds
     it), the same each run; a lookup's gradient too (deterministic
@@ -186,6 +188,30 @@ def test_scatter_add_is_deterministic(device, dtype, width, rows):
     for _ in range(3):
         got = lumen.to_numpy(compiled(*on(device)).to(dtype="float32").to("cpu"))
         np.testing.assert_array_equal(got, want)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("columns, indices", [(3, 0), (0, 2)], ids=["no indices", "no columns"])
+def test_scatter_add_of_nothing_is_its_operand(device, columns, indices):
+    """A scatter_add adding no elements (no indices, or rows of no
+    columns) is its operand, unchanged."""
+    x = np.arange(4 * columns, dtype=np.float32).reshape(4, columns)
+    ids, u = np.arange(indices, dtype=np.int64), np.ones((indices, columns), np.float32)
+    args = (_tensor(x, device), _tensor(ids, device), _tensor(u, device))
+    got = lumen.compile(lambda x, i, u: prims.scatter_add(x * 2.0, i, u, 0))(*args)
+    np.testing.assert_array_equal(lumen.to_numpy(got.to("cpu")), x * 2)
+
+
+@pytest.mark.mps
+def test_mps_scatter_add_refuses_booleans():
+    """MPS has no scatter_add of booleans (no sum of them): compiling one
+    raises naming the op; the CPU reference computes it."""
+    x, i, u = np.zeros((4, 3), bool), np.array([1, 2], np.int64), np.ones((2, 3), bool)
+    f = lambda x, i, u: prims.scatter_add(x, i, u, 0)  # noqa: E731
+    want = lumen.to_numpy(lumen.compile(f, device="cpu")(*(_tensor(a, "cpu") for a in (x, i, u))))
+    np.testing.assert_array_equal(want, [[0, 0, 0], [1, 1, 1], [1, 1, 1], [0, 0, 0]])
+    with pytest.raises(ValueError, match="scatter_add: booleans have no sum to scatter-add"):
+        lumen.compile(f, device="mps")(*(_tensor(a, "mps") for a in (x, i, u)))
 
 
 def test_scatter_add_in_place():
