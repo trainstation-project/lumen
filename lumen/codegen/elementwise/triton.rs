@@ -33,13 +33,16 @@ impl ElementwiseCodegen for Triton {
             .map(|k| format!("out{k}"))
             .collect::<Vec<_>>()
             .join(",\n    ");
+
         let params = params(
             by_value,
             (!extra.is_empty()).then_some(extra.as_str()),
             outputs,
         );
+
         let segments = segments(body);
         let mut emitter = Emitter::new(body, by_value);
+
         // Statements computing and storing the outputs at `k`, then the ones computing them.
         let stored = |emitter: &mut Emitter, k: &[usize]| {
             let stores: String = k
@@ -53,8 +56,10 @@ impl ElementwiseCodegen for Triton {
                 })
                 .collect::<Vec<_>>()
                 .concat();
+
             std::mem::take(&mut emitter.lines) + &stores
         };
+
         let code = match segments.as_slice() {
             [(_, k)] => {
                 let code = stored(&mut emitter, k);
@@ -73,6 +78,7 @@ impl ElementwiseCodegen for Triton {
                         0 => String::new(),
                         s => format!("first{s} + "),
                     };
+
                     writeln!(
                         code,
                         "    first{} = {previous}({numel} + BLOCK_SIZE - 1) // BLOCK_SIZE",
@@ -80,32 +86,39 @@ impl ElementwiseCodegen for Triton {
                     )
                     .unwrap();
                 }
+
                 for (s, (numel, k)) in segments.iter().enumerate() {
                     let branch = match s {
                         0 => "if pid < first1".to_string(),
                         s if s == segments.len() - 1 => "else".to_string(),
                         s => format!("elif pid < first{}", s + 1),
                     };
+
                     let start = match s {
                         0 => "pid".to_string(),
                         s => format!("(pid - first{s})"),
                     };
+
                     // Values computed in another branch aren't defined in this one.
                     emitter.values.clear();
                     emitter.indices.clear();
+
                     let statements: String = stored(&mut emitter, k)
                         .lines()
                         .map(|line| format!("    {line}\n"))
                         .collect();
+
                     write!(
                         code,
                         "    {branch}:\n        j = {start} * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)\n        mask = j < {numel}\n{statements}"
                     )
                     .unwrap();
                 }
+
                 code
             }
         };
+
         let source = formatdoc!(
             "
             @triton.jit
@@ -113,6 +126,7 @@ impl ElementwiseCodegen for Triton {
             {params}):
             {code}"
         );
+
         Ok(named("fusion", source))
     }
 }
