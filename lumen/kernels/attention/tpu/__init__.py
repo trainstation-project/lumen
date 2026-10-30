@@ -116,23 +116,26 @@ def scored(spec, qk):
     return x.to("float32")
 
 
-def last_key_block(spec, i):
-    """Last key block query block `i` can see under the causal offset."""
-    (bq, bkv), nk = spec["blocks"], spec["sk"] // spec["blocks"][1]
-    return minimum(div(add(mul(i, bq), bq - 1 + spec["causal"]), bkv), nk - 1)
+def last_key_block(spec, BLOCK_ID_M):
+    """Last key block query block `BLOCK_ID_M` can see under the causal offset."""
+    (BLOCK_SIZE_M, BLOCK_SIZE_N), NUM_BLOCKS_N = spec["blocks"], spec["sk"] // spec["blocks"][1]
+    return minimum(
+        div(add(mul(BLOCK_ID_M, BLOCK_SIZE_M), BLOCK_SIZE_M - 1 + spec["causal"]), BLOCK_SIZE_N), NUM_BLOCKS_N - 1
+    )
 
 
-def key_block(spec, i, j):
-    """Key block fetched at grid step `j` of query block `i`: `j` while visible, else block 0."""
+def key_block(spec, BLOCK_ID_M, BLOCK_ID_N):
+    """Key block fetched at grid step `BLOCK_ID_N` of query block `BLOCK_ID_M`: `BLOCK_ID_N` while visible, else
+    block 0."""
     if spec["causal"] is None:
-        return j
-    return _traced(j) * (_traced(j) <= last_key_block(spec, i)).to("int32")
+        return BLOCK_ID_N
+    return _traced(BLOCK_ID_N) * (_traced(BLOCK_ID_N) <= last_key_block(spec, BLOCK_ID_M)).to("int32")
 
 
-def first_query_block(spec, j):
-    """First query block that sees key block `j` under the causal offset."""
-    bq, bkv = spec["blocks"]
-    return div(maximum(add(mul(j, bkv), -spec["causal"]), 0), bq)
+def first_query_block(spec, BLOCK_ID_N):
+    """First query block that sees key block `BLOCK_ID_N` under the causal offset."""
+    BLOCK_SIZE_M, BLOCK_SIZE_N = spec["blocks"]
+    return div(maximum(add(mul(BLOCK_ID_N, BLOCK_SIZE_N), -spec["causal"]), 0), BLOCK_SIZE_M)
 
 
 def masked(spec, qk, queries, keys, transposed=False):

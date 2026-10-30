@@ -32,26 +32,26 @@ from lumen.kernels.tpu import pallas
 def program(spec):
     """Splash attention's forward (``flash_attention_kernel``): for each head
     and block of queries, the blocks of keys in order, an online softmax of
-    their scores (its running max and sum in ``(bq, 128)`` lanes) and its
+    their scores (its running max and sum in ``(BLOCK_SIZE_M, 128)`` lanes) and its
     probabilities' product with the values (a block of keys in chunks of
     up to 512, as ``block_kv_compute``), normalized after the last and
     rounded to ``o_dtype``: written as ``o`` and, through ``epilogue`` (its
     ``nodes`` on the output block, the scalars it reads by row), as ``e``;
     the rows' log-sum-exp too if ``lse``. A causal mask skips the blocks
     past the diagonal, and their copies."""
-    bq, bkv = spec["blocks"]
-    bkc = chunk(bkv)
-    nq, nk = spec["sq"] // bq, spec["sk"] // bkv
+    BLOCK_SIZE_M, BLOCK_SIZE_N = spec["blocks"]
+    bkc = chunk(BLOCK_SIZE_N)
+    NUM_BLOCKS_M, NUM_BLOCKS_N = spec["sq"] // BLOCK_SIZE_M, spec["sk"] // BLOCK_SIZE_N
     h, hv, causal = spec["h"], spec["hv"], spec["causal"]
     q, k, v, o, lse = spec["q"], spec["k"], spec["v"], spec["o"], spec["lse"]
     e, epilogue = spec.get("e"), spec.get("epilogue")
     outs = [x for x in (o, e) if x]
 
-    def key_block(i, j):
-        """Key block fetched for query block `i` at step `j`."""
-        return fetched(spec, i, j)
+    def key_block(BLOCK_ID_M, BLOCK_ID_N):
+        """Key block fetched for query block `BLOCK_ID_M` at step `BLOCK_ID_N`."""
+        return fetched(spec, BLOCK_ID_M, BLOCK_ID_N)
 
-    grid = (*heads(spec), nq, nk)
+    grid = (*heads(spec), NUM_BLOCKS_M, NUM_BLOCKS_N)
 
     def kernel(rows, memory, result, m_ref, l_ref, acc_ref):
         """Pipelines the attention blocks over the grid, reading `rows` of `memory` and writing into `result`."""
@@ -70,44 +70,51 @@ def program(spec):
         ops = [(q, False), (k, False), (v, False)] + [(x, True) for x in outs] + ([(lse, True)] if lse else [])
         query_rows = lambda *ids: (ids[:-2], ids[-2])  # noqa: E731
         key_rows = lambda *ids: (ids[:-2], key_block(ids[-2], ids[-1]))  # noqa: E731
-        in_specs = [matrix(spec, q, bq, h, query_rows), matrix(spec, k, bkv, h, key_rows)]
-        in_specs.append(matrix(spec, v, bkv, hv, key_rows))
-        out_specs = [matrix(spec, x, bq, hv, query_rows) for x in outs]
+        in_specs = [matrix(spec, q, BLOCK_SIZE_M, h, query_rows), matrix(spec, k, BLOCK_SIZE_N, h, key_rows)]
+        in_specs.append(matrix(spec, v, BLOCK_SIZE_N, hv, key_rows))
+        out_specs = [matrix(spec, x, BLOCK_SIZE_M, hv, query_rows) for x in outs]
         if lse:
-            out_specs.append(vector(spec, lse, bq, query_rows))
+            out_specs.append(vector(spec, lse, BLOCK_SIZE_M, query_rows))
 
         def body(qb, kb, vb, *rest):
             """Accumulates one key block into the running softmax and output, finalizing after the last."""
             ids = [pl.program_id(a) for a in range(len(grid))]
-            g, i, j = tuple(ids[:-2]), ids[-2], ids[-1]
+            BLOCK_ID_BATCH, BLOCK_ID_M, BLOCK_ID_N = tuple(ids[:-2]), ids[-2], ids[-1]
 
-            @pl.when(j == 0)
+            @pl.when(BLOCK_ID_N == 0)
             def _():
                 """Resets the running max, sum and output at the first key block."""
-                m_ref[...] = lumen.full((bq, LANES), MASK, "float32")
-                l_ref[...] = zeros((bq, LANES))
-                acc_ref[...] = zeros((bq, hv))
+                m_ref[...] = lumen.full((BLOCK_SIZE_M, LANES), MASK, "float32")
+                l_ref[...] = zeros((BLOCK_SIZE_M, LANES))
+                acc_ref[...] = zeros((BLOCK_SIZE_M, hv))
 
             def compute(c, mask):
                 """Folds key chunk `c` into the online softmax, masking scores when `mask`."""
                 keys = slice(c * bkc, (c + 1) * bkc)
                 qk = scored(spec, pl.dot_general(qb[...], kb[keys, :], NT, preferred_element_type="float32"))
                 if mask:
-                    qk = masked(spec, qk, mul(i, bq), add(mul(key_block(i, j), bkv), c * bkc))
+                    qk = masked(
+                        spec,
+                        qk,
+                        mul(BLOCK_ID_M, BLOCK_SIZE_M),
+                        add(mul(key_block(BLOCK_ID_M, BLOCK_ID_N), BLOCK_SIZE_N), c * bkc),
+                    )
                 m_prev, l_prev = m_ref[...], l_ref[...]
-                m_next = F.maximum(m_prev, broadcast(F.amax(qk, -1, keepdim=True), (bq, LANES)))
+                m_next = F.maximum(m_prev, broadcast(F.amax(qk, -1, keepdim=True), (BLOCK_SIZE_M, LANES)))
                 s = F.exp(qk - tile(m_next, bkc))
                 alpha = F.exp(m_prev - m_next)
-                l_ref[...] = broadcast(F.sum(s, -1, keepdim=True), (bq, LANES)) + alpha * l_prev
+                l_ref[...] = broadcast(F.sum(s, -1, keepdim=True), (BLOCK_SIZE_M, LANES)) + alpha * l_prev
                 m_ref[...] = m_next
                 pv = pl.dot_general(s.to(vb.dtype), vb[keys, :], NN, preferred_element_type="float32")
                 acc_ref[...] = tile(alpha, hv) * acc_ref[...] + pv
 
-            for c in range(bkv // bkc):
-                start = add(mul(j, bkv), c * bkc)
-                by_mask(spec, mul(i, bq), start, bq, bkc, lambda mask, c=c: compute(c, mask))
+            for c in range(BLOCK_SIZE_N // bkc):
+                start = add(mul(BLOCK_ID_N, BLOCK_SIZE_N), c * bkc)
+                by_mask(
+                    spec, mul(BLOCK_ID_M, BLOCK_SIZE_M), start, BLOCK_SIZE_M, bkc, lambda mask, c=c: compute(c, mask)
+                )
 
-            @pl.when(j == nk - 1)
+            @pl.when(BLOCK_ID_N == NUM_BLOCKS_N - 1)
             def _():
                 """Normalizes the output and writes it, its epilogue and the log-sum-exp."""
                 total = l_ref[...]
@@ -117,11 +124,17 @@ def program(spec):
                         ref[...] = value.to(ref.dtype)
                         continue
                     values = [value] + [s[...] for s in scalars]
-                    ref[...] = computed(epilogue["nodes"], values, (bq, hv))[epilogue["result"]].to(ref.dtype)
+                    ref[...] = computed(epilogue["nodes"], values, (BLOCK_SIZE_M, hv))[epilogue["result"]].to(
+                        ref.dtype
+                    )
                 if lse:
                     rest[len(outs)][...] = (F.log(total) + m_ref[...])[:, :1].to(rest[len(outs)].dtype)
 
         pl.emit_pipeline(body, grid=grid, in_specs=in_specs, out_specs=out_specs)(*views(memory, result, rows, ops))
 
-    scratch = [pl.VMEM((bq, LANES), "float32"), pl.VMEM((bq, LANES), "float32"), pl.VMEM((bq, hv), "float32")]
+    scratch = [
+        pl.VMEM((BLOCK_SIZE_M, LANES), "float32"),
+        pl.VMEM((BLOCK_SIZE_M, LANES), "float32"),
+        pl.VMEM((BLOCK_SIZE_M, hv), "float32"),
+    ]
     return pallas.program(kernel, spec, scratch=scratch)

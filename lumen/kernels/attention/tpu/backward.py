@@ -39,22 +39,22 @@ def program(spec):
     keys, its gradients summed over the query heads of its group and their
     blocks of queries), the probabilities recomputed from the rows'
     log-sum-exp, ``dS = (dP - delta) P``, scaled by ``ds_scale``."""
-    bq, bkv = spec["blocks"]
-    nq, nk = spec["sq"] // bq, spec["sk"] // bkv
+    BLOCK_SIZE_M, BLOCK_SIZE_N = spec["blocks"]
+    NUM_BLOCKS_M, NUM_BLOCKS_N = spec["sq"] // BLOCK_SIZE_M, spec["sk"] // BLOCK_SIZE_N
     h, hv, causal, ds_scale = spec["h"], spec["hv"], spec["causal"], spec["ds_scale"]
     q, k, v, do, lse, delta = (spec[n] for n in ("q", "k", "v", "do", "lse", "delta"))
     per_query = (delta, False) if delta else (spec["o"], False)
 
-    bkc = chunk(bkv)
+    bkc = chunk(BLOCK_SIZE_N)
 
-    def rows_of(lseb, deltab, dob, g):
+    def rows_of(lseb, deltab, dob, BLOCK_ID_BATCH):
         """Per-row log-sum-exp and delta (rowsum of dO * O, computed here when not given) in lanes."""
         if delta:
-            d = lanes(spec, deltab, delta, g)
+            d = lanes(spec, deltab, delta, BLOCK_ID_BATCH)
         else:
             d = F.sum(deltab[...].to("float32") * dob[...].to("float32"), -1, keepdim=True)
             d = broadcast(d, (d.shape[0], LANES))
-        return lanes(spec, lseb, lse, g), d
+        return lanes(spec, lseb, lse, BLOCK_ID_BATCH), d
 
     def gradients(qb, kb, vb, dob, stats, queries, keys, c, mask):
         """Probabilities and `dS` of key chunk `c`, with the chunk's slice; masks scores when `mask`."""
@@ -73,11 +73,11 @@ def program(spec):
     if spec["kind"] == "dq":
         dq = spec["dq"]
 
-        def key_block(i, j):
-            """Key block fetched for query block `i` at step `j`."""
-            return fetched(spec, i, j)
+        def key_block(BLOCK_ID_M, BLOCK_ID_N):
+            """Key block fetched for query block `BLOCK_ID_M` at step `BLOCK_ID_N`."""
+            return fetched(spec, BLOCK_ID_M, BLOCK_ID_N)
 
-        grid = (*heads(spec), nq, nk)
+        grid = (*heads(spec), NUM_BLOCKS_M, NUM_BLOCKS_N)
 
         def kernel(rows, memory, result, acc_ref):
             """Pipelines dQ over query blocks, summing over key blocks."""
@@ -85,30 +85,30 @@ def program(spec):
             query_rows = lambda *ids: (ids[:-2], ids[-2])  # noqa: E731
             key_rows = lambda *ids: (ids[:-2], key_block(ids[-2], ids[-1]))  # noqa: E731
             in_specs = [
-                matrix(spec, q, bq, h, query_rows),
-                matrix(spec, k, bkv, h, key_rows),
-                matrix(spec, v, bkv, hv, key_rows),
-                matrix(spec, do, bq, hv, query_rows),
-                vector(spec, lse, bq, query_rows),
-                per_row(bq, query_rows),
+                matrix(spec, q, BLOCK_SIZE_M, h, query_rows),
+                matrix(spec, k, BLOCK_SIZE_N, h, key_rows),
+                matrix(spec, v, BLOCK_SIZE_N, hv, key_rows),
+                matrix(spec, do, BLOCK_SIZE_M, hv, query_rows),
+                vector(spec, lse, BLOCK_SIZE_M, query_rows),
+                per_row(BLOCK_SIZE_M, query_rows),
             ]
-            out_specs = [matrix(spec, dq, bq, h, query_rows)]
+            out_specs = [matrix(spec, dq, BLOCK_SIZE_M, h, query_rows)]
 
             def body(qb, kb, vb, dob, lseb, deltab, dqb):
                 """Accumulates one key block's contribution to the query block's dQ."""
                 ids = [pl.program_id(a) for a in range(len(grid))]
-                g, i, j = tuple(ids[:-2]), ids[-2], ids[-1]
+                BLOCK_ID_BATCH, BLOCK_ID_M, BLOCK_ID_N = tuple(ids[:-2]), ids[-2], ids[-1]
 
-                @pl.when(j == 0)
+                @pl.when(BLOCK_ID_N == 0)
                 def _():
                     """Zeroes the dQ accumulator at the first key block."""
-                    acc_ref[...] = zeros((bq, h))
+                    acc_ref[...] = zeros((BLOCK_SIZE_M, h))
 
-                queries, keys = mul(i, bq), mul(key_block(i, j), bkv)
+                queries, keys = mul(BLOCK_ID_M, BLOCK_SIZE_M), mul(key_block(BLOCK_ID_M, BLOCK_ID_N), BLOCK_SIZE_N)
 
                 def block():
                     """Adds this key block's chunks to dQ."""
-                    stats = rows_of(lseb, deltab, dob, g)
+                    stats = rows_of(lseb, deltab, dob, BLOCK_ID_BATCH)
 
                     def run(c, mask):
                         """Adds `dS K` of key chunk `c`."""
@@ -117,13 +117,13 @@ def program(spec):
                             ds.to(kb.dtype), kb[part, :], NN, preferred_element_type="float32"
                         )
 
-                    for c in range(bkv // bkc):
-                        start = add(mul(j, bkv), c * bkc)
-                        by_mask(spec, queries, start, bq, bkc, lambda mask, c=c: run(c, mask))
+                    for c in range(BLOCK_SIZE_N // bkc):
+                        start = add(mul(BLOCK_ID_N, BLOCK_SIZE_N), c * bkc)
+                        by_mask(spec, queries, start, BLOCK_SIZE_M, bkc, lambda mask, c=c: run(c, mask))
 
-                when(any_visible(spec, queries, mul(j, bkv), bq), block)
+                when(any_visible(spec, queries, mul(BLOCK_ID_N, BLOCK_SIZE_N), BLOCK_SIZE_M), block)
 
-                @pl.when(j == nk - 1)
+                @pl.when(BLOCK_ID_N == NUM_BLOCKS_N - 1)
                 def _():
                     """Writes the accumulated dQ after the last key block."""
                     dqb[...] = acc_ref[...].to(dqb.dtype)
@@ -132,15 +132,16 @@ def program(spec):
                 *views(memory, result, rows, ops)
             )
 
-        return pallas.program(kernel, spec, scratch=[pl.VMEM((bq, h), "float32")])
+        return pallas.program(kernel, spec, scratch=[pl.VMEM((BLOCK_SIZE_M, h), "float32")])
 
     dk, dv, group = spec["dk"], spec["dv"], spec["group"]
 
-    def query_block(i, j):
-        """Query block visited at step `i` for key block `j`, starting from the first that sees it."""
-        return i if causal is None else maximum(i, first_query_block(spec, j))
+    def query_block(BLOCK_ID_M, BLOCK_ID_N):
+        """Query block visited at step `BLOCK_ID_M` for key block `BLOCK_ID_N`, starting from the first that sees
+        it."""
+        return BLOCK_ID_M if causal is None else maximum(BLOCK_ID_M, first_query_block(spec, BLOCK_ID_N))
 
-    grid = (nk, *heads(spec), nq)
+    grid = (NUM_BLOCKS_N, *heads(spec), NUM_BLOCKS_M)
 
     def kernel(rows, memory, result, dk_ref, dv_ref):
         """Pipelines dK and dV over key blocks, summing over query blocks and the heads of a group."""
@@ -148,35 +149,39 @@ def program(spec):
         query_rows = lambda *ids: (ids[1:-1], query_block(ids[-1], ids[0]))  # noqa: E731
         key_rows = lambda *ids: (ids[1:-1], ids[0])  # noqa: E731
         in_specs = [
-            matrix(spec, q, bq, h, query_rows),
-            matrix(spec, k, bkv, h, key_rows),
-            matrix(spec, v, bkv, hv, key_rows),
-            matrix(spec, do, bq, hv, query_rows),
-            vector(spec, lse, bq, query_rows),
-            per_row(bq, query_rows),
+            matrix(spec, q, BLOCK_SIZE_M, h, query_rows),
+            matrix(spec, k, BLOCK_SIZE_N, h, key_rows),
+            matrix(spec, v, BLOCK_SIZE_N, hv, key_rows),
+            matrix(spec, do, BLOCK_SIZE_M, hv, query_rows),
+            vector(spec, lse, BLOCK_SIZE_M, query_rows),
+            per_row(BLOCK_SIZE_M, query_rows),
         ]
-        out_specs = [matrix(spec, dk, bkv, h, key_rows), matrix(spec, dv, bkv, hv, key_rows)]
+        out_specs = [matrix(spec, dk, BLOCK_SIZE_N, h, key_rows), matrix(spec, dv, BLOCK_SIZE_N, hv, key_rows)]
 
         def body(qb, kb, vb, dob, lseb, deltab, dkb, dvb):
             """Accumulates one query block's contribution to the key block's dK and dV."""
             ids = [pl.program_id(a) for a in range(len(grid))]
-            j, g, i = ids[0], tuple(ids[1:-1]), ids[-1]
-            member = g[-1]
+            BLOCK_ID_N, BLOCK_ID_BATCH, BLOCK_ID_M = ids[0], tuple(ids[1:-1]), ids[-1]
+            member = BLOCK_ID_BATCH[-1]
             # With grouped heads, accumulation spans every head of the group, not just the query blocks.
-            first = (i == 0) & (member == 0) if group > 1 else i == 0
-            last = (i == nq - 1) & (member == group - 1) if group > 1 else i == nq - 1
+            first = (BLOCK_ID_M == 0) & (member == 0) if group > 1 else BLOCK_ID_M == 0
+            last = (
+                (BLOCK_ID_M == NUM_BLOCKS_M - 1) & (member == group - 1)
+                if group > 1
+                else BLOCK_ID_M == NUM_BLOCKS_M - 1
+            )
 
             @pl.when(first)
             def _():
                 """Zeroes the dK and dV accumulators at the first step."""
-                dk_ref[...] = zeros((bkv, h))
-                dv_ref[...] = zeros((bkv, hv))
+                dk_ref[...] = zeros((BLOCK_SIZE_N, h))
+                dv_ref[...] = zeros((BLOCK_SIZE_N, hv))
 
-            queries, keys = mul(query_block(i, j), bq), mul(j, bkv)
+            queries, keys = mul(query_block(BLOCK_ID_M, BLOCK_ID_N), BLOCK_SIZE_M), mul(BLOCK_ID_N, BLOCK_SIZE_N)
 
             def block():
                 """Adds this query block's chunks to dK and dV."""
-                stats = rows_of(lseb, deltab, dob, g)
+                stats = rows_of(lseb, deltab, dob, BLOCK_ID_BATCH)
 
                 def run(c, mask):
                     """Adds `P^T dO` to dV and `dS^T Q` to dK for key chunk `c`."""
@@ -184,10 +189,17 @@ def program(spec):
                     dv_ref[part, :] += pl.dot_general(p.to(dob.dtype), dob[...], TN, preferred_element_type="float32")
                     dk_ref[part, :] += pl.dot_general(ds.to(qb.dtype), qb[...], TN, preferred_element_type="float32")
 
-                for c in range(bkv // bkc):
-                    by_mask(spec, mul(i, bq), add(keys, c * bkc), bq, bkc, lambda mask, c=c: run(c, mask))
+                for c in range(BLOCK_SIZE_N // bkc):
+                    by_mask(
+                        spec,
+                        mul(BLOCK_ID_M, BLOCK_SIZE_M),
+                        add(keys, c * bkc),
+                        BLOCK_SIZE_M,
+                        bkc,
+                        lambda mask, c=c: run(c, mask),
+                    )
 
-            when(any_visible(spec, mul(i, bq), keys, bq), block)
+            when(any_visible(spec, mul(BLOCK_ID_M, BLOCK_SIZE_M), keys, BLOCK_SIZE_M), block)
 
             @pl.when(last)
             def _():
@@ -197,4 +209,6 @@ def program(spec):
 
         pl.emit_pipeline(body, grid=grid, in_specs=in_specs, out_specs=out_specs)(*views(memory, result, rows, ops))
 
-    return pallas.program(kernel, spec, scratch=[pl.VMEM((bkv, h), "float32"), pl.VMEM((bkv, hv), "float32")])
+    return pallas.program(
+        kernel, spec, scratch=[pl.VMEM((BLOCK_SIZE_N, h), "float32"), pl.VMEM((BLOCK_SIZE_N, hv), "float32")]
+    )
