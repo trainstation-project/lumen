@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use super::GemmCodegen;
 use crate::DType;
-use crate::codegen::tpu::{Tpu, node, window};
+use crate::codegen::tpu::{Tpu, window};
 use crate::device::tpu::layout::Layout;
 use crate::graph::{Graph, Node, Primitive, TensorType, Var};
 use crate::graph_compiler::plan::Step;
@@ -102,7 +102,7 @@ impl Epilogue {
                 continue;
             }
             let args: Vec<usize> = node.inputs.iter().map(|v| value[v]).collect();
-            nodes.push(node(&node.primitive, &args));
+            nodes.push(crate::codegen::tpu::node(&node.primitive, &args));
             value.insert(node.output, results + extras.len() + nodes.len() - 1);
             // Track which piece each value comes from to tell whether pieces stay independent.
             let mut of: Vec<usize> = node
