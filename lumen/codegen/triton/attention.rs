@@ -7,11 +7,13 @@ use indoc::formatdoc;
 
 use super::utils::indented;
 use super::{Emitter, constant, load, named, triton_type};
-use crate::Scalar;
 use crate::codegen::AttentionCodegen;
 use crate::graph::Graph;
-use crate::graph_compiler::common::attention::{Access, Attention, Backward, Score, Strides, Term};
+use crate::graph_compiler::common::attention::{
+    Access, Attention, Backward, Dropout, Score, Strides, Term,
+};
 use crate::tensor::contiguous_strides;
+use crate::{DType, Scalar};
 
 /// The statement setting `at`, the element offset of `acc`'s tile at outer batch index `BLOCK_ID_B`,
 /// head `BLOCK_ID_H`, rows `rows` and columns `cols`, on the grid `grid_batch` gives `batch`. A divisor
@@ -204,6 +206,10 @@ impl AttentionCodegen for super::Triton {
 
     /// Loads of Q, K and V, the output store with its epilogue, the log-sum-exp store and the score ops.
     fn forward(body: &Graph, a: &Attention, strides: &Strides) -> Result<Self::Code, String> {
+        if let Some(d) = &a.dropout {
+            Self::dropout(d, a.dtype, a.sq, a.sk)?;
+        }
+
         let root = body.nodes()[a.root].output;
         // The attention values are also written as they are when the body outputs them too.
         let raw = body.outputs()[1..].contains(&root);
@@ -241,6 +247,10 @@ impl AttentionCodegen for super::Triton {
 
     /// Loads of the operands, a store (or atomic add) of each gradient, and the score ops.
     fn backward(_: &Graph, b: &Backward, _: &Strides) -> Result<Self::Code, String> {
+        if let Some(d) = &b.dropout {
+            Self::dropout(d, DType::F32, b.sq, b.sk)?;
+        }
+
         let operands = [
             ("Q", &b.q),
             ("K", &b.k),
@@ -266,5 +276,10 @@ impl AttentionCodegen for super::Triton {
 
         code.push(("SCORE".into(), attention_score(&b.scores)));
         Ok(code)
+    }
+
+    /// The Triton attention kernels have no dropout yet.
+    fn dropout(_: &Dropout, _: DType, _: usize, _: usize) -> Result<String, String> {
+        Err("dropout in attention has no Triton kernel (random_bits)".into())
     }
 }

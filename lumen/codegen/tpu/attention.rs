@@ -6,7 +6,9 @@ use crate::DType;
 use crate::codegen::AttentionCodegen;
 use crate::device::tpu::layout::Layout;
 use crate::graph::{Graph, Node, Primitive, TensorType, Var};
-use crate::graph_compiler::common::attention::{self, Access, Attention, Backward, Score, Strides};
+use crate::graph_compiler::common::attention::{
+    self, Access, Attention, Backward, Dropout, Score, Strides,
+};
 use crate::graph_compiler::elementwise;
 use crate::kernels::attention::tpu::blocks;
 use crate::tensor::contiguous_strides;
@@ -178,12 +180,8 @@ fn output(body: &Graph, k: usize, acc: Access, width: usize) -> Operand {
     }
 }
 
-/// Fails for what the TPU attention kernels don't run: dropout and dtypes other than float32 or bfloat16.
-fn unsupported(dropout: bool, dtype: DType) -> Result<(), String> {
-    if dropout {
-        return Err("flash attention on TPU: dropout does not run on TPU yet".into());
-    }
-
+/// Fails for the dtypes the TPU attention kernels don't run: other than float32 or bfloat16.
+fn unsupported(dtype: DType) -> Result<(), String> {
     if !matches!(dtype, DType::F32 | DType::BF16) {
         return Err(format!(
             "flash attention on TPU: operands of float32 or bfloat16, got {dtype}"
@@ -222,7 +220,11 @@ impl AttentionCodegen for Tpu {
     /// The forward kernel's kind and spec for the attention fusion `body`, with an optional
     /// elementwise epilogue on the output and an optional log-sum-exp output.
     fn forward(body: &Graph, a: &Attention, _: &Strides) -> Result<Self::Code, String> {
-        unsupported(a.dropout.is_some(), a.dtype)?;
+        unsupported(a.dtype)?;
+
+        if let Some(d) = &a.dropout {
+            Self::dropout(d, a.dtype, a.sq, a.sk)?;
+        }
 
         let views = [
             view("q", &operand(body, &a.q, a.h), &a.batch, Some(a.sq))?,
@@ -288,7 +290,11 @@ impl AttentionCodegen for Tpu {
     /// The backward kernel's kind (`dq`, or `dkv` for dk and dv) and spec for the attention backward
     /// fusion `body`.
     fn backward(body: &Graph, b: &Backward, _: &Strides) -> Result<Self::Code, String> {
-        unsupported(b.dropout.is_some(), b.dtype)?;
+        unsupported(b.dtype)?;
+
+        if let Some(d) = &b.dropout {
+            Self::dropout(d, DType::F32, b.sq, b.sk)?;
+        }
 
         let ins = [
             view("q", &operand(body, &b.q, b.h), &b.batch, Some(b.sq))?,
@@ -361,6 +367,11 @@ impl AttentionCodegen for Tpu {
         );
 
         Ok((kind, spec))
+    }
+
+    /// The Pallas attention kernels have no dropout yet.
+    fn dropout(_: &Dropout, _: DType, _: usize, _: usize) -> Result<String, String> {
+        Err("flash attention on TPU: dropout does not run on TPU yet".into())
     }
 }
 

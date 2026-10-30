@@ -11,27 +11,6 @@ pub(super) fn random_state(first: usize) -> [String; 2] {
     ]
 }
 
-/// Metal functor that applies dropout to element `(b, i, j)` of an `sq` x `sk` score matrix
-/// using Philox bits, scaling kept values.
-pub(super) fn dropout_functor(d: &Dropout, dtype: DType, sq: usize, sk: usize) -> String {
-    let t = metal_type(dtype);
-    let scale = constant(dtype, Scalar::Float(d.scale));
-    let (offset, threshold) = (d.offset, d.threshold);
-
-    formatdoc!(
-        "
-        struct NAME_drop {{
-            ulong seed, start;
-            inline {t} operator()({t} x, uint b, uint i, uint j) const {{
-                ulong at = (ulong(b) * {sq}ul + i) * {sk}ul + j;
-                bool dropped = philox_bits(seed, start + {offset}ul + at) < {threshold}u;
-                return dropped ? {t}(0) : {t}(Mul::apply(x, {scale}));
-            }}
-        }};
-        "
-    )
-}
-
 /// Metal `NAME_ix` method returning the element offset of operand `name` for outer batch index `b` and
 /// head `h`, on the grid `grid_batch` gives `batch`, plus its row and column strides. A divisor maps the
 /// heads onto fewer (shared KV heads). Fails when the outer batch dims don't step as one dim.
@@ -194,7 +173,8 @@ impl AttentionCodegen for Mps {
                 } else {
                     epi
                 };
-                let drop = dropout_functor(d, a.dtype, a.sq, a.sk);
+
+                let drop = Self::dropout(d, a.dtype, a.sq, a.sk)?;
                 (drop, format!("{epi}, NAME_drop{{seed, start}}"))
             }
             None => (String::new(), epi),
@@ -328,7 +308,7 @@ impl AttentionCodegen for Mps {
         let (drop, drop_arg) = match &b.dropout {
             Some(d) => {
                 params.extend(random_state(n + outs.len()));
-                let drop = dropout_functor(d, DType::F32, b.sq, b.sk);
+                let drop = Self::dropout(d, DType::F32, b.sq, b.sk)?;
                 (drop, ", NAME_drop{seed, start}")
             }
             None => (String::new(), ""),
@@ -407,5 +387,26 @@ impl AttentionCodegen for Mps {
             }}
             "
         )))
+    }
+
+    /// Metal functor that applies dropout to element `(b, i, j)` of an `sq` x `sk` score matrix
+    /// using Philox bits, scaling kept values.
+    fn dropout(d: &Dropout, dtype: DType, sq: usize, sk: usize) -> Result<String, String> {
+        let t = metal_type(dtype);
+        let scale = constant(dtype, Scalar::Float(d.scale));
+        let (offset, threshold) = (d.offset, d.threshold);
+
+        Ok(formatdoc!(
+            "
+            struct NAME_drop {{
+                ulong seed, start;
+                inline {t} operator()({t} x, uint b, uint i, uint j) const {{
+                    ulong at = (ulong(b) * {sq}ul + i) * {sk}ul + j;
+                    bool dropped = philox_bits(seed, start + {offset}ul + at) < {threshold}u;
+                    return dropped ? {t}(0) : {t}(Mul::apply(x, {scale}));
+                }}
+            }};
+            "
+        ))
     }
 }

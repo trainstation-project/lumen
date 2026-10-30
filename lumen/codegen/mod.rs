@@ -6,8 +6,9 @@ pub(crate) mod regions;
 pub(crate) mod tpu;
 pub(crate) mod triton;
 
+use crate::DType;
 use crate::graph::Graph;
-use crate::graph_compiler::common::attention::{Attention, Backward, Strides};
+use crate::graph_compiler::common::attention::{Attention, Backward, Dropout, Strides};
 
 /// A backend's flash-attention code generator: the code its kernels run for a fused attention body,
 /// given the attention matched in it and how the body's inputs and outputs are laid out.
@@ -19,4 +20,7 @@ pub(crate) trait AttentionCodegen {
     fn forward(body: &Graph, a: &Attention, strides: &Strides) -> Result<Self::Code, String>;
     /// Code for attention backward `b`, matched in `body` laid out as `strides`.
     fn backward(body: &Graph, b: &Backward, strides: &Strides) -> Result<Self::Code, String>;
+    /// Code applying dropout `d` to each head's `sq` x `sk` probabilities, computed in `dtype`, for the
+    /// forward and backward code to call. Fails on a backend whose kernels have no dropout yet.
+    fn dropout(d: &Dropout, dtype: DType, sq: usize, sk: usize) -> Result<String, String>;
 }

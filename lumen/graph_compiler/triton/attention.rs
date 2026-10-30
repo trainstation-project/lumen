@@ -180,15 +180,9 @@ fn prepare(step: &Step, strides: &Strides) -> Result<Prepared, String> {
         let functions = code.into_iter().map(|(param, f)| Function::new(param, f));
         functions.collect()
     };
-    let dropout = format!(
-        "{}: dropout in attention has no Triton kernel (random_bits)",
-        step.label
-    );
+    let labeled = |e: String| format!("{}: {e}", step.label);
     if name == FORWARD {
         let a = attention::of_body_strided(body, strides).ok_or("a forward flash attention")?;
-        if a.dropout.is_some() {
-            return Err(dropout);
-        }
         let root = body.nodes()[a.root].output;
         let lse = a.lse.map(|n| output(body.nodes()[n].output));
         // The body's inputs but the offset, which the epilogue may read, then the attention values
@@ -215,7 +209,7 @@ fn prepare(step: &Step, strides: &Strides) -> Result<Prepared, String> {
             kernel: "forward",
             tensors,
             zeroed: Vec::new(),
-            functions: functions(codegen::Triton::forward(body, &a, strides)?),
+            functions: functions(codegen::Triton::forward(body, &a, strides).map_err(labeled)?),
             sizes: sizes(&a.batch, [a.sq, a.sk, a.h, a.hv]),
             causal: a.causal,
             scale: 1.0,
@@ -225,9 +219,6 @@ fn prepare(step: &Step, strides: &Strides) -> Result<Prepared, String> {
     }
     let b =
         attention::backward_of_body_strided(body, strides).ok_or("a backward flash attention")?;
-    if b.dropout.is_some() {
-        return Err(dropout);
-    }
     let gradients = codegen::gradients(&b);
     if gradients.is_empty() {
         return Err(format!("{}: computes no gradient", step.label));
@@ -248,7 +239,7 @@ fn prepare(step: &Step, strides: &Strides) -> Result<Prepared, String> {
         kernel: if b.dk_out.is_some() { "dkdv" } else { "dq" },
         tensors,
         zeroed,
-        functions: functions(codegen::Triton::backward(body, &b, strides)?),
+        functions: functions(codegen::Triton::backward(body, &b, strides).map_err(labeled)?),
         sizes: sizes(&b.batch, [b.sq, b.sk, b.h, b.hv]),
         causal: b.causal,
         scale: b.ds_scale,
