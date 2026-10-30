@@ -186,18 +186,6 @@ fn per_row(batch: &[usize], sq: usize, strides: Option<&[usize]>) -> Access {
     }
 }
 
-/// The backward kernels' operands, by the name of their `LOAD_` helper, in parameter order.
-pub(crate) fn operands(b: &Backward) -> [(&'static str, &Access); 6] {
-    [
-        ("Q", &b.q),
-        ("K", &b.k),
-        ("V", &b.v),
-        ("DO", &b.d_o),
-        ("LSE", &b.lse),
-        ("DELTA", &b.delta),
-    ]
-}
-
 /// The gradients a backward kernel writes, by the helper writing each, in parameter order: dK and
 /// dV, with dQ added atomically into a zeroed float32 buffer as each key block computes it, or dQ
 /// alone; empty when the backward computes no gradient.
@@ -228,7 +216,9 @@ impl AttentionCodegen for super::Triton {
             let k = body.outputs().iter().position(|&u| u == v)?;
             strides.outputs.get(&k).map(|(_, s)| s.as_slice())
         });
+
         let lse = per_row(&a.batch, a.sq, lse_strides);
+
         Ok(vec![
             ("LOAD_Q".into(), attention_load(&a.q, &a.batch)),
             ("LOAD_K".into(), attention_load(&a.k, &a.batch)),
@@ -241,10 +231,20 @@ impl AttentionCodegen for super::Triton {
 
     /// Loads of the operands, a store (or atomic add) of each gradient, and the score ops.
     fn backward(_: &Graph, b: &Backward, _: &Strides) -> Result<Self::Code, String> {
-        let mut code: Self::Code = operands(b)
+        let operands = [
+            ("Q", &b.q),
+            ("K", &b.k),
+            ("V", &b.v),
+            ("DO", &b.d_o),
+            ("LSE", &b.lse),
+            ("DELTA", &b.delta),
+        ];
+
+        let mut code: Self::Code = operands
             .iter()
             .map(|(name, acc)| (format!("LOAD_{name}"), attention_load(acc, &b.batch)))
             .collect();
+
         for (param, (_, acc)) in gradients(b) {
             let helper = match param {
                 "ADD_DQ" => attention_atomic_add(acc, &b.batch),
@@ -252,6 +252,7 @@ impl AttentionCodegen for super::Triton {
             };
             code.push((param.into(), helper));
         }
+
         code.push(("SCORE".into(), attention_score(&b.scores)));
         Ok(code)
     }

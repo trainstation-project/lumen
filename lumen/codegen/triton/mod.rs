@@ -23,7 +23,7 @@ mod indexing;
 mod reduction;
 mod row;
 
-pub(crate) use attention::{gradients, operands};
+pub(crate) use attention::gradients;
 pub(crate) use config::{
     ATTENTION_CONFIGS, AttentionConfig, CONFIGS, Config, LOOP_CONFIGS, LoopConfig, ROW_PARTIALS,
     UNTUNED, UNTUNED_LOOP, loop_configs, partial_tile, row_gemm_configs, untuned_attention,

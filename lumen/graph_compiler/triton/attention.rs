@@ -224,9 +224,10 @@ fn prepare(step: &Step, strides: &Strides) -> Result<Prepared, String> {
     if gradients.is_empty() {
         return Err(format!("{}: computes no gradient", step.label));
     }
-    let mut tensors: Vec<Option<Source>> = codegen::operands(&b)
+    // The kernels' operands in parameter order: Q, K, V, dO, the log-sum-exp and delta.
+    let mut tensors: Vec<Option<Source>> = [&b.q, &b.k, &b.v, &b.d_o, &b.lse, &b.delta]
         .iter()
-        .map(|(_, acc)| Some(input(acc.base)))
+        .map(|acc| Some(input(acc.base)))
         .collect();
     let mut zeroed = Vec::new();
     for (param, (node, _)) in &gradients {
