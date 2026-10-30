@@ -1,9 +1,7 @@
-//! Indexing code generation and kernels: gathers and scatter-adds, each backend's beside the others.
+//! Indexing code generation and kernels: scatter-adds, each backend's beside the others.
 
 #[cfg(lumen_mps_linked)]
 pub(crate) mod mps;
-#[cfg(lumen_tpu_linked)]
-pub(crate) mod tpu;
 pub(crate) mod triton;
 
 use crate::graph::TensorType;

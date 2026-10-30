@@ -3,7 +3,7 @@
 pub(crate) mod transpose;
 
 use crate::Tensor;
-use crate::codegen::indexing::mps::gather::gather;
+use crate::codegen::gather::mps::gather;
 use crate::graph::Primitive::*;
 use crate::graph_compiler::plan::Step;
 use crate::kernels::mps::{Grid, dims32_arg, launch, u32_arg};

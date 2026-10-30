@@ -1,6 +1,5 @@
-//! Metal indexing: strided gathers and scatter-add kernels.
+//! Metal indexing: scatter-add kernels.
 
-pub(crate) mod gather;
 pub(crate) mod scatter_add;
 
 use super::IndexingCodegen;

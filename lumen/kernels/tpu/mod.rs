@@ -886,7 +886,7 @@ pub(crate) fn encode(
             crate::codegen::layout::tpu::encode(index, step, inputs, output)
         }
         Primitive::Gather { .. } => {
-            crate::codegen::indexing::tpu::gather::encode(index, step, inputs, output)
+            crate::codegen::gather::tpu::encode(index, step, inputs, output)
         }
         Primitive::DynamicUpdateSlice => {
             crate::codegen::dynamic_slice::tpu::encode(index, step, inputs, output)
