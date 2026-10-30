@@ -17,7 +17,8 @@ impl ElementwiseCodegen for Triton {
     type Code = (String, String);
     type Schedule = ();
 
-    /// Generates the elementwise kernel computing every output of the body at each flat index `j`.
+    /// Generates the elementwise kernel computing every output of the body at each flat index of its
+    /// block `BLOCK` (program `BLOCK_ID`'s `BLOCK_SIZE` elements), masked by `MASK`.
     /// Returns `(name, source)`; inputs flagged in `by_value` arrive as scalars. The first output is
     /// `out` stored through `STORE`; output `k` after it is `out{k}`, a parameter right after the
     /// inputs, stored through `STORE{k}`. Outputs of different element counts split the grid: each
@@ -42,16 +43,17 @@ impl ElementwiseCodegen for Triton {
 
         let segments = segments(body);
         let mut emitter = Emitter::new(body, by_value);
+        emitter.mask = "MASK".into();
 
         // Statements computing and storing the outputs at `k`, then the ones computing them.
         let stored = |emitter: &mut Emitter, k: &[usize]| {
             let stores: String = k
                 .iter()
                 .map(|&k| {
-                    let result = emitter.value(body.outputs()[k], "j".into());
+                    let result = emitter.value(body.outputs()[k], "BLOCK".into());
                     match k {
-                        0 => format!("    STORE(out, j, {result}, mask)\n"),
-                        k => format!("    STORE{k}(out{k}, j, {result}, mask)\n"),
+                        0 => format!("    STORE(out, BLOCK, {result}, MASK)\n"),
+                        k => format!("    STORE{k}(out{k}, BLOCK, {result}, MASK)\n"),
                     }
                 })
                 .collect::<Vec<_>>()
@@ -65,23 +67,24 @@ impl ElementwiseCodegen for Triton {
                 let code = stored(&mut emitter, k);
                 formatdoc!(
                     "
-                        j = tl.program_id(0).to(tl.int64) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-                        mask = j < n
+                        BLOCK_ID = tl.program_id(0).to(tl.int64)
+                        BLOCK = BLOCK_ID * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+                        MASK = BLOCK < n
                     {code}"
                 )
             }
             _ => {
-                let mut code = String::from("    pid = tl.program_id(0).to(tl.int64)\n");
-                // `first{s}` is the first program of segment `s`; segment 0 starts at 0.
+                let mut code = String::from("    BLOCK_ID = tl.program_id(0).to(tl.int64)\n");
+                // `FIRST_BLOCK_ID_{s}` is the first program of segment `s`; segment 0 starts at 0.
                 for (s, (numel, _)) in segments.iter().enumerate().take(segments.len() - 1) {
                     let previous = match s {
                         0 => String::new(),
-                        s => format!("first{s} + "),
+                        s => format!("FIRST_BLOCK_ID_{s} + "),
                     };
 
                     writeln!(
                         code,
-                        "    first{} = {previous}({numel} + BLOCK_SIZE - 1) // BLOCK_SIZE",
+                        "    FIRST_BLOCK_ID_{} = {previous}({numel} + BLOCK_SIZE - 1) // BLOCK_SIZE",
                         s + 1
                     )
                     .unwrap();
@@ -89,14 +92,14 @@ impl ElementwiseCodegen for Triton {
 
                 for (s, (numel, k)) in segments.iter().enumerate() {
                     let branch = match s {
-                        0 => "if pid < first1".to_string(),
+                        0 => "if BLOCK_ID < FIRST_BLOCK_ID_1".to_string(),
                         s if s == segments.len() - 1 => "else".to_string(),
-                        s => format!("elif pid < first{}", s + 1),
+                        s => format!("elif BLOCK_ID < FIRST_BLOCK_ID_{}", s + 1),
                     };
 
                     let start = match s {
-                        0 => "pid".to_string(),
-                        s => format!("(pid - first{s})"),
+                        0 => "BLOCK_ID".to_string(),
+                        s => format!("(BLOCK_ID - FIRST_BLOCK_ID_{s})"),
                     };
 
                     // Values computed in another branch aren't defined in this one.
@@ -110,7 +113,7 @@ impl ElementwiseCodegen for Triton {
 
                     write!(
                         code,
-                        "    {branch}:\n        j = {start} * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)\n        mask = j < {numel}\n{statements}"
+                        "    {branch}:\n        BLOCK = {start} * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)\n        MASK = BLOCK < {numel}\n{statements}"
                     )
                     .unwrap();
                 }

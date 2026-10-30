@@ -11,6 +11,14 @@ def lower(module: str, spec: str) -> str:
     return importlib.import_module(module).program(json.loads(spec))
 
 
+def lower_source(source: str, scalars: int, host_rows, rows: int) -> str:
+    """The Mosaic module of a generated kernel: ``source`` defines ``program(device)``, traced on a device's
+    memory of ``rows`` rows with ``scalars`` scalars and ``host_rows`` host rows (or None)."""
+    scope = {}
+    exec(compile(source, "<lumen generated TPU kernel>", "exec"), scope)
+    return scope["program"]({"scalars": scalars, "host_rows": host_rows, "rows": rows})
+
+
 def program(kernel, spec, scratch=()) -> str:
     """``kernel(scalars, [host,] memory, result, *scratch)`` traced on the
     memory of ``spec`` and lowered to Mosaic."""

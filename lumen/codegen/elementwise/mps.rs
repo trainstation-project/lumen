@@ -17,9 +17,10 @@ impl ElementwiseCodegen for Mps {
     type Code = (String, String);
     type Schedule = Tuning;
 
-    /// Generates a loop kernel computing every body output elementwise under `tuning`. Outputs of
-    /// different element counts split the grid: each `segments` group runs on its own consecutive
-    /// range of `cdiv(count, per_thread)` threads, with `n` and `threads` its own.
+    /// Generates a loop kernel computing every body output elementwise under `tuning`: thread `THREAD_ID`
+    /// of `NUM_THREADS` computes `ELEMENTS_PER_THREAD` (`per_thread`) elements, contiguous or `NUM_THREADS`
+    /// apart. Outputs of different element counts split the grid: each `segments` group runs on its own
+    /// consecutive range of `cdiv(count, ELEMENTS_PER_THREAD)` threads, with `n` and `NUM_THREADS` its own.
     fn elementwise(
         body: &Graph,
         by_value: &[bool],
@@ -32,12 +33,14 @@ impl ElementwiseCodegen for Mps {
             contiguous,
         } = *tuning;
 
-        let each = |i: &str| match contiguous {
+        let each = |thread_id: &str| match contiguous {
             true => format!(
-                "for (uint j = {i} * {per_thread}u, k = 0; k < {per_thread}u && j < n; ++k, ++j)"
+                "for (uint j = {thread_id} * ELEMENTS_PER_THREAD, k = 0; k < ELEMENTS_PER_THREAD && j < n; ++k, ++j)"
             ),
             false => {
-                format!("for (uint j = {i}, k = 0; k < {per_thread}u && j < n; ++k, j += threads)")
+                format!(
+                    "for (uint j = {thread_id}, k = 0; k < ELEMENTS_PER_THREAD && j < n; ++k, j += NUM_THREADS)"
+                )
             }
         };
 
@@ -61,7 +64,12 @@ impl ElementwiseCodegen for Mps {
         let writes: Vec<&str> = writes.lines().collect();
 
         let code = match segments.as_slice() {
-            [_] => format!("{} {{\n{}{}\n}}", each("i"), lines[0], writes.join("\n")),
+            [_] => format!(
+                "{} {{\n{}{}\n}}",
+                each("THREAD_ID"),
+                lines[0],
+                writes.join("\n")
+            ),
             _ => {
                 let mut code = String::new();
                 let mut start = 0;
@@ -71,21 +79,21 @@ impl ElementwiseCodegen for Mps {
                     let end = start + threads;
 
                     let branch = match s {
-                        0 => format!("if (i < {end}u)"),
+                        0 => format!("if (THREAD_ID < {end}u)"),
                         s if s == segments.len() - 1 => " else".to_string(),
-                        _ => format!(" else if (i < {end}u)"),
+                        _ => format!(" else if (THREAD_ID < {end}u)"),
                     };
 
                     let stored: Vec<&str> = outputs.iter().map(|&k| writes[k]).collect();
-                    let t = match start {
-                        0 => "i".to_string(),
-                        start => format!("i - {start}u"),
+                    let thread_id = match start {
+                        0 => "THREAD_ID".to_string(),
+                        start => format!("THREAD_ID - {start}u"),
                     };
 
                     write!(
                         code,
-                        "{branch} {{\nconst uint t = {t}, n = {numel}u, threads = {threads}u;\n{} {{\n{}{}\n}}\n}}",
-                        each("t"),
+                        "{branch} {{\nconst uint SEGMENT_THREAD_ID = {thread_id}, n = {numel}u, NUM_THREADS = {threads}u;\n{} {{\n{}{}\n}}\n}}",
+                        each("SEGMENT_THREAD_ID"),
                         lines[s],
                         stored.join("\n"),
                     )
@@ -102,6 +110,7 @@ impl ElementwiseCodegen for Mps {
             {stores}
             [[max_total_threads_per_threadgroup({group})]]
             kernel void NAME({params}ELEMENTWISE_ARGS({args})) {{
+                constexpr uint ELEMENTS_PER_THREAD = {per_thread}u;
                 {code}
             }}
             "
