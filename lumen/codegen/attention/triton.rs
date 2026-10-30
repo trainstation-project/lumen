@@ -37,7 +37,7 @@ fn address(acc: &Access, batch: &[usize]) -> Result<String, String> {
 
     // Both strides zero (one query row of a per-row tensor): zero offsets still shaped like the tile.
     if tile.is_empty() {
-        tile = vec!["rows * 0".into(), "cols * 0".into()];
+        tile = vec!["tl.zeros_like(rows)".into(), "tl.zeros_like(cols)".into()];
     }
 
     terms.extend(tile);

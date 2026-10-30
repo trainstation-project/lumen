@@ -39,7 +39,7 @@ pub(crate) fn cross_entropy_epilogue(
                 tl.store(ptr + at, peak, mask=row_mask)
                 tl.store(sums + at, total, mask=row_mask)
                 hit = mask & (n == LOAD_LABEL(labels, m, row_mask).to(tl.int64))
-                tl.store(picked + m + n * 0, value, mask=hit)
+                tl.store(picked + m + tl.zeros_like(n), value, mask=hit)
             "
         ),
     )

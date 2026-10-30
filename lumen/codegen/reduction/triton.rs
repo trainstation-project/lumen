@@ -127,12 +127,12 @@ impl ReductionCodegen for Triton {
             {kernel_params}):
                 s = tl.program_id(0) // tl.cdiv(n, {outputs})
                 o = ({block}).to(tl.int64) * ({outputs}) + tl.arange(0, {outputs})
-                jo = ({o_at}) + 0 * o
+                jo = ({o_at}) + tl.zeros_like(o)
                 empty = tl.full([], {init}, {acc})
                 acc = tl.full({tile_shape}, {init}, {acc})
                 for start in range({range}):
                     r = start + tl.arange(0, {lanes})
-                    jr = ({r_at}) + 0 * r
+                    jr = ({r_at}) + tl.zeros_like(r)
                     j = {j}
                     mask = {mask}
             {lines}        acc = NAME_combine(acc, tl.where(mask, {element}, empty))

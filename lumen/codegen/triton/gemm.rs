@@ -63,7 +63,7 @@ pub(crate) fn gemm(dot: &Primitive, lhs: Layout, rhs: Layout, out: Layout) -> Ge
                 let shape: Vec<usize> = dims.iter().map(|&d| shape[d]).collect();
                 let strides: Vec<usize> = dims.iter().map(|&d| strides[d]).collect();
                 match gather_index(idx, &shape, &strides).as_str() {
-                    "0" => format!("{idx} * 0"),
+                    "0" => format!("tl.zeros_like({idx})"),
                     offset => offset.to_string(),
                 }
             })

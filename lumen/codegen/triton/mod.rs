@@ -171,9 +171,9 @@ pub(crate) fn store(shape: &[usize], strides: &[usize]) -> (String, String) {
 fn at(idx: &str, shape: &[usize], strides: &[usize]) -> String {
     match strides == contiguous_strides(shape) {
         true => idx.to_string(),
-        // `idx * 0` keeps a block-shaped offset when every dim is broadcast.
+        // `tl.zeros_like(idx)` keeps a block-shaped offset when every dim is broadcast.
         false => match gather_index(idx, shape, strides).as_str() {
-            "0" => format!("{idx} * 0"),
+            "0" => format!("tl.zeros_like({idx})"),
             offset => offset.to_string(),
         },
     }
@@ -627,7 +627,7 @@ impl<'a> Emitter<'a> {
                     .map(|(s, st)| s * st)
                     .sum();
                 let i = match gather_index(&idx, &ty.shape, &x_strides).as_str() {
-                    "0" => format!("{idx} * 0"),
+                    "0" => format!("tl.zeros_like({idx})"),
                     i => i.to_string(),
                 };
                 self.index(format!("{start} + {i}"))
@@ -770,7 +770,7 @@ impl<'a> Emitter<'a> {
                             ));
                         }
                         let i = match terms.is_empty() {
-                            true => format!("{idx} * 0"),
+                            true => format!("tl.zeros_like({idx})"),
                             false => terms.join(" + "),
                         };
                         let i = self.index(i);
