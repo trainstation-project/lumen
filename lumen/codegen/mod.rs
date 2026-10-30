@@ -2,6 +2,7 @@
 pub(crate) mod attention;
 pub(crate) mod dot_general;
 pub(crate) mod elementwise;
+pub(crate) mod indexing;
 pub(crate) mod kinds;
 #[cfg(lumen_mps_linked)]
 pub(crate) mod mps;

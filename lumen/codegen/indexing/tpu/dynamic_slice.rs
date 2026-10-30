@@ -241,7 +241,7 @@ pub(crate) fn encode(
         .collect();
 
     let launched = Launch {
-        module: "lumen.kernels.dynamic_slice.tpu",
+        module: "lumen.codegen.indexing.tpu.dynamic_slice",
         kernel: format!(
             "dynamic_update_slice_{count}x{}_{bm}x{bn}_{gm}",
             operand.dtype

@@ -1657,7 +1657,7 @@ impl Plan {
                         return Err(format!("{}: custom ops do not run on TPU yet", step.label));
                     }
                     #[cfg(lumen_mps_linked)]
-                    Device::Mps(_) => crate::kernels::dynamic_slice::mps::copy(
+                    Device::Mps(_) => crate::codegen::indexing::mps::dynamic_slice::copy(
                         src.data_ptr().cast_const(),
                         out.data_ptr(),
                         ty,

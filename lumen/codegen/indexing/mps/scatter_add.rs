@@ -51,7 +51,14 @@ pub(crate) fn encode(
     // Copy x into the output first unless they already share a buffer.
     if output.cast_const() != inputs[0] {
         let name = step.label;
-        crate::kernels::dynamic_slice::mps::copy(inputs[0], output, x, keep.clone(), name)?;
+
+        crate::codegen::indexing::mps::dynamic_slice::copy(
+            inputs[0],
+            output,
+            x,
+            keep.clone(),
+            name,
+        )?;
     }
 
     let kernel = match scan {

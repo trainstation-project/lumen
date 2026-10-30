@@ -1,7 +1,14 @@
 //! Metal source for an `updates` fusion: a chain of constant-start dynamic-update-slices in one kernel.
-use super::*;
+
+use std::fmt::Write;
+
+use indoc::formatdoc;
+
+use crate::codegen::mps::*;
+use crate::graph::Graph;
 use crate::graph::UPDATES;
 use crate::graph_compiler::common::updates::{overlaps, starts};
+use crate::tensor::contiguous_strides;
 
 /// Generates the kernel of `updates` fusion `body`: every update (inputs `1..`, one shape) written into
 /// `out` (already holding operand `in0`) at its constant start indices, clamped so it stays in bounds;

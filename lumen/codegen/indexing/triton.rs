@@ -1,7 +1,12 @@
 //! Triton sources for indexed writes: dynamic-update-slice and scatter-add.
 
-use super::*;
+use std::fmt::Write;
+
+use indoc::formatdoc;
+
+use crate::codegen::triton::*;
 use crate::graph::TensorType;
+use crate::tensor::contiguous_strides;
 
 /// Triton expression reading input `k` as an int64 scalar, from a by-value argument or a 1-element tensor.
 fn scalar(k: usize, by_value: &[bool]) -> String {

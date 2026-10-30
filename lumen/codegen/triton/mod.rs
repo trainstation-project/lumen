@@ -16,7 +16,6 @@ use crate::{DType, Element, Scalar};
 
 pub(crate) mod config;
 mod cross_entropy;
-mod indexing;
 pub(crate) mod utils;
 
 pub(crate) use crate::codegen::dot_general::triton::row::{
@@ -25,6 +24,7 @@ pub(crate) use crate::codegen::dot_general::triton::row::{
 pub(crate) use crate::codegen::dot_general::triton::{
     EpilogueFlags, Layouts, gemm, gemm_dot, gemm_flags,
 };
+pub(crate) use crate::codegen::indexing::triton::{scatter_add, update, updates};
 pub(crate) use crate::codegen::kinds::reduction_root;
 pub(crate) use crate::codegen::reduction::triton::scan;
 pub(crate) use crate::codegen::row::triton::{row_count, row_groups, row_looped};
@@ -34,7 +34,6 @@ pub(crate) use config::{
     untuned_loop, untuned_row_gemm,
 };
 pub(crate) use cross_entropy::{cross_entropy_combine, cross_entropy_epilogue};
-pub(crate) use indexing::{scatter_add, update, updates};
 
 /// The Triton code generator.
 pub(crate) struct Triton;

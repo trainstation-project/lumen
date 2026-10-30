@@ -22,9 +22,9 @@ mod config;
 mod emitter;
 mod stores;
 mod transpose;
-mod updates;
 
 pub(crate) use crate::codegen::dot_general::mps::*;
+pub(crate) use crate::codegen::indexing::mps::updates_kernel;
 pub(crate) use crate::codegen::kinds::reduction_root;
 pub(crate) use crate::codegen::reduction::mps::{has_epilogue, split_launches};
 pub(crate) use crate::codegen::row::mps::*;
@@ -33,7 +33,6 @@ pub(crate) use emitter::Emitter;
 use emitter::*;
 pub(crate) use stores::written;
 pub(crate) use transpose::*;
-pub(crate) use updates::updates_kernel;
 
 /// The Metal code generator.
 pub(crate) struct Mps;

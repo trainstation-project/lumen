@@ -17,6 +17,12 @@ pub(super) fn copy_h2d(dst: &Tensor, src: &Tensor) {
     let ty = TensorType::new(dst.dtype(), dst.shape());
     let (from, to) = (staging.data_ptr().cast_const(), dst.data_ptr());
 
-    crate::kernels::dynamic_slice::mps::copy(from, to, &ty, vec![staging, dst.clone()], "copy_h2d")
-        .unwrap_or_else(|e| panic!("copy_h2d: {e}"));
+    crate::codegen::indexing::mps::dynamic_slice::copy(
+        from,
+        to,
+        &ty,
+        vec![staging, dst.clone()],
+        "copy_h2d",
+    )
+    .unwrap_or_else(|e| panic!("copy_h2d: {e}"));
 }
