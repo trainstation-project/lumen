@@ -9,6 +9,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use indoc::{formatdoc, indoc, writedoc};
 
 use crate::codegen::elementwise::ElementwiseCodegen;
+use crate::codegen::layout::LayoutCodegen;
 use crate::codegen::reduction::ReductionCodegen;
 use crate::codegen::row::RowCodegen;
 use crate::graph::{Graph, Node, Primitive, UnaryOp, Var};
@@ -90,8 +91,9 @@ pub(crate) fn kernel(
             .expect("a Metal reduction of every reduction body");
     }
 
-    if let Some(tiling) = transpose_tiling(body) {
-        return transpose_kernel(body, by_value, &tiling, views);
+    if transpose_tiling(body).is_some() {
+        return Mps::transpose(body, by_value, views)
+            .expect("a Metal kernel of every tiled transpose");
     }
 
     let tuning = tuning.unwrap_or_else(|| loop_tuning(body));
