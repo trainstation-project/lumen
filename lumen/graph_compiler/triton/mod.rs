@@ -88,6 +88,8 @@ pub enum Template {
     /// `transpose_kernel` (lumen.codegen.layout.triton): `TILE` x `TILE` tiles of an `a` x `b` output, per
     /// batch.
     Transpose { a: usize, b: usize },
+    /// `dynamic_update_slice_kernel` (lumen.codegen.dynamic_slice.triton): blocks of the update's elements.
+    DynamicUpdateSlice,
 }
 
 #[cfg_attr(not(feature = "python"), allow(dead_code))]
@@ -97,11 +99,15 @@ impl Template {
         match self {
             Template::Elementwise => ("lumen.codegen.elementwise.triton", "elementwise_kernel"),
             Template::Transpose { .. } => ("lumen.codegen.layout.triton", "transpose_kernel"),
+            Template::DynamicUpdateSlice => (
+                "lumen.codegen.dynamic_slice.triton",
+                "dynamic_update_slice_kernel",
+            ),
         }
     }
 
     /// The kernel's constexprs for a launch over `n` outputs in `segments` (empty for one segment): a
-    /// loop's segments' element counts, a transpose's output sides and tile.
+    /// loop's segments' element counts, a transpose's output sides and tile, an update's element count.
     pub fn constexprs(self, n: usize, segments: &[usize]) -> Vec<(&'static str, Constexpr)> {
         match self {
             Template::Elementwise => {
@@ -117,6 +123,7 @@ impl Template {
                 ("B", Constexpr::Int(b)),
                 ("TILE", Constexpr::Int(TILE)),
             ],
+            Template::DynamicUpdateSlice => vec![("N", Constexpr::Int(n))],
         }
     }
 }
@@ -341,14 +348,14 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
     Ok(plan)
 }
 
-/// The name of a templated loop's kernel: `elementwise_` plus a hash of its body (its `BODY`, generated per
-/// layout at launch, is named after its own source).
-fn templated(body: &Graph) -> String {
+/// The name of a templated kernel: `kind` plus a hash of `key`, what its `BODY` is generated from (the
+/// `BODY`, generated per layout at launch, is named after its own source).
+fn templated(kind: &str, key: &str) -> String {
     use std::hash::{Hash, Hasher};
 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    body.to_string().hash(&mut hasher);
-    format!("elementwise_{:016x}", hasher.finish())
+    key.hash(&mut hasher);
+    format!("{kind}_{:016x}", hasher.finish())
 }
 
 /// Generates the loop kernel for `step`, or `None` for GEMMs and steps without a Triton loop kernel.
@@ -360,12 +367,13 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
         .collect();
 
     let (name, source, lanes, splits) = match &step.primitive {
-        Primitive::Fusion { name, body, .. } if name == UPDATES => {
-            let (name, source) =
-                codegen::Triton::updates(body).expect("a Triton kernel of every updates body");
-
-            (name, source, 1, 1)
-        }
+        // A chain of updates runs in the dynamic-update-slice template, its `BODY` generated at launch.
+        Primitive::Fusion { name, body, .. } if name == UPDATES => (
+            templated("dynamic_update_slice", &body.to_string()),
+            String::new(),
+            1,
+            1,
+        ),
         Primitive::Fusion { body, .. } if codegen::gemm_dot(body).is_some() => return None,
         Primitive::Fusion { name, body, .. } if name == ROW => {
             let r = codegen::Triton::row(body, &by_value, &())
@@ -381,7 +389,12 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
                 (r.name, r.source, r.lanes, r.splits)
             }
             // A loop runs in a template kernel, its `BODY` generated with its tensors' layouts at launch.
-            None => (templated(body), String::new(), 1, 1),
+            None => (
+                templated("elementwise", &body.to_string()),
+                String::new(),
+                1,
+                1,
+            ),
         },
         Primitive::Cumsum {
             axis,
@@ -394,11 +407,14 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
             (name, source, lanes, 1)
         }
         Primitive::DynamicUpdateSlice => {
-            let (name, source) =
-                codegen::Triton::update(&step.inputs[0].1, &step.inputs[1].1, &by_value)
-                    .expect("a Triton kernel of every dynamic_update_slice");
+            let types: Vec<String> = step.inputs.iter().map(|(_, t)| t.to_string()).collect();
 
-            (name, source, 1, 1)
+            (
+                templated("dynamic_update_slice", &format!("{types:?} {by_value:?}")),
+                String::new(),
+                1,
+                1,
+            )
         }
         Primitive::ScatterAdd { axis } => {
             let (name, source) =
@@ -427,6 +443,8 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
 
     // A loop computed from transposes it can tile runs a tile of the output a program.
     let template = match &step.primitive {
+        Primitive::Fusion { name, .. } if name == UPDATES => Some(Template::DynamicUpdateSlice),
+        Primitive::DynamicUpdateSlice => Some(Template::DynamicUpdateSlice),
         Primitive::Fusion { name, body, .. }
             if name != UPDATES && name != ROW && codegen::reduction_root(body).is_none() =>
         {
@@ -815,7 +833,7 @@ fn loop_helpers(
     out: &Tensor,
     outs: &[Tensor],
 ) -> Helpers {
-    if let (Some(template), Primitive::Fusion { body, .. }) = (kernel.template, &step.primitive) {
+    if let Some(template) = kernel.template {
         let owned = |t: &Tensor| (t.shape().to_vec(), t.strides().to_vec());
 
         let layouts = codegen::Tensors {
@@ -827,15 +845,27 @@ fn loop_helpers(
             outputs: std::iter::once(out).chain(outs).map(owned).collect(),
         };
 
-        let generated = match template {
-            Template::Elementwise => {
+        let generated = match (template, &step.primitive) {
+            (Template::Elementwise, Primitive::Fusion { body, .. }) => {
                 codegen::Triton::elementwise(body, &kernel.by_value, &HashMap::new(), &layouts)
                     .expect("a Triton loop of every elementwise body")
             }
-            Template::Transpose { .. } => {
+            (Template::Transpose { .. }, Primitive::Fusion { body, .. }) => {
                 codegen::Triton::transpose(body, &kernel.by_value, &layouts)
                     .expect("a Triton kernel of every tiled transpose")
             }
+            (Template::DynamicUpdateSlice, Primitive::Fusion { body, .. }) => {
+                codegen::Triton::updates(body, &layouts)
+                    .expect("a Triton kernel of every updates body")
+            }
+            (Template::DynamicUpdateSlice, _) => codegen::Triton::update(
+                &step.inputs[0].1,
+                &step.inputs[1].1,
+                &kernel.by_value,
+                &layouts,
+            )
+            .expect("a Triton kernel of every dynamic_update_slice"),
+            _ => unreachable!("a templated loop's fusion"),
         };
 
         return Helpers {

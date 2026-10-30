@@ -235,9 +235,10 @@ fn program(
 /// the updates and their blocks.
 impl DynamicSliceCodegen for Tpu {
     type Code = Program;
+    type Options = ();
 
     /// The program writing the `updates` fusion `body`'s updates at their constant starts.
-    fn updates(body: &Graph) -> Result<Program, String> {
+    fn updates(body: &Graph, _: &()) -> Result<Program, String> {
         let ty = |k: usize| body.type_of(body.inputs()[k]);
         let (operand, update) = (ty(0), ty(1));
         let fixed = starts(body, operand, update);
@@ -246,7 +247,12 @@ impl DynamicSliceCodegen for Tpu {
     }
 
     /// The program writing `update` into `operand` at runtime int32 starts.
-    fn update(operand: &TensorType, update: &TensorType, _: &[bool]) -> Result<Program, String> {
+    fn update(
+        operand: &TensorType,
+        update: &TensorType,
+        _: &[bool],
+        _: &(),
+    ) -> Result<Program, String> {
         program(operand, update, None, 1)
     }
 }
@@ -277,8 +283,8 @@ pub(crate) fn encode(
     }
 
     let p = match &step.primitive {
-        Primitive::Fusion { body, .. } => Tpu::updates(body)?,
-        _ => Tpu::update(operand, update, &[])?,
+        Primitive::Fusion { body, .. } => Tpu::updates(body, &())?,
+        _ => Tpu::update(operand, update, &[], &())?,
     };
 
     let copy = inputs[0] != output.cast_const();

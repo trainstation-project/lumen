@@ -108,11 +108,12 @@ pub(crate) fn encode(
 impl DynamicSliceCodegen for Mps {
     /// The kernel's name and source.
     type Code = (String, String);
+    type Options = ();
 
     /// The kernel of `updates` fusion `body`: every update (inputs `1..`, one shape) written into `out`
     /// (already holding operand `in0`) at its constant start indices, clamped so it stays in bounds; thread
     /// `t` writes element `t` of every update. Its name is `UPDATES`-prefixed.
-    fn updates(body: &Graph) -> Result<(String, String), String> {
+    fn updates(body: &Graph, _: &()) -> Result<(String, String), String> {
         let x = body.type_of(body.inputs()[0]);
         let update = body.type_of(body.inputs()[1]);
         let t = metal_type(x.dtype);
@@ -220,6 +221,7 @@ impl DynamicSliceCodegen for Mps {
         operand: &TensorType,
         _: &TensorType,
         _: &[bool],
+        _: &(),
     ) -> Result<(String, String), String> {
         Err(format!(
             "a dynamic_update_slice into {operand} runs Metal's fixed kernel"

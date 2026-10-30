@@ -82,7 +82,7 @@ impl<'a> CompilerPass<MpsModule<'a>> for Codegen {
 
             if name == crate::graph::UPDATES {
                 let (kernel, source) =
-                    codegen::Mps::updates(body).expect("a Metal kernel of every updates body");
+                    codegen::Mps::updates(body, &()).expect("a Metal kernel of every updates body");
 
                 super::record_launch(&kernel, body, None);
                 m.sources.insert(kernel.clone(), source);

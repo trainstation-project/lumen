@@ -1,24 +1,25 @@
-//! Triton sources for dynamic-update-slices: one at runtime starts, and a fused chain at constant starts.
+//! Triton dynamic-update-slices, one at runtime starts or a fused chain at constant starts: the `BODY` of
+//! the fixed `dynamic_update_slice_kernel` (`__init__.py`).
 
 use std::fmt::Write;
-
-use indoc::formatdoc;
 
 use super::DynamicSliceCodegen;
 use crate::codegen::triton::*;
 use crate::graph::{Graph, TensorType};
 use crate::tensor::contiguous_strides;
 
-/// Triton dynamic slices: a generated kernel per op.
+/// Triton dynamic slices: the fixed `dynamic_update_slice_kernel` runs a generated `BODY` over the update's
+/// elements, loading and storing through helpers for its tensors' layouts.
 impl DynamicSliceCodegen for Triton {
-    /// The kernel's name and source.
+    /// The `BODY` function's name and Python source.
     type Code = (String, String);
+    type Options = Tensors;
 
-    /// The kernel of `updates` fusion `body`: every update (inputs `1..`, one shape) written into `out`
-    /// (already holding operand input `0`) at its constant start indices, clamped so it stays in bounds;
-    /// each thread writes element `j` of every update, except where a later update overlapping it writes
-    /// over it.
-    fn updates(body: &Graph) -> Result<(String, String), String> {
+    /// The `BODY(EXTRA, BLOCK, MASK)` of `updates` fusion `body`: every update (inputs `1..`, one shape)
+    /// written into `out` (already holding operand input `0`) at its constant start indices, clamped so it
+    /// stays in bounds; element `BLOCK` of every update is written, except where a later update
+    /// overlapping it writes over it.
+    fn updates(body: &Graph, layouts: &Tensors) -> Result<(String, String), String> {
         let starts: Vec<Vec<i64>> = crate::graph_compiler::common::updates::starts(body)
             .into_iter()
             .map(|(_, s)| s)
@@ -37,7 +38,7 @@ impl DynamicSliceCodegen for Triton {
         // Element `j`'s coordinates in the update, then its offset in `x` before a start is added.
         let mut code: String = (0..rank)
             .filter(|&d| update.shape[d] != 1)
-            .map(|d| format!("    c{d} = (j // {}) % {}\n", spans[d], update.shape[d]))
+            .map(|d| format!("    c{d} = (BLOCK // {}) % {}\n", spans[d], update.shape[d]))
             .collect();
 
         let coordinate = |d: usize| match update.shape[d] {
@@ -51,7 +52,7 @@ impl DynamicSliceCodegen for Triton {
             .collect();
 
         let at = match terms.is_empty() {
-            true => "j".to_string(),
+            true => "BLOCK".to_string(),
             false => terms.join(" + "),
         };
 
@@ -76,47 +77,41 @@ impl DynamicSliceCodegen for Triton {
                         .collect();
 
                     match inside.is_empty() {
-                        true => "(j >= 0)".to_string(),
+                        true => "(BLOCK >= 0)".to_string(),
                         false => format!("({})", inside.join(" & ")),
                     }
                 })
                 .collect();
 
             let mask = match covered.is_empty() {
-                true => "mask".to_string(),
-                false => format!("mask & ~({})", covered.join(" | ")),
+                true => "MASK".to_string(),
+                false => format!("MASK & ~({})", covered.join(" | ")),
             };
 
             let k = k + 1;
 
             writeln!(
                 code,
-                "    STORE(out, at + {offset}, LOAD{k}(in{k}, j, {mask}), {mask})"
+                "    STORE(out, at + {offset}, LOAD{k}(in{k}, BLOCK, {mask}), {mask})"
             )
             .unwrap();
         }
 
-        let params = params(&vec![false; starts.len() + 1], None, 1);
-
-        let source = formatdoc!(
-            "
-            @triton.jit
-            def NAME(
-            {params}):
-                j = tl.program_id(0).to(tl.int64) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-                mask = j < n
-            {code}"
-        );
-
-        Ok(named("updates", source))
+        Ok(body_function(
+            "dynamic_update_slice",
+            layouts,
+            "BLOCK, MASK",
+            &code,
+        ))
     }
 
-    /// The dynamic-update-slice kernel writing `update` into `out` (already holding `x`) at runtime start
-    /// indices (inputs `2..`), clamped so the update stays in bounds.
+    /// The `BODY(EXTRA, BLOCK, MASK)` writing elements `BLOCK` of `update` into `out` (already holding
+    /// `x`) at runtime start indices (inputs `2..`), clamped so the update stays in bounds.
     fn update(
         x: &TensorType,
         update: &TensorType,
         by_value: &[bool],
+        layouts: &Tensors,
     ) -> Result<(String, String), String> {
         // Input `k` read as an int64 scalar, from a by-value argument or a 1-element tensor.
         let scalar = |k: usize| match by_value[k] {
@@ -137,30 +132,24 @@ impl DynamicSliceCodegen for Triton {
                 let most = x.shape[d] - update.shape[d];
 
                 format!(
-                    "((j // {}) % {} + tl.minimum(tl.maximum({start}, 0), {most})) * {}",
+                    "((BLOCK // {}) % {} + tl.minimum(tl.maximum({start}, 0), {most})) * {}",
                     spans[d], update.shape[d], strides[d]
                 )
             })
             .collect();
 
         let at = match terms.is_empty() {
-            true => "j".to_string(),
+            true => "BLOCK".to_string(),
             false => terms.join(" + "),
         };
 
-        let params = params(by_value, None, 1);
+        let code = format!("    STORE(out, {at}, LOAD1(in1, BLOCK, MASK), MASK)\n");
 
-        let source = formatdoc!(
-            "
-            @triton.jit
-            def NAME(
-            {params}):
-                j = tl.program_id(0).to(tl.int64) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-                mask = j < n
-                STORE(out, {at}, LOAD1(in1, j, mask), mask)
-            "
-        );
-
-        Ok(named("update", source))
+        Ok(body_function(
+            "dynamic_update_slice",
+            layouts,
+            "BLOCK, MASK",
+            &code,
+        ))
     }
 }
