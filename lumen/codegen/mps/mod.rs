@@ -9,6 +9,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use indoc::{formatdoc, indoc, writedoc};
 
 use crate::codegen::elementwise::ElementwiseCodegen;
+use crate::codegen::layout::LayoutCodegen;
 use crate::codegen::reduction::ReductionCodegen;
 use crate::codegen::row::RowCodegen;
 use crate::graph::{Graph, Node, Primitive, UnaryOp, Var};
@@ -21,17 +22,15 @@ use crate::{DType, Scalar};
 mod config;
 mod emitter;
 mod stores;
-mod transpose;
 
 pub(crate) use crate::codegen::dot_general::mps::*;
 pub(crate) use crate::codegen::kinds::reduction_root;
+pub(crate) use crate::codegen::layout::mps::transpose::*;
 pub(crate) use crate::codegen::reduction::mps::{has_epilogue, split_launches};
 pub(crate) use crate::codegen::row::mps::*;
 pub(crate) use config::*;
-pub(crate) use emitter::Emitter;
-use emitter::*;
+pub(crate) use emitter::{Emitter, gather_index};
 pub(crate) use stores::written;
-pub(crate) use transpose::*;
 
 /// The Metal code generator.
 pub(crate) struct Mps;
@@ -92,8 +91,9 @@ pub(crate) fn kernel(
             .expect("a Metal reduction of every reduction body");
     }
 
-    if let Some(tiling) = transpose_tiling(body) {
-        return transpose_kernel(body, by_value, &tiling, views);
+    if transpose_tiling(body).is_some() {
+        return Mps::transpose(body, by_value, views)
+            .expect("a Metal kernel of every tiled transpose");
     }
 
     let tuning = tuning.unwrap_or_else(|| loop_tuning(body));

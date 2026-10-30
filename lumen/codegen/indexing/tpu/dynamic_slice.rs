@@ -3,7 +3,7 @@
 use crate::DType;
 use crate::codegen::dot_general::tpu::block;
 use crate::codegen::indexing::IndexingCodegen;
-use crate::codegen::tpu::Tpu;
+use crate::codegen::utils::tpu::Tpu;
 use crate::device::tpu::layout::Layout;
 use crate::graph::{Graph, Primitive, TensorType};
 use crate::graph_compiler::plan::Step;

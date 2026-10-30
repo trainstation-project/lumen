@@ -9,8 +9,8 @@ use indoc::formatdoc;
 
 use crate::codegen::dot_general::GemmCodegen;
 use crate::codegen::regions::{Columns, Region, gemm_expanded, gemm_regions};
-use crate::codegen::triton::utils::indented;
 use crate::codegen::triton::{Emitter, Triton, gather_index, load, named, stored_at, triton_type};
+use crate::codegen::utils::triton::indented;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::tensor::contiguous_strides;
 

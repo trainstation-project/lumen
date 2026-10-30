@@ -1,7 +1,7 @@
 """Pallas TPU kernel for row fusions: elementwise and per-row work over blocks of whole rows."""
 
 from lumen import pallas as pl
-from lumen.codegen.tpu import per_row
+from lumen.codegen.utils.tpu import per_row
 from lumen.kernels.tpu import pallas
 
 

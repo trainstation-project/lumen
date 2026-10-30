@@ -7,7 +7,7 @@ mod config;
 
 use super::AttentionCodegen;
 use crate::DType;
-use crate::codegen::tpu::Tpu;
+use crate::codegen::utils::tpu::Tpu;
 use crate::device::tpu::layout::Layout;
 use crate::graph::{Graph, Node, Primitive, TensorType, Var};
 use crate::graph_compiler::common::attention::{
@@ -650,7 +650,7 @@ fn epilogue_spec(body: &Graph, chain: &[&Node], from: Var) -> Result<String, Str
         }
 
         let args: Vec<usize> = n.inputs.iter().map(|v| value[v]).collect();
-        shown.push(crate::codegen::tpu::node(&n.primitive, &args));
+        shown.push(crate::codegen::utils::tpu::node(&n.primitive, &args));
         value.insert(n.output, scalars.len() + shown.len());
     }
 

@@ -47,7 +47,7 @@ Everything per element is generated from the fusion's body.
 1. **No kernel per primitive.** When a primitive does not run on a device,
    give it a lowering in that device's codegen, not a new kernel under
    `lumen/kernels/<primitive>/<device>/`. Per-primitive kernels (today's TPU
-   reduce_sum and reshape kernels) are stopgaps until `lumen/codegen/tpu`
+   reduce_sum and reshape kernels) are stopgaps until TPU codegen
    generates them, as it does elementwise loops; don't add more.
 2. **A new hand-written kernel needs a reason codegen can't meet:** a
    schedule, the matrix unit, or a measured win over the generated kernel.
@@ -66,7 +66,7 @@ Everything per element is generated from the fusion's body.
    `lumen.full`/`lumen.zeros` and `lumen.pallas` (its `lax` names, such as
    `pl.broadcasted_iota`), as a JAX Pallas kernel uses `jnp` and `lax`; not
    `lumen.graph.prims`. Only codegen's replay of a body's nodes
-   (`codegen/tpu/__init__.py`) binds primitives by name.
+   (`codegen/utils/tpu/__init__.py`) binds primitives by name.
 
 ## Checklist
 

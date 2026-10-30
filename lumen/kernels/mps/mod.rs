@@ -323,7 +323,7 @@ pub(crate) fn encode(
         DotGeneral { .. } => crate::codegen::dot_general::mps::encode,
 
         Reshape { .. } | BroadcastInDim { .. } | Transpose { .. } | Slice { .. } => {
-            super::layout::mps::encode
+            crate::codegen::layout::mps::encode
         }
         DynamicSlice { .. } | DynamicUpdateSlice => {
             crate::codegen::indexing::mps::dynamic_slice::encode

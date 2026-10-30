@@ -1,6 +1,6 @@
 //! Horizontal fusion of independent same-shape `loop` fusions into one kernel launch.
 use super::super::TpuModule;
-use crate::codegen::tpu::fusible;
+use crate::codegen::utils::tpu::fusible;
 use crate::graph::{Graph, Node, Primitive};
 use crate::graph_compiler::common::horizontal::{Target, fuse};
 use crate::graph_compiler::pass::CompilerPass;

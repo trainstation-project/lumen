@@ -25,7 +25,7 @@ from lumen.codegen.attention.tpu import (
     views,
     zeros,
 )
-from lumen.codegen.tpu import computed
+from lumen.codegen.utils.tpu import computed
 from lumen.kernels.tpu import pallas
 
 
