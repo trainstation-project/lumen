@@ -118,12 +118,7 @@ pub(crate) fn gemm(dot: &Primitive, lhs: Layout, rhs: Layout, out: Layout) -> Ge
     }
 }
 
-/// The fusion body's `dot_general`, if it has one.
-pub(crate) fn gemm_dot(body: &Graph) -> Option<&Node> {
-    body.nodes()
-        .iter()
-        .find(|n| matches!(n.primitive, Primitive::DotGeneral { .. }))
-}
+pub(crate) use crate::codegen::kinds::gemm_dot;
 
 /// How the GEMM kernel shapes its accumulator for a fused epilogue.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]

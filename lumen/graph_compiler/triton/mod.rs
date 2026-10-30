@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 #[cfg(feature = "python")]
 pub(crate) use crate::codegen::triton::Config;
-use attention::{FlashAttentionBackward, Tiles};
+use attention::Tiles;
 #[cfg(feature = "python")]
 pub(crate) use attention::{Launch, set_attention};
 use diamonds::Diamonds;
@@ -36,7 +36,7 @@ use super::common::autotune::{Autotuner, Kernels, Timer};
 use super::common::chunked_cross_entropy::ChunkedCrossEntropy;
 use super::common::clamp_indices::ClampIndices;
 use super::common::dot_strength::DotStrength;
-use super::common::flash_attention::FlashAttention;
+use super::common::flash_attention::{FlashAttention, FlashAttentionBackward};
 use super::common::linear_cross_entropy::LinearCrossEntropy;
 use super::common::merge_dots::{Blocks, MergeDots, Packs, Target};
 use super::common::merge_dots_backward::MergeDotsBackward;
@@ -45,7 +45,7 @@ use super::common::take_along_axis::TakeAlongAxis;
 use super::common::updates::Updates;
 use super::pass::{Module, Pipeline};
 use super::plan::{Buffer, Step, Tuned};
-use super::{CompilerConfig, Options, Plan, PlanOptions, positions};
+use super::{CompilerConfig, Options, Plan, plan_options, positions};
 use crate::codegen::triton::{self as codegen, LOOP_CONFIGS, LoopConfig, UNTUNED_LOOP};
 use crate::graph::{Graph, Primitive, TensorType, UPDATES};
 use crate::graph_compiler::common::diamonds::Row;
@@ -240,30 +240,9 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
         interleaved,
         ..
     } = module;
-    // Packed blocks are appended as inputs after the original ones.
-    let parameters = options.parameters.clone().map(|mut p| {
-        p.resize(fused.inputs().len(), true);
-        p
-    });
-    let first_block = fused.inputs().len() - packed.len();
-    let blocks = packed
-        .iter()
-        .enumerate()
-        .map(|(k, (members, _))| (first_block + k, members.clone()))
-        .collect();
-    let mut plan = Plan::compile_with(
-        &fused,
-        &PlanOptions {
-            scratch: None,
-            donate: options.donate.clone(),
-            donate_into: options.donate_into.clone(),
-            parameters,
-            scalars: positions(&options.scalars),
-            memory_limit: config.memory_limit(),
-            blocks,
-            layout: None,
-        },
-    );
+    let scalars = positions(&options.scalars);
+    let plan = plan_options(&fused, options, config, &packed, scalars);
+    let mut plan = Plan::compile_with(&fused, &plan);
     plan.packed = packed;
     plan.interleaved = interleaved;
     let kernels = plan.steps().iter().map(loop_kernel);

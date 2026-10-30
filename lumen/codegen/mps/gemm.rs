@@ -6,12 +6,7 @@ use crate::kernels::dot_general::mps::{
 };
 use crate::tensor::contiguous_strides;
 
-/// The body's `DotGeneral` node, if any.
-pub(crate) fn gemm_dot(body: &Graph) -> Option<&Node> {
-    body.nodes()
-        .iter()
-        .find(|n| matches!(n.primitive, Primitive::DotGeneral { .. }))
-}
+pub(crate) use crate::codegen::kinds::gemm_dot;
 
 pub(crate) use crate::codegen::regions::{
     Columns, Expansion, ROW_COLUMNS, Region, expansion, gemm_expanded, gemm_pair, gemm_regions,

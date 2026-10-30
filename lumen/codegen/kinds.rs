@@ -1,9 +1,16 @@
 //! The kinds of fused body the GPU backends' code generators tell apart, read from the body alone: a
-//! reduction with its prologue and epilogue, or a normalization row (reductions over the last axis
-//! whose results feed back into their rows), and the column partials riding along a row.
+//! GEMM, a reduction with its prologue and epilogue, or a normalization row (reductions over the last
+//! axis whose results feed back into their rows), and the column partials riding along a row.
 
 use crate::graph::{Graph, Node, Primitive};
 use crate::graph_compiler::{constant, elementwise};
+
+/// The body's `DotGeneral` node, if any.
+pub(crate) fn gemm_dot(body: &Graph) -> Option<&Node> {
+    body.nodes()
+        .iter()
+        .find(|n| matches!(n.primitive, Primitive::DotGeneral { .. }))
+}
 
 /// The body's only reduction when the first output reaches it through elementwise or reshape
 /// nodes alone, else `None`.
