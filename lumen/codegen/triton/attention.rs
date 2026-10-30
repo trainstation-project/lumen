@@ -5,6 +5,7 @@ use std::fmt::Write;
 
 use indoc::formatdoc;
 
+use super::reduction::indented;
 use super::{Emitter, constant, load, named, triton_type};
 use crate::Scalar;
 use crate::codegen::AttentionCodegen;
@@ -15,7 +16,14 @@ use crate::tensor::contiguous_strides;
 /// Statements setting `at`, the element offset of `acc`'s tile at flat batch index `b`, rows `rows`
 /// and columns `cols`; `batch` holds the batch extents, outermost first.
 fn address(acc: &Access, batch: &[usize]) -> String {
-    let mut code = format!("    rest = b\n    at = rest * 0 + {}\n", acc.offset);
+    let mut code = formatdoc!(
+        "
+        rest = b
+        at = rest * 0 + {offset}
+        ",
+        offset = acc.offset
+    );
+
     // Peel batch dims innermost first; a divisor maps a broadcast dim (shared KV heads) onto a smaller one.
     for (k, (&size, &(stride, divisor))) in batch.iter().zip(&acc.batch).enumerate().rev() {
         let index = match k {
@@ -27,10 +35,10 @@ fn address(acc: &Access, batch: &[usize]) -> String {
                 1 => index,
                 _ => format!("({index} // {divisor})"),
             };
-            writeln!(code, "    at += {index} * {stride}").unwrap();
+            writeln!(code, "at += {index} * {stride}").unwrap();
         }
         if k > 0 {
-            writeln!(code, "    rest = rest // {size}").unwrap();
+            writeln!(code, "rest = rest // {size}").unwrap();
         }
     }
     let mut terms: Vec<String> = [("rows", acc.row), ("cols", acc.col)]
@@ -42,8 +50,8 @@ fn address(acc: &Access, batch: &[usize]) -> String {
     if terms.is_empty() {
         terms = vec!["rows * 0".into(), "cols * 0".into()];
     }
-    writeln!(code, "    at = at + {}", terms.join(" + ")).unwrap();
-    code
+    writeln!(code, "at = at + {}", terms.join(" + ")).unwrap();
+    indented(&code)
 }
 
 /// A jit helper loading the tile at `rows` and `cols` of operand `acc` for batch `b`, zero where masked.
@@ -89,14 +97,14 @@ fn attention_output(body: &Graph, a: &Attention, raw: bool, strides: &Strides) -
         .filter(|&k| a.offset != Some(body.inputs()[k]))
         .collect();
     let mut loads = String::new();
-    let mut code = format!("    j = at\n    r = value.to({t})\n");
+    let mut code = formatdoc!(
+        "
+        j = at
+        r = value.to({t})
+        "
+    );
     if raw {
-        writeln!(
-            code,
-            "    tl.store(EXTRA[{}] + at, r, mask=mask)",
-            leaves.len()
-        )
-        .unwrap();
+        writeln!(code, "tl.store(EXTRA[{}] + at, r, mask=mask)", leaves.len()).unwrap();
     }
     for (e, &k) in leaves.iter().enumerate() {
         let ty = body.type_of(body.inputs()[k]);
@@ -106,25 +114,21 @@ fn attention_output(body: &Graph, a: &Attention, raw: bool, strides: &Strides) -
         };
         let (name, source) = load(&ty.shape, &strides);
         loads += &(source.replace(&format!("def {name}("), &format!("def LOAD{k}(")) + "\n\n");
-        writeln!(code, "    in{k} = EXTRA[{e}]").unwrap();
+        writeln!(code, "in{k} = EXTRA[{e}]").unwrap();
     }
     let by_value = vec![false; body.inputs().len()];
     let mut emitter = Emitter::new(body, &by_value);
     emitter.values.insert((root, "j".into()), "r".into());
     let value = emitter.value(body.outputs()[0], "j".into());
-    code += &emitter.lines;
-    writeln!(
-        code,
-        "    tl.store(ptr + at, {value}.to(ptr.dtype.element_ty), mask=mask)"
-    )
-    .unwrap();
+    let (code, lines) = (indented(&code), emitter.lines);
     named(
         "attention_output",
         formatdoc!(
             "
             {loads}@triton.jit
             def NAME(ptr, EXTRA, b, rows, cols, value, mask):
-            {at}{code}"
+            {at}{code}{lines}    tl.store(ptr + at, {value}.to(ptr.dtype.element_ty), mask=mask)
+            "
         ),
     )
 }
