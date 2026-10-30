@@ -48,6 +48,7 @@ use super::plan::{Buffer, Step, Tuned};
 use super::{CompilerConfig, Options, Plan, plan_options, positions};
 use crate::codegen::elementwise::ElementwiseCodegen;
 use crate::codegen::indexing::IndexingCodegen;
+use crate::codegen::layout::{LayoutCodegen, transpose_tiling};
 use crate::codegen::reduction::ReductionCodegen;
 use crate::codegen::row::RowCodegen;
 use crate::codegen::triton::{self as codegen, LOOP_CONFIGS, LoopConfig, UNTUNED_LOOP};
@@ -314,6 +315,13 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
 
                 (r.name, r.source, r.lanes, r.splits)
             }
+            // A loop computed from transposes it can tile: a tile of the output a program.
+            None if transpose_tiling(body).is_some() => {
+                let (name, source) = codegen::Triton::transpose(body, &by_value, &HashMap::new())
+                    .expect("a Triton kernel of every tiled transpose");
+
+                (name, source, 1, 1)
+            }
             None => {
                 let (name, source) =
                     codegen::Triton::elementwise(body, &by_value, &HashMap::new(), &())
@@ -518,13 +526,14 @@ pub(crate) fn run(
             let untuned = codegen::untuned_loop(kernel.lanes);
             let config = step.launch::<LoopConfig>().unwrap_or(&untuned);
             // A looped row kernel walks one row a program, a block of it at a time; one with column
-            // partials one group of rows a program.
+            // partials one group of rows a program; a tiled transpose one tile a program.
             let looped;
 
             let kernel = match &step.primitive {
                 Primitive::Fusion { name, body, .. }
                     if name == ROW
-                        && (codegen::row_looped(body) || codegen::row_groups(body).is_some()) =>
+                        && (codegen::row_looped(body) || codegen::row_groups(body).is_some())
+                        || name != ROW && transpose_tiling(body).is_some() =>
                 {
                     looped = Kernel {
                         lanes: config.block_size,
@@ -536,11 +545,14 @@ pub(crate) fn run(
                 _ => kernel,
             };
 
-            // Grid size: outputs, or a row fusion's rows (its row groups with partials), or lines for a
-            // scan, or picks for a scatter.
+            // Grid size: outputs, or a row fusion's rows (its row groups with partials), or a tiled
+            // transpose's tiles, or lines for a scan, or picks for a scatter.
             let n = match &step.primitive {
                 Primitive::Fusion { name, body, .. } if name == ROW => {
                     Some(codegen::row_groups(body).unwrap_or(codegen::row_count(body)))
+                }
+                Primitive::Fusion { body, .. } if transpose_tiling(body).is_some() => {
+                    transpose_tiling(body).map(|tiling| tiling.tiles())
                 }
                 Primitive::Cumsum { axis, .. } => out.numel().checked_div(out.shape()[*axis]),
                 Primitive::DynamicUpdateSlice => Some(inputs[1].numel()),

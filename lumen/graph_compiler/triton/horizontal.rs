@@ -4,7 +4,9 @@
 use super::TritonModule;
 use crate::codegen::triton as codegen;
 use crate::graph::{Graph, Node, Primitive};
-use crate::graph_compiler::common::horizontal::{Target, fuse};
+use crate::graph_compiler::common::horizontal::{
+    Target, fuse, heroes_fit, keeps_tiling, tiling_key,
+};
 use crate::graph_compiler::elementwise;
 use crate::graph_compiler::pass::CompilerPass;
 
@@ -40,19 +42,20 @@ impl Target for Loops {
             && codegen::gemm_dot(body).is_none()
     }
 
-    /// Groups every candidate together: members of different element counts split the grid.
-    fn key(&self, _: &Graph, _: &Node) -> Vec<usize> {
-        Vec::new()
+    /// Groups loops of any size together (they split the grid), and tiled transposes by exact shape, as
+    /// MPS's target does.
+    fn key(&self, graph: &Graph, node: &Node) -> Vec<usize> {
+        tiling_key(graph, node)
     }
 
-    /// Caps the tensor count at `MAX_BUFFERS`.
-    fn fits(&self, _: &Graph, _: &[usize], buffers: usize) -> bool {
-        buffers <= MAX_BUFFERS
+    /// Caps the tensor count at `MAX_BUFFERS` and, for tiled transposes, the transpose count.
+    fn fits(&self, graph: &Graph, members: &[usize], buffers: usize) -> bool {
+        heroes_fit(graph, members) && buffers <= MAX_BUFFERS
     }
 
-    /// Accepts any group that fits.
-    fn accepts(&self, _: &Graph, _: &[usize], _: &Graph) -> bool {
-        true
+    /// Whether the merged body keeps the members' tiling.
+    fn accepts(&self, graph: &Graph, members: &[usize], body: &Graph) -> bool {
+        keeps_tiling(graph, members, body)
     }
 
     /// Names the merged kernel `loop`; its source is generated per plan step.

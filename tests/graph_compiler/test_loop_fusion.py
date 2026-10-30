@@ -68,6 +68,36 @@ def agrees(device, f, arrays, tol):
 
 
 @pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize(
+    "f, shapes",
+    [
+        # A batch dim and partial tiles on both tiled sides.
+        (lambda x, y: F.exp(x.transpose(1, 2)) * 2.0 + y, [(3, 50, 70), (3, 70, 50)]),
+        # Two transposes staged through tiles of one kernel.
+        (lambda x, y: x.t() * y.t() + 1.0, [(40, 100), (40, 100)]),
+        # The tiled dims merged from several: [b, h, s, d] read as [b, d, h, s].
+        (lambda x, y: -x.permute(0, 3, 1, 2) + y, [(2, 3, 20, 48), (2, 48, 3, 20)]),
+        # Two outputs of one tile.
+        (lambda x, y: (x.t() + y, F.tanh(x.t())), [(64, 96), (96, 64)]),
+    ],
+)
+def test_transposes_tiled_with_their_elementwise_ops_match_the_cpu(device, f, shapes, triton_on_cuda):
+    """A loop computing elementwise ops of transposes runs one tile of the
+    output a program, reading each transposed input along its contiguous
+    dims and writing along the output's; it computes what the CPU does."""
+    arrays = [rand(*s, seed=k) for k, s in enumerate(shapes)]
+    on_cpu = [lumen.from_numpy(v) for v in arrays]
+    try:
+        on_device = [v.to(device) for v in on_cpu]
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    expected, got = lumen.compile(f)(*on_cpu), lumen.compile(f)(*on_device)
+    for e, g in zip(*(r if isinstance(r, tuple) else (r,) for r in (expected, got))):
+        assert g.device == f"{device}:0"
+        np.testing.assert_allclose(lumen.to_numpy(g), lumen.to_numpy(e), rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("shape", [(37, 300), (300, 37), (5, 70, 9), (1, 1), (2, 0, 3)])
 def test_reductions_match_the_cpu(device, shape, triton_on_cuda):
     """Sums and maxima over any axes (rows, columns, middle, several, all;
