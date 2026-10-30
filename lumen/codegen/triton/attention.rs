@@ -171,21 +171,6 @@ fn attention_score(scores: &[Score]) -> (String, String) {
     )
 }
 
-/// Where the forward kernel writes each query row's log-sum-exp, `[batch.., sq]`: at `strides`, or
-/// contiguous.
-fn per_row(batch: &[usize], sq: usize, strides: Option<&[usize]>) -> Access {
-    let mut shape = batch.to_vec();
-    shape.push(sq);
-    let strides = strides.map_or_else(|| contiguous_strides(&shape), <[usize]>::to_vec);
-    Access {
-        base: 0,
-        offset: 0,
-        batch: strides[..batch.len()].iter().map(|&s| (s, 1)).collect(),
-        row: strides[batch.len()],
-        col: 0,
-    }
-}
-
 /// The gradients a backward kernel writes, by the helper writing each, in parameter order: dK and
 /// dV, with dQ added atomically into a zeroed float32 buffer as each key block computes it, or dQ
 /// alone; empty when the backward computes no gradient.
@@ -211,13 +196,27 @@ impl AttentionCodegen for super::Triton {
         let root = body.nodes()[a.root].output;
         // The attention values are also written as they are when the body outputs them too.
         let raw = body.outputs()[1..].contains(&root);
+        // Each query row's log-sum-exp, `[batch.., sq]`, is written at its output's strides, or contiguous.
         let lse_strides = a.lse.and_then(|n| {
             let v = body.nodes()[n].output;
             let k = body.outputs().iter().position(|&u| u == v)?;
-            strides.outputs.get(&k).map(|(_, s)| s.as_slice())
+            strides.outputs.get(&k).cloned().map(|(_, s)| s)
         });
 
-        let lse = per_row(&a.batch, a.sq, lse_strides);
+        let mut shape = a.batch.clone();
+        shape.push(a.sq);
+
+        let lse_strides = lse_strides.unwrap_or_else(|| contiguous_strides(&shape));
+        let lse = Access {
+            base: 0,
+            offset: 0,
+            batch: lse_strides[..a.batch.len()]
+                .iter()
+                .map(|&s| (s, 1))
+                .collect(),
+            row: lse_strides[a.batch.len()],
+            col: 0,
+        };
 
         Ok(vec![
             ("LOAD_Q".into(), attention_load(&a.q, &a.batch)),
