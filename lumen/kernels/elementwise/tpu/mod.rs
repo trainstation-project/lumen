@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use crate::DType;
-use crate::codegen::ElementwiseCodegen;
+use crate::codegen::elementwise::ElementwiseCodegen;
 use crate::codegen::tpu::Tpu;
 use crate::device::tpu::layout::Layout;
 use crate::graph::Primitive;

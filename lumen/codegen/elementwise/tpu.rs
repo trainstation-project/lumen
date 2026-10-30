@@ -2,10 +2,10 @@
 
 use std::collections::HashMap;
 
-use super::indexing::{Dim, Plan, layout, plan};
-use super::{Tpu, fusible, node, window_at};
+use super::ElementwiseCodegen;
 use crate::DType;
-use crate::codegen::ElementwiseCodegen;
+use crate::codegen::tpu::indexing::{Dim, Plan, layout, plan};
+use crate::codegen::tpu::{Tpu, fusible, node, window_at};
 use crate::graph::{Graph, Primitive, TensorType, Var};
 use crate::kernels::dot_general::tpu::block;
 use crate::kernels::elementwise::tpu::{blocks, gcd};

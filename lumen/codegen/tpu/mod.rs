@@ -1,8 +1,6 @@
 //! TPU code generation: the Rust side that turns fused steps into JSON specs for the Pallas kernels.
 
 #[cfg(lumen_tpu_linked)]
-mod elementwise;
-#[cfg(lumen_tpu_linked)]
 pub(crate) mod gemm;
 #[cfg(lumen_tpu_linked)]
 pub(crate) mod gemm_row;

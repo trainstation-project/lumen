@@ -8,7 +8,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 
 use indoc::{formatdoc, indoc, writedoc};
 
-use crate::codegen::ElementwiseCodegen;
+use crate::codegen::elementwise::ElementwiseCodegen;
 use crate::graph::{Graph, Node, Primitive, UnaryOp, Var};
 use crate::graph_compiler::MpsConfig;
 use crate::graph_compiler::common::attention::{Attention, Backward};
@@ -19,23 +19,23 @@ use crate::tensor::contiguous_strides;
 use crate::{DType, Scalar};
 
 mod config;
-mod elementwise;
 mod emitter;
 mod gemm;
 mod gemm_row;
 mod reduction;
 mod row;
+mod stores;
 mod transpose;
 mod updates;
 
 pub(crate) use config::*;
-use elementwise::*;
 pub(crate) use emitter::Emitter;
 use emitter::*;
 pub(crate) use gemm::*;
 pub(crate) use gemm_row::*;
 pub(crate) use reduction::*;
 pub(crate) use row::*;
+pub(crate) use stores::written;
 pub(crate) use transpose::*;
 pub(crate) use updates::updates_kernel;
 
