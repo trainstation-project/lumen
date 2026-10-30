@@ -48,7 +48,7 @@ use super::plan::{Buffer, Step, Tuned};
 use super::{CompilerConfig, Options, Plan, plan_options, positions};
 use crate::codegen::elementwise::ElementwiseCodegen;
 use crate::codegen::indexing::IndexingCodegen;
-use crate::codegen::layout::{LayoutCodegen, transpose_tiling};
+use crate::codegen::layout::{LayoutCodegen, TILE, transpose_tiling};
 use crate::codegen::reduction::ReductionCodegen;
 use crate::codegen::row::RowCodegen;
 use crate::codegen::triton::{self as codegen, LOOP_CONFIGS, LoopConfig, UNTUNED_LOOP};
@@ -73,6 +73,60 @@ pub struct Kernel {
     /// Element counts of a horizontal fusion's grid segments, each on its own programs; empty
     /// when every output has one element count.
     pub segments: Vec<usize>,
+    /// The fixed kernel the step's generated `BODY` runs in, its source then empty: the `BODY` is generated
+    /// with its tensors' layouts, among its helpers. `None` for a kernel generated whole.
+    pub template: Option<Template>,
+}
+
+/// A fixed Triton kernel a step's generated `BODY` runs in.
+#[derive(Debug, Clone, Copy, PartialEq)]
+#[cfg_attr(not(feature = "python"), allow(dead_code))]
+pub enum Template {
+    /// `loop_kernel` (lumen.codegen.elementwise.triton): blocks of each grid segment's elements.
+    Loop,
+    /// `transpose_kernel` (lumen.codegen.layout.triton): `TILE` x `TILE` tiles of an `a` x `b` output, per
+    /// batch.
+    Transpose { a: usize, b: usize },
+}
+
+#[cfg_attr(not(feature = "python"), allow(dead_code))]
+impl Template {
+    /// The Python module and name of the kernel.
+    pub fn kernel(self) -> (&'static str, &'static str) {
+        match self {
+            Template::Loop => ("lumen.codegen.elementwise.triton", "loop_kernel"),
+            Template::Transpose { .. } => ("lumen.codegen.layout.triton", "transpose_kernel"),
+        }
+    }
+
+    /// The kernel's constexprs for a launch over `n` outputs in `segments` (empty for one segment): a
+    /// loop's segments' element counts, a transpose's output sides and tile.
+    pub fn constexprs(self, n: usize, segments: &[usize]) -> Vec<(&'static str, Constexpr)> {
+        match self {
+            Template::Loop => {
+                let segments = match segments {
+                    [] => vec![n],
+                    segments => segments.to_vec(),
+                };
+
+                vec![("SEGMENTS", Constexpr::Ints(segments))]
+            }
+            Template::Transpose { a, b } => vec![
+                ("A", Constexpr::Int(a)),
+                ("B", Constexpr::Int(b)),
+                ("TILE", Constexpr::Int(TILE)),
+            ],
+        }
+    }
+}
+
+/// A template kernel's constexpr value.
+#[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(not(feature = "python"), allow(dead_code))]
+pub enum Constexpr {
+    Int(usize),
+    /// A tuple of ints.
+    Ints(Vec<usize>),
 }
 
 /// A jit helper bound to a kernel's constexpr parameter.
@@ -286,6 +340,16 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
     Ok(plan)
 }
 
+/// The name of a templated loop's kernel: `loop_` plus a hash of its body (its `BODY`, generated per
+/// layout at launch, is named after its own source).
+fn templated(body: &Graph) -> String {
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    body.to_string().hash(&mut hasher);
+    format!("loop_{:016x}", hasher.finish())
+}
+
 /// Generates the loop kernel for `step`, or `None` for GEMMs and steps without a Triton loop kernel.
 fn loop_kernel(step: &Step) -> Option<Kernel> {
     let by_value: Vec<bool> = step
@@ -315,20 +379,8 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
 
                 (r.name, r.source, r.lanes, r.splits)
             }
-            // A loop computed from transposes it can tile: a tile of the output a program.
-            None if transpose_tiling(body).is_some() => {
-                let (name, source) = codegen::Triton::transpose(body, &by_value, &HashMap::new())
-                    .expect("a Triton kernel of every tiled transpose");
-
-                (name, source, 1, 1)
-            }
-            None => {
-                let (name, source) =
-                    codegen::Triton::elementwise(body, &by_value, &HashMap::new(), &())
-                        .expect("a Triton loop of every elementwise body");
-
-                (name, source, 1, 1)
-            }
+            // A loop runs in a template kernel, its `BODY` generated with its tensors' layouts at launch.
+            None => (templated(body), String::new(), 1, 1),
         },
         Primitive::Cumsum {
             axis,
@@ -372,6 +424,22 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
         _ => segments.into_iter().map(|(numel, _)| numel).collect(),
     };
 
+    // A loop computed from transposes it can tile runs a tile of the output a program.
+    let template = match &step.primitive {
+        Primitive::Fusion { name, body, .. }
+            if name != UPDATES && name != ROW && codegen::reduction_root(body).is_none() =>
+        {
+            match transpose_tiling(body) {
+                Some(tiling) => Some(Template::Transpose {
+                    a: tiling.a,
+                    b: tiling.b,
+                }),
+                None => Some(Template::Loop),
+            }
+        }
+        _ => None,
+    };
+
     Some(Kernel {
         name,
         source,
@@ -379,6 +447,7 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
         lanes,
         splits,
         segments,
+        template,
     })
 }
 
@@ -603,6 +672,7 @@ pub(crate) fn run(
                 lanes: kernel.splits.next_power_of_two(),
                 splits: 1,
                 segments: Vec::new(),
+                template: None,
             };
 
             let inputs = [inputs, std::slice::from_ref(&partials)].concat();
@@ -666,6 +736,7 @@ pub(crate) fn fill(t: &Tensor, value: Scalar) -> Result<(), String> {
             lanes: 1,
             splits: 1,
             segments: Vec::new(),
+            template: None,
         };
 
         let store = Function::new("STORE", codegen::store(t.shape(), t.strides()));
@@ -692,22 +763,25 @@ pub(crate) fn copy(dst: &Tensor, src: &Tensor) -> Result<(), String> {
         let x = body.input(TensorType::new(src.dtype(), src.shape()));
         body.set_outputs(&[x]).expect("the copied value");
 
-        let (name, source) = codegen::Triton::elementwise(&body, &[false], &HashMap::new(), &())
+        let layouts = codegen::Tensors {
+            inputs: vec![Some((src.shape().to_vec(), src.strides().to_vec()))],
+            outputs: vec![(dst.shape().to_vec(), dst.strides().to_vec())],
+        };
+
+        let generated = codegen::Triton::elementwise(&body, &[false], &HashMap::new(), &layouts)
             .expect("a Triton loop of a copy");
 
         let kernel = Kernel {
-            name,
-            source,
+            name: generated.0.clone(),
+            source: String::new(),
             by_value: vec![false],
             lanes: 1,
             splits: 1,
             segments: Vec::new(),
+            template: Some(Template::Loop),
         };
 
-        let functions = vec![
-            Function::new("LOAD0", codegen::load(src.shape(), src.strides())),
-            Function::new("STORE", codegen::store(dst.shape(), dst.strides())),
-        ];
+        let functions = vec![Function::new("BODY", generated)];
 
         (kernel, functions)
     });
@@ -740,6 +814,35 @@ fn loop_helpers(
     out: &Tensor,
     outs: &[Tensor],
 ) -> Helpers {
+    if let (Some(template), Primitive::Fusion { body, .. }) = (kernel.template, &step.primitive) {
+        let owned = |t: &Tensor| (t.shape().to_vec(), t.strides().to_vec());
+
+        let layouts = codegen::Tensors {
+            inputs: inputs
+                .iter()
+                .zip(&kernel.by_value)
+                .map(|(t, &scalar)| (!scalar).then(|| owned(t)))
+                .collect(),
+            outputs: std::iter::once(out).chain(outs).map(owned).collect(),
+        };
+
+        let generated = match template {
+            Template::Loop => {
+                codegen::Triton::elementwise(body, &kernel.by_value, &HashMap::new(), &layouts)
+                    .expect("a Triton loop of every elementwise body")
+            }
+            Template::Transpose { .. } => {
+                codegen::Triton::transpose(body, &kernel.by_value, &layouts)
+                    .expect("a Triton kernel of every tiled transpose")
+            }
+        };
+
+        return Helpers {
+            functions: vec![Function::new("BODY", generated)],
+            launches: Launches::default(),
+        };
+    }
+
     let mut functions: Vec<Function> = inputs
         .iter()
         .enumerate()

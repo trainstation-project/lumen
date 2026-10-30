@@ -16,8 +16,9 @@ pub(crate) trait ElementwiseCodegen {
     /// The generated code: a Metal kernel's name and source, a Triton kernel's, or a TPU program's kernel
     /// name and spec.
     type Code;
-    /// How the loop's elements are split across threads when the autotuner chooses it: MPS's `Tuning`; `()`
-    /// where it is chosen elsewhere (Triton at launch, TPU from the shapes).
+    /// What the code is generated for beyond the body: how MPS splits the loop's elements across threads
+    /// (`Tuning`, when the autotuner chooses it), the tensors' layouts Triton's loads and stores are
+    /// generated for, or `()` for TPU (its split follows from the shapes).
     type Schedule;
     /// Code for the loop `body`; fails for a loop the backend has no kernel for.
     fn elementwise(

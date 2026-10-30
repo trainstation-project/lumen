@@ -129,6 +129,7 @@ pub(super) fn run(
         lanes: loop_config.block_size,
         splits: 1,
         segments: Vec::new(),
+        template: None,
     };
 
     super::launch(

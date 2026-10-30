@@ -179,6 +179,65 @@ pub(crate) fn store(shape: &[usize], strides: &[usize]) -> (String, String) {
     named("store", source)
 }
 
+/// A tensor's shape and strides, in elements.
+pub(crate) type Owned = (Vec<usize>, Vec<usize>);
+
+/// The layouts a template kernel's `BODY` is generated for: each input's (`None` when it is passed by
+/// value), then each output's.
+pub(crate) struct Tensors {
+    pub(crate) inputs: Vec<Option<Owned>>,
+    pub(crate) outputs: Vec<Owned>,
+}
+
+/// A template kernel's generated `BODY(EXTRA, {params})` running `code`: it binds the step's inputs `in{k}`
+/// and outputs `out` and `out{k}` from `EXTRA` (the inputs, then the outputs after the first, then the
+/// first), and defines the `LOAD{k}` and `STORE`/`STORE{k}` helpers `code` calls for their `layouts`.
+/// Returns `(name, source)`, the name `kind` plus a hash of the source.
+pub(crate) fn body_function(
+    kind: &str,
+    layouts: &Tensors,
+    params: &str,
+    code: &str,
+) -> (String, String) {
+    let (inputs, outputs) = (layouts.inputs.len(), layouts.outputs.len());
+    let mut helpers = String::new();
+
+    for (k, layout) in layouts.inputs.iter().enumerate() {
+        if let Some((shape, strides)) = layout {
+            let (name, source) = load(shape, strides);
+            helpers += &source.replace(&format!("def {name}("), &format!("def LOAD{k}("));
+            helpers += "\n";
+        }
+    }
+
+    for (k, (shape, strides)) in layouts.outputs.iter().enumerate() {
+        let (name, source) = store(shape, strides);
+
+        let param = match k {
+            0 => "STORE".to_string(),
+            k => format!("STORE{k}"),
+        };
+
+        helpers += &source.replace(&format!("def {name}("), &format!("def {param}("));
+        helpers += "\n";
+    }
+
+    let mut bind: String = (0..inputs)
+        .map(|k| format!("    in{k} = EXTRA[{k}]\n"))
+        .collect();
+
+    for k in 1..outputs {
+        writeln!(bind, "    out{k} = EXTRA[{}]", inputs + k - 1).unwrap();
+    }
+
+    writeln!(bind, "    out = EXTRA[{}]", inputs + outputs - 1).unwrap();
+
+    named(
+        kind,
+        format!("{helpers}@triton.jit\ndef NAME(EXTRA, {params}):\n{bind}{code}"),
+    )
+}
+
 /// Address expression storing flat logical index `idx`: an output is written at distinct elements, never
 /// broadcast.
 pub(crate) fn stored_at(idx: &str, shape: &[usize], strides: &[usize]) -> String {

@@ -15,13 +15,10 @@ use crate::kernels::tpu::{Launch, launch};
 impl LayoutCodegen for Tpu {
     /// The kernel's name and spec.
     type Code = (String, String);
+    type Options = ();
 
     /// None: a transpose fuses into the elementwise loops.
-    fn transpose(
-        _: &Graph,
-        _: &[bool],
-        _: &HashMap<usize, (usize, Vec<usize>)>,
-    ) -> Result<(String, String), String> {
+    fn transpose(_: &Graph, _: &[bool], _: &()) -> Result<(String, String), String> {
         Err("a transpose on TPU fuses into the elementwise loops".into())
     }
 
