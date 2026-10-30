@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use crate::codegen::layout::{MAX_HEROES, transpose_tiling};
 use crate::graph::{Graph, Node, Primitive, Scope, Var, intern};
 
 /// Most nodes in one horizontal group.
@@ -426,4 +427,43 @@ fn body(graph: &Graph, members: &[usize], reads: &[Var], values: &[Vec<Var>]) ->
         .expect("the members' values are values of the body");
 
     (body, outputs)
+}
+
+/// Whether `node` is a fusion whose kernel stages transposes through tiles (`transpose_tiling`).
+pub(crate) fn tiled(node: &Node) -> bool {
+    match &node.primitive {
+        Primitive::Fusion { body, .. } => transpose_tiling(body).is_some(),
+        _ => false,
+    }
+}
+
+/// A `Target::key` keeping tiled kernels apart by exact shape (their grid is the shape's tiles), and
+/// grouping every other kernel together (they split the grid).
+pub(crate) fn tiling_key(graph: &Graph, node: &Node) -> Vec<usize> {
+    match tiled(node) {
+        true => graph.type_of(node.output).shape.clone(),
+        false => Vec::new(),
+    }
+}
+
+/// Whether a group of tiled kernels stages at most `MAX_HEROES` transposes, each needing its own tile; an
+/// untiled group always does.
+pub(crate) fn heroes_fit(graph: &Graph, members: &[usize]) -> bool {
+    let nodes = graph.nodes();
+
+    let transposes = |m: &usize| match &nodes[*m].primitive {
+        Primitive::Fusion { body, .. } => body
+            .nodes()
+            .iter()
+            .filter(|n| matches!(n.primitive, Primitive::Transpose { .. }))
+            .count(),
+        _ => 0,
+    };
+
+    !tiled(&nodes[members[0]]) || members.iter().map(transposes).sum::<usize>() <= MAX_HEROES
+}
+
+/// Whether the merged `body` of `members` keeps their tiling.
+pub(crate) fn keeps_tiling(graph: &Graph, members: &[usize], body: &Graph) -> bool {
+    transpose_tiling(body).is_some() == tiled(&graph.nodes()[members[0]])
 }
