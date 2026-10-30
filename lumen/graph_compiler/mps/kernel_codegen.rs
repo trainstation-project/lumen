@@ -2,11 +2,11 @@
 
 use std::collections::HashMap;
 
-use super::alone::wrapped;
 use super::autotune::Tunable;
 use super::place_concats::in_place_concats;
 use super::{Kernel, MpsModule, PENDING, codegen, request};
 use crate::graph::{Primitive, Var};
+use crate::graph_compiler::common::alone::wrapped;
 use crate::graph_compiler::common::attention;
 use crate::graph_compiler::pass::CompilerPass;
 
@@ -45,7 +45,7 @@ impl<'a> CompilerPass<MpsModule<'a>> for Codegen {
                     }
                 )
             };
-            m.graph = wrapped(&m.graph, &[], concatenate, |_| {
+            m.graph = wrapped(&m.graph, &[], concatenate, |_, _| {
                 request(kernels, Kernel::Loop(Vec::new()))
             });
         }
