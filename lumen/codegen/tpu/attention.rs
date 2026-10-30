@@ -121,19 +121,6 @@ fn view(
     ))
 }
 
-/// The JSON list of the transforms applied to the scores before the softmax.
-fn scores(scores: &[Score]) -> String {
-    let shown: Vec<String> = scores
-        .iter()
-        .map(|s| match s {
-            Score::Round(d) => format!("[\"round\", \"{}\"]", d.full_name()),
-            Score::Mul(c, d) => format!("[\"mul\", {c:?}, \"{}\"]", d.full_name()),
-        })
-        .collect();
-
-    format!("[{}]", shown.join(", "))
-}
-
 /// The input position of `acc`'s base, or `n` when it is not a body input.
 fn rows_of(body: &Graph, acc: &Access, n: usize) -> usize {
     body.inputs()
@@ -274,7 +261,7 @@ impl AttentionCodegen for Tpu {
             a.hv,
             blocks(a.sq, a.sk).0,
             blocks(a.sq, a.sk).1,
-            scores(&a.scores),
+            Self::score(&a.scores),
             a.causal.map_or("null".into(), |c| c.to_string()),
             views[0],
             views[1],
@@ -356,7 +343,7 @@ impl AttentionCodegen for Tpu {
             b.hv,
             blocks(b.sq, b.sk).0,
             blocks(b.sq, b.sk).1,
-            scores(&b.scores),
+            Self::score(&b.scores),
             b.causal.map_or("null".into(), |c| c.to_string()),
             b.ds_scale,
             ins[0],
@@ -372,6 +359,19 @@ impl AttentionCodegen for Tpu {
     /// The Pallas attention kernels have no dropout yet.
     fn dropout(_: &Dropout, _: DType, _: usize, _: usize) -> Result<String, String> {
         Err("flash attention on TPU: dropout does not run on TPU yet".into())
+    }
+
+    /// The JSON list of the transforms applied to the scores before the softmax.
+    fn score(scores: &[Score]) -> String {
+        let shown: Vec<String> = scores
+            .iter()
+            .map(|s| match s {
+                Score::Round(d) => format!("[\"round\", \"{}\"]", d.full_name()),
+                Score::Mul(c, d) => format!("[\"mul\", {c:?}, \"{}\"]", d.full_name()),
+            })
+            .collect();
+
+        format!("[{}]", shown.join(", "))
     }
 }
 

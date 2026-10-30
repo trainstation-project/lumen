@@ -45,28 +45,6 @@ pub(super) fn ix_method(name: &str, acc: &Access, batch: &[usize]) -> Result<Str
     ))
 }
 
-/// Metal functor applying the score transforms (rounding casts and scalings) in order.
-pub(super) fn score_functor(scores: &[Score]) -> String {
-    let mut score = "s".to_string();
-
-    for step in scores {
-        score = match *step {
-            Score::Round(d) => format!("convert_value<{}>({score})", metal_type(d)),
-            Score::Mul(c, d) => format!("Mul::apply({score}, {})", constant(d, Scalar::Float(c))),
-        };
-    }
-
-    formatdoc!(
-        "
-        struct NAME_score {{
-            inline float operator()(float s) const {{
-                return {score};
-            }}
-        }};
-        "
-    )
-}
-
 /// Metal flash-attention kernels: each fusion gets a kernel of its own, generated for its operands' layout.
 impl AttentionCodegen for Mps {
     /// The kernel's name and Metal source.
@@ -183,7 +161,7 @@ impl AttentionCodegen for Mps {
         };
 
         let (q, k, v) = (input(a.q.base), input(a.k.base), input(a.v.base));
-        let score = score_functor(&a.scores);
+        let score = Self::score(&a.scores);
         let (causal, offset) = (a.causal.is_some(), a.causal.unwrap_or(0));
         let offset = match a.offset {
             Some(v) => format!("{offset} + int({}[0])", input(v)),
@@ -267,7 +245,7 @@ impl AttentionCodegen for Mps {
             "
         );
 
-        let score = score_functor(&b.scores);
+        let score = Self::score(&b.scores);
         let t = metal_type(b.dtype);
         let n = body.inputs().len() - if b.dropout.is_some() { 2 } else { 0 };
 
@@ -410,5 +388,29 @@ impl AttentionCodegen for Mps {
             }};
             "
         ))
+    }
+
+    /// Metal functor applying the score transforms (rounding casts and scalings) in order.
+    fn score(scores: &[Score]) -> String {
+        let mut score = "s".to_string();
+
+        for step in scores {
+            score = match *step {
+                Score::Round(d) => format!("convert_value<{}>({score})", metal_type(d)),
+                Score::Mul(c, d) => {
+                    format!("Mul::apply({score}, {})", constant(d, Scalar::Float(c)))
+                }
+            };
+        }
+
+        formatdoc!(
+            "
+            struct NAME_score {{
+                inline float operator()(float s) const {{
+                    return {score};
+                }}
+            }};
+            "
+        )
     }
 }

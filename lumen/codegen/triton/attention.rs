@@ -155,35 +155,6 @@ fn attention_atomic_add(acc: &Access, batch: &[usize]) -> Result<(String, String
     ))
 }
 
-/// A jit helper applying the traced score ops (rounding casts and scalings) to float32 `Q K^T`
-/// products, returning float32.
-fn attention_score(scores: &[Score]) -> (String, String) {
-    let mut lines = String::new();
-
-    for &score in scores {
-        let line = match score {
-            Score::Round(d) => format!("s = s.to({})", triton_type(d).expect("a float dtype")),
-            Score::Mul(c, d) => format!(
-                "s = s.to({}) * {}",
-                triton_type(d).expect("a float dtype"),
-                constant(d, Scalar::Float(c))
-            ),
-        };
-        writeln!(lines, "    {line}").unwrap();
-    }
-
-    named(
-        "attention_score",
-        formatdoc!(
-            "
-            @triton.jit
-            def NAME(s):
-            {lines}    return s.to(tl.float32)
-            "
-        ),
-    )
-}
-
 /// The gradients a backward kernel writes, by the helper writing each, in parameter order: dK and
 /// dV, with dQ added atomically into a zeroed float32 buffer as each key block computes it, or dQ
 /// alone; empty when the backward computes no gradient.
@@ -241,7 +212,10 @@ impl AttentionCodegen for super::Triton {
             ("LOAD_V".into(), attention_load(&a.v, &a.batch)?),
             ("STORE_O".into(), attention_output(body, a, raw, strides)?),
             ("STORE_LSE".into(), attention_store(&lse, &a.batch)?),
-            ("SCORE".into(), attention_score(&a.scores)),
+            (
+                "SCORE".into(),
+                named("attention_score", Self::score(&a.scores)),
+            ),
         ])
     }
 
@@ -274,12 +248,41 @@ impl AttentionCodegen for super::Triton {
             code.push((param.into(), helper));
         }
 
-        code.push(("SCORE".into(), attention_score(&b.scores)));
+        code.push((
+            "SCORE".into(),
+            named("attention_score", Self::score(&b.scores)),
+        ));
         Ok(code)
     }
 
     /// The Triton attention kernels have no dropout yet.
     fn dropout(_: &Dropout, _: DType, _: usize, _: usize) -> Result<String, String> {
         Err("dropout in attention has no Triton kernel (random_bits)".into())
+    }
+
+    /// A jit helper applying the traced score ops (rounding casts and scalings) to float32 `Q K^T`
+    /// products, returning float32: the jit helper's source.
+    fn score(scores: &[Score]) -> String {
+        let mut lines = String::new();
+
+        for &score in scores {
+            let line = match score {
+                Score::Round(d) => format!("s = s.to({})", triton_type(d).expect("a float dtype")),
+                Score::Mul(c, d) => format!(
+                    "s = s.to({}) * {}",
+                    triton_type(d).expect("a float dtype"),
+                    constant(d, Scalar::Float(c))
+                ),
+            };
+            writeln!(lines, "    {line}").unwrap();
+        }
+
+        formatdoc!(
+            "
+            @triton.jit
+            def NAME(s):
+            {lines}    return s.to(tl.float32)
+            "
+        )
     }
 }
