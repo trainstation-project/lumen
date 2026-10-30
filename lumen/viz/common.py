@@ -57,7 +57,7 @@ _SOURCES = [
     (r"^reduce_\w+_cols_", "codegen/reduction/mps/kernels.metal", "inline void reduce_cols"),
     (r"^reduce_\w+_grouped_", "codegen/reduction/mps/kernels.metal", "inline void reduce_grouped"),
     (r"^reduce_", "codegen/reduction/mps/kernels.metal", "inline void reduce("),
-    (r"^gather_", "codegen/layout/mps/kernels.metal", "#define GATHER"),
+    (r"^gather_", "codegen/indexing/mps/gather.metal", "#define GATHER"),
     (r"^transpose_", "codegen/layout/mps/kernels.metal", "#define TRANSPOSE"),
     (r"^fill_\d$", "kernels/factory/mps/kernels.metal", "#define FULL"),
     (r"^iota_", "kernels/factory/mps/kernels.metal", "#define IOTA"),

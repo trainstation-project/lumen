@@ -3,9 +3,10 @@
 pub(crate) mod transpose;
 
 use crate::Tensor;
+use crate::codegen::indexing::mps::gather::gather;
 use crate::graph::Primitive::*;
 use crate::graph_compiler::plan::Step;
-use crate::kernels::mps::{BYTES_PER_THREAD, Grid, dims32_arg, launch, u32_arg};
+use crate::kernels::mps::{Grid, dims32_arg, launch, u32_arg};
 use crate::tensor::contiguous_strides;
 
 /// Encodes a layout step as a gather of the input under the strides that produce the output.
@@ -21,7 +22,7 @@ pub(crate) fn encode(
 
     let strides = match &step.primitive {
         Reshape { .. } => {
-            return gather(width, &[out.numel()], &[1], inputs[0], output, keep, name);
+            return copy(width, &[out.numel()], &[1], inputs[0], output, keep, name);
         }
         BroadcastInDim {
             broadcast_dimensions,
@@ -42,17 +43,17 @@ pub(crate) fn encode(
         Slice { start_indices, .. } => {
             let start: usize = start_indices.iter().zip(&xs).map(|(s, st)| s * st).sum();
             let src = inputs[0].wrapping_add(start * width);
-            return gather(width, &out.shape, &xs, src, output, keep, name);
+            return copy(width, &out.shape, &xs, src, output, keep, name);
         }
         _ => unreachable!("a layout primitive"),
     };
 
-    gather(width, &out.shape, &strides, inputs[0], output, keep, name)
+    copy(width, &out.shape, &strides, inputs[0], output, keep, name)
 }
 
-/// Copies `src` viewed with `shape` and element `strides` into contiguous `dst`, using the tiled transpose
-/// when the innermost dim is strided and another dim has unit stride.
-fn gather(
+/// Copies `src` viewed with `shape` and element `strides` into contiguous `dst`: through the tiled transpose
+/// when the innermost dim is strided and another dim has unit stride, otherwise as a gather.
+fn copy(
     width: usize,
     shape: &[usize],
     strides: &[usize],
@@ -106,35 +107,5 @@ fn gather(
         );
     }
 
-    let inner = dims.last().map_or(1, |d| d.0);
-    let outer = &dims[..dims.len().saturating_sub(1)];
-
-    let args = [
-        u32_arg(outer.len() as u32),
-        dims32_arg(outer.iter().map(|d| d.0)),
-        dims32_arg(outer.iter().map(|d| d.1)),
-        u32_arg(inner_stride as u32),
-        u32_arg(inner as u32),
-    ];
-
-    let per_thread = if inner_stride <= 1 {
-        (BYTES_PER_THREAD / width).max(1)
-    } else {
-        1
-    };
-
-    let grid = Grid::Threads([
-        inner.div_ceil(per_thread),
-        outer.iter().map(|d| d.0).product(),
-        1,
-    ]);
-
-    launch(
-        &format!("gather_{width}"),
-        &buffers,
-        &args,
-        grid,
-        keep,
-        name,
-    )
+    gather(width, &dims, buffers, keep, name)
 }

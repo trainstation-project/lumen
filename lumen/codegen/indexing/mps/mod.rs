@@ -2,6 +2,7 @@
 //! fused chain of dynamic-update-slices.
 
 pub(crate) mod dynamic_slice;
+pub(crate) mod gather;
 pub(crate) mod scatter_add;
 
 use std::fmt::Write;
