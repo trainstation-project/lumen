@@ -14,11 +14,11 @@ use crate::tensor::dtype::dispatch_dtype;
 use crate::tensor::storage::as_bytes;
 use crate::{DType, Element, Scalar};
 
-mod config;
+pub(crate) mod config;
 mod cross_entropy;
 mod gemm;
 mod indexing;
-mod reduction;
+pub(crate) mod reduction;
 mod row;
 pub(crate) mod utils;
 
@@ -30,7 +30,7 @@ pub(crate) use config::{
 pub(crate) use cross_entropy::{cross_entropy_combine, cross_entropy_epilogue};
 pub(crate) use gemm::{EpilogueFlags, epilogue, gemm, gemm_dot, gemm_flags};
 pub(crate) use indexing::{scatter_add, update, updates};
-pub(crate) use reduction::{reduction, reduction_root, scan};
+pub(crate) use reduction::{reduction_root, scan};
 pub(crate) use row::{
     dot_row_fits, partials_epilogue, row, row_count, row_epilogue, row_groups, row_looped,
 };
@@ -222,7 +222,7 @@ pub(crate) struct Emitter<'a> {
     /// Local name already holding each index expression.
     pub(crate) indices: HashMap<String, String>,
     /// Counter for fresh local names.
-    locals: usize,
+    pub(crate) locals: usize,
     /// Mask expression guarding loads at the current point.
     pub(crate) mask: String,
     /// Local holding each row reduction already computed, read at any index (a row kernel's rows).
@@ -871,7 +871,7 @@ pub(crate) fn constant(dtype: DType, value: Scalar) -> String {
 
 /// Offset expression for flat logical index `idx` of a tensor with `shape` and element `strides`.
 /// Adjacent dims that stay contiguous with each other are merged so fewer div/mod terms are emitted.
-fn gather_index(idx: &str, shape: &[usize], strides: &[usize]) -> String {
+pub(crate) fn gather_index(idx: &str, shape: &[usize], strides: &[usize]) -> String {
     let spans = contiguous_strides(shape);
     /// Consecutive dims `first..=last` addressable as one dim of `size` with `stride`.
     struct Run {

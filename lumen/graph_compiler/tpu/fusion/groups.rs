@@ -1,7 +1,7 @@
 //! Plans which nodes fuse together into TPU `loop` and `reduction` kernels.
+use crate::codegen::reduction::tpu::reducible;
 use crate::codegen::tpu::fusible;
 use crate::codegen::tpu::indexing::{layout, plan};
-use crate::codegen::tpu::reduction::reducible;
 use crate::graph::{Graph, Primitive};
 use crate::graph_compiler::common::loops::{body, members};
 

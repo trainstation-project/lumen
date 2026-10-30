@@ -7,10 +7,11 @@
 use indoc::writedoc;
 
 use super::config::{MOST_GEMM_ROW, MOST_WHOLE_ROW};
-use super::reduction::{Reduction, combine, lowest, reduce_along};
+use super::reduction::{combine, lowest, reduce_along};
 use super::utils::indented;
 use super::*;
 use crate::codegen::kinds::{row_partials, row_reductions};
+use crate::codegen::reduction::triton::Reduction;
 use crate::graph::TensorType;
 use crate::graph_compiler::common::diamonds::softmax_pair;
 use crate::graph_compiler::elementwise;
