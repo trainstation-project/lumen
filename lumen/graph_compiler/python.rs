@@ -566,7 +566,7 @@ fn triton_attention(launch: &super::triton::Launch) -> Result<(), String> {
     let config = launch.config;
     crate::kernels::launched::launched("flash_attention", || {
         let template = format!(
-            "# @triton.jit: lumen/kernels/attention/triton.py's {} kernel, BLOCK_SIZE_M={} BLOCK_SIZE_N={} stages={} warps={}\n",
+            "# @triton.jit: lumen/codegen/attention/triton's {} kernel, BLOCK_SIZE_M={} BLOCK_SIZE_N={} stages={} warps={}\n",
             launch.kernel, config.block_m, config.block_n, config.stages, config.warps
         );
         Some(triton_code(&template, launch.functions))
@@ -584,7 +584,7 @@ fn triton_attention(launch: &super::triton::Launch) -> Result<(), String> {
             .iter()
             .map(|t| t.as_ref().map(|t| PyTensor::wrap(t.clone())))
             .collect();
-        py.import("lumen.kernels.attention.triton")?
+        py.import("lumen.codegen.attention.triton")?
             .getattr("attention")?
             .call(
                 (

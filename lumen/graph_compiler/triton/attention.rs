@@ -258,7 +258,7 @@ fn attention(
     config: Option<&AttentionConfig>,
 ) -> Result<(), String> {
     let launch = ATTENTION.get().ok_or(
-        "the Triton backend's flash attention is Python's (lumen.kernels.attention.triton): none is installed",
+        "the Triton backend's flash attention is Python's (lumen.codegen.attention.triton): none is installed",
     )?;
     let given: Vec<&Tensor> = std::iter::once(out).chain(outs).collect();
     // Operands are read and written where they are, at any strides but a contiguous last dim (a
