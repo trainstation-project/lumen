@@ -1,7 +1,7 @@
 //! Metal source for fused flash-attention forward and backward kernels.
 use super::*;
 use crate::codegen::AttentionCodegen;
-use crate::graph_compiler::common::attention::{Strides, grid_batch};
+use crate::graph_compiler::common::attention::{Strides, Term, grid_batch};
 
 /// Buffer parameters for the dropout seed and stream offset starting at buffer `first`.
 pub(super) fn random_state(first: usize) -> [String; 2] {
@@ -36,23 +36,16 @@ pub(super) fn dropout_functor(d: &Dropout, dtype: DType, sq: usize, sk: usize) -
 /// heads onto fewer (shared KV heads). Fails when the outer batch dims don't step as one dim.
 pub(super) fn ix_method(name: &str, acc: &Access, batch: &[usize]) -> Result<String, String> {
     let up = name.to_uppercase();
-    let (outer, (heads, div)) = acc
-        .grid_strides(batch)
-        .ok_or("flash attention on MPS: batch dims before the heads that don't step as one dim")?;
-    let mut terms = Vec::new();
-    if acc.offset != 0 {
-        terms.push(format!("{}ul", acc.offset));
-    }
-    if outer != 0 {
-        terms.push(format!("ulong(b) * {outer}ul"));
-    }
-    if heads != 0 {
-        let h = match div {
-            1 => "h".to_string(),
-            _ => format!("(h / {div}u)"),
-        };
-        terms.push(format!("ulong({h}) * {heads}ul"));
-    }
+    let mut terms: Vec<String> = acc
+        .batch_terms(batch)?
+        .into_iter()
+        .map(|term| match term {
+            Term::Offset(offset) => format!("{offset}ul"),
+            Term::Outer(stride) => format!("ulong(b) * {stride}ul"),
+            Term::Heads { stride, divisor: 1 } => format!("ulong(h) * {stride}ul"),
+            Term::Heads { stride, divisor } => format!("ulong(h / {divisor}u) * {stride}ul"),
+        })
+        .collect();
     if terms.is_empty() {
         terms.push("0ul".into());
     }

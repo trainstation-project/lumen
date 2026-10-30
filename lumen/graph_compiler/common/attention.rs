@@ -32,13 +32,28 @@ pub(crate) fn grid_batch(batch: &[usize]) -> (usize, usize) {
     }
 }
 
+/// A term of an operand's element offset on the attention grid, each kernel writing it in its own syntax.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Term {
+    /// The view's first element.
+    Offset(usize),
+    /// The outer batch index times this stride.
+    Outer(usize),
+    /// The head index, divided by `divisor` (heads sharing a KV head), times `stride`.
+    Heads { stride: usize, divisor: usize },
+}
+
 impl Access {
-    /// The access's strides on the grid `grid_batch` gives `batch`: the merged outer dims' stride, and the
-    /// heads' stride with its divisor. `None` when the outer dims don't step as one dim (each over the
-    /// whole of the one inside it) or carry a divisor.
-    pub(crate) fn grid_strides(&self, batch: &[usize]) -> Option<(usize, (usize, usize))> {
-        let Some((&heads, outer)) = self.batch.split_last() else {
-            return Some((0, (0, 1)));
+    /// The non-zero batch terms of the access's element offset on the grid `grid_batch` gives `batch`: its
+    /// offset, the merged outer dims' stride and the heads' stride with its divisor. Fails when the outer
+    /// dims don't step as one dim (each over the whole of the one inside it) or carry a divisor.
+    pub(crate) fn batch_terms(&self, batch: &[usize]) -> Result<Vec<Term>, String> {
+        let mut terms = Vec::new();
+        if self.offset != 0 {
+            terms.push(Term::Offset(self.offset));
+        }
+        let Some((&(stride, divisor), outer)) = self.batch.split_last() else {
+            return Ok(terms);
         };
         // The outer dims of more than one element, outermost first.
         let dims: Vec<(usize, (usize, usize))> = batch
@@ -49,9 +64,17 @@ impl Access {
             .collect();
         let steps = dims.windows(2).all(|w| w[0].1.0 == w[1].1.0 * w[1].0);
         if !steps || dims.iter().any(|&(_, (_, divisor))| divisor != 1) {
-            return None;
+            return Err(
+                "flash attention: batch dims before the heads that don't step as one dim".into(),
+            );
         }
-        Some((dims.last().map_or(0, |&(_, (stride, _))| stride), heads))
+        if let Some(&(_, (outer, _))) = dims.last().filter(|&&(_, (s, _))| s != 0) {
+            terms.push(Term::Outer(outer));
+        }
+        if stride != 0 {
+            terms.push(Term::Heads { stride, divisor });
+        }
+        Ok(terms)
     }
 }
 

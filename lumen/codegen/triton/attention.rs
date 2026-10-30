@@ -10,34 +10,23 @@ use super::{Emitter, constant, load, named, triton_type};
 use crate::Scalar;
 use crate::codegen::AttentionCodegen;
 use crate::graph::Graph;
-use crate::graph_compiler::common::attention::{Access, Attention, Backward, Score, Strides};
+use crate::graph_compiler::common::attention::{Access, Attention, Backward, Score, Strides, Term};
 use crate::tensor::contiguous_strides;
 
 /// The statement setting `at`, the element offset of `acc`'s tile at outer batch index `BLOCK_ID_B`,
 /// head `BLOCK_ID_H`, rows `rows` and columns `cols`, on the grid `grid_batch` gives `batch`. A divisor
 /// maps the heads onto fewer (shared KV heads). Fails when the outer batch dims don't step as one dim.
 fn address(acc: &Access, batch: &[usize]) -> Result<String, String> {
-    let (outer, (heads, divisor)) = acc.grid_strides(batch).ok_or(
-        "flash attention on Triton: batch dims before the heads that don't step as one dim",
-    )?;
-
-    let mut terms: Vec<String> = Vec::new();
-    if acc.offset != 0 {
-        terms.push(acc.offset.to_string());
-    }
-
-    if outer != 0 {
-        terms.push(format!("BLOCK_ID_B * {outer}"));
-    }
-
-    if heads != 0 {
-        let h = match divisor {
-            1 => "BLOCK_ID_H".to_string(),
-            _ => format!("(BLOCK_ID_H // {divisor})"),
-        };
-
-        terms.push(format!("{h} * {heads}"));
-    }
+    let mut terms: Vec<String> = acc
+        .batch_terms(batch)?
+        .into_iter()
+        .map(|term| match term {
+            Term::Offset(offset) => offset.to_string(),
+            Term::Outer(stride) => format!("BLOCK_ID_B * {stride}"),
+            Term::Heads { stride, divisor: 1 } => format!("BLOCK_ID_H * {stride}"),
+            Term::Heads { stride, divisor } => format!("(BLOCK_ID_H // {divisor}) * {stride}"),
+        })
+        .collect();
 
     let mut tile: Vec<String> = [("rows", acc.row), ("cols", acc.col)]
         .into_iter()
