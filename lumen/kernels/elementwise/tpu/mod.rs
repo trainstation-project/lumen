@@ -1,8 +1,15 @@
-//! Block-size selection for elementwise Pallas kernels on TPU.
+//! Elementwise Pallas kernels on TPU: block-size selection and launching a fused loop's program.
+
+use std::collections::HashMap;
 
 use crate::DType;
+use crate::codegen::ElementwiseCodegen;
+use crate::codegen::tpu::Tpu;
 use crate::device::tpu::layout::Layout;
+use crate::graph::Primitive;
+use crate::graph_compiler::plan::Step;
 use crate::kernels::dot_general::tpu::block;
+use crate::kernels::tpu::{Launch, launch};
 
 /// Upper bound in bytes on one block including its batched leading dimension.
 const BLOCK_BYTES: usize = 1 << 20;
@@ -62,4 +69,48 @@ pub(crate) fn gcd(a: usize, b: usize) -> usize {
         0 => a,
         _ => gcd(b, a % b),
     }
+}
+
+/// Launches the fused elementwise loop `step` on TPU `index`, writing into `output`.
+pub(crate) fn encode(
+    index: usize,
+    step: &Step,
+    inputs: &[*const u8],
+    output: *mut u8,
+) -> Result<(), String> {
+    let Primitive::Fusion { body, .. } = &step.primitive else {
+        unreachable!("a loop fusion")
+    };
+    if step.output.1.numel() == 0 {
+        return Ok(());
+    }
+    let views: HashMap<usize, (usize, Vec<usize>)> = step
+        .output_views
+        .iter()
+        .enumerate()
+        .filter_map(|(k, v)| v.as_ref().map(|v| (k, (v.offset, v.strides.clone()))))
+        .collect();
+    let code =
+        Tpu::elementwise(body, &[], &views, &()).map_err(|e| format!("{}: {e}", step.label))?;
+    // An indexed loop takes its inputs, then its output; a plain one its output after the step's own inputs.
+    let n = match code.indexed {
+        true => inputs.len(),
+        false => step.inputs.len(),
+    };
+    let rows: Vec<*const u8> = inputs[..n]
+        .iter()
+        .copied()
+        .chain([output.cast_const()])
+        .chain(inputs[n..].iter().copied())
+        .collect();
+    let launched = Launch {
+        module: "lumen.kernels.elementwise.tpu",
+        kernel: code.kernel,
+        spec: code.spec,
+        rows: &rows,
+        scalars: &[],
+        host: &[],
+        sparse: None,
+    };
+    launch(index, launched)
 }

@@ -46,6 +46,7 @@ use super::common::updates::Updates;
 use super::pass::{Module, Pipeline};
 use super::plan::{Buffer, Step, Tuned};
 use super::{CompilerConfig, Options, Plan, plan_options, positions};
+use crate::codegen::ElementwiseCodegen;
 use crate::codegen::triton::{self as codegen, LOOP_CONFIGS, LoopConfig, UNTUNED_LOOP};
 use crate::graph::{Graph, Primitive, TensorType, UPDATES};
 use crate::graph_compiler::common::diamonds::Row;
@@ -283,7 +284,9 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
                 (r.name, r.source, r.lanes, r.splits)
             }
             None => {
-                let (name, source) = codegen::kernel(body, &by_value);
+                let (name, source) =
+                    codegen::Triton::elementwise(body, &by_value, &HashMap::new(), &())
+                        .expect("a Triton loop of every elementwise body");
                 (name, source, 1, 1)
             }
         },
@@ -602,7 +605,8 @@ pub(crate) fn copy(dst: &Tensor, src: &Tensor) -> Result<(), String> {
         let mut body = Graph::new();
         let x = body.input(TensorType::new(src.dtype(), src.shape()));
         body.set_outputs(&[x]).expect("the copied value");
-        let (name, source) = codegen::kernel(&body, &[false]);
+        let (name, source) = codegen::Triton::elementwise(&body, &[false], &HashMap::new(), &())
+            .expect("a Triton loop of a copy");
         let kernel = Kernel {
             name,
             source,

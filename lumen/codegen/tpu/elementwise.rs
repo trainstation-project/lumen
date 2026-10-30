@@ -1,15 +1,23 @@
-//! TPU elementwise loops: encodes a fused loop as a spec for `lumen.kernels.elementwise.tpu` and launches it.
+//! TPU elementwise loops: a fused loop as the spec of a `lumen.kernels.elementwise.tpu` program.
 
 use std::collections::HashMap;
 
 use super::indexing::{Dim, Plan, layout, plan};
-use super::{fusible, node, window};
+use super::{Tpu, fusible, node, window_at};
 use crate::DType;
-use crate::graph::{Primitive, TensorType, Var};
-use crate::graph_compiler::plan::Step;
+use crate::codegen::ElementwiseCodegen;
+use crate::graph::{Graph, Primitive, TensorType, Var};
 use crate::kernels::dot_general::tpu::block;
 use crate::kernels::elementwise::tpu::{blocks, gcd};
-use crate::kernels::tpu::{Launch, launch};
+
+/// A TPU loop: its Pallas program's kernel name and spec, and whether it reads its operands through the
+/// indexing plan (it then takes its inputs, then its output; a plain loop takes its output right after the
+/// step's own inputs).
+pub(crate) struct Loop {
+    pub(crate) kernel: String,
+    pub(crate) spec: String,
+    pub(crate) indexed: bool,
+}
 
 /// The JSON node for `p` in an indexed loop, carrying its block `shape` and, for an iota,
 /// the `[grid dim, block, offset]` its indices start from.
@@ -53,16 +61,10 @@ fn indexed_node(
     )
 }
 
-/// Launches a loop with layout primitives (slices, transposes, broadcasts), each value read in
-/// blocks placed by the indexing plan; `rows` are the input pointers followed by the output.
-fn indexed(index: usize, step: &Step, rows: &[*const u8]) -> Result<(), String> {
-    let Primitive::Fusion { body, .. } = &step.primitive else {
-        unreachable!("a loop fusion")
-    };
-    let out = &step.output.1;
-    let window = window(step, 0);
-    let plan =
-        plan(body, window.map_or(0, |w| w.1)).map_err(|e| format!("{} on TPU: {e}", step.label))?;
+/// The loop `body` with layout primitives (slices, transposes, broadcasts), each value read in blocks
+/// placed by the indexing plan, writing `out` in `window` when it has one.
+fn indexed(body: &Graph, out: &TensorType, window: Option<(usize, usize)>) -> Result<Loop, String> {
+    let plan = plan(body, window.map_or(0, |w| w.1)).map_err(|e| format!("a loop on TPU: {e}"))?;
     let block = |v: Var| match body.type_of(v).shape.is_empty() {
         true => Vec::new(),
         false => plan.block(plan.maps[v].as_ref().expect("a value of the loop")),
@@ -127,133 +129,109 @@ fn indexed(index: usize, step: &Step, rows: &[*const u8]) -> Result<(), String> 
         window.map_or("null".into(), |(n, start)| format!("[{n}, {start}]")),
     );
     let shown: Vec<String> = plan.blocks.iter().map(usize::to_string).collect();
-    let launched = Launch {
-        module: "lumen.kernels.elementwise.tpu",
+    Ok(Loop {
         kernel: format!("loop_{}_{}", out.dtype, shown.join("x")),
         spec,
-        rows,
-        scalars: &[],
-        host: &[],
-        sparse: None,
-    };
-    launch(index, launched)
+        indexed: true,
+    })
 }
 
-/// Launches the fused elementwise loop `step` on TPU `index`, writing into `output`.
-///
-/// Loops with layout primitives go through the indexed path; otherwise every operand must have
-/// the output's shape or be a scalar.
-pub(crate) fn encode(
-    index: usize,
-    step: &Step,
-    inputs: &[*const u8],
-    output: *mut u8,
-) -> Result<(), String> {
-    let Primitive::Fusion { body, .. } = &step.primitive else {
-        unreachable!("a loop fusion")
-    };
-    let out = &step.output.1;
-    if out.numel() == 0 {
-        return Ok(());
-    }
-    let mut values = body
-        .inputs()
-        .iter()
-        .chain(body.nodes().iter().map(|n| &n.output));
-    if values.any(|&v| body.type_of(v).dtype == DType::F16) {
-        return Err(format!("{}: float16 does not run on TPU yet", step.label));
-    }
-    if body
-        .nodes()
-        .iter()
-        .any(|n| layout(&n.primitive) && !fusible(&n.primitive))
-    {
-        let rows: Vec<*const u8> = inputs
+/// TPU loops: one Pallas program a fusion, the spec its kernel reads, its blocks chosen from the shapes.
+impl ElementwiseCodegen for Tpu {
+    type Code = Loop;
+    type Schedule = ();
+
+    /// Loops with layout primitives go through the indexed path; otherwise every operand must have the
+    /// output's shape or be a scalar. Inputs are read as their buffers, by value or not.
+    fn elementwise(
+        body: &Graph,
+        _: &[bool],
+        views: &HashMap<usize, (usize, Vec<usize>)>,
+        _: &(),
+    ) -> Result<Loop, String> {
+        let out = body.type_of(body.outputs()[0]);
+        let window = views
+            .get(&0)
+            .and_then(|(offset, strides)| window_at(*offset, strides));
+        let mut values = body
+            .inputs()
             .iter()
-            .copied()
-            .chain([output.cast_const()])
+            .chain(body.nodes().iter().map(|n| &n.output));
+        if values.any(|&v| body.type_of(v).dtype == DType::F16) {
+            return Err("float16 does not run on TPU yet".into());
+        }
+        if body
+            .nodes()
+            .iter()
+            .any(|n| layout(&n.primitive) && !fusible(&n.primitive))
+        {
+            return indexed(body, out, window);
+        }
+        let operands: Vec<&TensorType> = body.inputs().iter().map(|&v| body.type_of(v)).collect();
+        if let Some(t) = operands
+            .iter()
+            .find(|t| t.shape != out.shape && !t.shape.is_empty())
+        {
+            return Err(format!(
+                "a loop on TPU: operands of the output's shape {out}, got {t}"
+            ));
+        }
+        let broadcast: Vec<bool> = operands.iter().map(|t| t.shape != out.shape).collect();
+        let dtypes: Vec<DType> = operands
+            .iter()
+            .map(|t| t.dtype)
+            .chain(body.outputs().iter().map(|&v| body.type_of(v).dtype))
             .collect();
-        return indexed(index, step, &rows);
+        let names: Vec<String> = operands
+            .iter()
+            .map(|t| format!("\"{}\"", t.dtype.full_name()))
+            .collect();
+        let mut value: HashMap<Var, usize> = body
+            .inputs()
+            .iter()
+            .enumerate()
+            .map(|(k, &v)| (v, k))
+            .collect();
+        let mut nodes = Vec::new();
+        for n in body.nodes() {
+            let args: Vec<usize> = n.inputs.iter().map(|v| value[v]).collect();
+            nodes.push(node(&n.primitive, &args));
+            value.insert(n.output, operands.len() + nodes.len() - 1);
+        }
+        let mut blocks = blocks(&out.shape, &dtypes)?;
+        // A windowed output needs a column block that divides both the row width and the window start.
+        if let Some((_, start)) = window {
+            let n = *out.shape.last().expect("a matrix");
+            blocks[2] = block(gcd(n, start), 128, 2048)
+                .ok_or("a loop on TPU: a window of no whole columns' block")?;
+        }
+        // A leading block of 1 is left out of the kernel name.
+        let leading = blocks.len() == 3 && blocks[0] == 1;
+        let shown: Vec<String> = blocks
+            .iter()
+            .skip(usize::from(leading))
+            .map(usize::to_string)
+            .collect();
+        let kernel = format!("loop_{}_{}", out.dtype, shown.join("x"));
+        let results: Vec<usize> = body.outputs().iter().map(|v| value[v]).collect();
+        let outputs: Vec<String> = body
+            .outputs()
+            .iter()
+            .map(|&v| format!("\"{}\"", body.type_of(v).dtype.full_name()))
+            .collect();
+        let spec = format!(
+            "\"shape\": {:?}, \"inputs\": [{}], \"broadcast\": {broadcast:?}, \"nodes\": [{}], \"results\": {results:?}, \"outputs\": [{}], \"blocks\": {:?}, \"window\": {}",
+            out.shape,
+            names.join(", "),
+            nodes.join(", "),
+            outputs.join(", "),
+            blocks,
+            window.map_or("null".into(), |(n, start)| format!("[{n}, {start}]")),
+        );
+        Ok(Loop {
+            kernel,
+            spec,
+            indexed: false,
+        })
     }
-    let operands: Vec<&TensorType> = body.inputs().iter().map(|&v| body.type_of(v)).collect();
-    if let Some(t) = operands
-        .iter()
-        .find(|t| t.shape != out.shape && !t.shape.is_empty())
-    {
-        return Err(format!(
-            "{} on TPU: operands of the output's shape {out}, got {t}",
-            step.label
-        ));
-    }
-    let broadcast: Vec<bool> = operands.iter().map(|t| t.shape != out.shape).collect();
-    let dtypes: Vec<DType> = operands
-        .iter()
-        .map(|t| t.dtype)
-        .chain(body.outputs().iter().map(|&v| body.type_of(v).dtype))
-        .collect();
-    let names: Vec<String> = operands
-        .iter()
-        .map(|t| format!("\"{}\"", t.dtype.full_name()))
-        .collect();
-    let mut value: HashMap<Var, usize> = body
-        .inputs()
-        .iter()
-        .enumerate()
-        .map(|(k, &v)| (v, k))
-        .collect();
-    let mut nodes = Vec::new();
-    for n in body.nodes() {
-        let args: Vec<usize> = n.inputs.iter().map(|v| value[v]).collect();
-        nodes.push(node(&n.primitive, &args));
-        value.insert(n.output, operands.len() + nodes.len() - 1);
-    }
-    let window = window(step, 0);
-    let mut blocks = blocks(&out.shape, &dtypes)?;
-    // A windowed output needs a column block that divides both the row width and the window start.
-    if let Some((_, start)) = window {
-        let n = *out.shape.last().expect("a matrix");
-        blocks[2] = block(gcd(n, start), 128, 2048)
-            .ok_or_else(|| format!("{} on TPU: a window of no whole columns' block", step.label))?;
-    }
-    // A leading block of 1 is left out of the kernel name.
-    let leading = blocks.len() == 3 && blocks[0] == 1;
-    let shown: Vec<String> = blocks
-        .iter()
-        .skip(usize::from(leading))
-        .map(usize::to_string)
-        .collect();
-    let kernel = format!("loop_{}_{}", out.dtype, shown.join("x"));
-    let results: Vec<usize> = body.outputs().iter().map(|v| value[v]).collect();
-    let outputs: Vec<String> = body
-        .outputs()
-        .iter()
-        .map(|&v| format!("\"{}\"", body.type_of(v).dtype.full_name()))
-        .collect();
-    let spec = format!(
-        "\"shape\": {:?}, \"inputs\": [{}], \"broadcast\": {broadcast:?}, \"nodes\": [{}], \"results\": {results:?}, \"outputs\": [{}], \"blocks\": {:?}, \"window\": {}",
-        out.shape,
-        names.join(", "),
-        nodes.join(", "),
-        outputs.join(", "),
-        blocks,
-        window.map_or("null".into(), |(n, start)| format!("[{n}, {start}]")),
-    );
-    // Pointers past the step's own inputs follow the output in the launch order.
-    let n = step.inputs.len();
-    let rows: Vec<*const u8> = inputs[..n]
-        .iter()
-        .copied()
-        .chain([output.cast_const()])
-        .chain(inputs[n..].iter().copied())
-        .collect();
-    let launched = Launch {
-        module: "lumen.kernels.elementwise.tpu",
-        kernel,
-        spec,
-        rows: &rows,
-        scalars: &[],
-        host: &[],
-        sparse: None,
-    };
-    launch(index, launched)
 }

@@ -688,7 +688,7 @@ pub(crate) fn encode(
             super::dynamic_slice::tpu::encode(index, step, inputs, output)
         }
         Primitive::Fusion { ref name, .. } if name == "loop" => {
-            crate::codegen::tpu::encode(index, step, inputs, output)
+            super::elementwise::tpu::encode(index, step, inputs, output)
         }
         Primitive::DotGeneral { .. } | Primitive::Fusion { .. } => {
             super::dot_general::tpu::encode(index, step, inputs, output)

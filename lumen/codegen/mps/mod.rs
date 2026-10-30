@@ -8,6 +8,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 
 use indoc::{formatdoc, indoc, writedoc};
 
+use crate::codegen::ElementwiseCodegen;
 use crate::graph::{Graph, Node, Primitive, UnaryOp, Var};
 use crate::graph_compiler::MpsConfig;
 use crate::graph_compiler::common::attention::{Access, Attention, Backward, Dropout, Score};
@@ -97,7 +98,8 @@ pub(crate) fn kernel(
         return transpose_kernel(body, by_value, &tiling, views);
     }
     let tuning = tuning.unwrap_or_else(|| loop_tuning(body));
-    elementwise_kernel(body, by_value, views, tuning)
+    Mps::elementwise(body, by_value, views, &tuning)
+        .expect("a Metal loop of every elementwise body")
 }
 
 /// Whether the kernel chosen for `body` can write its outputs through strided views.

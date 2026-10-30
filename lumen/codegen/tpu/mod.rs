@@ -16,8 +16,6 @@ use crate::graph::Primitive;
 use crate::graph::UnaryOp;
 #[cfg(lumen_tpu_linked)]
 use crate::graph_compiler::plan::Step;
-#[cfg(lumen_tpu_linked)]
-pub(crate) use elementwise::encode;
 
 /// The TPU code generator.
 pub(crate) struct Tpu;
@@ -93,6 +91,13 @@ pub(crate) fn node(p: &Primitive, args: &[usize]) -> String {
 #[cfg(lumen_tpu_linked)]
 pub(crate) fn window(step: &Step, k: usize) -> Option<(usize, usize)> {
     let view = step.output_views.get(k)?.as_ref()?;
-    let rank = view.strides.len();
-    (rank >= 2).then(|| (view.strides[rank - 2], view.offset % view.strides[rank - 2]))
+    window_at(view.offset, &view.strides)
+}
+
+/// The `(row stride, column offset)` of an output written at `offset` and `strides`, when that is a
+/// window of a wider matrix (rank 2 or more).
+#[cfg(lumen_tpu_linked)]
+pub(crate) fn window_at(offset: usize, strides: &[usize]) -> Option<(usize, usize)> {
+    let rank = strides.len();
+    (rank >= 2).then(|| (strides[rank - 2], offset % strides[rank - 2]))
 }
