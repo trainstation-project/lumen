@@ -9,7 +9,6 @@ pub mod layout;
 pub(crate) mod mps;
 #[cfg(feature = "python")]
 pub mod python;
-pub mod reduction;
 pub mod reference;
 pub mod scan;
 pub mod scatter_add;

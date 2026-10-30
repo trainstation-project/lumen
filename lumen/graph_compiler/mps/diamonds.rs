@@ -3,11 +3,11 @@
 
 use super::MpsModule;
 use super::fusion::fusible;
+use crate::codegen::reduction::mps::REDUCE_THREADS;
 use crate::graph::Graph;
 pub(super) use crate::graph_compiler::common::diamonds::Row;
 use crate::graph_compiler::common::diamonds::{Partials, partials};
 use crate::graph_compiler::pass::CompilerPass;
-use crate::kernels::reduction::mps::REDUCE_THREADS;
 
 /// How column sums ride along MPS row kernels: at most 16 `REDUCE_THREADS`-wide column chunks a row,
 /// split into 16 to 64 row groups.
