@@ -8,12 +8,16 @@ use super::super::{Algorithm, GemmConfig, MAX_THREADGROUP_BYTES};
 /// loads and tiles that fit in threadgroup memory.
 pub(crate) fn configs() -> &'static [GemmConfig] {
     static CONFIGS: OnceLock<Vec<GemmConfig>> = OnceLock::new();
+
     CONFIGS.get_or_init(|| {
         let mut out = Vec::new();
+
         for threads in [64, 128, 256, 512] {
             let simds = threads / 32;
+
             for cols in [1, 2, 4].into_iter().filter(|c| simds % c == 0) {
                 let rows = simds / cols;
+
                 // `rows x cols` simdgroups, each owning `fm x fn_` 8x8 fragments.
                 for (bm, bn, bk) in [32, 64, 128]
                     .into_iter()
@@ -23,13 +27,17 @@ pub(crate) fn configs() -> &'static [GemmConfig] {
                     if bm % (rows * 8) != 0 || bn % (cols * 8) != 0 {
                         continue;
                     }
+
                     let (fm, fn_) = (bm / rows / 8, bn / cols / 8);
                     let fragments = fm * fn_;
+
                     let loads = (bm * bk) % threads == 0
                         && (bk * bn) % threads == 0
                         && threads % bk == 0
                         && threads % bn == 0;
+
                     let bytes = ((bm * bk).max(simds * 64) + bk * bn) * 4;
+
                     if (4..=16).contains(&fragments)
                         && fm <= 2 * fn_
                         && fn_ <= 2 * fm
@@ -51,6 +59,7 @@ pub(crate) fn configs() -> &'static [GemmConfig] {
                 }
             }
         }
+
         out
     })
 }

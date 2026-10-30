@@ -17,24 +17,32 @@ pub(super) fn roots(
 ) -> Vec<bool> {
     let (graph, nodes, is_output, users, fusible) =
         (a.graph, a.nodes, &a.is_output, &a.users, &a.fusible);
+
     let (dot_end, dot_of, in_epilogue) = (&dots.end, &dots.of, &dots.inside);
+
     let (epilogue, ends, in_reduction_epilogue) =
         (&reductions.epilogue, &reductions.ends, &reductions.inside);
+
     let row_root = |i: usize| rows.iter().any(|r| r.root == i);
+
     nodes
         .iter()
         .enumerate()
         .map(|(i, node)| {
             let users = &users[node.output];
+
             if dot_end[i].is_some() || in_epilogue[i] || in_reduction_epilogue[i] {
                 return false;
             }
+
             if rows.iter().any(|r| {
                 r.inner.contains(&i) || r.reductions.contains(&i) || r.partials.contains(&i)
             }) {
                 return false;
             }
+
             let inside = ends[i].is_some();
+
             !fusible[i]
                 || (is_reduction(node) && !inside)
                 || epilogue[i].is_some()
@@ -66,15 +74,18 @@ pub(super) fn hosts(
         &a.users,
         &a.fusible,
     );
+
     let (dot_of, dot_aux, ends) = (&dots.of, dots.aux.clone(), &reductions.ends);
     let epilogue = &reductions.epilogue;
     let row_root = |i: usize| rows.iter().any(|r| r.root == i);
     let mut host: Vec<Option<usize>> = dot_aux;
+
     let readers = Readers {
         graph,
         producer,
         users,
     };
+
     for (i, node) in nodes.iter().enumerate().rev() {
         let candidate = backend.multi_output_fusion
             && live[i]
@@ -88,18 +99,24 @@ pub(super) fn hosts(
             && !rows
                 .iter()
                 .any(|r| r.root == i && !(r.outputs.is_empty() && r.partials.is_empty()));
+
         if !candidate {
             continue;
         }
+
         // Follow single-reader non-roots to the fusion that will consume this value.
         let fusion_of = |reader: usize| {
             let mut first = reader;
+
             while !root[first] && users[nodes[first].output].len() == 1 {
                 first = users[nodes[first].output][0];
             }
+
             (first, ends[first].unwrap_or(first))
         };
+
         let member = |first: usize, p: usize| p == first || !root[p];
+
         let hostable = |first: usize, fusion: usize| {
             root[fusion]
                 && fusible[first]
@@ -107,6 +124,7 @@ pub(super) fn hosts(
                 && dot_of[fusion].is_none()
                 && host[fusion].is_none()
         };
+
         host[i] = readers.host(i, fusion_of, member, hostable);
     }
 
@@ -115,5 +133,6 @@ pub(super) fn hosts(
             host[k] = Some(row.root);
         }
     }
+
     host
 }

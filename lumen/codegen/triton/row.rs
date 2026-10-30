@@ -39,6 +39,7 @@ pub(crate) fn row_count(body: &Graph) -> usize {
 /// The body's last-axis reductions of its rows, in order.
 fn reductions(body: &Graph) -> Vec<&Node> {
     let root = &rows_type(body).shape;
+
     body.nodes()
         .iter()
         .filter(|n| {
@@ -54,6 +55,7 @@ fn reductions(body: &Graph) -> Vec<&Node> {
 /// the rows reduced along its middle axis), written per group.
 fn column_partials(body: &Graph) -> Vec<&Node> {
     let root = &rows_type(body).shape;
+
     body.nodes()
         .iter()
         .filter(|n| {
@@ -80,20 +82,25 @@ fn width(body: &Graph) -> usize {
 /// with each other, or broadcast back across their rows; its outputs of its rows' shape or one a row.
 pub(crate) fn row_fits(body: &Graph) -> bool {
     let root = rows_type(body);
+
     let Some(&n) = root.shape.last() else {
         return false;
     };
+
     let rows = root.numel() / n.max(1);
     let last = root.shape.len() - 1;
     let mut per_row = vec![false; body.types.len()];
     let mut partial = vec![false; body.types.len()];
+
     for node in body.nodes() {
         let read = node.inputs.iter().any(|&v| per_row[v]);
         let out = body.type_of(node.output);
         let x = body.type_of(node.inputs.first().copied().unwrap_or(node.output));
+
         if node.inputs.iter().any(|&v| partial[v]) {
             return false;
         }
+
         match &node.primitive {
             // A column partial: whole rows, each program summing its own group of them.
             Primitive::ReduceSum { axes, .. } if x.shape != root.shape => {
@@ -101,15 +108,18 @@ pub(crate) fn row_fits(body: &Graph) -> bool {
                     && x.shape[2] == n
                     && x.numel() == root.numel()
                     && axes == &[1];
+
                 if read || !grouped || n > MOST_WHOLE_ROW {
                     return false;
                 }
+
                 partial[node.output] = true;
             }
             Primitive::ReduceSum { axes, .. } | Primitive::ReduceMax { axes } => {
                 if read || body.type_of(node.inputs[0]).shape != root.shape || axes != &[last] {
                     return false;
                 }
+
                 per_row[node.output] = true;
             }
             _ if !read => {}
@@ -118,10 +128,12 @@ pub(crate) fn row_fits(body: &Graph) -> bool {
                 ..
             } => {
                 let x = body.type_of(node.inputs[0]);
+
                 let along = broadcast_dimensions
                     .iter()
                     .zip(&x.shape)
                     .all(|(&d, &size)| d != last || size == 1);
+
                 if out.shape != root.shape || !along {
                     return false;
                 }
@@ -134,10 +146,12 @@ pub(crate) fn row_fits(body: &Graph) -> bool {
             _ => return false,
         }
     }
+
     let written = |v: &Var| {
         let numel = body.type_of(*v).numel();
         numel == rows || numel == root.numel() || partial[*v]
     };
+
     n > 1 && body.outputs().iter().all(written)
 }
 
@@ -151,6 +165,7 @@ fn operand(emitter: &mut Emitter, node: &Node) -> (String, DType, &'static str) 
     let a = emitter.body.type_of(node.output).dtype;
     let acc = triton_type(a).expect("a Triton dtype");
     let x = emitter.value(node.inputs[0], "j".into());
+
     match emitter.body.type_of(node.inputs[0]).dtype == a {
         true => (x, a, acc),
         false => (format!("{x}.to({acc})"), a, acc),
@@ -168,6 +183,7 @@ fn identity(node: &Node, dtype: DType) -> String {
 /// Appends `NAME_combine{k}`, the elementwise combine of reduction `node` accumulating in `dtype`.
 fn combined(combines: &mut String, k: usize, node: &Node, dtype: DType) {
     let sum = matches!(node.primitive, Primitive::ReduceSum { .. });
+
     writedoc!(
         combines,
         "
@@ -186,13 +202,16 @@ fn combined(combines: &mut String, k: usize, node: &Node, dtype: DType) {
 fn whole(emitter: &mut Emitter, k: usize, node: &Node, combines: &mut String) {
     let sum = matches!(node.primitive, Primitive::ReduceSum { .. });
     let (x, a, acc) = operand(emitter, node);
+
     let masked = format!(
         "tl.where(mask, {x}, tl.full([], {}, {acc}))",
         identity(node, a)
     );
+
     let call = reduce_along(&masked, 1, sum, a, &format!("NAME_combine{k}"));
     let value = emitter.local(format!("{call}[:, None]"));
     emitter.reduced.insert(node.output, value);
+
     if call.starts_with("tl.reduce") {
         combined(combines, k, node, a);
     }
@@ -204,12 +223,15 @@ fn chunks(emitter: &mut Emitter, n: usize, emit: impl FnOnce(&mut Emitter)) -> S
     emitter.indices.clear();
     emitter.mask = "mask".into();
     emit(emitter);
+
     let lines: String = std::mem::take(&mut emitter.lines)
         .lines()
         .map(|l| format!("    {l}\n"))
         .collect();
+
     emitter.values.clear();
     emitter.indices.clear();
+
     formatdoc!(
         "
             for start in range(0, {n}, BLOCK_SIZE):
@@ -237,74 +259,95 @@ pub(crate) fn row(body: &Graph, by_value: &[bool]) -> Reduction {
     let mut code = String::new();
     let reductions = reductions(body);
     let mut k = 0;
+
     while k < reductions.len() {
         let node = reductions[k];
         let sum = matches!(node.primitive, Primitive::ReduceSum { .. });
+
         if !looped {
             whole(&mut emitter, k, node, &mut combines);
             k += 1;
             continue;
         }
+
         let next = reductions.get(k + 1).copied();
+
         if let Some(total) = next.filter(|s| softmax_pair(body, node, s)) {
             // Lane-wise running max and sum of exp(x - max), rescaled as the max grows.
             let (m, s) = (format!("m{k}"), format!("s{k}"));
             let a = body.type_of(node.output).dtype;
+
             let (ma, sa) = (
                 triton_type(a).expect("a Triton dtype"),
                 body.type_of(total.output).dtype,
             );
+
             let st = triton_type(sa).expect("a Triton dtype");
+
             writeln!(
                 code,
                 "    {m} = tl.full([1, BLOCK_SIZE], float(\"-inf\"), {ma})"
             )
             .unwrap();
+
             writeln!(code, "    {s} = tl.zeros([1, BLOCK_SIZE], {st})").unwrap();
+
             code += &chunks(&mut emitter, n, |e| {
                 let (x, _, _) = operand(e, node);
+
                 writeln!(
                     e.lines,
                     "    {m}_new = NAME_combine{k}({m}, tl.where(mask, {x}, float(\"-inf\")))"
                 )
                 .unwrap();
+
                 e.reduced.insert(node.output, format!("{m}_new"));
                 let (x, _, _) = operand(e, total);
+
                 writeln!(
                     e.lines,
                     "    {s} = {s} * tl.where({m}_new == float(\"-inf\"), 1.0, libdevice.exp({m} - {m}_new)) + tl.where(mask & ({m}_new != float(\"-inf\")), {x}, 0.0)\n    {m} = {m}_new"
                 )
                 .unwrap();
             });
+
             combined(&mut combines, k, node, a);
+
             let peak = emitter.local(format!(
                 "{}[:, None]",
                 reduce_along(&m, 1, false, a, &format!("NAME_combine{k}"))
             ));
+
             let scaled =
                 format!("tl.where({m} == float(\"-inf\"), 0.0, {s} * libdevice.exp({m} - {peak}))");
+
             let total_value = emitter.local(format!(
                 "{}[:, None]",
                 reduce_along(&scaled, 1, true, sa, "")
             ));
+
             code += &std::mem::take(&mut emitter.lines);
             emitter.reduced.insert(node.output, peak);
             emitter.reduced.insert(total.output, total_value);
             k += 2;
             continue;
         }
+
         // A pass reducing lane-wise partials, then the lanes.
         let a = body.type_of(node.output).dtype;
         let (acc, init) = (triton_type(a).expect("a Triton dtype"), identity(node, a));
         writeln!(code, "    acc{k} = tl.full([1, BLOCK_SIZE], {init}, {acc})").unwrap();
+
         code += &chunks(&mut emitter, n, |e| {
             let (x, _, _) = operand(e, node);
+
             writeln!(
                 e.lines,
                 "    acc{k} = NAME_combine{k}(acc{k}, tl.where(mask, {x}, tl.full([], {init}, {acc})))"
             )
             .unwrap();
         });
+
         combined(&mut combines, k, node, a);
         let call = reduce_along(&format!("acc{k}"), 1, sum, a, &format!("NAME_combine{k}"));
         let value = emitter.local(format!("{call}[:, None]"));
@@ -312,14 +355,17 @@ pub(crate) fn row(body: &Graph, by_value: &[bool]) -> Reduction {
         emitter.reduced.insert(node.output, value);
         k += 1;
     }
+
     // Each output is stored per element of the rows, or once per row; partials once per group.
     let partials = column_partials(body);
     let partial = |v: Var| partials.iter().any(|p| p.output == v);
     let per_row = |v: Var| body.type_of(v).numel() == rows && !partial(v);
+
     let store = |k: usize| match k {
         0 => "STORE(out".to_string(),
         k => format!("STORE{k}(out{k}"),
     };
+
     let elements = |emitter: &mut Emitter| {
         for (k, &v) in body.outputs().iter().enumerate() {
             if !per_row(v) && !partial(v) {
@@ -328,6 +374,7 @@ pub(crate) fn row(body: &Graph, by_value: &[bool]) -> Reduction {
             }
         }
     };
+
     match looped {
         true => code += &chunks(&mut emitter, n, elements),
         false => {
@@ -335,31 +382,39 @@ pub(crate) fn row(body: &Graph, by_value: &[bool]) -> Reduction {
             code += &std::mem::take(&mut emitter.lines);
         }
     }
+
     emitter.mask = "row_mask".into();
+
     for (k, &v) in body.outputs().iter().enumerate() {
         if per_row(v) {
             let value = emitter.value(v, "o".into());
             writeln!(emitter.lines, "    {}, o, {value}, row_mask)", store(k)).unwrap();
         }
     }
+
     // Each partial adds up its operand over the tile's rows, kept per column across the group.
     emitter.mask = "mask".into();
     let mut sums = String::new();
     let mut stores = String::new();
+
     for (p, node) in partials.iter().enumerate() {
         let k = body.outputs().iter().position(|&v| v == node.output);
+
         let reshape = body
             .nodes()
             .iter()
             .find(|r| r.output == node.inputs[0])
             .expect("a partial reads its rows reshaped into groups");
+
         let a = body.type_of(node.output).dtype;
         let acc = triton_type(a).expect("a Triton dtype");
         let x = emitter.value(reshape.inputs[0], "j".into());
+
         let x = match body.type_of(reshape.inputs[0]).dtype == a {
             true => x,
             false => format!("{x}.to({acc})"),
         };
+
         let total = reduce_along(
             &format!("tl.where(mask, {x}, tl.full([], 0, {acc}))"),
             0,
@@ -367,8 +422,10 @@ pub(crate) fn row(body: &Graph, by_value: &[bool]) -> Reduction {
             a,
             "",
         );
+
         writeln!(sums, "    part{p} = tl.zeros([1, {lanes}], {acc})").unwrap();
         writeln!(emitter.lines, "    part{p} += {total}[None, :]").unwrap();
+
         writeln!(
             stores,
             "    {}, g * {n} + c, part{p}, c < {n})",
@@ -376,17 +433,22 @@ pub(crate) fn row(body: &Graph, by_value: &[bool]) -> Reduction {
         )
         .unwrap();
     }
+
     code += &emitter.lines;
+
     let extra = (1..body.outputs().len())
         .map(|k| format!("out{k}"))
         .collect::<Vec<_>>()
         .join(",\n    ");
+
     let params = params(
         by_value,
         (!extra.is_empty()).then_some(extra.as_str()),
         body.outputs().len(),
     );
+
     let each = rows / row_groups(body).unwrap_or(1);
+
     let tile = match looped {
         // One group of rows a program, `BLOCK_SIZE // lanes` of them at a time.
         false if !partials.is_empty() => {
@@ -400,10 +462,12 @@ pub(crate) fn row(body: &Graph, by_value: &[bool]) -> Reduction {
             .iter()
             .map(|l| format!("    {l}\n"))
             .collect();
+
             code = format!(
                 "{sums}    for r in range(0, {each}, BLOCK_SIZE // {lanes}):\n{}{stores}",
                 indented(&(rows + &code))
             );
+
             vec![
                 "g = tl.program_id(0).to(tl.int64)".to_string(),
                 format!("c = tl.arange(0, {lanes})[None, :]"),
@@ -423,7 +487,9 @@ pub(crate) fn row(body: &Graph, by_value: &[bool]) -> Reduction {
             format!("mask = row_mask & (c < {n})"),
         ],
     };
+
     let tile: String = tile.iter().map(|l| format!("    {l}\n")).collect();
+
     let source = formatdoc!(
         "
         {combines}@triton.jit
@@ -431,7 +497,9 @@ pub(crate) fn row(body: &Graph, by_value: &[bool]) -> Reduction {
         {params}):
         {tile}{code}"
     );
+
     let (name, source) = named("row", source);
+
     Reduction {
         name,
         source,
@@ -452,6 +520,7 @@ fn preamble(
     [rows, cols]: [usize; 2],
 ) -> (String, String, Vec<String>) {
     let t = triton_type(body.type_of(dot.output).dtype).expect("a Triton dtype");
+
     let loads: String = inputs
         .iter()
         .enumerate()
@@ -461,9 +530,11 @@ fn preamble(
             source.replace(&format!("def {name}("), &format!("def LOAD{k}(")) + "\n\n"
         })
         .collect();
+
     let mut code: String = (0..inputs.len())
         .map(|k| format!("    in{k} = EXTRA[{k}]\n"))
         .collect();
+
     let pointers: Vec<String> = (0..outputs.len())
         .map(|o| match o {
             0 => "ptr".to_string(),
@@ -473,11 +544,13 @@ fn preamble(
             }
         })
         .collect();
+
     writeln!(
         code,
         "    j = m * {cols} + n\n    row_mask = m < {rows}\n    product = value.to({t})"
     )
     .unwrap();
+
     (loads, code, pointers)
 }
 
@@ -496,21 +569,27 @@ pub(crate) fn row_epilogue(
     let (loads, mut code, pointers) = preamble(body, by_value, dot, inputs, outputs, [rows, cols]);
     let mut emitter = Emitter::new(body, by_value);
     emitter.tile = Some(dot.output);
+
     emitter
         .values
         .insert((dot.output, "j".into()), "product".into());
+
     let mut combines = String::new();
+
     for (k, node) in reductions(body).into_iter().enumerate() {
         whole(&mut emitter, k, node, &mut combines);
     }
+
     for (o, &v) in body.outputs().iter().enumerate() {
         let (index, mask) = match body.type_of(v).numel() == rows {
             true => ("m", "row_mask"),
             false => ("j", "mask"),
         };
+
         emitter.mask = mask.into();
         let value = emitter.value(v, index.into());
         let (shape, strides) = outputs[o];
+
         writeln!(
             emitter.lines,
             "    tl.store({} + {}, {value}, mask={mask})",
@@ -519,7 +598,9 @@ pub(crate) fn row_epilogue(
         )
         .unwrap();
     }
+
     code += &emitter.lines;
+
     named(
         "row_epilogue",
         formatdoc!(
@@ -538,16 +619,21 @@ pub(crate) fn dot_row_fits(body: &Graph) -> bool {
     let Some(dot) = gemm_dot(body) else {
         return false;
     };
+
     let float = |v: Var| matches!(body.type_of(v).dtype, DType::F16 | DType::BF16 | DType::F32);
+
     let Primitive::DotGeneral { lhs_batch, .. } = &dot.primitive else {
         return false;
     };
+
     let dots = body
         .nodes()
         .iter()
         .filter(|n| matches!(n.primitive, Primitive::DotGeneral { .. }))
         .count();
+
     let rows = rows_type(body);
+
     // As MPS's `row_dot`: one unbatched float matmul over the body's inputs whose product is the rows.
     dots == 1
         && lhs_batch.is_empty()
@@ -575,6 +661,7 @@ fn at_own_index(body: &Graph, product: Var) -> bool {
     // The rows flattened, readable only as a gather's operand picking one element a row.
     let mut flat = vec![false; body.types.len()];
     derived[product] = true;
+
     for node in body.nodes() {
         if node.inputs.iter().any(|&v| flat[v]) {
             let picks = matches!(node.primitive, Primitive::Gather { axis: 0 })
@@ -582,14 +669,18 @@ fn at_own_index(body: &Graph, product: Var) -> bool {
                 && !flat[node.inputs[1]]
                 && !derived[node.inputs[1]]
                 && body.type_of(node.output).numel() == rows;
+
             if !picks {
                 return false;
             }
+
             continue;
         }
+
         if !node.inputs.iter().any(|&v| derived[v]) {
             continue;
         }
+
         match &node.primitive {
             Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. } => {}
             Primitive::Reshape { new_sizes } if new_sizes.len() == 1 => flat[node.output] = true,
@@ -597,6 +688,7 @@ fn at_own_index(body: &Graph, product: Var) -> bool {
             _ => return false,
         }
     }
+
     true
 }
 
@@ -616,20 +708,26 @@ pub(crate) fn partials_epilogue(
     let (loads, mut code, pointers) = preamble(body, by_value, dot, inputs, outputs, [rows, cols]);
     let producer: HashMap<Var, &Node> = body.nodes().iter().map(|n| (n.output, n)).collect();
     let mut emitter = Emitter::new(body, by_value);
+
     emitter
         .values
         .insert((dot.output, "j".into()), "product".into());
+
     let value = emitter.value(body.outputs()[0], "j".into());
     let (shape, strides) = outputs[0];
+
     writeln!(
         emitter.lines,
         "    tl.store(ptr + {}, {value}, mask=mask)\n    blocks = tl.min(n, 1)[:, None] // {tile} + tl.arange(0, value.shape[1] // {tile})[None, :]",
         stored_at("j", shape, strides)
     )
     .unwrap();
+
     let mut combines = String::new();
+
     for (k, &v) in body.outputs().iter().enumerate().skip(1) {
         let reduction = producer[&v];
+
         // The GEMM's other outputs, past the partials, are stored at each element's own index.
         if !matches!(
             reduction.primitive,
@@ -637,6 +735,7 @@ pub(crate) fn partials_epilogue(
         ) {
             let value = emitter.value(v, "j".into());
             let (shape, strides) = outputs[k];
+
             writeln!(
                 emitter.lines,
                 "    tl.store({} + {}, {value}, mask=mask)",
@@ -644,30 +743,38 @@ pub(crate) fn partials_epilogue(
                 stored_at("j", shape, strides)
             )
             .unwrap();
+
             continue;
         }
+
         let blocks = producer[&reduction.inputs[0]];
         let a = body.type_of(reduction.output).dtype;
         let acc = triton_type(a).expect("a Triton dtype");
         let sum = matches!(reduction.primitive, Primitive::ReduceSum { .. });
         let x = emitter.value(blocks.inputs[0], "j".into());
+
         let x = match body.type_of(blocks.inputs[0]).dtype == a {
             true => x,
             false => format!("{x}.to({acc})"),
         };
+
         // The tile's columns split into `tile`-wide blocks, each reduced to its partial.
         let masked = emitter.local(format!(
             "tl.reshape(tl.where(mask, {x}, tl.full([], {}, {acc})), (value.shape[0], value.shape[1] // {tile}, {tile}))",
             identity(reduction, a)
         ));
+
         let call = reduce_along(&masked, 2, sum, a, &format!("NAME_combine{k}"));
+
         if call.starts_with("tl.reduce") {
             combined(&mut combines, k, reduction, a);
         }
+
         let partial = emitter.local(call);
         let (shape, strides) = outputs[k];
         let tiles = cols / tile;
         let index = format!("m * {tiles} + blocks");
+
         writeln!(
             emitter.lines,
             "    tl.store({} + {}, {partial}, mask=row_mask & (blocks < {tiles}))",
@@ -676,7 +783,9 @@ pub(crate) fn partials_epilogue(
         )
         .unwrap();
     }
+
     code += &emitter.lines;
+
     named(
         "partials_epilogue",
         formatdoc!(

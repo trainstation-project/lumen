@@ -78,26 +78,33 @@ impl<M: Module> Pipeline<M> {
     /// directory, writes the graph before the first pass and after each one.
     pub(crate) fn run(&mut self, module: &mut M) -> Result<(), String> {
         let name = self.name;
+
         let dump = module.config().dump_to().map(str::to_owned).map(|dir| {
             let id = DUMPED.fetch_add(1, Ordering::Relaxed);
+
             move |step: usize, pass: &str, graph: &Graph| {
                 let file = format!("{dir}/{id:04}.{name}.{step:02}.{pass}.txt");
+
                 std::fs::create_dir_all(&dir)
                     .and_then(|()| std::fs::write(&file, graph.to_string()))
                     .map_err(|e| format!("dumping {file}: {e}"))
             }
         });
+
         if let Some(dump) = &dump {
             dump(0, "input", module.graph())?;
         }
+
         for (step, pass) in self.passes.iter_mut().enumerate() {
             let range = format!("{name}::{}", pass.name());
             let _range = crate::profiler::record_function(range);
             pass.apply(module)?;
+
             if let Some(dump) = &dump {
                 dump(step + 1, pass.name(), module.graph())?;
             }
         }
+
         Ok(())
     }
 }

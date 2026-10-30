@@ -18,13 +18,16 @@ impl Target for Loops {
     /// Accepts non-scalar, small, fully fusible `loop` fusions not written in place into a concat.
     fn candidate(&self, graph: &Graph, node: &Node) -> bool {
         let ty = graph.type_of(node.output);
+
         let Primitive::Fusion { name, body, .. } = &node.primitive else {
             return false;
         };
+
         let placed = graph.nodes().iter().any(|n| {
             matches!(n.primitive, Primitive::Concatenate { in_place: true, .. })
                 && n.inputs.contains(&node.output)
         });
+
         name == "loop"
             && !ty.shape.is_empty()
             && ty.numel() <= MAX_ELEMENTS

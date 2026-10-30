@@ -111,20 +111,26 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         packed: Vec::new(),
         interleaved: Vec::new(),
     };
+
     let mut pipeline = Pipeline::new("tpu");
+
     if options.config.tpu.merge_dots {
         pipeline.add(MergeDotsBackward);
     }
+
     if options.config.tpu.flash_attention {
         pipeline.add(FlashAttention).add(FlashAttentionBackward);
     }
+
     if options.config.tpu.safe_kernels {
         pipeline.add(ClampIndices);
     }
+
     pipeline
         .add(FoldDotReshapes)
         .add(Simplify { matched: true })
         .add(DotStrength);
+
     if options.config.tpu.merge_dots {
         pipeline.add(MergeDots {
             target: Target {
@@ -135,9 +141,11 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
             },
         });
     }
+
     if options.config.tpu.normalization_diamonds {
         pipeline.add(Diamonds).add(DotRows);
     }
+
     pipeline
         .add(Updates {
             least: 1,
@@ -146,17 +154,22 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         .add(FuseDots)
         .add(PlaceConcats)
         .add(LoopFusion);
+
     if options.config.tpu.horizontal_fusion {
         pipeline.add(HorizontalFusion);
     }
+
     pipeline.run(&mut module)?;
+
     let TpuModule {
         graph,
         packed,
         interleaved,
         ..
     } = module;
+
     let config = &options.config.tpu;
+
     let plan = PlanOptions {
         layout: Some(LAYOUT),
         ..plan_options(
@@ -167,6 +180,7 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
             positions(&options.scalars),
         )
     };
+
     let mut plan = Plan::compile_with(&graph, &plan);
     plan.packed = packed;
     plan.interleaved = interleaved;

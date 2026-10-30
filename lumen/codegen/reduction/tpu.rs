@@ -50,6 +50,7 @@ pub(crate) fn layout(x: &TensorType, axes: &[usize]) -> Option<Layout> {
     let mut sorted = axes.to_vec();
     sorted.sort_unstable();
     let s = &x.shape;
+
     if r == 1 && sorted == [0] {
         return Some(Layout::Total {
             lead: 1,
@@ -58,13 +59,17 @@ pub(crate) fn layout(x: &TensorType, axes: &[usize]) -> Option<Layout> {
             flat: true,
         });
     }
+
     if r < 2 {
         return None;
     }
+
     let (lead, m, n) = (s[..r - 2].iter().product(), s[r - 2], s[r - 1]);
+
     if sorted == [r - 1] {
         let h = if r >= 3 { s[r - 3] } else { 1 };
         let lead = s[..r.saturating_sub(3)].iter().product();
+
         return Some(Layout::Rows {
             rank: r,
             lead,
@@ -73,6 +78,7 @@ pub(crate) fn layout(x: &TensorType, axes: &[usize]) -> Option<Layout> {
             n,
         });
     }
+
     if sorted.iter().copied().eq(0..r) {
         return Some(Layout::Total {
             lead,
@@ -81,9 +87,11 @@ pub(crate) fn layout(x: &TensorType, axes: &[usize]) -> Option<Layout> {
             flat: false,
         });
     }
+
     if sorted.iter().copied().eq(0..r - 1) {
         return Some(Layout::Columns { lead, m, n });
     }
+
     None
 }
 
@@ -92,6 +100,7 @@ pub(crate) fn reducible(graph: &Graph, node: &Node) -> bool {
     let Some(axes) = axes(&node.primitive) else {
         return false;
     };
+
     let (x, out) = (graph.type_of(node.inputs[0]), graph.type_of(node.output));
     let narrow = |t: &TensorType| t.dtype.bits() <= 32 && t.dtype != crate::DType::Bool;
     narrow(x) && narrow(out) && x.numel() > 0 && layout(x, axes).is_some()
@@ -151,69 +160,87 @@ impl ReductionCodegen for Tpu {
     fn reduction(body: &Graph, _: &[bool], root: &Node) -> Result<Spec, String> {
         let failed = |why: &str| format!("a reduction on TPU: {why}");
         let nodes = body.nodes();
+
         let at = nodes
             .iter()
             .position(|n| n.output == root.output)
             .ok_or_else(|| failed("no reduction"))?;
+
         let reduce = &nodes[at];
         let (x, out) = (body.type_of(reduce.inputs[0]), body.type_of(reduce.output));
+
         let layout = layout(x, axes(&reduce.primitive).expect("a reduction"))
             .ok_or_else(|| failed("a reduction over axes no layout takes"))?;
+
         // Mark the nodes the reduced operand depends on: they form the prologue.
         let mut feeds = vec![false; body.types.len()];
         feeds[reduce.inputs[0]] = true;
+
         for n in nodes[..at].iter().rev() {
             if feeds[n.output] {
                 n.inputs.iter().for_each(|&v| feeds[v] = true);
             }
         }
+
         let k = body.inputs().len();
+
         let mut value: HashMap<Var, usize> = body
             .inputs()
             .iter()
             .enumerate()
             .map(|(i, &v)| (v, i))
             .collect();
+
         let mut prologue = Vec::new();
+
         for n in nodes.iter().filter(|n| feeds[n.output]) {
             let args: Vec<usize> = n.inputs.iter().map(|v| value[v]).collect();
             prologue.push(node(&n.primitive, &args));
             value.insert(n.output, k + prologue.len() - 1);
         }
+
         // The reduction's result takes the value slot right after the prologue.
         value.insert(reduce.output, k + prologue.len());
         let mut epilogue = Vec::new();
         let mut copied: HashMap<Var, usize> = HashMap::new();
+
         for (i, n) in nodes.iter().enumerate() {
             if i == at || feeds[n.output] {
                 continue;
             }
+
             let mut args = Vec::new();
+
             for &v in &n.inputs {
                 // Constants shared with the prologue are re-emitted in the epilogue; other prologue values aren't kept.
                 let shared = feeds[v] && v != reduce.inputs[0];
                 let made = nodes.iter().find(|m| m.output == v);
+
                 match made {
                     Some(m) if shared && m.inputs.is_empty() => {
                         let at = *copied.entry(v).or_insert_with(|| {
                             epilogue.push(node(&m.primitive, &[]));
                             k + prologue.len() + epilogue.len()
                         });
+
                         args.push(at);
                     }
                     Some(_) if shared => return Err(failed("its epilogue reads its prologue")),
                     _ => args.push(value[&v]),
                 }
             }
+
             epilogue.push(node(&n.primitive, &args));
             value.insert(n.output, k + prologue.len() + epilogue.len());
         }
+
         // Each body input is read at the reduction's input blocks, its output blocks, or as a scalar.
         let kinds: Vec<String> = body
             .inputs()
             .iter()
             .map(|&v| {
                 let t = body.type_of(v);
+
                 let kind = match () {
                     _ if t.shape.is_empty() => "scalar",
                     _ if t.shape == x.shape => "in",
@@ -224,10 +251,13 @@ impl ReductionCodegen for Tpu {
                         )));
                     }
                 };
+
                 Ok(format!("[\"{}\", \"{kind}\"]", t.dtype.full_name()))
             })
             .collect::<Result<_, _>>()?;
+
         let result = body.type_of(body.outputs()[0]);
+
         // Dtypes streamed at input-block and output-block granularity, for sizing the blocks.
         let dtypes = |kind: &str| -> Vec<DType> {
             body.inputs()
@@ -244,8 +274,10 @@ impl ReductionCodegen for Tpu {
                 })
                 .collect()
         };
+
         let blocks = crate::kernels::reduction::tpu::blocks(&layout, &dtypes("in"), &dtypes("out"))
             .map_err(|e| failed(&e))?;
+
         let spec = format!(
             "{}, \"blocks\": {blocks:?}, \"inputs\": [{}], \"prologue\": [{}], \"operand\": {}, \"reduce\": {}, \
              \"epilogue\": [{}], \"result\": {}, \"accum\": \"{}\", \"output\": \"{}\"",
@@ -259,12 +291,15 @@ impl ReductionCodegen for Tpu {
             out.dtype.full_name(),
             result.dtype.full_name(),
         );
+
         let kind = match layout {
             Layout::Rows { .. } => "rows",
             Layout::Columns { .. } => "columns",
             Layout::Total { .. } => "total",
         };
+
         let shown: Vec<String> = blocks.iter().map(usize::to_string).collect();
+
         Ok(Spec {
             kernel: format!("reduce_{kind}_{}_{}", x.dtype, shown.join("x")),
             spec,

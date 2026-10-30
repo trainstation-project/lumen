@@ -22,6 +22,7 @@ impl<'a> CompilerPass<MpsModule<'a>> for PlaceConcats {
                 *in_place = true;
             }
         }
+
         Ok(())
     }
 }
@@ -36,12 +37,15 @@ pub(super) fn in_place_concats(
 ) -> Vec<usize> {
     let nodes = graph.nodes();
     let mut producer: Vec<Option<usize>> = vec![None; graph.types.len()];
+
     for (i, node) in nodes.iter().enumerate() {
         producer[node.output] = Some(i);
     }
+
     let mut live = vec![false; graph.types.len()];
     graph.outputs().iter().for_each(|&v| live[v] = true);
     let mut readers: Vec<Vec<usize>> = vec![Vec::new(); graph.types.len()];
+
     for (i, node) in nodes.iter().enumerate().rev() {
         if live[node.output] {
             for &v in &node.inputs {
@@ -50,6 +54,7 @@ pub(super) fn in_place_concats(
             }
         }
     }
+
     // The kernel request behind a still-pending fusion.
     let kernel = |node: &Node| match &node.primitive {
         Primitive::Fusion { name, .. } => name
@@ -58,11 +63,14 @@ pub(super) fn in_place_concats(
             .map(|k| &kernels[k]),
         _ => None,
     };
+
     let mut concats = Vec::new();
+
     for (c, node) in nodes.iter().enumerate() {
         if !live[node.output] || !matches!(node.primitive, Primitive::Concatenate { .. }) {
             continue;
         }
+
         let writes = node
             .inputs
             .iter()
@@ -72,23 +80,30 @@ pub(super) fn in_place_concats(
             .map(|(k, &v)| {
                 let other =
                     |r: &&usize| !matches!(nodes[**r].primitive, Primitive::FusionOutput { .. });
+
                 let alone =
                     readers[v].iter().filter(other).eq([&c]) && !graph.outputs().contains(&v);
+
                 let once = node.inputs.iter().filter(|&&u| u == v).count() == 1;
                 let p = producer[v].filter(|_| alone && once)?;
+
                 let (f, index) = match nodes[p].primitive {
                     Primitive::FusionOutput { index, .. } => (producer[nodes[p].inputs[0]]?, index),
                     _ => (p, 0),
                 };
+
                 let fused = &nodes[f];
+
                 match (kernel(fused), &fused.primitive) {
                     (Some(Kernel::AttentionBackward), Primitive::Fusion { body, .. }) => {
                         // The atomically accumulated dQ output can't target a strided slot.
                         let atomic = body.outputs().len() == 3 && index == 2;
                         let at = graph.slot(node, k);
                         let views = HashMap::from([(index, (at.offset, at.strides))]);
+
                         let writes =
                             !atomic && attention::backward_of_body_into(body, views).is_some();
+
                         writes.then_some(true)
                     }
                     (Some(Kernel::Loop(_)), Primitive::Fusion { body, .. }) => {
@@ -102,17 +117,21 @@ pub(super) fn in_place_concats(
                                 | Primitive::BroadcastInDim { .. }
                                 | Primitive::Slice { .. }
                         );
+
                         let fuses =
                             fusion::fusible(graph, fused) && (layout || fusion::elementwise(p));
+
                         fuses.then_some(false)
                     }
                     _ => None,
                 }
             })
             .collect::<Option<Vec<bool>>>();
+
         if writes.is_some_and(|w| w.contains(&true)) {
             concats.push(c);
         }
     }
+
     concats
 }

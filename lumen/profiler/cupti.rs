@@ -21,16 +21,20 @@ mod ffi {
     unsafe extern "C" {
         pub fn cuptiActivityEnable(kind: u32) -> i32;
         pub fn cuptiActivityDisable(kind: u32) -> i32;
+
         pub fn cuptiActivityRegisterCallbacks(
             requested: BufferRequested,
             completed: BufferCompleted,
         ) -> i32;
+
         pub fn cuptiActivityFlushAll(flag: u32) -> i32;
+
         pub fn cuptiActivityGetNextRecord(
             buffer: *mut u8,
             valid: usize,
             record: *mut *mut u8,
         ) -> i32;
+
         pub fn cuptiActivityPushExternalCorrelationId(kind: u32, id: u64) -> i32;
         pub fn cuptiActivityPopExternalCorrelationId(kind: u32, last: *mut u64) -> i32;
         pub fn cuptiGetTimestamp(timestamp: *mut u64) -> i32;
@@ -83,10 +87,12 @@ impl Record {
         let at = |offset: usize| unsafe { record.add(offset) };
         let u32_at = |offset| unsafe { at(offset).cast::<u32>().read_unaligned() };
         let u64_at = |offset| unsafe { at(offset).cast::<u64>().read_unaligned() };
+
         // Field offsets follow the CUPTI activity record structs.
         match u32_at(0) {
             ffi::KIND_CONCURRENT_KERNEL => {
                 let name = unsafe { at(104).cast::<*const c_char>().read_unaligned() };
+
                 Some(Record::Work {
                     name: if name.is_null() {
                         "kernel".to_owned()
@@ -153,11 +159,13 @@ const BUFFER: Layout = match Layout::from_size_align(1 << 20, 8) {
 unsafe extern "C" fn buffer_requested(buffer: *mut *mut u8, size: *mut usize, max: *mut usize) {
     unsafe {
         *buffer = std::alloc::alloc(BUFFER);
+
         *size = if (*buffer).is_null() {
             0
         } else {
             BUFFER.size()
         };
+
         *max = 0;
     }
 }
@@ -177,29 +185,38 @@ unsafe extern "C" fn buffer_completed(
     if buffer.is_null() {
         return;
     }
+
     let mut read = Vec::new();
     let mut record = std::ptr::null_mut();
+
     while unsafe { ffi::cuptiActivityGetNextRecord(buffer, valid, &mut record) } == 0 {
         read.extend(unsafe { Record::read(record) });
     }
+
     RECORDS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .extend(read);
+
     unsafe { std::alloc::dealloc(buffer, BUFFER) };
 }
 
 /// Enables CUPTI activity recording and pairs the CUPTI clock with the profiler's.
 pub(crate) fn start() {
     static REGISTER: Once = Once::new();
+
     REGISTER.call_once(|| unsafe {
         ffi::cuptiActivityRegisterCallbacks(buffer_requested, buffer_completed);
     });
+
     for kind in KINDS {
         unsafe { ffi::cuptiActivityEnable(kind) };
     }
+
     let mut cupti_ns = 0;
+
     unsafe { ffi::cuptiGetTimestamp(&mut cupti_ns) };
+
     *CLOCK.lock().unwrap_or_else(|e| e.into_inner()) = Some((cupti_ns, super::now_ns()));
 }
 
@@ -208,16 +225,22 @@ pub(crate) fn correlated<R>(device: Device, work: impl FnOnce() -> R) -> R {
     let Some(context) = super::gpu_context(device) else {
         return work();
     };
+
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+
     CONTEXTS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get_or_insert_with(HashMap::new)
         .insert(id, context);
+
     unsafe { ffi::cuptiActivityPushExternalCorrelationId(ffi::EXTERNAL_CUSTOM0, id) };
+
     let result = work();
     let mut last = 0;
+
     unsafe { ffi::cuptiActivityPopExternalCorrelationId(ffi::EXTERNAL_CUSTOM0, &mut last) };
+
     result
 }
 
@@ -227,19 +250,25 @@ pub(crate) fn stop() {
     else {
         return;
     };
+
     for device_index in 0..crate::device::cuda::CUDA.device_count() {
         crate::stream::cuda::synchronize(device_index);
     }
+
     unsafe { ffi::cuptiActivityFlushAll(ffi::FLUSH_FORCED) };
+
     for kind in KINDS {
         unsafe { ffi::cuptiActivityDisable(kind) };
     }
+
     let records = std::mem::take(&mut *RECORDS.lock().unwrap_or_else(|e| e.into_inner()));
+
     let contexts = CONTEXTS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .take()
         .unwrap_or_default();
+
     let launches: HashMap<u32, u64> = records
         .iter()
         .filter_map(|r| match *r {
@@ -247,8 +276,10 @@ pub(crate) fn stop() {
             Record::Work { .. } => None,
         })
         .collect();
+
     // CUPTI timestamps shifted onto the profiler clock.
     let to_ns = |t: u64| (profiler_ns + t).saturating_sub(cupti_ns);
+
     for record in records {
         let Record::Work {
             name,
@@ -260,7 +291,9 @@ pub(crate) fn stop() {
         else {
             continue;
         };
+
         let context = launches.get(&correlation).and_then(|id| contexts.get(id));
+
         if let Some(context) = context.cloned() {
             let device = Device::Cuda(device as usize);
             // Under a named launch (a plan step's), the kernel that ran keeps its own name too.

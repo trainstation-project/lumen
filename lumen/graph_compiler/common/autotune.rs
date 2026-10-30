@@ -51,9 +51,11 @@ fn time<T: Timer>(
     // Stall the queue while enqueuing so the timed runs execute back to back between the events.
     let held = hold(device)?;
     start.record()?;
+
     for rep in 0..reps {
         timer.run(buffers, step, rep)?;
     }
+
     end.record()?;
     drop(held);
     end.synchronize()?;
@@ -78,6 +80,7 @@ fn key(step: &Step) -> String {
         Primitive::Fusion { name, .. } => name.clone(),
         p => p.to_string(),
     };
+
     let types: Vec<String> = step.inputs.iter().map(|(_, ty)| ty.to_string()).collect();
     format!("{name} {} -> {}", types.join(" "), step.output.1)
 }
@@ -86,6 +89,7 @@ static PICKS: LazyLock<Mutex<HashMap<String, usize>>> = LazyLock::new(Default::d
 
 fn pick<K>(device: Device, step: &Step) -> String {
     let types: Vec<String> = step.inputs.iter().map(|(_, ty)| ty.to_string()).collect();
+
     format!(
         "{} {device} {} {} -> {}",
         std::any::type_name::<K>(),
@@ -105,44 +109,57 @@ impl<T: Timer> Autotuner<T> {
     fn tune_untraced<K: Kernels>(&self, kernels: &mut K, plan: &mut Plan) -> Result<(), String> {
         let mut same: HashMap<String, usize> = HashMap::new();
         let mut jobs: Vec<(Vec<usize>, Vec<Tuned>)> = Vec::new();
+
         for (i, step) in plan.steps().iter().enumerate() {
             if let Some(&job) = same.get(&key(step)) {
                 jobs[job].0.push(i);
                 continue;
             }
+
             let candidates: Vec<Tuned> = kernels
                 .configs(step)
                 .into_iter()
                 .map(|config| kernels.build(step, config))
                 .collect();
+
             if !candidates.is_empty() {
                 same.insert(key(step), jobs.len());
                 jobs.push((vec![i], candidates));
             }
         }
+
         if jobs.is_empty() {
             return Ok(());
         }
+
         kernels.compile()?;
         let picks = || PICKS.lock().unwrap_or_else(PoisonError::into_inner);
+
         for (steps, candidates) in jobs {
             let picked = pick::<K>(self.timer.device(), &plan.steps()[steps[0]]);
+
             if let Some(&k) = picks().get(&picked).filter(|&&k| k < candidates.len()) {
                 for i in steps {
                     plan.steps_mut()[i].tuned = Some(candidates[k].clone());
                 }
+
                 continue;
             }
+
             let mut trial = plan.steps()[steps[0]].clone();
+
             let Some(buffers) = self.timer.buffers(&trial)? else {
                 continue;
             };
+
             let mut reps = vec![0; candidates.len()];
             let mut seconds = vec![f64::INFINITY; candidates.len()];
             let mut runs = vec![true; candidates.len()];
+
             for _ in 0..PASSES {
                 for (k, candidate) in candidates.iter().enumerate() {
                     trial.tuned = Some(candidate.clone());
+
                     // The first run sizes the repetitions to the time budget; a failing candidate is dropped.
                     if reps[k] == 0 && runs[k] {
                         match time(&self.timer, &buffers, &trial, 1) {
@@ -153,20 +170,26 @@ impl<T: Timer> Autotuner<T> {
                             Err(_) => runs[k] = false,
                         }
                     }
+
                     if runs[k] {
                         seconds[k] = seconds[k].min(time(&self.timer, &buffers, &trial, reps[k])?);
                     }
                 }
             }
+
             let fastest = (0..seconds.len()).min_by(|&a, &b| seconds[a].total_cmp(&seconds[b]));
+
             let Some(k) = fastest.filter(|&k| seconds[k].is_finite()) else {
                 continue;
             };
+
             picks().insert(picked, k);
+
             for i in steps {
                 plan.steps_mut()[i].tuned = Some(candidates[k].clone());
             }
         }
+
         Ok(())
     }
 }

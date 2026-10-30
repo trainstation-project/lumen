@@ -34,7 +34,9 @@ impl Layout {
             }
             other => other,
         };
+
         let pack = 32 / stored.bits();
+
         Ok(Layout {
             shape: shape.to_vec(),
             dtype,
@@ -61,10 +63,12 @@ impl Layout {
     /// Bytes the tensor takes in memory, padding included.
     pub fn bytes(&self) -> usize {
         let bits = self.stored.bits();
+
         if self.tiled() {
             let (lead, m, n) = self.padded();
             return lead * m * n * bits / 8;
         }
+
         let numel: usize = self.shape.iter().product();
         (numel * bits).div_ceil(8 * ROW) * ROW
     }
@@ -72,9 +76,11 @@ impl Layout {
     /// Each element's position, in stored values, in row-major order.
     fn positions(&self) -> Vec<usize> {
         let numel: usize = self.shape.iter().product();
+
         if !self.tiled() {
             // Untiled arrays interleave `pack` 128-lane rows within each 32-bit word.
             let tile = 128 * self.pack;
+
             return (0..numel)
                 .map(|i| {
                     let within = i % tile;
@@ -82,6 +88,7 @@ impl Layout {
                 })
                 .collect();
         }
+
         let r = self.shape.len();
         let (m, n) = (self.shape[r - 2], self.shape[r - 1]);
         let (_, mp, np) = self.padded();
@@ -90,17 +97,20 @@ impl Layout {
         let (tiles_m, tiles_n) = (mp / tm, np / 128);
         let mut out = Vec::with_capacity(numel);
         let lead = numel / (m * n).max(1);
+
         // Tiles are row-major over (lead, tile row, tile column); within a tile, `pack` consecutive rows share a word.
         for l in 0..lead {
             for i in 0..m {
                 let (ti, within) = (i / tm, i % tm);
                 let (word_row, sub) = (within / self.pack, within % self.pack);
+
                 for j in 0..n {
                     let t = (l * tiles_m + ti) * tiles_n + j / 128;
                     out.push(t * tile + (word_row * 128 + j % 128) * self.pack + sub);
                 }
             }
         }
+
         out
     }
 
@@ -108,8 +118,10 @@ impl Layout {
     pub fn tile(&self, host: &[u8]) -> Vec<u8> {
         let (from, bits) = (self.dtype.size_of(), self.stored.bits());
         let mut out = vec![0u8; self.bytes()];
+
         for (k, p) in self.positions().into_iter().enumerate() {
             let src = &host[k * from..(k + 1) * from];
+
             match self.dtype {
                 DType::Bool => out[p * 4] = u8::from(src[0] != 0),
                 _ if bits < 8 => {
@@ -119,14 +131,17 @@ impl Layout {
                 _ => out[p * from..(p + 1) * from].copy_from_slice(src),
             }
         }
+
         out
     }
 
     /// Copies the tiled memory image `memory` back into row-major `host` bytes.
     pub fn untile(&self, memory: &[u8], host: &mut [u8]) {
         let (to, bits) = (self.dtype.size_of(), self.stored.bits());
+
         for (k, p) in self.positions().into_iter().enumerate() {
             let dst = &mut host[k * to..(k + 1) * to];
+
             match self.dtype {
                 DType::Bool => {
                     dst[0] = u8::from(memory[p * 4..(p + 1) * 4].iter().any(|&b| b != 0))
@@ -154,28 +169,35 @@ impl Layout {
         if self.shape.is_empty() {
             return (String::new(), vec![]);
         }
+
         if !self.tiled() {
             let tiles = match self.pack {
                 1 => "(128)".into(),
                 p => format!("({})(128)({p},1)", 128 * p),
             };
+
             return (tiles, vec![1]);
         }
+
         let r = self.shape.len();
         let (_, mp, np) = self.padded();
         let (tiles_m, tiles_n) = (mp / self.rows, np / 128);
         // The last two dims stride over tiles, the leading dims over whole matrices.
         let mut strides = vec![1, tiles_n];
         let mut stride = tiles_m * tiles_n;
+
         for d in (0..r - 2).rev() {
             strides.push(stride);
             stride *= self.shape[d];
         }
+
         strides.reverse();
+
         let tiles = match self.pack {
             1 => format!("({},128)", self.rows),
             p => format!("({},128)({p},1)", self.rows),
         };
+
         (tiles, strides)
     }
 
@@ -198,10 +220,13 @@ pub fn alignment(dtype: DType, shape: &[usize]) -> usize {
     let Ok(layout) = Layout::new(dtype, shape) else {
         return ROW;
     };
+
     if !layout.tiled() {
         return ROW;
     }
+
     let columns = shape[shape.len() - 1].div_ceil(128);
+
     match columns <= ALIGNED_COLUMNS {
         true => 8 * columns * ROW,
         false => ROW,
@@ -212,5 +237,6 @@ pub fn alignment(dtype: DType, shape: &[usize]) -> usize {
 pub fn same(a: &crate::graph::TensorType, b: &crate::graph::TensorType) -> bool {
     let layout =
         |t: &crate::graph::TensorType| Layout::new(t.dtype, &t.shape).map(|l| l.positions());
+
     a.dtype == b.dtype && matches!((layout(a), layout(b)), (Ok(x), Ok(y)) if x == y)
 }

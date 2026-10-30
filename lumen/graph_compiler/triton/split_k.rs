@@ -21,6 +21,7 @@ impl<M: Module> CompilerPass<M> for SplitK {
     /// Splits the module's matmuls, counting tiles of the untuned GEMM config.
     fn apply(&mut self, m: &mut M) -> Result<(), String> {
         let tile = CONFIGS[UNTUNED];
+
         let rules = Rules {
             tiles: &|m, n| m.div_ceil(tile.block_m) * n.div_ceil(tile.block_n),
             target: TARGET,
@@ -29,6 +30,7 @@ impl<M: Module> CompilerPass<M> for SplitK {
             atomic: false,
             fuse: true,
         };
+
         *m.graph_mut() = split_k(m.graph(), &rules);
         Ok(())
     }

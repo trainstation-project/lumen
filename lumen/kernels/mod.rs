@@ -1,5 +1,4 @@
 //! Kernel modules per op family and the dispatch table mapping an op and device to its kernel.
-pub mod dot_general;
 pub mod dummy_op;
 pub mod dynamic_slice;
 pub mod factory;
@@ -86,9 +85,11 @@ impl<K: Copy + Send + Sync + 'static> Op<K> {
         }
 
         let mut dynamic = DYNAMIC.write().unwrap_or_else(|e| e.into_inner());
+
         dynamic
             .get_or_insert_with(HashMap::new)
             .insert((self.name, key), Box::new(kernel));
+
         Ok(())
     }
 
@@ -97,7 +98,9 @@ impl<K: Copy + Send + Sync + 'static> Op<K> {
         if let Some(kernel) = (self.builtin)(key) {
             return Some(kernel);
         }
+
         let dynamic = DYNAMIC.read().unwrap_or_else(|e| e.into_inner());
+
         dynamic
             .as_ref()?
             .get(&(self.name, key))
@@ -108,6 +111,7 @@ impl<K: Copy + Send + Sync + 'static> Op<K> {
     /// Removes the registered kernel for `key`, returning whether there was one.
     pub fn unregister(&self, key: DispatchKey) -> bool {
         let mut dynamic = DYNAMIC.write().unwrap_or_else(|e| e.into_inner());
+
         dynamic
             .as_mut()
             .is_some_and(|map| map.remove(&(self.name, key)).is_some())
@@ -116,6 +120,7 @@ impl<K: Copy + Send + Sync + 'static> Op<K> {
     /// Returns the kernel for `device`, panicking when none exists.
     pub fn dispatch(&self, device: Device) -> K {
         let key = DispatchKey::of(device);
+
         self.kernel(key)
             .unwrap_or_else(|| panic!("{} has no kernel for {key:?} ({device})", self.name))
     }
@@ -141,9 +146,12 @@ pub(crate) fn vector_size(
             && strides[1..].iter().all(|s| s.is_multiple_of(v))
             && address.is_multiple_of(v * itemsize)
     };
+
     let mut v = MAX_VECTOR_BYTES / itemsize;
+
     while v > 1 && !fits(v) {
         v /= 2;
     }
+
     v.max(1)
 }

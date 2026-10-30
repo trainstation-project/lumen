@@ -129,11 +129,13 @@ impl Graph {
     pub fn set_origins(&mut self, nodes: &[&Node]) {
         self.scope = nodes.first().map_or(&[], |n| n.scope);
         let mut lines = Vec::new();
+
         for &line in nodes.iter().flat_map(|n| n.sources) {
             if !lines.contains(&line) {
                 lines.push(line);
             }
         }
+
         self.sources = intern_lines(&lines);
     }
 
@@ -144,6 +146,7 @@ impl Graph {
         let ty = primitive.infer(&args)?;
         self.types.push(ty);
         let output = self.types.len() - 1;
+
         self.nodes.push(Node {
             primitive,
             inputs: inputs.to_vec(),
@@ -152,6 +155,7 @@ impl Graph {
             sources: self.sources,
             label: None,
         });
+
         Ok(output)
     }
 
@@ -182,9 +186,11 @@ impl Graph {
     pub fn prune(&self) -> (Graph, Vec<Option<Var>>) {
         // Walk nodes backwards marking every value an output depends on.
         let mut live = vec![false; self.types.len()];
+
         for &v in &self.outputs {
             live[v] = true;
         }
+
         for node in self.nodes.iter().rev() {
             if live[node.output] {
                 for &v in &node.inputs {
@@ -192,30 +198,38 @@ impl Graph {
                 }
             }
         }
+
         let mut pruned = Graph::new();
         let mut map: Vec<Option<Var>> = vec![None; self.types.len()];
+
         for &v in &self.inputs {
             map[v] = Some(pruned.input(self.types[v].clone()));
         }
+
         for node in self.nodes.iter().filter(|n| live[n.output]) {
             pruned.set_origin(node);
+
             let inputs: Vec<Var> = node
                 .inputs
                 .iter()
                 .map(|&v| map[v].expect("an earlier value"))
                 .collect();
+
             map[node.output] = Some(
                 pruned
                     .apply(node.primitive.clone(), &inputs)
                     .expect("a node of the graph"),
             );
+
             pruned.set_label(map[node.output].expect("just made"), node.label);
         }
+
         let outputs: Vec<Var> = self
             .outputs
             .iter()
             .map(|&v| map[v].expect("a live value"))
             .collect();
+
         pruned.set_outputs(&outputs).expect("its values");
         (pruned, map)
     }
@@ -239,12 +253,15 @@ impl Graph {
         let Primitive::Concatenate { dimension, .. } = node.primitive else {
             panic!("{}: not a concatenate", node.primitive)
         };
+
         let strides = contiguous_strides(&self.types[node.output].shape);
+
         // The slot starts after the earlier operands' extents along the concatenated dimension.
         let before: usize = node.inputs[..k]
             .iter()
             .map(|&v| self.types[v].shape[dimension])
             .sum();
+
         View {
             offset: before * strides[dimension],
             strides,
@@ -255,6 +272,7 @@ impl Graph {
     /// the host value and the view; `None` for values with their own storage.
     pub fn placements(&self) -> Vec<Option<(Var, View)>> {
         let mut placed = vec![None; self.types.len()];
+
         for node in &self.nodes {
             match &node.primitive {
                 Primitive::Slice {
@@ -275,6 +293,7 @@ impl Graph {
                 _ => {}
             }
         }
+
         placed
     }
 
@@ -298,6 +317,7 @@ impl Graph {
         if let Some(label) = node.label {
             return label;
         }
+
         match node.primitive {
             Primitive::Cast { new_dtype } => intern(format!(
                 "cast({} -> {})",
@@ -322,29 +342,37 @@ impl Graph {
     pub fn precision_warnings(&self) -> Vec<(Var, Var, String)> {
         use Primitive::*;
         let mut readers: Vec<Vec<usize>> = vec![Vec::new(); self.types.len()];
+
         for (i, node) in self.nodes.iter().enumerate() {
             for &v in &node.inputs {
                 readers[v].push(i);
             }
         }
+
         let mut warnings = Vec::new();
+
         for node in &self.nodes {
             let (DotGeneral { accum_dtype, .. } | ReduceSum { accum_dtype, .. }) = node.primitive
             else {
                 continue;
             };
+
             let narrow = self.types[node.output].dtype;
+
             if accum_dtype.size_of() <= narrow.size_of() {
                 continue;
             }
+
             // Follow same-dtype readers from the narrow output until a widening cast; another reduction stops the search.
             let mut stack = vec![(node.output, Vec::new())];
             let mut seen = vec![false; self.types.len()];
+
             while let Some((v, path)) = stack.pop() {
                 for &r in &readers[v] {
                     let (reader, wide) = (&self.nodes[r], self.types[self.nodes[r].output].dtype);
                     let mut path = path.clone();
                     path.push(self.label(reader));
+
                     match reader.primitive {
                         Cast { .. } if wide.size_of() > narrow.size_of() => {
                             let (name, fix) = match node.primitive {
@@ -359,11 +387,13 @@ impl Graph {
                                     format!("cast its input to {accum_dtype} first"),
                                 ),
                             };
+
                             let operands: Vec<String> = node
                                 .inputs
                                 .iter()
                                 .map(|&i| self.types[i].to_string())
                                 .collect();
+
                             let message = format!(
                                 "{name}({}) -> {} accumulates in {accum_dtype} but outputs {narrow}, then \
                                  {name} {sep} {} casts it back to {wide}: the rounding loses precision; {fix} \
@@ -373,6 +403,7 @@ impl Graph {
                                 path.join(FUSION_SEPARATOR),
                                 sep = FUSION_SEPARATOR.trim(),
                             );
+
                             warnings.push((node.output, reader.output, message));
                         }
                         DotGeneral { .. } | ReduceSum { .. } | ReduceMax { .. } | Fusion { .. } => {
@@ -386,6 +417,7 @@ impl Graph {
                 }
             }
         }
+
         warnings
     }
 }
@@ -394,9 +426,11 @@ impl Graph {
 pub(crate) fn intern(label: String) -> &'static str {
     static LABELS: Mutex<BTreeSet<&'static str>> = Mutex::new(BTreeSet::new());
     let mut labels = LABELS.lock().unwrap_or_else(PoisonError::into_inner);
+
     if let Some(&interned) = labels.get(label.as_str()) {
         return interned;
     }
+
     let interned: &'static str = Box::leak(label.into_boxed_str());
     labels.insert(interned);
     interned
@@ -406,9 +440,11 @@ pub(crate) fn intern(label: String) -> &'static str {
 pub(crate) fn intern_lines(lines: &[(&'static str, u32)]) -> Lines {
     static LINES: Mutex<BTreeSet<Lines>> = Mutex::new(BTreeSet::new());
     let mut interned = LINES.lock().unwrap_or_else(PoisonError::into_inner);
+
     if let Some(&lines) = interned.get(lines) {
         return lines;
     }
+
     let lines: Lines = Box::leak(lines.to_vec().into_boxed_slice());
     interned.insert(lines);
     lines
@@ -419,9 +455,11 @@ pub(crate) fn intern_lines(lines: &[(&'static str, u32)]) -> Lines {
 pub(crate) fn intern_scope(ranges: &[Range]) -> Scope {
     static SCOPES: Mutex<BTreeSet<Scope>> = Mutex::new(BTreeSet::new());
     let mut scopes = SCOPES.lock().unwrap_or_else(PoisonError::into_inner);
+
     if let Some(&interned) = scopes.get(ranges) {
         return interned;
     }
+
     let interned: Scope = Box::leak(ranges.to_vec().into_boxed_slice());
     scopes.insert(interned);
     interned
@@ -430,19 +468,25 @@ pub(crate) fn intern_scope(ranges: &[Range]) -> Scope {
 impl fmt::Display for Graph {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let typed = |v: Var| format!("%{v}:{}", self.types[v]);
+
         let names = |vars: &[Var]| {
             let names: Vec<String> = vars.iter().map(|v| format!("%{v}")).collect();
             names.join(" ")
         };
+
         let inputs: Vec<String> = self.inputs.iter().map(|&v| typed(v)).collect();
         writeln!(f, "{{ lambda {}. let", inputs.join(" "))?;
+
         for node in &self.nodes {
             write!(f, "    {} = {}", typed(node.output), node.primitive)?;
+
             if !node.inputs.is_empty() {
                 write!(f, " {}", names(&node.inputs))?;
             }
+
             writeln!(f)?;
         }
+
         let outputs: Vec<String> = self.outputs.iter().map(|v| format!("%{v}")).collect();
         write!(f, "  in ({}) }}", outputs.join(", "))
     }

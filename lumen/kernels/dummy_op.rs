@@ -31,5 +31,6 @@ pub fn dummy_op(t: &Tensor, value: Scalar) {
     ) {
         return;
     }
+
     DUMMY_OP.dispatch(t.device())(t, value);
 }

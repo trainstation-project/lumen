@@ -32,6 +32,7 @@ fn most_per_thread(body: &Graph) -> usize {
 /// Default tuning: enough elements per thread to cap the grid near `GRID_THREADS`.
 pub(crate) fn loop_tuning(body: &Graph) -> Tuning {
     let n = body.type_of(body.outputs()[0]).numel();
+
     Tuning::Loop {
         per_thread: (n / GRID_THREADS).clamp(1, most_per_thread(body)),
         group: LOOP_GROUP,
@@ -44,12 +45,14 @@ pub(crate) fn loop_tuning(body: &Graph) -> Tuning {
 pub(crate) fn loop_tunings(body: &Graph) -> Vec<Tuning> {
     let most = most_per_thread(body);
     let per_threads = (0..).map(|k| 1 << k).take_while(|&p| p <= most);
+
     per_threads
         .flat_map(|per_thread| {
             let contiguous = match per_thread {
                 1 => &[false][..],
                 _ => &[false, true][..],
             };
+
             contiguous.iter().flat_map(move |&contiguous| {
                 LOOP_GROUPS.map(|group| Tuning::Loop {
                     per_thread,
@@ -64,6 +67,7 @@ pub(crate) fn loop_tunings(body: &Graph) -> Vec<Tuning> {
 /// Query rows per block for the backward kernel, the largest that fits in threadgroup memory.
 pub(crate) fn backward_block(b: &Backward) -> usize {
     let bytes = |n: usize| n * (b.h + b.hv) * b.dtype.size_of() + 2 * n * 4;
+
     [32, 16, 8]
         .into_iter()
         .find(|&n| bytes(n) <= 28 << 10)
@@ -88,6 +92,7 @@ pub(crate) fn decodes(a: &Attention) -> bool {
 pub(crate) fn key_block(a: &Attention) -> usize {
     let t = a.dtype.size_of();
     let bytes = |bk: usize| bk * (a.h + a.hv) * t;
+
     [32, 16, 8]
         .into_iter()
         .find(|&bk| bytes(bk) <= 28 << 10)

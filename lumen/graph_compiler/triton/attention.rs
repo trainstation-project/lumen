@@ -118,6 +118,7 @@ fn contiguous(t: &Tensor, kept: impl Fn(&Tensor) -> bool) -> Result<Tensor, Stri
     if t.is_contiguous() || kept(t) {
         return Ok(t.clone());
     }
+
     let options = TensorOptions::new().dtype(t.dtype()).device(t.device());
     let c = unsafe { Tensor::empty(t.shape(), options) };
     copy(&c, t)?;
@@ -168,19 +169,24 @@ fn prepare(step: &Step, strides: &Strides) -> Result<Prepared, String> {
     let Primitive::Fusion { name, body, .. } = &step.primitive else {
         unreachable!("an attention fusion")
     };
+
     let input = |v: Var| {
         let k = body.inputs().iter().position(|&u| u == v);
         Source::Input(k.expect("an input of the attention"))
     };
+
     let output = |v: Var| {
         let k = body.outputs().iter().position(|&u| u == v);
         Source::Output(k.expect("an output of the attention"))
     };
+
     let functions = |code: Vec<(String, (String, String))>| {
         let functions = code.into_iter().map(|(param, f)| Function::new(param, f));
         functions.collect()
     };
+
     let labeled = |e: String| format!("{}: {e}", step.label);
+
     if name == FORWARD {
         let a = attention::of_body_strided(body, strides).ok_or("a forward flash attention")?;
         let root = body.nodes()[a.root].output;
@@ -188,6 +194,7 @@ fn prepare(step: &Step, strides: &Strides) -> Result<Prepared, String> {
         // The body's inputs but the offset, which the epilogue may read, then the attention values
         // when the body outputs them too (`EXTRA`).
         let raw = body.outputs()[1..].contains(&root);
+
         let mut tensors = vec![
             Some(input(a.q.base)),
             Some(input(a.k.base)),
@@ -196,15 +203,18 @@ fn prepare(step: &Step, strides: &Strides) -> Result<Prepared, String> {
             lse,
             a.offset.map(input),
         ];
+
         tensors.extend(
             body.inputs()
                 .iter()
                 .filter(|&&v| a.offset != Some(v))
                 .map(|&v| Some(input(v))),
         );
+
         if raw {
             tensors.push(Some(output(root)));
         }
+
         return Ok(Prepared {
             kernel: "forward",
             tensors,
@@ -217,24 +227,32 @@ fn prepare(step: &Step, strides: &Strides) -> Result<Prepared, String> {
             launches: Launches::default(),
         });
     }
+
     let b =
         attention::backward_of_body_strided(body, strides).ok_or("a backward flash attention")?;
+
     let gradients = crate::codegen::attention::triton::gradients(&b);
+
     if gradients.is_empty() {
         return Err(format!("{}: computes no gradient", step.label));
     }
+
     // The kernels' operands in parameter order: Q, K, V, dO, the log-sum-exp and delta.
     let mut tensors: Vec<Option<Source>> = [&b.q, &b.k, &b.v, &b.d_o, &b.lse, &b.delta]
         .iter()
         .map(|acc| Some(input(acc.base)))
         .collect();
+
     let mut zeroed = Vec::new();
+
     for (param, (node, _)) in &gradients {
         if *param == "ADD_DQ" {
             zeroed.push(tensors.len());
         }
+
         tensors.push(Some(output(body.nodes()[*node].output)));
     }
+
     Ok(Prepared {
         kernel: if b.dk_out.is_some() { "dkdv" } else { "dq" },
         tensors,
@@ -260,7 +278,9 @@ fn attention(
     let launch = ATTENTION.get().ok_or(
         "the Triton backend's flash attention is Python's (lumen.codegen.attention.triton): none is installed",
     )?;
+
     let given: Vec<&Tensor> = std::iter::once(out).chain(outs).collect();
+
     // Operands are read and written where they are, at any strides but a contiguous last dim (a
     // layout the kernels can't take, or an output added into, is copied); prepared once per layout.
     let laid_out = |kept: &dyn Fn(&Tensor) -> bool| -> Result<_, String> {
@@ -297,8 +317,10 @@ fn attention(
             false => Ok((prepared, inputs, written)),
         }
     };
+
     let (prepared, inputs, written) =
         laid_out(&last_contiguous).or_else(|_| laid_out(&|_| false))?;
+
     let tensors: Vec<Option<Tensor>> = prepared
         .tensors
         .iter()
@@ -308,14 +330,18 @@ fn attention(
             None => None,
         })
         .collect();
+
     for &k in &prepared.zeroed {
         fill(tensors[k].as_ref().expect("an output"), Scalar::Float(0.0))?;
     }
+
     let (h, hv, dtype) = prepared.heads;
+
     let tiles = match config {
         Some(c) => *c,
         None => untuned_attention(h.max(hv) * dtype.size_of()),
     };
+
     launch(&Launch {
         kernel: prepared.kernel,
         tensors: &tensors,
@@ -326,11 +352,13 @@ fn attention(
         scale: prepared.scale,
         config: &tiles,
     })?;
+
     for (t, w) in given.iter().zip(&written) {
         if t.data_ptr() != w.data_ptr() {
             copy(t, w)?;
         }
     }
+
     Ok(())
 }
 
@@ -353,6 +381,7 @@ impl Kernels for Tiles {
         let run: Run = Box::new(move |step, inputs, out, outs| {
             attention(step, inputs, out, outs, Some(&config))
         });
+
         Tuned::new(format!("{config:?}"), run)
     }
 }

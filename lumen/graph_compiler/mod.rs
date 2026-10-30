@@ -73,17 +73,21 @@ pub fn compile_with(graph: &Graph, device: Device, options: &Options) -> Result<
         device,
         options,
     };
+
     Pipeline::new("frontend")
         .add(Cse)
         .add(Simplify { matched: false })
         .run(&mut module)?;
+
     // Graphs with transfers or host-only parts are compiled as stages; otherwise one device plan.
     let graph = &module.graph;
+
     if device != Device::Cpu(0)
         && let Some(plan) = stages::compile(graph, device, options)?
     {
         return Ok(plan);
     }
+
     device_compile(&stages::without_transfers(graph), device, options)
 }
 
@@ -119,7 +123,9 @@ fn plan_options(
         p.resize(graph.inputs().len(), true);
         p
     });
+
     let first_block = graph.inputs().len() - packed.len();
+
     PlanOptions {
         scratch: None,
         donate: options.donate.clone(),
@@ -140,6 +146,7 @@ fn plan_options(
 #[cfg_attr(not(any(feature = "python", lumen_mps_linked)), allow(dead_code))]
 pub(crate) fn elementwise(p: &Primitive) -> bool {
     use Primitive::*;
+
     matches!(
         p,
         Add | Sub
@@ -171,29 +178,37 @@ pub(crate) fn combined(graph: &Graph, sources: &[Var]) -> Vec<usize> {
             parent[i] = parent[parent[i]];
             i = parent[i];
         }
+
         i
     }
+
     let mut parent: Vec<usize> = (0..sources.len()).collect();
     let mut of: Vec<Vec<usize>> = vec![Vec::new(); graph.types.len()];
     let mut source = vec![false; graph.types.len()];
+
     for (k, &v) in sources.iter().enumerate() {
         of[v] = vec![k];
         source[v] = true;
     }
+
     // of[v] lists the sources that reach v through elementwise nodes only; a node merges the groups of its inputs.
     for node in graph.nodes() {
         if source[node.output] || !elementwise(&node.primitive) {
             continue;
         }
+
         let mut of_node: Vec<usize> = node.inputs.iter().flat_map(|&v| of[v].clone()).collect();
         of_node.sort_unstable();
         of_node.dedup();
+
         for pair in of_node.windows(2) {
             let (a, b) = (root(&mut parent, pair[0]), root(&mut parent, pair[1]));
             parent[a] = b;
         }
+
         of[node.output] = of_node;
     }
+
     (0..sources.len()).map(|k| root(&mut parent, k)).collect()
 }
 
@@ -201,10 +216,13 @@ pub(crate) fn combined(graph: &Graph, sources: &[Var]) -> Vec<usize> {
 #[cfg_attr(not(any(feature = "python", lumen_mps_linked)), allow(dead_code))]
 pub(crate) fn constant(graph: &Graph, producer: &[Option<usize>], v: Var) -> bool {
     use Primitive::*;
+
     let Some(p) = producer[v] else {
         return false;
     };
+
     let node = &graph.nodes()[p];
+
     match node.primitive {
         Full { .. } => true,
         Reshape { .. } | BroadcastInDim { .. } | Transpose { .. } | Slice { .. } => {
@@ -219,6 +237,7 @@ pub(crate) fn constant(graph: &Graph, producer: &[Option<usize>], v: Var) -> boo
 /// out constant members unless every member is constant.
 pub(crate) fn label(graph: &Graph, producer: &[Option<usize>], members: &[usize]) -> &'static str {
     let nodes = graph.nodes();
+
     let names = |all: bool| -> Vec<&str> {
         members
             .iter()
@@ -226,6 +245,7 @@ pub(crate) fn label(graph: &Graph, producer: &[Option<usize>], members: &[usize]
             .map(|&m| graph.label(&nodes[m]))
             .collect()
     };
+
     let shown = names(false);
     intern(if shown.is_empty() { names(true) } else { shown }.join(FUSION_SEPARATOR))
 }

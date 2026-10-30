@@ -18,6 +18,7 @@ fn kernels(key: DispatchKey) -> Option<WaitKernel> {
             let crate::Device::Tpu(index) = t.device() else {
                 unreachable!("a TPU tensor")
             };
+
             crate::allocator::tpu::wait(index).unwrap_or_else(|e| panic!("{e}"))
         }),
         #[cfg(not(lumen_tpu_linked))]
@@ -46,6 +47,7 @@ pub fn wait(t: &Tensor) {
     if t.device() == Device::Cpu(0) {
         return;
     }
+
     let mut op = crate::profiler::record_op(WAIT.name(), || vec![t.ty()]);
     op.outputs(|| vec![t.ty()]);
     WAIT.dispatch(t.device())(t);

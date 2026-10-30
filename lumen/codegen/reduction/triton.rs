@@ -34,11 +34,13 @@ impl ReductionCodegen for Triton {
         let x = body.type_of(root.inputs[0]);
         let a = body.type_of(root.output).dtype;
         let acc = triton_type(a).expect("a Triton dtype");
+
         let (axes, sum) = match &root.primitive {
             Primitive::ReduceSum { axes, .. } => (axes, true),
             Primitive::ReduceMax { axes } => (axes, false),
             p => unreachable!("{p} is not a reduction"),
         };
+
         // Flat offsets split into a kept part (`o`) and a reduced part (`r`), summed to address the input.
         let strides = contiguous_strides(&x.shape);
         let kept: Vec<usize> = (0..x.shape.len()).filter(|d| !axes.contains(d)).collect();
@@ -47,11 +49,14 @@ impl ReductionCodegen for Triton {
         let shape = |ds: &[usize]| ds.iter().map(|&d| x.shape[d]).collect::<Vec<_>>();
         let stride = |ds: &[usize]| ds.iter().map(|&d| strides[d]).collect::<Vec<_>>();
         let count: usize = shape(&reduced).iter().product();
+
         let splits = match body.type_of(root.output).numel() < SPLIT_BELOW {
             true => (count / SPLIT_SPAN).clamp(1, MOST_SPLITS),
             false => 1,
         };
+
         let tile = Tile::new(&x.shape, |d| axes.contains(&d), count, splits > 1);
+
         // Offsets of the kept and reduced parts: an expression in `o` or `r` of its shape, or, of one element,
         // `o` or `r` itself, 0 wherever it is read.
         let at = |idx: &str, ds: &[usize]| match gather_index(idx, &shape(ds), &stride(ds)).as_str()
@@ -59,19 +64,24 @@ impl ReductionCodegen for Triton {
             "0" => idx.to_string(),
             at => at.to_string(),
         };
+
         let (o_at, r_at) = (at("o", &kept), at("r", &reduced));
 
         let mut prologue = Emitter::new(body, by_value);
         let element = prologue.value(root.inputs[0], "j".into());
+
         let element = match x.dtype == a {
             true => element,
             false => format!("{element}.to({acc})"),
         };
+
         // Values the prologue computes that other kernels read too (hosted, as MPS writes them) are
         // written where it reads each element, once (by whichever split covers it).
         let extras = body.outputs().len() - 1;
+
         for (k, &v) in body.outputs()[1..].iter().enumerate() {
             let value = prologue.value(v, "j".into());
+
             writeln!(
                 prologue.lines,
                 "    STORE{}(out{}, j, {value}, mask)",
@@ -80,30 +90,38 @@ impl ReductionCodegen for Triton {
             )
             .unwrap();
         }
+
         let outs: Vec<String> = (1..=extras).map(|k| format!("out{k}")).collect();
         // The epilogue starts with the reduced value bound at output index `o`.
         let mut epilogue = Emitter::new(body, by_value);
         epilogue.locals = prologue.locals;
+
         epilogue
             .values
             .insert((root.output, "o".into()), "reduced".into());
+
         let result = epilogue.value(body.outputs()[0], "o".into());
 
         let (lanes, outputs, tile_shape, axis) =
             (tile.lanes, tile.outputs(), tile.shape(), tile.axis());
+
         let (j, mask) = (
             tile.join("jo", "jr", "+"),
             tile.join("(o < n)", &format!("(r < {count})"), "&"),
         );
+
         let (combine, init) = (combine(sum, a), lowest(a));
         let init = if sum { "0".into() } else { init };
+
         let (whole, partials) = (
             reduce_along("acc", axis, sum, a, "NAME_combine"),
             reduce_along("partial", 1, sum, a, "NAME_combine"),
         );
+
         let (lines, tail) = (indented(&prologue.lines), &epilogue.lines);
         // Each split covers a whole number of lane-sized chunks.
         let per = count.div_ceil(splits).div_ceil(lanes) * lanes;
+
         // Split programs are numbered split-major: `s` picks the split, the remainder the output block.
         let (block, range, finish) = match splits {
             1 => (
@@ -117,10 +135,12 @@ impl ReductionCodegen for Triton {
                 format!("    tl.store(out + o * {splits} + s, reduced, mask=o < n)\n"),
             ),
         };
+
         let block = block.replace("{outputs}", &outputs);
         // A split's first pass stores only the extras (`STORE` stays unused), the second the result.
         let extra = (extras > 0).then(|| outs.join(",\n    "));
         let kernel_params = params(by_value, extra.as_deref(), 1 + extras);
+
         let mut source = formatdoc!(
             "
             @triton.jit
@@ -145,15 +165,19 @@ impl ReductionCodegen for Triton {
                 reduced = {whole}
             {finish}"
         );
+
         // Second pass: each program combines the partials of its outputs, padded to a power of two.
         if splits > 1 {
             let parts = splits.next_power_of_two();
+
             let reads: Vec<&str> = outs
                 .iter()
                 .map(String::as_str)
                 .chain(["partials"])
                 .collect();
+
             let params = params(by_value, Some(&reads.join(",\n    ")), 1);
+
             source += &formatdoc!(
                 "
 
@@ -172,7 +196,9 @@ impl ReductionCodegen for Triton {
                 "
             );
         }
+
         let (name, source) = named("fusion", source);
+
         Ok(Reduction {
             name,
             source,

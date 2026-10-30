@@ -1,8 +1,6 @@
 //! TPU code generation: the Rust side that turns fused steps into JSON specs for the Pallas kernels.
 
 #[cfg(lumen_tpu_linked)]
-pub(crate) mod gemm;
-#[cfg(lumen_tpu_linked)]
 pub(crate) mod gemm_row;
 pub(crate) mod indexing;
 pub(crate) mod row;
@@ -19,6 +17,7 @@ pub(crate) struct Tpu;
 /// Whether `p` can run inside a plain elementwise TPU loop (only scalar broadcasts among layout ops).
 pub(crate) fn fusible(p: &Primitive) -> bool {
     use Primitive::*;
+
     if let BroadcastInDim {
         broadcast_dimensions,
         ..
@@ -64,6 +63,7 @@ pub(crate) fn node(p: &Primitive, args: &[usize]) -> String {
                 }
                 Scalar::Float(f) => format!("{f:?}"),
             };
+
             format!(
                 "\"fill_value\": {value}, \"dtype\": \"{}\"",
                 dtype.full_name()
@@ -77,6 +77,7 @@ pub(crate) fn node(p: &Primitive, args: &[usize]) -> String {
         }) => format!("\"exponent_bits\": {exponent_bits}, \"mantissa_bits\": {mantissa_bits}"),
         _ => String::new(),
     };
+
     format!(
         "{{\"name\": \"{}\", \"params\": {{{params}}}, \"args\": {args:?}}}",
         p.name()

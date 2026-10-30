@@ -49,8 +49,10 @@ impl<M: Attentions> CompilerPass<M> for FlashAttention {
         let epilogues = m.contraction_epilogues().then(|| m.epilogues());
         let (graph, scalars) = (m.graph().clone(), m.scalars());
         let runtime_offsets = m.runtime_offsets();
+
         *m.graph_mut() =
             attention::fuse(&graph, epilogues, &scalars, runtime_offsets, |_| m.kernel());
+
         Ok(())
     }
 }

@@ -24,30 +24,38 @@ pub(crate) fn encode_linear_cross_entropy(
 ) -> Result<(), String> {
     let (h, w, target) = (&step.inputs[0].1, &step.inputs[1].1, &step.inputs[2].1);
     let (b, d, v) = (h.shape[0], h.shape[1], w.shape[0]);
+
     if b == 0 || v == 0 {
         return Ok(());
     }
+
     if scratch.is_null() {
         return Err(format!(
             "{}: needs scratch for its partials: compile the graph for MPS (lumen.compile, Plan(graph, \"mps\"))",
             step.label
         ));
     }
+
     let (small, mid, (tm, tn)) = float_tiles(1, b, v);
+
     let kind = match (small, mid) {
         (true, _) => "small_",
         (_, true) => "mid_",
         _ => "",
     };
+
     let tiles = v.div_ceil(tn);
+
     // Scratch holds `[b, tiles]` maxima followed by `[b, tiles]` sums.
     let (maxima, sums) = (
         scratch.cast_const(),
         unsafe { scratch.add(b * tiles * 4) }.cast_const(),
     );
+
     // h is [b, d] row-major; w is [v, d], read as a [d, v] rhs with K stride 1 and N stride d.
     let p = dims_arg([b, v, d, 0, d, 1, 0, 1, d]);
     let partials = TensorType::new(crate::DType::F32, &[2, b, tiles]);
+
     crate::profiler::next_launch("linear_cross_entropy (partials)", || {
         crate::profiler::IoTypes {
             inputs: step.inputs.iter().map(|(_, ty)| ty.clone()).collect(),
@@ -56,6 +64,7 @@ pub(crate) fn encode_linear_cross_entropy(
             output_strides: vec![contiguous_strides(&partials.shape)],
         }
     });
+
     launch(
         &format!("lce_partials_{kind}{}_{}", h.dtype, target.dtype),
         &[
@@ -71,6 +80,7 @@ pub(crate) fn encode_linear_cross_entropy(
         keep.clone(),
         step.label,
     )?;
+
     crate::profiler::next_launch("linear_cross_entropy (combine)", || {
         crate::profiler::IoTypes {
             inputs: vec![partials.clone()],
@@ -79,6 +89,7 @@ pub(crate) fn encode_linear_cross_entropy(
             output_strides: step.output_strides(),
         }
     });
+
     launch(
         "lce_combine",
         &[maxima, sums, output.cast_const()],

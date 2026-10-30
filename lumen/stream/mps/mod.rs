@@ -11,18 +11,25 @@ use crate::stream::event::Recorded;
 unsafe extern "C" {
     /// Commits the open command buffer and returns the total buffers encoded so far.
     fn lumen_mps_stream_flush() -> u64;
+
     /// Total command buffers encoded so far.
     fn lumen_mps_stream_encoded_total() -> u64;
+
     /// Host time in seconds on the clock command buffer GPU times use.
     fn lumen_mps_stream_host_time() -> f64;
+
     /// The open command buffer, created if needed.
     fn lumen_mps_stream_command_buffer() -> *mut c_void;
+
     /// Queues a completion callback after the work encoded so far.
     fn lumen_mps_stream_mark(done: Completion, context: *mut c_void);
+
     /// Makes later encoders wait for earlier ones.
     fn lumen_mps_stream_fence();
+
     /// Encodes a GPU wait on a new shared event; work encoded after it stalls until the event is released.
     fn lumen_mps_stream_hold() -> *mut c_void;
+
     /// Signals a gate from `lumen_mps_stream_hold`, letting the stalled work run.
     fn lumen_mps_stream_release(gate: *mut c_void);
 }
@@ -42,9 +49,11 @@ impl Gate {
 /// Stalls GPU work encoded from now on until the returned closure is called.
 pub(crate) fn hold() -> Result<Box<dyn FnOnce() + Send>, String> {
     let gate = Gate(unsafe { lumen_mps_stream_hold() });
+
     if gate.0.is_null() {
         return Err("holding the MPS stream failed: no Metal device".into());
     }
+
     Ok(Box::new(move || gate.release()))
 }
 
@@ -65,6 +74,7 @@ pub(crate) fn mark() {
         profile: None,
         event: None,
     });
+
     unsafe { lumen_mps_stream_mark(completed, Box::into_raw(submission).cast()) };
 }
 
@@ -87,6 +97,7 @@ static COMPLETED: Condvar = Condvar::new();
 pub fn synchronize() {
     let encoded = unsafe { lumen_mps_stream_flush() };
     let mut finished = FINISHED.lock().unwrap_or_else(|e| e.into_inner());
+
     while *finished < encoded {
         finished = COMPLETED.wait(finished).unwrap_or_else(|e| e.into_inner());
     }
@@ -133,6 +144,7 @@ pub(crate) fn submit(
     kernel: &str,
 ) -> (*mut c_void, Completion, bool) {
     crate::kernels::launched::launched(kernel, || None);
+
     let profile = crate::profiler::gpu_context(Device::Mps(0)).map(|context| Profiled {
         context,
         name,
@@ -140,12 +152,15 @@ pub(crate) fn submit(
         profiler_ns: crate::profiler::now_ns(),
         host_seconds: unsafe { lumen_mps_stream_host_time() },
     });
+
     let timed = profile.is_some();
+
     let submission = Box::new(Submission {
         _tensors: tensors,
         profile,
         event: None,
     });
+
     (Box::into_raw(submission).cast(), completed, timed)
 }
 
@@ -156,6 +171,7 @@ pub(crate) fn submit_event(recorded: Arc<Recorded>) -> (*mut c_void, Completion)
         profile: None,
         event: Some(recorded),
     });
+
     (Box::into_raw(submission).cast(), completed)
 }
 
@@ -168,12 +184,15 @@ pub(crate) fn cancel(context: *mut c_void) {
 /// the buffer finished.
 unsafe extern "C" fn completed(context: *mut c_void, gpu_start: f64, gpu_end: f64, ok: i32) {
     let submission = unsafe { Box::from_raw(context.cast::<Submission>()) };
+
     if ok == 0 {
         eprintln!("{}: an MPS command buffer failed", crate::LIBRARY_NAME);
     }
+
     if let Some(event) = &submission.event {
         event.set(gpu_start, gpu_end, ok != 0);
     }
+
     if let Some(p) = &submission.profile {
         let to_ns = |t: f64| (p.profiler_ns as f64 + (t - p.host_seconds) * 1e9).max(0.0) as u64;
         let (start, end) = (to_ns(gpu_start), to_ns(gpu_end));
@@ -181,6 +200,7 @@ unsafe extern "C" fn completed(context: *mut c_void, gpu_start: f64, gpu_end: f6
         let context = p.context.clone();
         crate::profiler::record_kernel_in(context, p.name, kernel, Device::Mps(0), start, end);
     }
+
     drop(submission);
     *FINISHED.lock().unwrap_or_else(|e| e.into_inner()) += 1;
     COMPLETED.notify_all();

@@ -33,6 +33,7 @@ fn malloc(index: usize, nbytes: usize) -> NonNull<u8> {
     CUDA.set_device(index);
     let mut ptr: *mut std::ffi::c_void = std::ptr::null_mut();
     let err = unsafe { ffi::cudaMalloc(&mut ptr, nbytes) };
+
     NonNull::new(ptr.cast())
         .filter(|_| err == 0)
         .unwrap_or_else(|| {
@@ -47,6 +48,7 @@ fn malloc(index: usize, nbytes: usize) -> NonNull<u8> {
 #[cfg(lumen_cuda_linked)]
 unsafe fn free(index: usize, ptr: NonNull<u8>) {
     CUDA.set_device(index);
+
     unsafe { ffi::cudaFree(ptr.as_ptr().cast()) };
 }
 
@@ -93,11 +95,14 @@ impl Drop for CudaAllocator {
 #[cfg(lumen_cuda_linked)]
 pub(super) fn allocator(index: usize) -> Arc<dyn Allocator> {
     static ALLOCATORS: OnceLock<Mutex<HashMap<usize, Arc<dyn Allocator>>>> = OnceLock::new();
+
     let mut allocators = ALLOCATORS
         .get_or_init(Default::default)
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+
     let capacity = super::config::static_allocator_bytes();
+
     Arc::clone(
         allocators
             .entry(index)

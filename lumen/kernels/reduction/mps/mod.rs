@@ -18,6 +18,7 @@ pub(crate) fn encode(
 ) -> Result<(), String> {
     let x = &step.inputs[0].1;
     let name = step.label;
+
     encode_reduction(
         step,
         &step.primitive,
@@ -51,16 +52,19 @@ pub(crate) enum Layout {
 pub(crate) fn layout(x: &TensorType, axes: &[usize]) -> Layout {
     let (x, reduced) = normalize(x, axes);
     let grouped = x.numel() <= u32::MAX as usize;
+
     // reduced axes form one block after normalisation; short trailing rows prefer the grouped kernel
     if reduced.windows(2).all(|w| w[1] == w[0] + 1) {
         let Split { count, b, .. } = split(&x, &reduced);
         let lanes = count.div_ceil((LANE_BYTES / x.dtype.size_of()).max(1));
+
         return match b {
             1 if grouped && lanes < REDUCE_THREADS => Layout::Grouped,
             1 => Layout::Rows,
             _ => Layout::Cols,
         };
     }
+
     match grouped {
         true => Layout::Grouped,
         false => Layout::Generic,
@@ -72,19 +76,24 @@ pub(crate) fn layout(x: &TensorType, axes: &[usize]) -> Layout {
 fn normalize(x: &TensorType, axes: &[usize]) -> (TensorType, Vec<usize>) {
     let (mut shape, mut reduced) = (Vec::new(), Vec::new());
     let mut last = None;
+
     for (d, &n) in x.shape.iter().enumerate().filter(|&(_, &n)| n != 1) {
         let r = axes.contains(&d);
+
         match (last == Some(r), shape.last_mut()) {
             (true, Some(merged)) => *merged *= n,
             _ => {
                 if r {
                     reduced.push(shape.len());
                 }
+
                 shape.push(n);
             }
         }
+
         last = Some(r);
     }
+
     (TensorType::new(x.dtype, &shape), reduced)
 }
 
@@ -112,6 +121,7 @@ pub(crate) fn encode_reduction(
     let (ReduceSum { axes, .. } | ReduceMax { axes }) = op else {
         unreachable!("a reduction")
     };
+
     let (op_name, accum) = (op.name(), accum_dtype(op, x.dtype));
     let dtype = kernel_dtype(x.dtype, accum);
     let kernel = |own: String| fused.map_or(own, str::to_owned);
@@ -121,22 +131,27 @@ pub(crate) fn encode_reduction(
     let (x, reduced) = normalize(x, axes);
     let x = &x;
     let layout = layout(x, &reduced);
+
     if let Layout::Rows | Layout::Cols = layout {
         return consecutive(
             step, op_name, name, x, accum, &reduced, fused, last, launches, inputs, output, extra,
             scalars, scratch, keep,
         );
     }
+
     let strides = contiguous_strides(&x.shape);
     let kept: Vec<usize> = free_dims(x.shape.len(), &reduced).collect();
+
     let init = match op {
         ReduceSum { .. } => Scalar::Int(0),
         _ => lowest(accum),
     };
+
     let count: usize = reduced.iter().map(|&d| x.shape[d]).product();
     let outputs: usize = kept.iter().map(|&d| x.shape[d]).product();
     let reduced_sizes = reduced.iter().map(|&d| x.shape[d]);
     let reduced_strides = reduced.iter().map(|&d| strides[d]);
+
     let mut args = vec![
         element_arg(accum, init),
         u32_arg(kept.len() as u32),
@@ -144,13 +159,16 @@ pub(crate) fn encode_reduction(
         dims_arg(kept.iter().map(|&d| strides[d])),
         u32_arg(reduced.len() as u32),
     ];
+
     // pick a power-of-two lane count so each lane reads about LANE_BYTES, capped at one threadgroup
     let (kernel, grid) = if let Layout::Grouped = layout {
         let per_lane = (LANE_BYTES / x.dtype.size_of()).max(1);
+
         let lanes = count
             .div_ceil(per_lane)
             .next_power_of_two()
             .min(REDUCE_THREADS);
+
         args.extend([
             dims32_arg(reduced_sizes),
             dims32_arg(reduced_strides),
@@ -158,7 +176,9 @@ pub(crate) fn encode_reduction(
             u32_arg(lanes as u32),
             u32_arg(outputs as u32),
         ]);
+
         let per_group = REDUCE_THREADS / lanes;
+
         (
             kernel(format!("{op_name}_grouped_{dtype}")),
             Grid::Groups([outputs.div_ceil(per_group), 1, 1]),
@@ -169,11 +189,13 @@ pub(crate) fn encode_reduction(
             dims_arg(reduced_strides),
             u64_arg(count),
         ]);
+
         (
             kernel(format!("{op_name}_{dtype}")),
             Grid::Threads([outputs, 1, 1]),
         )
     };
+
     let args: Vec<Vec<u8>> = scalars.iter().cloned().chain(args).collect();
     launch(&kernel, &buffers, &args, grid, keep, name)
 }
@@ -211,6 +233,7 @@ fn split(x: &TensorType, reduced: &[usize]) -> Split {
     let a: usize = x.shape[..first].iter().product();
     let count: usize = x.shape[first..end].iter().product();
     let b: usize = x.shape[end..].iter().product();
+
     // aim for about 256 threadgroups on rows and 65536 threads on columns, without chunks shorter than 4096/64;
     // an empty output has nothing to split
     let chunks = if a * b == 0 {
@@ -226,8 +249,10 @@ fn split(x: &TensorType, reduced: &[usize]) -> Split {
     } else {
         (1usize << 16).div_ceil(a * b).min(count.div_ceil(64))
     };
+
     let chunk = count.div_ceil(chunks.max(1));
     let chunks = if chunk == 0 { 1 } else { count.div_ceil(chunk) };
+
     Split {
         a,
         count,
@@ -261,13 +286,17 @@ pub(crate) fn kernel_dtype(x: DType, accum: DType) -> String {
 /// Returns the scratch bytes for the `(a, chunks, b)` partials of a split reduction, or 0 when it runs in one pass.
 pub(crate) fn scratch_bytes(x: &TensorType, axes: &[usize], accum: DType) -> usize {
     let (x, reduced) = normalize(x, axes);
+
     if !reduced.windows(2).all(|w| w[1] == w[0] + 1) {
         return 0;
     }
+
     let Split { a, b, chunks, .. } = split(&x, &reduced);
+
     if chunks == 1 || a * b == 0 {
         return 0;
     }
+
     a * chunks * b * accum.size_of()
 }
 
@@ -298,11 +327,15 @@ fn consecutive(
         chunks,
         chunk,
     } = split(x, reduced);
+
     let (dtype, rows) = (kernel_dtype(x.dtype, accum), b == 1);
+
     if a * b == 0 {
         return Ok(());
     }
+
     let layout = if rows { "rows" } else { "cols" };
+
     // one launch over `count` elements in chunks of `chunk`; rows use a threadgroup per (chunk, row)
     let pass = |kernel: String,
                 srcs: &[*const u8],
@@ -317,10 +350,13 @@ fn consecutive(
         let mut buffers = srcs.to_vec();
         buffers.push(dst);
         buffers.extend(extra);
+
         let args =
             |own: &[Vec<u8>]| -> Vec<Vec<u8>> { scalars.iter().chain(own).cloned().collect() };
+
         if rows {
             let args = args(&[u64_arg(count), u64_arg(chunk)]);
+
             launch(
                 &kernel,
                 &buffers,
@@ -336,29 +372,37 @@ fn consecutive(
                 u64_arg(chunk),
                 u32_arg(chunks as u32),
             ]);
+
             let grid = Grid::Threads([a * chunks * b, 1, 1]);
             launch(&kernel, &buffers, &args, grid, keep, name)
         }
     };
+
     let first = |own: String| fused.map_or(own, str::to_owned);
+
     if chunks == 1 {
         let kernel = first(format!("{op}_{layout}_{dtype}"));
+
         return pass(
             kernel, inputs, output, extra, scalars, count, count, 1, keep, name,
         );
     }
+
     if scratch.is_null() {
         return Err(format!(
             "{name}: a split reduction needs scratch for its partials: compile the graph for MPS (lumen.compile, Plan(graph, \"mps\"))"
         ));
     }
+
     let p = scratch.cast_const();
     let partials = TensorType::new(accum, &[a, chunks, b]);
+
     // the profiler sees the first pass writing the partials tensor instead of the step's output
     crate::profiler::next_launch(launches.0, || {
         let extra = step.extra_outputs.iter().map(|(_, ty)| ty.clone());
         let mut output_strides = step.output_strides();
         output_strides[0] = contiguous_strides(&partials.shape);
+
         crate::profiler::IoTypes {
             inputs: step.inputs.iter().map(|(_, ty)| ty.clone()).collect(),
             outputs: std::iter::once(partials.clone()).chain(extra).collect(),
@@ -366,7 +410,9 @@ fn consecutive(
             output_strides,
         }
     });
+
     let kernel = first(format!("{op}_{layout}_{dtype}"));
+
     pass(
         kernel,
         inputs,
@@ -379,13 +425,16 @@ fn consecutive(
         keep.clone(),
         name,
     )?;
+
     let kernel = last.map_or_else(|| format!("{op}_{layout}_{accum}"), str::to_owned);
+
     crate::profiler::next_launch(launches.1, || crate::profiler::IoTypes {
         inputs: vec![partials.clone()],
         outputs: vec![step.output.1.clone()],
         input_strides: vec![contiguous_strides(&partials.shape)],
         output_strides: step.output_strides()[..1].to_vec(),
     });
+
     pass(
         kernel,
         &[p],

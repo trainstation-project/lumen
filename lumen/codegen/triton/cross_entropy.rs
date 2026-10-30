@@ -18,6 +18,7 @@ pub(crate) fn cross_entropy_epilogue(
 ) -> (String, String) {
     let (label, source) = load(target.0, target.1);
     let labels = source.replace(&format!("def {label}("), "def LOAD_LABEL(");
+
     named(
         "cross_entropy_epilogue",
         formatdoc!(
@@ -51,6 +52,7 @@ pub(crate) fn cross_entropy_epilogue(
 pub(crate) fn cross_entropy_combine(tiles: usize, out: (&[usize], &[usize])) -> (String, String) {
     let lse = stored_at("n + o", out.0, out.1);
     let loss = stored_at("o", out.0, out.1);
+
     named(
         "cross_entropy_combine",
         formatdoc!(

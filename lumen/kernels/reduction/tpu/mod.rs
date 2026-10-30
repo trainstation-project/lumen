@@ -1,13 +1,13 @@
 //! The TPU Pallas reduction kernels: their block sizes, and launching a reduction fusion's program.
 
 use crate::DType;
+use crate::codegen::dot_general::tpu::block;
 use crate::codegen::reduction::ReductionCodegen;
 use crate::codegen::reduction::tpu::{Layout, axes};
 use crate::codegen::tpu::Tpu;
 use crate::device::tpu::layout::Layout as Tiles;
 use crate::graph::Primitive;
 use crate::graph_compiler::plan::Step;
-use crate::kernels::dot_general::tpu::block;
 use crate::kernels::tpu::{Launch, launch};
 
 /// Target bytes of one operand block in VMEM.
@@ -28,6 +28,7 @@ pub(crate) fn blocks(layout: &Layout, ins: &[DType], outs: &[DType]) -> Result<V
     let rows_in = tile_rows(ins)?;
     // lane-axis blocks are multiples of 128 dividing `n`, or all of `n` when none fits
     let lanes = |n: usize, cap: usize| block(n, 128, cap).unwrap_or(n);
+
     match *layout {
         Layout::Rows { rank, h, m, n, .. } => {
             let bh = match rank {
@@ -37,6 +38,7 @@ pub(crate) fn blocks(layout: &Layout, ins: &[DType], outs: &[DType]) -> Result<V
                     block(h, unit, unit).ok_or_else(|| failed("its rows' rows"))?
                 }
             };
+
             let bn = lanes(n, 512);
             let unit_m = (if rank == 2 { 1024 } else { 128 }).max(rows_in);
             let cap = 1024.min((BLOCK_BYTES / (bh * bn)).max(unit_m));
@@ -70,17 +72,21 @@ pub(crate) fn encode(
     let Primitive::Fusion { body, .. } = &step.primitive else {
         unreachable!("a reduction fusion")
     };
+
     let root = body
         .nodes()
         .iter()
         .find(|n| axes(&n.primitive).is_some())
         .ok_or_else(|| format!("{}: a reduction on TPU: no reduction", step.label))?;
+
     let code = Tpu::reduction(body, &[], root).map_err(|e| format!("{}: {e}", step.label))?;
+
     let rows: Vec<*const u8> = inputs
         .iter()
         .copied()
         .chain([output.cast_const()])
         .collect();
+
     let launched = Launch {
         module: "lumen.kernels.reduction.tpu",
         kernel: code.kernel,
@@ -90,5 +96,6 @@ pub(crate) fn encode(
         host: &[],
         sparse: None,
     };
+
     launch(index, launched)
 }

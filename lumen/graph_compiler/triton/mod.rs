@@ -128,6 +128,7 @@ const ROW: &str = "row";
 fn unsupported(graph: &Graph) -> Result<(), String> {
     for node in graph.nodes() {
         let x = graph.type_of(node.inputs.first().copied().unwrap_or(node.output));
+
         if node.primitive.is_transcendental() && matches!(x.dtype, DType::F16 | DType::BF16) {
             return Err(format!(
                 "{}: has no {} kernel on Triton, got {x}: convert to float32 first (x.to(dtype=float32))",
@@ -136,6 +137,7 @@ fn unsupported(graph: &Graph) -> Result<(), String> {
             ));
         }
     }
+
     Ok(())
 }
 
@@ -180,6 +182,7 @@ impl Blocks for TritonModule<'_> {
 pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Result<Plan, String> {
     unsupported(graph)?;
     let config = &options.config.cuda;
+
     let mut module = TritonModule {
         graph: graph.clone(),
         options,
@@ -187,11 +190,14 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
         interleaved: Vec::new(),
         rows: Vec::new(),
     };
+
     let mut pipeline = Pipeline::new("triton");
     pipeline.add(TakeAlongAxis);
+
     if config.fused_linear_cross_entropy {
         pipeline.add(ChunkedCrossEntropy);
     }
+
     if config.merge_dots {
         pipeline.add(MergeDotsBackward).add(MergeDots {
             target: Target {
@@ -202,46 +208,60 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
             },
         });
     }
+
     if config.flash_attention {
         pipeline.add(FlashAttention).add(FlashAttentionBackward);
     }
+
     if config.fused_linear_cross_entropy {
         pipeline.add(LinearCrossEntropy);
     }
+
     if config.safe_kernels {
         pipeline.add(ClampIndices);
     }
+
     // Batched inner products (attention backward's delta, read through transposes) run as loops.
     pipeline.add(Simplify { matched: true }).add(DotStrength);
+
     if config.split_k {
         pipeline.add(SplitK);
     }
+
     // As on MPS: update chains, normalization rows, in-place concatenations, then loop fusion.
     pipeline.add(Updates {
         least: 2,
         most: usize::MAX,
     });
+
     if config.normalization_diamonds {
         pipeline.add(Diamonds);
     }
+
     pipeline.add(PlaceConcats);
     pipeline.add(LoopFusion);
+
     // Rows too wide for one GEMM tile: the GEMM feeding them writes their reductions' partials too.
     if config.normalization_diamonds {
         pipeline.add(WideRows);
     }
+
     pipeline.add(PlaceViews);
     pipeline.add(Alone);
+
     if config.horizontal_fusion {
         pipeline.add(HorizontalFusion);
     }
+
     pipeline.run(&mut module)?;
+
     let TritonModule {
         graph: fused,
         packed,
         interleaved,
         ..
     } = module;
+
     let scalars = positions(&options.scalars);
     let plan = plan_options(&fused, options, config, &packed, scalars);
     let mut plan = Plan::compile_with(&fused, &plan);
@@ -249,14 +269,17 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
     plan.interleaved = interleaved;
     let kernels = plan.steps().iter().map(loop_kernel);
     plan.triton = Some(kernels.collect());
+
     if options.config.cuda.autotune {
         let tuner = Autotuner {
             timer: Events { device },
         };
+
         tuner.tune(&mut gemm::Gemms, &mut plan)?;
         tuner.tune(&mut Tiles, &mut plan)?;
         tuner.tune(&mut Loops, &mut plan)?;
     }
+
     Ok(plan)
 }
 
@@ -267,6 +290,7 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
         .iter()
         .map(|(b, _)| matches!(b, Buffer::Scalar(_)))
         .collect();
+
     let (name, source, lanes, splits) = match &step.primitive {
         Primitive::Fusion { name, body, .. } if name == UPDATES => {
             let chain = crate::graph_compiler::common::updates::starts(body);
@@ -283,12 +307,14 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
             Some(root) => {
                 let r = codegen::Triton::reduction(body, &by_value, root)
                     .expect("a Triton reduction of every reduction body");
+
                 (r.name, r.source, r.lanes, r.splits)
             }
             None => {
                 let (name, source) =
                     codegen::Triton::elementwise(body, &by_value, &HashMap::new(), &())
                         .expect("a Triton loop of every elementwise body");
+
                 (name, source, 1, 1)
             }
         },
@@ -299,6 +325,7 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
         } => {
             let (name, source, lanes) =
                 codegen::scan(&step.inputs[0].1, *axis, *reverse, *accum_dtype);
+
             (name, source, lanes, 1)
         }
         Primitive::DynamicUpdateSlice => {
@@ -308,10 +335,12 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
         Primitive::ScatterAdd { axis } => {
             let (name, source) =
                 codegen::scatter_add(&step.inputs[0].1, *axis, step.inputs[1].1.numel());
+
             (name, source, 1, 1)
         }
         _ => return None,
     };
+
     // Only a plain loop's outputs (a horizontal fusion's) split the grid; a row's are one row each.
     let segments = match &step.primitive {
         Primitive::Fusion { name, body, .. }
@@ -321,10 +350,12 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
         }
         _ => Vec::new(),
     };
+
     let segments = match segments.len() {
         0 | 1 => Vec::new(),
         _ => segments.into_iter().map(|(numel, _)| numel).collect(),
     };
+
     Some(Kernel {
         name,
         source,
@@ -346,6 +377,7 @@ impl Kernels for Loops {
         let Some(kernel) = loop_kernel(step) else {
             return Vec::new();
         };
+
         codegen::loop_configs(kernel.lanes.max(kernel.splits.next_power_of_two()))
     }
 
@@ -376,6 +408,7 @@ impl Timer for Events {
                 TensorOptions::new().dtype(ty.dtype).device(device),
             )
         };
+
         let inputs: Vec<Tensor> = step
             .inputs
             .iter()
@@ -384,15 +417,18 @@ impl Timer for Events {
                 _ => zeros(ty, self.device),
             })
             .collect();
+
         let out = match step.primitive {
             Primitive::DynamicUpdateSlice | Primitive::ScatterAdd { .. } => inputs[0].clone(),
             _ => zeros(&step.output.1, self.device),
         };
+
         let outs = step
             .extra_outputs
             .iter()
             .map(|(_, ty)| zeros(ty, self.device))
             .collect();
+
         Ok(Some((loop_kernel(step), inputs, out, outs)))
     }
 
@@ -428,6 +464,7 @@ pub(crate) fn run(
         (Primitive::DeviceWait, _) => {
             #[cfg(lumen_cuda_linked)]
             crate::distributed::nccl::device_wait(&inputs[0])?;
+
             match out.data_ptr() == inputs[0].data_ptr() {
                 true => Ok(()),
                 false => copy(out, &inputs[0]),
@@ -435,6 +472,7 @@ pub(crate) fn run(
         }
         (Primitive::HostWait, _) => {
             crate::stream::stream_for(out.device())?.synchronize();
+
             match out.data_ptr() == inputs[0].data_ptr() {
                 true => Ok(()),
                 false => copy(out, &inputs[0]),
@@ -452,6 +490,7 @@ pub(crate) fn run(
                 Primitive::Fusion { .. } => outs,
                 _ => &[],
             };
+
             if let Primitive::ScatterAdd { .. } = step.primitive
                 && out.dtype() == DType::Bool
             {
@@ -461,9 +500,11 @@ pub(crate) fn run(
                 ));
             }
             let key = layouts(inputs.iter().chain([out]).chain(outs));
+
             let helpers = step
                 .memo
                 .get(key, || Ok(loop_helpers(step, kernel, inputs, out, outs)))?;
+
             let (functions, launches) = (&helpers.functions, &helpers.launches);
             let inputs: &[Tensor] = &[inputs, outs].concat();
             let untuned = codegen::untuned_loop(kernel.lanes);
@@ -471,6 +512,7 @@ pub(crate) fn run(
             // A looped row kernel walks one row a program, a block of it at a time; one with column
             // partials one group of rows a program.
             let looped;
+
             let kernel = match &step.primitive {
                 Primitive::Fusion { name, body, .. }
                     if name == ROW
@@ -480,10 +522,12 @@ pub(crate) fn run(
                         lanes: config.block_size,
                         ..kernel.clone()
                     };
+
                     &looped
                 }
                 _ => kernel,
             };
+
             // Grid size: outputs, or a row fusion's rows (its row groups with partials), or lines for a
             // scan, or picks for a scatter.
             let n = match &step.primitive {
@@ -496,9 +540,11 @@ pub(crate) fn run(
                 Primitive::ScatterAdd { axis } => out.numel().checked_div(out.shape()[*axis]),
                 _ => Some(out.numel()),
             };
+
             // In-place ops start from a copy of their operand.
             let updates =
                 matches!(&step.primitive, Primitive::Fusion { name, .. } if name == UPDATES);
+
             if (updates
                 || matches!(
                     step.primitive,
@@ -508,21 +554,28 @@ pub(crate) fn run(
             {
                 copy(out, &inputs[0])?;
             }
+
             let n = n.unwrap_or(0);
+
             if kernel.splits == 1 {
                 return launch(kernel, config, functions, launches, inputs, out, n);
             }
+
             // A split reduction writes per-split partials, then a second kernel combines them into `out`.
             let Primitive::Fusion { body, .. } = &step.primitive else {
                 unreachable!("a split reduction")
             };
+
             let reduced = codegen::reduction_root(body).expect("a reduction").output;
+
             let options = TensorOptions::new()
                 .dtype(body.type_of(reduced).dtype)
                 .device(out.device());
+
             let partials = unsafe { Tensor::empty(&[n * kernel.splits], options) };
             // The first pass also writes the fusion's other outputs; the second only the result.
             launch(kernel, config, functions, launches, inputs, &partials, n)?;
+
             let last = Kernel {
                 name: format!("{}_final", kernel.name),
                 source: kernel.source.clone(),
@@ -531,12 +584,15 @@ pub(crate) fn run(
                 splits: 1,
                 segments: Vec::new(),
             };
+
             let inputs = [inputs, std::slice::from_ref(&partials)].concat();
+
             let finals: Vec<Function> = functions
                 .iter()
                 .filter(|f| f.param == "STORE" || !f.param.starts_with("STORE"))
                 .cloned()
                 .collect();
+
             launch(&last, config, &finals, launches, &inputs, out, n)
         }
         _ => Err(format!("{}: has no Triton kernel on CUDA yet", step.label)),
@@ -555,16 +611,20 @@ struct Utility {
 fn utility(layouts: &[&Tensor], make: impl FnOnce() -> (Kernel, Vec<Function>)) -> Arc<Utility> {
     type Layout = (DType, Vec<usize>, Vec<usize>);
     static UTILITIES: Mutex<Option<HashMap<Vec<Layout>, Arc<Utility>>>> = Mutex::new(None);
+
     let key: Vec<Layout> = layouts
         .iter()
         .map(|t| (t.dtype(), t.shape().to_vec(), t.strides().to_vec()))
         .collect();
+
     let mut cache = UTILITIES.lock().unwrap_or_else(PoisonError::into_inner);
     let cache = cache.get_or_insert_with(HashMap::new);
+
     cache
         .entry(key)
         .or_insert_with(|| {
             let (kernel, functions) = make();
+
             Arc::new(Utility {
                 kernel,
                 functions,
@@ -578,6 +638,7 @@ fn utility(layouts: &[&Tensor], make: impl FnOnce() -> (Kernel, Vec<Function>)) 
 pub(crate) fn fill(t: &Tensor, value: Scalar) -> Result<(), String> {
     let fill = utility(&[t], || {
         let (name, source) = codegen::fill(t.dtype());
+
         let kernel = Kernel {
             name,
             source,
@@ -586,10 +647,13 @@ pub(crate) fn fill(t: &Tensor, value: Scalar) -> Result<(), String> {
             splits: 1,
             segments: Vec::new(),
         };
+
         let store = Function::new("STORE", codegen::store(t.shape(), t.strides()));
         (kernel, vec![store])
     });
+
     let bits = Tensor::from_slice(&[codegen::bits(t.dtype(), value)], DType::U64);
+
     launch(
         &fill.kernel,
         &LOOP_CONFIGS[UNTUNED_LOOP],
@@ -607,8 +671,10 @@ pub(crate) fn copy(dst: &Tensor, src: &Tensor) -> Result<(), String> {
         let mut body = Graph::new();
         let x = body.input(TensorType::new(src.dtype(), src.shape()));
         body.set_outputs(&[x]).expect("the copied value");
+
         let (name, source) = codegen::Triton::elementwise(&body, &[false], &HashMap::new(), &())
             .expect("a Triton loop of a copy");
+
         let kernel = Kernel {
             name,
             source,
@@ -617,12 +683,15 @@ pub(crate) fn copy(dst: &Tensor, src: &Tensor) -> Result<(), String> {
             splits: 1,
             segments: Vec::new(),
         };
+
         let functions = vec![
             Function::new("LOAD0", codegen::load(src.shape(), src.strides())),
             Function::new("STORE", codegen::store(dst.shape(), dst.strides())),
         ];
+
         (kernel, functions)
     });
+
     launch(
         &copy.kernel,
         &LOOP_CONFIGS[UNTUNED_LOOP],
@@ -657,16 +726,19 @@ fn loop_helpers(
         .filter(|&(k, _)| !kernel.by_value[k])
         .map(|(k, t)| Function::new(format!("LOAD{k}"), codegen::load(t.shape(), t.strides())))
         .collect();
+
     functions.push(Function::new(
         "STORE",
         codegen::store(out.shape(), out.strides()),
     ));
+
     for (k, t) in outs.iter().enumerate() {
         functions.push(Function::new(
             format!("STORE{}", k + 1),
             codegen::store(t.shape(), t.strides()),
         ));
     }
+
     if let Primitive::ScatterAdd { .. } = step.primitive {
         functions.push(Function::new(
             "OUTLOAD",
@@ -683,9 +755,11 @@ fn loop_helpers(
 pub(crate) fn layouts<'a>(tensors: impl IntoIterator<Item = &'a Tensor>) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
+
     for t in tensors {
         (t.dtype(), t.shape(), t.strides()).hash(&mut hasher);
     }
+
     hasher.finish()
 }
 
@@ -715,10 +789,12 @@ fn launch(
     let launch = LOOP.get().ok_or(
         "the Triton backend's loops launch from Python (lumen.codegen.triton): none is installed",
     )?;
+
     let programs = match kernel.segments.as_slice() {
         [] => n.div_ceil(config.block_size / kernel.lanes) * kernel.splits,
         segments => segments.iter().map(|s| s.div_ceil(config.block_size)).sum(),
     };
+
     launch(
         kernel, config, functions, launches, inputs, out, n, programs,
     )

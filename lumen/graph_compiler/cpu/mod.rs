@@ -14,9 +14,11 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
         device,
         options,
     };
+
     Pipeline::new("cpu")
         .add(Simplify { matched: true })
         .run(&mut module)?;
+
     Ok(plan(&module.graph, device, options))
 }
 
@@ -32,5 +34,6 @@ pub(crate) fn plan(graph: &Graph, device: Device, options: &Options) -> Plan {
         blocks: Vec::new(),
         layout: None,
     };
+
     Plan::compile_with(graph, &plan)
 }

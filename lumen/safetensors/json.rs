@@ -22,12 +22,15 @@ pub(crate) fn parse(text: &str) -> Result<Value, String> {
         bytes: text.as_bytes(),
         pos: 0,
     };
+
     p.skip_ws();
     let value = p.value(0)?;
     p.skip_ws();
+
     if p.pos != p.bytes.len() {
         return Err(p.error("trailing characters"));
     }
+
     Ok(value)
 }
 
@@ -79,6 +82,7 @@ impl Parser<'_> {
         if depth > MAX_DEPTH {
             return Err(self.error("nested too deeply"));
         }
+
         match self.peek() {
             Some(b'{') => self.object(depth),
             Some(b'[') => self.array(depth),
@@ -97,21 +101,26 @@ impl Parser<'_> {
         self.expect(b'{')?;
         let mut members = Vec::new();
         self.skip_ws();
+
         if self.peek() == Some(b'}') {
             self.pos += 1;
             return Ok(Value::Object(members));
         }
+
         loop {
             self.skip_ws();
+
             if self.peek() != Some(b'"') {
                 return Err(self.error("expected a string key"));
             }
+
             let key = self.string()?;
             self.skip_ws();
             self.expect(b':')?;
             self.skip_ws();
             members.push((key, self.value(depth + 1)?));
             self.skip_ws();
+
             match self.peek() {
                 Some(b',') => self.pos += 1,
                 Some(b'}') => {
@@ -128,14 +137,17 @@ impl Parser<'_> {
         self.expect(b'[')?;
         let mut items = Vec::new();
         self.skip_ws();
+
         if self.peek() == Some(b']') {
             self.pos += 1;
             return Ok(Value::Array(items));
         }
+
         loop {
             self.skip_ws();
             items.push(self.value(depth + 1)?);
             self.skip_ws();
+
             match self.peek() {
                 Some(b',') => self.pos += 1,
                 Some(b']') => {
@@ -150,37 +162,48 @@ impl Parser<'_> {
     /// Checks a number against the JSON grammar (no leading zeros) and returns its text unparsed.
     fn number(&mut self) -> Result<Value, String> {
         let start = self.pos;
+
         // Consumes a run of digits and reports whether there was at least one.
         let digits = |p: &mut Self| {
             let s = p.pos;
+
             while matches!(p.peek(), Some(b'0'..=b'9')) {
                 p.pos += 1;
             }
+
             p.pos > s
         };
+
         if self.peek() == Some(b'-') {
             self.pos += 1;
         }
+
         if self.peek() == Some(b'0') {
             self.pos += 1;
         } else if !digits(self) {
             return Err(self.error("expected digits"));
         }
+
         if self.peek() == Some(b'.') {
             self.pos += 1;
+
             if !digits(self) {
                 return Err(self.error("expected digits after `.`"));
             }
         }
+
         if matches!(self.peek(), Some(b'e' | b'E')) {
             self.pos += 1;
+
             if matches!(self.peek(), Some(b'+' | b'-')) {
                 self.pos += 1;
             }
+
             if !digits(self) {
                 return Err(self.error("expected exponent digits"));
             }
         }
+
         let text = std::str::from_utf8(&self.bytes[start..self.pos]).expect("ASCII digits");
         Ok(Value::Number(text.to_owned()))
     }
@@ -193,6 +216,7 @@ impl Parser<'_> {
             .and_then(|h| std::str::from_utf8(h).ok())
             .and_then(|h| u32::from_str_radix(h, 16).ok())
             .ok_or_else(|| self.error("expected 4 hex digits"))?;
+
         self.pos += 4;
         Ok(digits)
     }
@@ -201,13 +225,17 @@ impl Parser<'_> {
     fn string(&mut self) -> Result<String, String> {
         self.expect(b'"')?;
         let mut out = String::new();
+
         loop {
             // Copy the run of plain bytes at once; it stops at ASCII bytes, so it is valid UTF-8.
             let start = self.pos;
+
             while matches!(self.peek(), Some(c) if c != b'"' && c != b'\\' && c >= 0x20) {
                 self.pos += 1;
             }
+
             out.push_str(std::str::from_utf8(&self.bytes[start..self.pos]).expect("UTF-8"));
+
             match self.peek() {
                 Some(b'"') => {
                     self.pos += 1;
@@ -215,10 +243,13 @@ impl Parser<'_> {
                 }
                 Some(b'\\') => {
                     self.pos += 1;
+
                     let escape = self
                         .peek()
                         .ok_or_else(|| self.error("unterminated escape"))?;
+
                     self.pos += 1;
+
                     match escape {
                         b'"' => out.push('"'),
                         b'\\' => out.push('\\'),
@@ -230,19 +261,24 @@ impl Parser<'_> {
                         b't' => out.push('\t'),
                         b'u' => {
                             let mut code = self.hex4()?;
+
                             // A high surrogate must be followed by a `\u` low surrogate;
                             // together they encode one code point above U+FFFF.
                             if (0xD800..0xDC00).contains(&code) {
                                 if !self.bytes[self.pos..].starts_with(b"\\u") {
                                     return Err(self.error("unpaired surrogate"));
                                 }
+
                                 self.pos += 2;
                                 let low = self.hex4()?;
+
                                 if !(0xDC00..0xE000).contains(&low) {
                                     return Err(self.error("unpaired surrogate"));
                                 }
+
                                 code = 0x10000 + ((code - 0xD800) << 10) + (low - 0xDC00);
                             }
+
                             out.push(
                                 char::from_u32(code)
                                     .ok_or_else(|| self.error("unpaired surrogate"))?,
@@ -261,6 +297,7 @@ impl Parser<'_> {
 /// Appends `s` to `out` as a quoted JSON string, escaping quotes, backslashes and control characters.
 pub(crate) fn write_string(out: &mut String, s: &str) {
     out.push('"');
+
     for c in s.chars() {
         match c {
             '"' => out.push_str("\\\""),
@@ -276,5 +313,6 @@ pub(crate) fn write_string(out: &mut String, s: &str) {
             c => out.push(c),
         }
     }
+
     out.push('"');
 }

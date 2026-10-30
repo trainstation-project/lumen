@@ -154,11 +154,13 @@ thread_local! {
 pub(crate) fn untraced<R>(f: impl FnOnce() -> R) -> R {
     /// Restores the saved `UNTRACED` value on drop, even on panic.
     struct Restore(bool);
+
     impl Drop for Restore {
         fn drop(&mut self) {
             UNTRACED.set(self.0);
         }
     }
+
     let _restore = Restore(UNTRACED.replace(true));
     f()
 }
@@ -188,6 +190,7 @@ pub(crate) struct Launch {
 #[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
 pub(crate) fn next_launch(name: &'static str, types: impl FnOnce() -> IoTypes) {
     let bits = flags();
+
     if bits & (MPS | CUDA) != 0 {
         let types = (bits & SHAPES != 0).then(types);
         NEXT_LAUNCH.with(|l| *l.borrow_mut() = Some(Launch { name, types }));
@@ -236,16 +239,20 @@ pub(crate) fn device_enabled(device: Device) -> bool {
         Device::Mps(_) => MPS,
         Device::Tpu(_) => TPU,
     };
+
     flags() & bit != 0
 }
 
 /// Starts a profiler session; errors if one is already running or an activity is not available.
 pub fn start(config: ProfilerConfig) -> Result<(), String> {
     let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+
     if state.is_some() {
         return Err("a profiler session is already running".to_owned());
     }
+
     let mut bits = 0;
+
     for activity in &config.activities {
         bits |= match activity {
             Activity::Cpu => CPU,
@@ -254,29 +261,37 @@ pub fn start(config: ProfilerConfig) -> Result<(), String> {
             Activity::Tpu => TPU,
         };
     }
+
     if config.profile_memory {
         bits |= MEMORY;
     }
+
     if config.record_shapes {
         bits |= SHAPES;
     }
+
     if bits & TPU != 0 {
         #[cfg(lumen_tpu_linked)]
         tpu::start()?;
+
         #[cfg(not(lumen_tpu_linked))]
         return Err("timing TPUs needs lumen built with the TPU backend".to_owned());
     }
+
     #[cfg(lumen_cupti_linked)]
     if bits & CUDA != 0 {
         cupti::start();
     }
+
     let id = SESSION.fetch_add(1, Ordering::Relaxed) + 1;
+
     *state = Some(Session {
         id,
         config,
         start_ns: now_ns(),
         events: Vec::new(),
     });
+
     FLAGS.store(bits, Ordering::Relaxed);
     Ok(())
 }
@@ -286,17 +301,21 @@ pub fn start(config: ProfilerConfig) -> Result<(), String> {
 pub fn stop() -> Result<Profile, String> {
     #[cfg(lumen_mps_linked)]
     crate::stream::mps::synchronize();
+
     #[cfg(lumen_cupti_linked)]
     cupti::stop();
+
     #[cfg(lumen_tpu_linked)]
     if let Err(e) = tpu::stop(op_name) {
         eprintln!("{}: the TPU profile: {e}", crate::LIBRARY_NAME);
     }
+
     let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
     FLAGS.store(0, Ordering::Relaxed);
     let session = state.take().ok_or("no profiler session is running")?;
     let mut events = session.events;
     events.sort_by_key(|e| (e.start_ns, e.id));
+
     // Kernels without their own types take their parent op's.
     let types: std::collections::HashMap<u64, (IoTypes, Vec<DType>)> = events
         .iter()
@@ -308,9 +327,11 @@ pub fn stop() -> Result<Profile, String> {
                 input_strides: e.input_strides.clone(),
                 output_strides: e.output_strides.clone(),
             };
+
             (e.id, (io, e.accum.clone()))
         })
         .collect();
+
     for e in events
         .iter_mut()
         .filter(|e| matches!(e.kind, EventKind::Gpu | EventKind::HostKernel))
@@ -318,12 +339,15 @@ pub fn stop() -> Result<Profile, String> {
         if let Some((io, accum)) = e.parent.and_then(|p| types.get(&p)) {
             if e.inputs.is_empty() && e.outputs.is_empty() {
                 (e.inputs, e.outputs) = (io.inputs.clone(), io.outputs.clone());
+
                 (e.input_strides, e.output_strides) =
                     (io.input_strides.clone(), io.output_strides.clone());
             }
+
             e.accum = accum.clone();
         }
     }
+
     Ok(Profile::new(events, session.config))
 }
 
@@ -332,6 +356,7 @@ pub fn stop() -> Result<Profile, String> {
 fn op_name(id: u64) -> Option<String> {
     let state = STATE.lock().unwrap_or_else(|e| e.into_inner());
     let events = &state.as_ref()?.events;
+
     events
         .iter()
         .rev()
@@ -342,6 +367,7 @@ fn op_name(id: u64) -> Option<String> {
 /// Adds `event` to session `session`, rebasing its times on the session start; dropped if that session ended.
 fn push(session: u64, mut event: Event) {
     let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+
     if let Some(s) = state.as_mut().filter(|s| s.id == session) {
         event.start_ns = event.start_ns.saturating_sub(s.start_ns);
         event.end_ns = event.end_ns.saturating_sub(s.start_ns);
@@ -386,12 +412,15 @@ fn open_range(
     inputs: impl FnOnce() -> Vec<TensorType>,
 ) -> RecordGuard {
     let bits = flags();
+
     if bits & CPU == 0 {
         return RecordGuard { open: None };
     }
+
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     let parent = current_parent();
     STACK.with(|s| s.borrow_mut().push(id));
+
     RecordGuard {
         open: Some(OpenRange {
             id,
@@ -435,16 +464,21 @@ impl Drop for RecordGuard {
         let Some(open) = self.open.take() else {
             return;
         };
+
         let end_ns = now_ns();
+
         STACK.with(|s| {
             let mut stack = s.borrow_mut();
+
             if let Some(i) = stack.iter().rposition(|&id| id == open.id) {
                 stack.remove(i);
             }
         });
+
         let thread = thread_id();
         let (inputs, outputs, accum) = open.types.unwrap_or_default();
         let (input_strides, output_strides) = open.strides;
+
         push(
             open.session,
             Event {
@@ -500,12 +534,14 @@ pub(crate) fn report_memory(
     if flags() & MEMORY == 0 {
         return;
     }
+
     let (session, now, parent, thread) = (
         SESSION.load(Ordering::Relaxed),
         now_ns(),
         current_parent(),
         thread_id(),
     );
+
     push(
         session,
         Event {
@@ -555,6 +591,7 @@ pub(crate) struct GpuContext {
 )]
 pub(crate) fn gpu_context(device: Device) -> Option<GpuContext> {
     let launch = NEXT_LAUNCH.with(|l| l.borrow_mut().take());
+
     device_enabled(device).then(|| GpuContext {
         session: SESSION.load(Ordering::Relaxed),
         parent: current_parent(),
@@ -627,7 +664,9 @@ fn record_in(
         Some(Launch { name, types }) => (name, types),
         None => (name, None),
     };
+
     let io = types.unwrap_or_default();
+
     push(
         context.session,
         Event {

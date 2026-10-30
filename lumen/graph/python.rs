@@ -18,6 +18,7 @@ pub(crate) struct PyGraph {
 /// Parses a collective's `op` parameter: `"sum"`, `"max"` or `"min"`.
 fn reduction(op: &str) -> PyResult<crate::graph::Reduction> {
     use crate::graph::Reduction::*;
+
     match op {
         "sum" => Ok(Sum),
         "max" => Ok(Max),
@@ -30,13 +31,16 @@ fn reduction(op: &str) -> PyResult<crate::graph::Reduction> {
 
 pub(crate) fn primitive(name: &str, params: &Bound<'_, PyDict>) -> PyResult<Primitive> {
     use Primitive::*;
+
     let get = |key: &str| {
         params
             .get_item(key)?
             .ok_or_else(|| PyKeyError::new_err(format!("{name} needs the parameter {key:?}")))
     };
+
     let dims = |key: &str| get(key)?.extract::<Vec<usize>>();
     let dtype = |key: &str| parse_dtype(&get(key)?.extract::<String>()?);
+
     Ok(match name {
         "add" => Add,
         "sub" => Sub,
@@ -203,7 +207,9 @@ impl PyGraph {
             Some(p) => p.clone(),
             None => PyDict::new(py),
         };
+
         let primitive = primitive(name, &params)?;
+
         self.inner
             .apply(primitive, &inputs)
             .map_err(PyValueError::new_err)
@@ -216,6 +222,7 @@ impl PyGraph {
                 "%{var} is not a value of this graph"
             )));
         }
+
         let ty = self.inner.type_of(var);
         Ok((dtype_name(ty.dtype), ty.shape.clone()))
     }
@@ -240,6 +247,7 @@ impl PyGraph {
     /// Records `file:line` as the Python source of the node producing `var`.
     fn _set_source(&mut self, var: Var, file: String, line: u32) {
         let line = (crate::graph::intern(file), line);
+
         self.inner
             .set_sources(var, crate::graph::intern_lines(&[line]));
     }
@@ -253,6 +261,7 @@ impl PyGraph {
                 call,
             })
             .collect();
+
         self.inner.set_scope(crate::graph::intern_scope(&ranges));
     }
 
@@ -261,6 +270,7 @@ impl PyGraph {
     fn attentions<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
         use crate::graph_compiler::common::attention::{Score, traced};
         let nodes = self.inner.nodes();
+
         traced(&self.inner)
             .into_iter()
             .map(|(a, members)| {
@@ -273,6 +283,7 @@ impl PyGraph {
                 d.set_item("out", d2.output)?;
                 d.set_item("max", a.max)?;
                 d.set_item("sum", a.sum)?;
+
                 let chain: Vec<Bound<'py, PyAny>> = a
                     .scores
                     .iter()
@@ -285,8 +296,10 @@ impl PyGraph {
                             .map(|t| t.into_any()),
                     })
                     .collect::<PyResult<_>>()?;
+
                 d.set_item("chain", chain)?;
                 d.set_item("causal", a.causal)?;
+
                 let dropout = match &a.dropout {
                     Some(drop) => {
                         let dict = PyDict::new(py);
@@ -296,6 +309,7 @@ impl PyGraph {
                     }
                     None => py.None().into_bound(py),
                 };
+
                 d.set_item("dropout", dropout)?;
                 d.set_item("members", members)?;
                 Ok(d)
@@ -334,8 +348,10 @@ impl PyGraph {
     /// Runs the graph on `inputs` with the reference CPU interpreter and returns its outputs.
     fn run(&self, inputs: Vec<PyRef<'_, PyTensor>>) -> PyResult<Vec<PyTensor>> {
         let inputs: Vec<_> = inputs.iter().map(|t| t.inner.clone()).collect();
+
         let outputs =
             crate::kernels::reference::run(&self.inner, &inputs).map_err(PyValueError::new_err)?;
+
         Ok(outputs.into_iter().map(PyTensor::wrap).collect())
     }
 
@@ -355,6 +371,7 @@ fn params_of<'py>(py: Python<'py>, p: &Primitive) -> PyResult<Bound<'py, PyDict>
     use Primitive::*;
     let d = PyDict::new(py);
     let dtype = |t: &crate::DType| dtype_name(*t);
+
     match p {
         Cast { new_dtype } => d.set_item("new_dtype", dtype(new_dtype))?,
         ReduceSum { axes, accum_dtype } => {
@@ -430,10 +447,12 @@ fn params_of<'py>(py: Python<'py>, p: &Primitive) -> PyResult<Bound<'py, PyDict>
         } => {
             d.set_item("op", *label)?;
             d.set_item("kernel", kernel)?;
+
             let outputs: Vec<(&str, Vec<usize>)> = outputs
                 .iter()
                 .map(|t| (dtype(&t.dtype), t.shape.clone()))
                 .collect();
+
             d.set_item("outputs", outputs)?;
         }
         FusionOutput { index, ty } => {
@@ -448,11 +467,13 @@ fn params_of<'py>(py: Python<'py>, p: &Primitive) -> PyResult<Bound<'py, PyDict>
             dtype: t,
         } => {
             d.set_item("shape", shape.clone())?;
+
             match *fill_value {
                 crate::Scalar::Bool(b) => d.set_item("fill_value", b)?,
                 crate::Scalar::Int(i) => d.set_item("fill_value", i)?,
                 crate::Scalar::Float(f) => d.set_item("fill_value", f)?,
             }
+
             d.set_item("dtype", dtype(t))?;
         }
         Iota {
@@ -477,6 +498,7 @@ fn params_of<'py>(py: Python<'py>, p: &Primitive) -> PyResult<Bound<'py, PyDict>
         }
         _ => {}
     }
+
     Ok(d)
 }
 
@@ -486,16 +508,20 @@ pub(crate) fn primitive_dict<'py>(py: Python<'py>, p: &Primitive) -> PyResult<Bo
     let d = PyDict::new(py);
     d.set_item("primitive", p.name())?;
     d.set_item("params", params_of(py, p)?)?;
+
     match p {
         Primitive::Fusion { name, body, .. } => {
             d.set_item("text", p.name())?;
             let fusion = PyDict::new(py);
             fusion.set_item("kernel", name)?;
             fusion.set_item("body", body.to_string())?;
+
             #[cfg(lumen_mps_linked)]
             fusion.set_item("source", crate::graph_compiler::mps::fusion_source(name))?;
+
             #[cfg(not(lumen_mps_linked))]
             fusion.set_item("source", py.None())?;
+
             d.set_item("fusion", fusion)?;
         }
         p => {
@@ -503,6 +529,7 @@ pub(crate) fn primitive_dict<'py>(py: Python<'py>, p: &Primitive) -> PyResult<Bo
             d.set_item("fusion", py.None())?;
         }
     }
+
     Ok(d)
 }
 
@@ -515,6 +542,7 @@ fn _register_custom_op(f: Py<PyAny>) -> usize {
     let mut ops = CUSTOM_OPS
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
+
     ops.push(f);
     ops.len() - 1
 }
@@ -526,9 +554,12 @@ fn call_custom_op(kernel: usize, args: &[crate::Tensor]) -> Result<(), String> {
             let ops = CUSTOM_OPS
                 .read()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
+
             ops[kernel].clone_ref(py)
         };
+
         let tensors: Vec<PyTensor> = args.iter().map(|t| PyTensor::wrap(t.clone())).collect();
+
         f.call1(py, (tensors,))
             .map(|_| ())
             .map_err(|e| e.to_string())

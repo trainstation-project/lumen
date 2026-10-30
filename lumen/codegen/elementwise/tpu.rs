@@ -6,11 +6,11 @@ use std::collections::HashMap;
 use indoc::formatdoc;
 
 use super::ElementwiseCodegen;
+use crate::codegen::dot_general::tpu::block;
 use crate::codegen::tpu::indexing::{Dim, Plan, layout, plan};
 use crate::codegen::tpu::{Tpu, fusible, window_at};
 use crate::device::tpu::layout::Layout;
 use crate::graph::{Graph, Node, Primitive, TensorType, UnaryOp, Var};
-use crate::kernels::dot_general::tpu::block;
 use crate::{DType, Scalar};
 
 /// A TPU loop: its kernel name, the `lumen.pallas` source of its `program(device)`, and whether it reads its
@@ -35,6 +35,7 @@ pub(crate) fn blocks(shape: &[usize], dtypes: &[DType]) -> Result<Vec<usize>, St
 
     if shape.len() < 2 {
         let n = shape.iter().product::<usize>().max(1);
+
         return Ok(vec![
             block(n, 1024, 64 * 1024).ok_or_else(|| failed("its length"))?,
         ]);
@@ -73,6 +74,7 @@ pub(crate) fn blocks(shape: &[usize], dtypes: &[DType]) -> Result<Vec<usize>, St
 
     // Bytes of one padded (bm, bn) tile; batch as many leading rows as fit in BLOCK_BYTES.
     let tile = bm.div_ceil(rows) * rows * bn.div_ceil(128) * 128 * width;
+
     let bl = (1..=lead)
         .rev()
         .find(|&b| lead.is_multiple_of(b) && b * tile <= BLOCK_BYTES)
@@ -201,6 +203,7 @@ impl Values {
             self.names[&node.inputs[0]].clone(),
             self.shapes[&node.inputs[0]].clone(),
         );
+
         self.set(node, name, shape);
     }
 }
@@ -209,6 +212,7 @@ impl Values {
 /// widened when its operand isn't already of the block's shape.
 fn plain_nodes(body: &Graph, values: &mut Values, block: &[usize]) -> Vec<String> {
     let mut lines = Vec::new();
+
     for (k, node) in body.nodes().iter().enumerate() {
         let name = format!("v{k}");
 
@@ -272,8 +276,10 @@ fn plain(
 
             let index =
                 "lambda BLOCK_ID_L, BLOCK_ID_M, BLOCK_ID_N: (BLOCK_ID_L, BLOCK_ID_M, BLOCK_ID_N)";
+
             let spec = format!("pl.BlockSpec(({leading}, BLOCK_SIZE_M, BLOCK_SIZE_N), {index})");
             let dims = ["L".to_string(), "M".into(), "N".into()];
+
             let consts = vec![
                 constants(&named("BLOCK_SIZE", &dims), &[bl, bm, bn]),
                 constants(&named("NUM_BLOCKS", &dims), &[view[0] / bl, m / bm, n / bn]),
@@ -289,10 +295,12 @@ fn plain(
         }
         &[b] => {
             let view = vec![shape.iter().product::<usize>().max(1)];
+
             let consts = vec![
                 constants(&["BLOCK_SIZE".into()], &[b]),
                 constants(&["NUM_BLOCKS".into()], &[view[0] / b]),
             ];
+
             let spec = "pl.BlockSpec((BLOCK_SIZE,), lambda BLOCK_ID: (BLOCK_ID,))".to_string();
             (view, vec![b], spec, "(NUM_BLOCKS,)".to_string(), consts)
         }
@@ -312,6 +320,7 @@ fn plain(
                 "lambda BLOCK_ID_L, BLOCK_ID_M, BLOCK_ID_N: (BLOCK_ID_L, BLOCK_ID_M, BLOCK_ID_N + {})",
                 start / bn
             );
+
             let spec = format!("pl.BlockSpec(({leading}, BLOCK_SIZE_M, BLOCK_SIZE_N), {index})");
             (vec![view[0], view[1], whole], Some(spec))
         }
@@ -319,6 +328,7 @@ fn plain(
     };
 
     let block_of = if scalar { vec![1] } else { block_shape };
+
     let mut values = Values {
         names: HashMap::new(),
         shapes: HashMap::new(),
@@ -365,6 +375,7 @@ fn plain(
 
     for (k, &v) in body.outputs().iter().enumerate() {
         let dtype = body.type_of(v).dtype.full_name();
+
         let shape = match (scalar, k) {
             (true, _) => tuple(&[]),
             (false, 0) => tuple(&out_view),
@@ -392,6 +403,7 @@ fn plain(
 
         let mut lines: Vec<String> = piped.iter().map(|k| format!("x{k} = in{k}[...]")).collect();
         lines.extend(plain_nodes(body, &mut values, &block_of));
+
         for (k, v) in body.outputs().iter().enumerate() {
             lines.push(format!("out{k}[...] = {}", values.names[v]));
         }
@@ -403,6 +415,7 @@ fn plain(
         ));
 
         let in_specs = vec!["BLOCK_SPEC"; piped.len()].join(", ");
+
         let out_specs: Vec<&str> = (0..body.outputs().len())
             .map(|k| match (k, &out_spec) {
                 (0, Some(_)) => "OUT_BLOCK_SPEC",
@@ -419,6 +432,7 @@ fn plain(
 
     let mut specs: Vec<String> = consts.into_iter().flatten().collect();
     specs.push(format!("BLOCK_SPEC = {spec}"));
+
     if let Some(out_spec) = out_spec {
         specs.push(format!("OUT_BLOCK_SPEC = {out_spec}"));
     }
@@ -631,6 +645,7 @@ fn indexed(body: &Graph, out: &TensorType, window: Option<(usize, usize)>) -> Re
     }
 
     let mut out_view = out.shape.clone();
+
     let mut out_map: Vec<Dim> = (0..out.shape.len())
         .map(|d| Dim::Out { d, offset: 0 })
         .collect();
@@ -639,6 +654,7 @@ fn indexed(body: &Graph, out: &TensorType, window: Option<(usize, usize)>) -> Re
     if let Some((whole, start)) = window {
         let last = out.shape.len() - 1;
         out_view[last] = whole;
+
         out_map[last] = Dim::Out {
             d: last,
             offset: start,
@@ -769,6 +785,7 @@ impl ElementwiseCodegen for Tpu {
         _: &(),
     ) -> Result<Loop, String> {
         let out = body.type_of(body.outputs()[0]);
+
         let window = views
             .get(&0)
             .and_then(|(offset, strides)| window_at(*offset, strides));
@@ -791,6 +808,7 @@ impl ElementwiseCodegen for Tpu {
         }
 
         let operands: Vec<&TensorType> = body.inputs().iter().map(|&v| body.type_of(v)).collect();
+
         if let Some(t) = operands
             .iter()
             .find(|t| t.shape != out.shape && !t.shape.is_empty())
@@ -801,6 +819,7 @@ impl ElementwiseCodegen for Tpu {
         }
 
         let broadcast: Vec<bool> = operands.iter().map(|t| t.shape != out.shape).collect();
+
         let dtypes: Vec<DType> = operands
             .iter()
             .map(|t| t.dtype)
@@ -812,12 +831,14 @@ impl ElementwiseCodegen for Tpu {
         // A windowed output needs a column block that divides both the row width and the window start.
         if let Some((_, start)) = window {
             let n = *out.shape.last().expect("a matrix");
+
             blocks[2] = block(gcd(n, start), 128, 2048)
                 .ok_or("a loop on TPU: a window of no whole columns' block")?;
         }
 
         // A leading block of 1 is left out of the kernel name.
         let leading = blocks.len() == 3 && blocks[0] == 1;
+
         let shown: Vec<String> = blocks
             .iter()
             .skip(usize::from(leading))

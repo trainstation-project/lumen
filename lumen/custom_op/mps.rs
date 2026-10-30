@@ -54,13 +54,16 @@ impl MetalKernel {
                 t.device()
             ));
         }
+
         #[cfg(lumen_mps_linked)]
         {
             let buffers: Vec<*const u8> =
                 tensors.iter().map(|t| t.data_ptr().cast_const()).collect();
+
             let label = crate::graph::intern(self.name.clone());
             crate::kernels::mps::launch(&self.key, &buffers, args, grid, tensors.to_vec(), label)
         }
+
         #[cfg(not(lumen_mps_linked))]
         {
             let _ = (args, grid);
@@ -90,6 +93,7 @@ fn compile(source: &str, name: Option<&str>, key: &str) -> Result<String, String
     let c = |s: &str| CString::new(s).map_err(|e| e.to_string());
     let (source, wanted, c_key) = (c(source)?, name.map(c).transpose()?, c(key)?);
     let mut chosen = vec![0 as std::ffi::c_char; 4096];
+
     let status = unsafe {
         lumen_mps_compile_kernel(
             source.as_ptr(),
@@ -99,9 +103,11 @@ fn compile(source: &str, name: Option<&str>, key: &str) -> Result<String, String
             chosen.len(),
         )
     };
+
     let chosen = unsafe { CStr::from_ptr(chosen.as_ptr()) }
         .to_string_lossy()
         .into_owned();
+
     match status {
         0 => Ok(chosen),
         -1 => Err("compiling the Metal source failed (Metal's error is in the log)".into()),

@@ -39,16 +39,20 @@ impl Tensor {
         if !self.is_parameter() {
             return Err("a parameter must be a whole meta tensor".into());
         }
+
         if let Some(p) = self.placement(device) {
             return Ok(p.tensor);
         }
+
         let options = TensorOptions::new().dtype(self.dtype()).device(device);
         let tensor = Tensor::zeros(self.shape(), options);
+
         self.place(Placement {
             device,
             tensor: tensor.clone(),
             block: None,
         });
+
         Ok(tensor)
     }
 
@@ -67,10 +71,13 @@ impl Tensor {
         let mut ids: Vec<usize> = members.iter().map(Tensor::storage_id).collect();
         ids.sort_unstable();
         ids.dedup();
+
         if ids.len() != members.len() || !members.iter().all(Tensor::is_parameter) {
             return Ok(None);
         }
+
         let placed: Vec<Option<Placement>> = members.iter().map(|m| m.placement(device)).collect();
+
         // Already placed: reuse the block only if every member is placed as exactly the view packing would make.
         if placed.iter().any(Option::is_some) {
             let Some(Some(Placement {
@@ -79,10 +86,13 @@ impl Tensor {
             else {
                 return Ok(None);
             };
+
             if sizes.iter().sum::<usize>() != block.shape()[dimension] {
                 return Ok(None);
             }
+
             let expected = views(block, dimension, regions, &sizes);
+
             let same = placed.iter().zip(&expected).all(|(p, e)| {
                 p.as_ref().is_some_and(|p| {
                     p.tensor.shares_storage_with(block)
@@ -91,19 +101,24 @@ impl Tensor {
                         && p.tensor.strides() == e.strides()
                 })
             });
+
             return Ok(same.then(|| block.clone()));
         }
+
         let types: Vec<TensorType> = members
             .iter()
             .map(|m| TensorType::new(m.dtype(), m.shape()))
             .collect();
+
         let ty = Primitive::Concatenate {
             dimension,
             in_place: false,
         }
         .infer(&types.iter().collect::<Vec<_>>())?;
+
         let options = TensorOptions::new().dtype(ty.dtype).device(device);
         let block = Tensor::zeros(&ty.shape, options);
+
         for (m, view) in members
             .iter()
             .zip(views(&block, dimension, regions, &sizes))
@@ -114,6 +129,7 @@ impl Tensor {
                 block: Some(block.clone()),
             });
         }
+
         Ok(Some(block))
     }
 
@@ -121,12 +137,15 @@ impl Tensor {
     pub(crate) fn copy_into_placements(&self, src: &Tensor) -> Result<(), String> {
         let placed = self.storage().parameter.placed.lock();
         let placed = placed.unwrap_or_else(PoisonError::into_inner).clone();
+
         if !self.is_parameter() || placed.is_empty() {
             return Err("copy_: a meta tensor has no memory until a compiled function using it compiles: compile it first (call it on meta tensors)".into());
         }
+
         for p in &placed {
             p.tensor.copy_(src)?;
         }
+
         self.mark_written();
         Ok(())
     }
@@ -154,6 +173,7 @@ impl Tensor {
     /// Records a new placement.
     fn place(&self, placement: Placement) {
         let placed = self.storage().parameter.placed.lock();
+
         placed
             .unwrap_or_else(PoisonError::into_inner)
             .push(placement);
@@ -168,7 +188,9 @@ fn check_regions(sizes: &[usize], regions: &[usize]) -> Result<(), String> {
             sizes.len()
         ));
     }
+
     let mut start = 0;
+
     for &k in regions {
         if sizes[start..start + k].iter().any(|&n| n != sizes[start]) {
             return Err(format!(
@@ -176,21 +198,27 @@ fn check_regions(sizes: &[usize], regions: &[usize]) -> Result<(), String> {
                 &sizes[start..start + k]
             ));
         }
+
         start += k;
     }
+
     Ok(())
 }
 
 /// Views of `block` for each member: in a group of `k`, member `j` takes every `k`th slice from the group's start plus `j`.
 fn views(block: &Tensor, dimension: usize, regions: &[usize], sizes: &[usize]) -> Vec<Tensor> {
     let (mut out, mut member, mut start) = (Vec::new(), 0, 0);
+
     for &k in regions {
         let n = sizes[member];
+
         for j in 0..k {
             out.push(block.stepped(dimension, start + j, n, k));
         }
+
         member += k;
         start += k * n;
     }
+
     out
 }

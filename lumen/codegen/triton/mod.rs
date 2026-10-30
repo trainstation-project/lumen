@@ -16,19 +16,20 @@ use crate::{DType, Element, Scalar};
 
 pub(crate) mod config;
 mod cross_entropy;
-mod gemm;
 mod indexing;
 pub(crate) mod reduction;
 mod row;
 pub(crate) mod utils;
 
+pub(crate) use crate::codegen::dot_general::triton::{
+    EpilogueFlags, Layouts, gemm, gemm_dot, gemm_flags,
+};
 pub(crate) use config::{
     ATTENTION_CONFIGS, AttentionConfig, CONFIGS, Config, LOOP_CONFIGS, LoopConfig, ROW_PARTIALS,
     UNTUNED, UNTUNED_LOOP, loop_configs, partial_tile, row_gemm_configs, untuned_attention,
     untuned_loop, untuned_row_gemm,
 };
 pub(crate) use cross_entropy::{cross_entropy_combine, cross_entropy_epilogue};
-pub(crate) use gemm::{EpilogueFlags, epilogue, gemm, gemm_dot, gemm_flags};
 pub(crate) use indexing::{scatter_add, update, updates};
 pub(crate) use reduction::{reduction_root, scan};
 pub(crate) use row::{
@@ -41,6 +42,7 @@ pub(crate) struct Triton;
 /// Triton element type for `dtype`, or `None` when Triton can't hold it.
 pub(crate) fn triton_type(dtype: DType) -> Option<&'static str> {
     use DType::*;
+
     Some(match dtype {
         Bool => "tl.int1",
         U8 => "tl.uint8",
@@ -63,6 +65,7 @@ pub(crate) fn triton_type(dtype: DType) -> Option<&'static str> {
 /// inputs and output all have Triton dtypes.
 pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
     use Primitive::*;
+
     let op = matches!(
         node.primitive,
         Add | Sub
@@ -94,6 +97,7 @@ pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
             | Gather { .. }
             | Concatenate { .. }
     );
+
     let typed = |v: &Var| triton_type(graph.type_of(*v).dtype).is_some();
     op && node.inputs.iter().chain([&node.output]).all(typed)
 }
@@ -105,9 +109,11 @@ pub(crate) fn params(by_value: &[bool], extra: Option<&str>, stores: usize) -> S
     let inputs = (0..by_value.len())
         .map(|k| format!("in{k}"))
         .chain(extra.map(String::from));
+
     let loads = (0..by_value.len())
         .filter(|&k| !by_value[k])
         .map(|k| format!("LOAD{k}: tl.constexpr"));
+
     inputs
         .chain(["out".into(), "n".into()])
         .chain(loads)
@@ -130,6 +136,7 @@ pub(crate) fn fill(dtype: DType) -> (String, String) {
             triton_type(dtype).expect("a Triton dtype")
         ),
     };
+
     let source = formatdoc!(
         "
         @triton.jit
@@ -138,6 +145,7 @@ pub(crate) fn fill(dtype: DType) -> (String, String) {
             STORE(out, j, {value}, j < n)
         "
     );
+
     named("fill", source)
 }
 
@@ -148,6 +156,7 @@ pub(crate) fn load(shape: &[usize], strides: &[usize]) -> (String, String) {
         Some(at) => format!("tl.load(ptr + {at}, mask=mask)"),
         None => "tl.broadcast_to(tl.load(ptr), mask.shape)".into(),
     };
+
     let source = formatdoc!(
         "
         @triton.jit
@@ -155,6 +164,7 @@ pub(crate) fn load(shape: &[usize], strides: &[usize]) -> (String, String) {
             return {load}
         "
     );
+
     named("load", source)
 }
 
@@ -168,6 +178,7 @@ pub(crate) fn store(shape: &[usize], strides: &[usize]) -> (String, String) {
         ",
         stored_at("i", shape, strides)
     );
+
     named("store", source)
 }
 
@@ -183,6 +194,7 @@ fn at(idx: &str, shape: &[usize], strides: &[usize]) -> Option<String> {
     if strides == contiguous_strides(shape) || shape.iter().product::<usize>() == 1 {
         return Some(idx.to_string());
     }
+
     match gather_index(idx, shape, strides).as_str() {
         "0" => None,
         offset => Some(offset.to_string()),
@@ -192,6 +204,7 @@ fn at(idx: &str, shape: &[usize], strides: &[usize]) -> Option<String> {
 /// Bit pattern of `value` cast to `dtype`, zero-extended into a `u64` (little-endian bytes).
 pub(crate) fn bits(dtype: DType, value: Scalar) -> u64 {
     let bytes = dispatch_dtype!(dtype, T => as_bytes(std::slice::from_ref(&T::from_scalar(value))).to_vec());
+
     bytes
         .iter()
         .rev()
@@ -290,9 +303,11 @@ impl<'a> Emitter<'a> {
     fn unary(&mut self, op: UnaryOp, x: String, operand: DType, out: DType) -> String {
         use UnaryOp::*;
         let t = triton_type(out).expect("a Triton dtype");
+
         if !operand.is_float() {
             // libdevice popc/clz work on 32 or 64 bits; narrow ints are zero-extended to 32.
             let bits = operand.bits();
+
             let wide = match bits {
                 64 => format!("{x}.to(tl.int64, bitcast=True)"),
                 _ => format!(
@@ -300,6 +315,7 @@ impl<'a> Emitter<'a> {
                     unsigned(bits)
                 ),
             };
+
             return match op {
                 Abs => format!("tl.where({x} < 0, -{x}, {x})"),
                 Sign => format!("tl.where({x} > 0, 1, tl.where({x} < 0, -1, 0)).to({t})"),
@@ -311,7 +327,9 @@ impl<'a> Emitter<'a> {
                 op => unreachable!("{} of an integer", op.name()),
             };
         }
+
         let (a, f) = self.computed(&x, operand);
+
         let value = match op {
             Sin => format!("libdevice.sin({a})"),
             Cos => format!("libdevice.cos({a})"),
@@ -346,6 +364,7 @@ impl<'a> Emitter<'a> {
             } => self.reduce_precision(&a, f, exponent_bits, mantissa_bits),
             op => unreachable!("{} of a float", op.name()),
         };
+
         format!("({value}).to({t})")
     }
 
@@ -360,8 +379,10 @@ impl<'a> Emitter<'a> {
     ) -> String {
         use BinaryOp::*;
         let t = triton_type(out).expect("a Triton dtype");
+
         if operand.is_float() {
             let (a, _) = self.computed(&x, operand);
+
             let value = match op {
                 // Integer exponents: libdevice.pow takes int32, so i64/u64 exponents are clamped
                 // to int32 range keeping their parity (sign of the result for negative bases).
@@ -373,10 +394,12 @@ impl<'a> Emitter<'a> {
                 }
                 Pow if !other.is_float() => {
                     let most = (1u32 << 31) - 2;
+
                     let low = match other {
                         DType::I64 => format!("tl.where({y} < -{most}, -{most} - ({y} & 1), {y})"),
                         _ => y.clone(),
                     };
+
                     format!(
                         "libdevice.pow({a}, tl.where({y} > {most}, {most} + ({y} & 1), {low}).to(tl.int32))"
                     )
@@ -389,19 +412,24 @@ impl<'a> Emitter<'a> {
                 Nextafter => return self.nextafter(&x, &y, operand),
                 op => unreachable!("{} of floats", op.name()),
             };
+
             return format!("({value}).to({t})");
         }
+
         let bits = operand.bits();
+
         let signed = !matches!(
             operand,
             DType::Bool | DType::U8 | DType::U16 | DType::U32 | DType::U64
         );
+
         match op {
             // Integer remainder by 0 returns x and by -1 returns 0 (avoids overflow on MIN % -1).
             Rem if signed => {
                 let safe = self.local(format!(
                     "tl.where(({y} == 0) | ({y} == -1), 1, {y}).to({t})"
                 ));
+
                 format!("tl.where({y} == 0, {x}, tl.where({y} == -1, 0, {x} % {safe}).to({t}))")
             }
             Rem => {
@@ -417,22 +445,27 @@ impl<'a> Emitter<'a> {
                 let in_range = self.local(format!("({y} >= 0) & ({y} < {bits})"));
                 let shift = self.local(format!("tl.where({in_range}, {y}, 0).to({t})"));
                 let (u, i) = (unsigned(bits), format!("tl.int{bits}"));
+
                 match op {
                     ShiftLeft => format!("tl.where({in_range}, {x} << {shift}, 0).to({t})"),
                     ShiftRightLogical => {
                         let r = self.local(format!(
                             "({x}.to({u}, bitcast=True) >> {shift}.to({u}, bitcast=True)).to({t}, bitcast=True)"
                         ));
+
                         format!("tl.where({in_range}, {r}, 0).to({t})")
                     }
                     _ => {
                         let v = self.local(format!("{x}.to({i}, bitcast=True)"));
+
                         let r = self.local(format!(
                             "({v} >> {shift}.to({i}, bitcast=True)).to({t}, bitcast=True)"
                         ));
+
                         let fill = self.local(format!(
                             "tl.where({v} < 0, -1, 0).to({i}).to({t}, bitcast=True)"
                         ));
+
                         format!("tl.where({in_range}, {r}, {fill})")
                     }
                 }
@@ -455,6 +488,7 @@ impl<'a> Emitter<'a> {
             "0.246640727",
             "1.50140941",
         ];
+
         const LARGE: [&str; 9] = [
             "-0.000200214257",
             "0.000100950558",
@@ -466,18 +500,24 @@ impl<'a> Emitter<'a> {
             "1.00167406",
             "2.83297682",
         ];
+
         let w = self.local(format!("-libdevice.log((1.0 - {a}) * (1.0 + {a}))"));
         let near = self.local(format!("{w} - 2.5"));
         let far = self.local(format!("libdevice.sqrt({w}) - 3.0"));
+
         let mut polynomial = |at: &str, coefficients: &[&str]| {
             let mut p = self.local(format!("tl.full([], {}, {f})", coefficients[0]));
+
             for c in &coefficients[1..] {
                 p = self.local(format!("{c} + {p} * {at}"));
             }
+
             p
         };
+
         let small = polynomial(&near, &SMALL);
         let large = polynomial(&far, &LARGE);
+
         format!(
             "tl.where(tl.abs({a}) == 1.0, {a} * float(\"inf\"), tl.where({w} < 5.0, {small}, {large}) * {a})"
         )
@@ -496,27 +536,33 @@ impl<'a> Emitter<'a> {
             "tl.float64" => ("tl.uint64", 64, 52, 11, 1023u64),
             _ => ("tl.uint32", 32, 23, 8, 127u64),
         };
+
         let c = |v: u64| format!("tl.full([], {v:#x}, {u})");
         let ones = u64::MAX >> (64 - width);
         let mut b = self.local(format!("{a}.to({u}, bitcast=True)"));
+
         // Round to nearest even by adding half an ulp minus one plus the kept LSB, then truncate.
         if mantissa_bits < mantissa {
             let shift = u64::from(mantissa - mantissa_bits);
             let last = 1u64 << shift;
+
             let round = self.local(format!(
                 "{} + (({b} & {}) >> {})",
                 c((last >> 1) - 1),
                 c(last),
                 c(shift)
             ));
+
             b = self.local(format!("({b} + {round}) & {}", c(!(last - 1) & ones)));
         }
+
         if exponent_bits <= exponent {
             let reduced = (1u64 << (exponent_bits - 1)) - 1;
             let field = ((1u64 << exponent) - 1) << mantissa;
             let sign = 1u64 << (width - 1);
             let e = self.local(format!("{b} & {}", c(field)));
             let s = self.local(format!("{b} & {}", c(sign)));
+
             b = self.local(format!(
                 "tl.where({e} > {}, {s} | {}, tl.where({e} <= {}, {s}, {b}))",
                 c((bias + reduced) << mantissa),
@@ -524,6 +570,7 @@ impl<'a> Emitter<'a> {
                 c(bias.saturating_sub(reduced) << mantissa)
             ));
         }
+
         format!("tl.where({a} != {a}, {a}, {b}.to({f}, bitcast=True))")
     }
 
@@ -539,15 +586,18 @@ impl<'a> Emitter<'a> {
         let zero = self.local(format!("({b} & {}) == 0", c(sign - 1)));
         let up = self.local(format!("{y} > {x}"));
         let tiny = self.local(format!("tl.where({up}, {}, {})", c(1), c(sign | 1)));
+
         let step = self.local(format!(
             "tl.where({up} == (({b} & {}) == 0), {b} + {}, {b} - {})",
             c(sign),
             c(1),
             c(1)
         ));
+
         let next = self.local(format!(
             "tl.where({zero}, {tiny}, {step}).to({t}, bitcast=True)"
         ));
+
         format!(
             "tl.where(({x} != {x}) | ({y} != {y}), {x} + {y}, tl.where({x} == {y}, {y}, {next}))"
         )
@@ -559,9 +609,11 @@ impl<'a> Emitter<'a> {
         if expr.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
             return expr;
         }
+
         if let Some(name) = self.indices.get(&expr) {
             return name.clone();
         }
+
         let name = self.fresh("i");
         writeln!(self.lines, "    {name} = {expr}").unwrap();
         self.indices.insert(expr, name.clone());
@@ -574,12 +626,16 @@ impl<'a> Emitter<'a> {
         let Some(product) = self.tile else {
             return false;
         };
+
         let Some(&k) = self.producer.get(&v) else {
             return false;
         };
+
         let node = &self.body.nodes()[k];
+
         let flat = matches!(node.primitive, Primitive::Reshape { .. })
             && self.body.type_of(v).shape.len() == 1;
+
         flat && self.through(node.inputs[0], product) == Some(true)
     }
 
@@ -589,14 +645,18 @@ impl<'a> Emitter<'a> {
         if v == product {
             return Some(true);
         }
+
         let Some(&k) = self.producer.get(&v) else {
             return Some(false);
         };
+
         let node = &self.body.nodes()[k];
         let mut depends = false;
+
         for &u in &node.inputs {
             depends |= self.through(u, product)?;
         }
+
         match depends && !elementwise(&node.primitive) {
             true => None,
             false => Some(depends),
@@ -607,11 +667,14 @@ impl<'a> Emitter<'a> {
     /// the flat index of its operand.
     fn operand_index(&mut self, node: &Node, idx: String) -> String {
         use Primitive::*;
+
         let (x, ty) = (
             self.body.type_of(node.inputs[0]),
             self.body.type_of(node.output),
         );
+
         let x_strides = contiguous_strides(&x.shape);
+
         match &node.primitive {
             Reshape { .. } => idx,
             BroadcastInDim {
@@ -619,11 +682,13 @@ impl<'a> Emitter<'a> {
                 ..
             } => {
                 let mut strides = vec![0; ty.shape.len()];
+
                 for (k, &d) in broadcast_dimensions.iter().enumerate() {
                     if x.shape[k] != 1 {
                         strides[d] = x_strides[k];
                     }
                 }
+
                 self.index(gather_index(&idx, &ty.shape, &strides))
             }
             Transpose { permutation } => {
@@ -636,11 +701,13 @@ impl<'a> Emitter<'a> {
                     .zip(&x_strides)
                     .map(|(s, st)| s * st)
                     .sum();
+
                 // A slice of one element is read at index 0, which its own index is wherever it is read.
                 let i = match gather_index(&idx, &ty.shape, &x_strides).as_str() {
                     "0" => idx.clone(),
                     i => i.to_string(),
                 };
+
                 self.index(format!("{start} + {i}"))
             }
             p => unreachable!("{p} is not a layout primitive"),
@@ -650,15 +717,19 @@ impl<'a> Emitter<'a> {
     /// Name of a local holding `v` at flat index `idx`, emitting the statements that compute it.
     pub(crate) fn value(&mut self, v: Var, idx: String) -> String {
         let key = (v, idx.clone());
+
         if let Some(name) = self.values.get(&key).or_else(|| self.reduced.get(&v)) {
             return name.clone();
         }
+
         let body = self.body;
         let ty = body.type_of(v);
         let t = triton_type(ty.dtype).expect("a Triton dtype");
+
         let expr = match self.producer.get(&v) {
             None => {
                 let k = body.inputs().iter().position(|&i| i == v).unwrap();
+
                 match (self.by_value[k], idx.as_str()) {
                     // f64 scalars are passed as their int64 bits since Python floats arrive as f32.
                     (true, _) if ty.dtype == DType::F64 => {
@@ -672,14 +743,18 @@ impl<'a> Emitter<'a> {
             Some(&i) => {
                 let node = &body.nodes()[i];
                 use Primitive::*;
+
                 let operand = body
                     .type_of(node.inputs.first().copied().unwrap_or(v))
                     .dtype;
+
                 let half = matches!(operand, DType::F16 | DType::BF16);
+
                 match &node.primitive {
                     Add | Sub | Mul | Div | Max | Eq | Lt => {
                         let x = self.value(node.inputs[0], idx.clone());
                         let y = self.value(node.inputs[1], idx);
+
                         match (&node.primitive, operand.is_float()) {
                             (Add, _) => format!("{x} + {y}"),
                             (Sub, _) => format!("{x} - {y}"),
@@ -705,6 +780,7 @@ impl<'a> Emitter<'a> {
                     Neg => format!("-{}", self.value(node.inputs[0], idx)),
                     Exp | Log | Sqrt | Tanh | Logistic => {
                         let a = self.value(node.inputs[0], idx);
+
                         match &node.primitive {
                             Exp => format!("libdevice.exp({a})"),
                             Log => format!("libdevice.log({a})"),
@@ -719,6 +795,7 @@ impl<'a> Emitter<'a> {
                     }
                     Cast { .. } => {
                         let x = self.value(node.inputs[0], idx);
+
                         match ty.dtype {
                             DType::Bool => format!("{x} != 0"),
                             _ => format!("{x}.to({t})"),
@@ -749,6 +826,7 @@ impl<'a> Emitter<'a> {
                         let mut strides = vec![0; ty.shape.len()];
                         strides[*dimension] = 1;
                         let i = self.index(gather_index(&idx, &ty.shape, &strides));
+
                         match i.parse::<u64>() {
                             Ok(_) => format!("tl.full([], {i}, {t})"),
                             Err(_) => format!("{i}.to({t})"),
@@ -757,34 +835,42 @@ impl<'a> Emitter<'a> {
                     RandomBits { offset, .. } => {
                         let seed = self.value(node.inputs[0], "0".into());
                         let start = self.value(node.inputs[1], "0".into());
+
                         let i = match idx.parse::<u64>() {
                             Ok(_) => format!("tl.full([], {idx}, tl.int64)"),
                             Err(_) => idx.clone(),
                         };
+
                         format!(
                             "philox_bits({seed}, {start} + tl.full([], {offset}, tl.uint64) + {i}.to(tl.uint64))"
                         )
                     }
                     DynamicSlice { slice_sizes } => {
                         let x = body.type_of(node.inputs[0]);
+
                         let (spans, strides) =
                             (contiguous_strides(&ty.shape), contiguous_strides(&x.shape));
+
                         let mut terms = Vec::new();
+
                         // Start indices are clamped so the slice stays in bounds.
                         for d in (0..ty.shape.len()).filter(|&d| x.shape[d] != 1) {
                             let start = self.value(node.inputs[1 + d], "0".into());
                             let most = x.shape[d] - slice_sizes[d];
                             let coord = format!("({idx} // {}) % {}", spans[d], ty.shape[d]);
+
                             terms.push(format!(
                                 "({coord} + tl.minimum(tl.maximum({start}.to(tl.int64), 0), {most})) * {}",
                                 strides[d]
                             ));
                         }
+
                         // Of one element, the slice is read at index 0, which its own index is wherever it is read.
                         let i = match terms.is_empty() {
                             true => idx.clone(),
                             false => terms.join(" + "),
                         };
+
                         let i = self.index(i);
                         return self.value(node.inputs[0], i);
                     }
@@ -792,6 +878,7 @@ impl<'a> Emitter<'a> {
                         // One element of each row the tile holds whole: the row's column at the pick.
                         let flat = self.value(node.inputs[0], "j".into());
                         let k = self.value(node.inputs[1], idx.clone());
+
                         format!(
                             "tl.sum(tl.where(mask & (j == {k}.to(tl.int64)), {flat}, tl.zeros_like({flat})), 1)[:, None]"
                         )
@@ -799,48 +886,62 @@ impl<'a> Emitter<'a> {
                     Gather { axis } => {
                         let (x, indices) =
                             (body.type_of(node.inputs[0]), body.type_of(node.inputs[1]));
+
                         let after: usize = x.shape[axis + 1..].iter().product();
                         let picks = indices.numel();
                         // Output layout is [outer, picks, after]; read the pick then the source row.
                         let at = self.index(format!("({idx} // {after}) % {picks}"));
                         let k = self.value(node.inputs[1], at);
+
                         let i = self.index(format!(
                             "{idx} // {} * {} + {k}.to(tl.int64) * {after} + {idx} % {after}",
                             picks * after,
                             x.shape[*axis] * after
                         ));
+
                         return self.value(node.inputs[0], i);
                     }
                     Concatenate { dimension, .. } => {
                         let d = *dimension;
                         let spans = contiguous_strides(&ty.shape);
+
                         let coord =
                             self.index(format!("({idx} // {}) % {}", spans[d], ty.shape[d]));
+
                         // Each part reads under its own range mask, with the coordinate clamped so
                         // out-of-range lanes still form valid addresses.
                         let outer = std::mem::take(&mut self.mask);
                         let (mut start, mut parts) = (0, Vec::new());
+
                         for &u in &node.inputs {
                             let size = body.type_of(u).shape[d];
+
                             if size == 0 {
                                 continue;
                             }
+
                             let mut strides = contiguous_strides(&body.type_of(u).shape);
                             let along = std::mem::replace(&mut strides[d], 0);
                             let others = gather_index(&idx, &ty.shape, &strides);
+
                             let local = format!(
                                 "tl.minimum(tl.maximum({coord} - {start}, 0), {}) * {along}",
                                 size - 1
                             );
+
                             let i = self.index(format!("{others} + {local}"));
                             let end = start + size;
+
                             self.mask = self.local(format!(
                                 "{outer} & ({coord} >= {start}) & ({coord} < {end})"
                             ));
+
                             parts.push((end, self.value(u, i)));
                             start = end;
                         }
+
                         self.mask = outer;
+
                         match parts.pop() {
                             Some((_, last)) => parts.iter().rev().fold(last, |rest, (end, v)| {
                                 format!("tl.where({coord} < {end}, {v}, {rest})")
@@ -852,6 +953,7 @@ impl<'a> Emitter<'a> {
                 }
             }
         };
+
         let name = self.fresh("v");
         writeln!(self.lines, "    {name} = {expr}").unwrap();
         self.values.insert(key, name.clone());
@@ -872,6 +974,7 @@ fn unsigned(bits: usize) -> &'static str {
 /// Triton expression for the scalar `value` of `dtype`, built bit-exactly from its raw bits.
 pub(crate) fn constant(dtype: DType, value: Scalar) -> String {
     let (bits, raw) = (bits(dtype, value), raw_type(dtype));
+
     match dtype {
         DType::Bool => format!("tl.full([], {}, tl.int1)", (bits != 0) as u8),
         _ => format!(
@@ -885,6 +988,7 @@ pub(crate) fn constant(dtype: DType, value: Scalar) -> String {
 /// Adjacent dims that stay contiguous with each other are merged so fewer div/mod terms are emitted.
 pub(crate) fn gather_index(idx: &str, shape: &[usize], strides: &[usize]) -> String {
     let spans = contiguous_strides(shape);
+
     /// Consecutive dims `first..=last` addressable as one dim of `size` with `stride`.
     struct Run {
         first: usize,
@@ -892,7 +996,9 @@ pub(crate) fn gather_index(idx: &str, shape: &[usize], strides: &[usize]) -> Str
         size: usize,
         stride: usize,
     }
+
     let mut runs: Vec<Run> = Vec::new();
+
     for d in (0..shape.len()).filter(|&d| shape[d] != 1 && strides[d] != 0) {
         match runs.last_mut() {
             Some(run)
@@ -911,23 +1017,29 @@ pub(crate) fn gather_index(idx: &str, shape: &[usize], strides: &[usize]) -> Str
             }),
         }
     }
+
     let terms: Vec<String> = runs
         .iter()
         .map(|run| {
             let mut c = idx.to_string();
+
             // Divide out the inner dims, and only take the modulo when outer dims exist.
             if spans[run.last] != 1 {
                 c = format!("{c} // {}", spans[run.last]);
             }
+
             if shape[..run.first].iter().any(|&n| n != 1) {
                 c = format!("({c}) % {}", run.size);
             }
+
             if run.stride != 1 {
                 c = format!("({c}) * {}", run.stride);
             }
+
             c
         })
         .collect();
+
     if terms.is_empty() {
         "0".into()
     } else {

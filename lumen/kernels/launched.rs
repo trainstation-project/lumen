@@ -52,10 +52,12 @@ pub(crate) fn templated(
     if !crate::profiler::traced() {
         return;
     }
+
     CAPTURED.with_borrow_mut(|c| {
         if let Some(c) = c {
             let (step, label) = STEP.get();
             let (code, template) = code();
+
             c.push(Launched {
                 step,
                 label,

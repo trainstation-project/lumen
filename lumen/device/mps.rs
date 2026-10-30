@@ -27,6 +27,7 @@ impl DeviceBackend for Mps {
         {
             usize::from(unsafe { ffi::lumen_mps_available() != 0 })
         }
+
         #[cfg(not(lumen_mps_linked))]
         {
             0

@@ -22,6 +22,7 @@ impl CompilerPass<TpuModule<'_>> for DotRows {
         if m.options.config.tpu.contraction_epilogues {
             m.graph = dot_rows(&m.graph, full, |_| true, false);
         }
+
         Ok(())
     }
 }

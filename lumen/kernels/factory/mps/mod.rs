@@ -12,6 +12,7 @@ pub(crate) fn encode(
     keep: Vec<Tensor>,
 ) -> Result<(), String> {
     let out = &step.output.1;
+
     match &step.primitive {
         Full { fill_value, .. } => {
             let n = out.numel();
@@ -22,12 +23,14 @@ pub(crate) fn encode(
         }
         Iota { dimension, .. } => {
             let (outer, inner) = (&out.shape[..*dimension], &out.shape[dimension + 1..]);
+
             // Grid is [inner, iota axis, outer] so the kernel reads its index from gid.y.
             let grid = Grid::Threads([
                 inner.iter().product(),
                 out.shape[*dimension],
                 outer.iter().product(),
             ]);
+
             launch_step(
                 step,
                 &format!("iota_{}", out.dtype),

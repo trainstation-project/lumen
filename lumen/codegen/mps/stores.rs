@@ -10,6 +10,7 @@ pub(crate) fn written(
     extra: &[String],
 ) -> (String, String) {
     let (mut stores, mut writes) = (String::new(), String::new());
+
     for (k, value) in std::iter::once(result)
         .chain(extra.iter().map(String::as_str))
         .enumerate()
@@ -18,31 +19,38 @@ pub(crate) fn written(
             0 => "out".to_string(),
             _ => format!("out{k}"),
         };
+
         let at = match views.get(&k) {
             Some((offset, strides)) => {
                 let shape = &body.type_of(body.outputs()[k]).shape;
                 let mut at = format!("{offset}ul");
                 let mut inner = 1;
+
                 // Decompose the flat index into coordinates innermost-first, skipping size-1 dims; the modulo
                 // is dropped on the outermost non-trivial dim.
                 for (d, (&n, &stride)) in shape.iter().zip(strides).enumerate().rev() {
                     if n == 1 {
                         continue;
                     }
+
                     let mut idx = match inner {
                         1 => "i".to_string(),
                         _ => format!("(i / {inner}u)"),
                     };
+
                     if d > 0 && shape[..d].iter().any(|&m| m != 1) {
                         idx = format!("({idx} % {n}u)");
                     }
+
                     at.push_str(&format!(" + ulong({idx}) * {stride}ul"));
                     inner *= n;
                 }
+
                 at
             }
             None => "i".to_string(),
         };
+
         writedoc!(
             stores,
             "
@@ -53,7 +61,9 @@ pub(crate) fn written(
             "
         )
         .unwrap();
+
         writeln!(writes, "NAME_store{k}({out}, j, {value});").unwrap();
     }
+
     (stores, writes)
 }

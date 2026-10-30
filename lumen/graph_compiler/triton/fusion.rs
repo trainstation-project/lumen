@@ -25,6 +25,7 @@ const LOOP: &str = "loop";
 /// a GEMM joins the row reading it when one tile holds whole rows (`dot_row_fits`).
 fn backend(m: &TritonModule<'_>) -> Backend {
     let config = &m.options.config.cuda;
+
     Backend {
         fusible,
         max_inputs: usize::MAX,
@@ -42,6 +43,7 @@ fn backend(m: &TritonModule<'_>) -> Backend {
 /// loop, a reduction with its epilogue, a GEMM with its epilogue).
 fn named(body: &Graph) -> String {
     let row = !row_reductions(body).is_empty();
+
     match (codegen::gemm_dot(body).is_some(), row) {
         (true, true) => DOT_ROW,
         (false, true) => ROW,
@@ -65,6 +67,7 @@ impl CompilerPass<TritonModule<'_>> for LoopFusion {
             .into_iter()
             .map(|i| m.graph.inputs()[i])
             .collect();
+
         let backend = backend(m);
         m.graph = fuse(&m.graph, &m.rows, &scalars, &backend, |body, _| named(body));
         m.rows.clear();

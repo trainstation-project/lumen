@@ -171,6 +171,7 @@ impl Managed for DLManagedTensorVersioned {
                 self.version.major, self.version.minor
             )));
         }
+
         Ok(())
     }
 }
@@ -202,6 +203,7 @@ fn to_managed<T: Managed>(t: &Tensor) -> *mut T {
     t.wait_();
     let shape: Vec<i64> = t.shape().iter().map(|&d| d as i64).collect();
     let strides: Vec<i64> = t.strides().iter().map(|&s| s as i64).collect();
+
     // Metal buffers are exported by base pointer plus byte offset, since a buffer pointer cannot be offset.
     let (data, byte_offset) = match t.device() {
         Device::Mps(_) => (
@@ -210,6 +212,7 @@ fn to_managed<T: Managed>(t: &Tensor) -> *mut T {
         ),
         _ => (t.data_ptr(), 0),
     };
+
     let dl_tensor = DLTensor {
         data: data.cast(),
         device: dl_device(t.device()),
@@ -219,12 +222,14 @@ fn to_managed<T: Managed>(t: &Tensor) -> *mut T {
         strides: strides.as_ptr().cast_mut(),
         byte_offset,
     };
+
     let ctx = Box::into_raw(Box::new(LumenDLMTensor {
         handle: t.clone(),
         shape,
         strides,
         tensor: T::new(dl_tensor, deleter::<T>),
     }));
+
     unsafe {
         *(*ctx).tensor.manager_ctx() = ctx.cast();
         &raw mut (*ctx).tensor
@@ -241,7 +246,9 @@ unsafe extern "C" fn capsule_destructor<T: Managed>(capsule: *mut ffi::PyObject)
         if ffi::PyCapsule_IsValid(capsule, T::CAPSULE.as_ptr()) == 0 {
             return;
         }
+
         let managed = ffi::PyCapsule_GetPointer(capsule, T::CAPSULE.as_ptr()).cast::<T>();
+
         if let Some(deleter) = (*managed).deleter() {
             deleter(managed);
         }
@@ -255,12 +262,15 @@ fn to_capsule<'py, T: Managed>(py: Python<'py>, t: &Tensor) -> PyResult<Bound<'p
             "meta tensors have no data to export",
         ));
     }
+
     if let Device::Tpu(_) = t.device() {
         return Err(pyo3::exceptions::PyRuntimeError::new_err(
             "TPU tensors cannot be exported: DLPack has no TPU device",
         ));
     }
+
     let managed = NonNull::new(to_managed::<T>(t).cast()).expect("Box is never null");
+
     unsafe {
         PyCapsule::new_with_pointer_and_destructor(
             py,
@@ -294,6 +304,7 @@ fn dl_device(device: Device) -> DLDevice {
             unreachable!("meta and TPU tensors are not exported (to_capsule)")
         }
     };
+
     DLDevice {
         device_type,
         device_id,
@@ -310,6 +321,7 @@ fn dl_dtype(dtype: DType) -> DLDataType {
         DType::BF16 => K_DL_BFLOAT,
         _ => K_DL_UINT,
     };
+
     DLDataType {
         code,
         bits: (dtype.size_of() * 8) as u8,
@@ -320,6 +332,7 @@ fn dl_dtype(dtype: DType) -> DLDataType {
 /// Imports a versioned or legacy DLPack capsule as a tensor sharing its memory, consuming the capsule.
 pub(crate) fn from_dlpack(capsule: &Bound<'_, PyCapsule>) -> PyResult<Tensor> {
     let is = |name: &CStr| unsafe { ffi::PyCapsule_IsValid(capsule.as_ptr(), name.as_ptr()) } != 0;
+
     if is(DLManagedTensorVersioned::CAPSULE) {
         from_capsule::<DLManagedTensorVersioned>(capsule)
     } else if is(DLManagedTensor::CAPSULE) {
@@ -336,12 +349,15 @@ pub(crate) fn from_dlpack(capsule: &Bound<'_, PyCapsule>) -> PyResult<Tensor> {
 fn from_capsule<T: Managed>(capsule: &Bound<'_, PyCapsule>) -> PyResult<Tensor> {
     let managed = unsafe { ffi::PyCapsule_GetPointer(capsule.as_ptr(), T::CAPSULE.as_ptr()) };
     let managed = managed.cast::<T>();
+
     let layout = unsafe { &*managed }
         .check_version()
         .and_then(|()| read_layout(unsafe { (*managed).dl_tensor() }))?;
+
     if unsafe { ffi::PyCapsule_SetName(capsule.as_ptr(), T::USED.as_ptr()) } != 0 {
         return Err(PyErr::fetch(capsule.py()));
     }
+
     Ok(adopt(managed, layout))
 }
 
@@ -363,8 +379,10 @@ fn read_layout(dl: &DLTensor) -> PyResult<DLLayout> {
     let device = device_of(dl.device)?;
     allocator_for(device).map_err(PyBufferError::new_err)?;
     let dtype = dtype_of(dl.dtype)?;
+
     let ndim = usize::try_from(dl.ndim)
         .map_err(|_| PyBufferError::new_err(format!("invalid DLPack ndim {}", dl.ndim)))?;
+
     let dims = |ptr: *const i64, what: &str| -> PyResult<Vec<usize>> {
         if ndim == 0 {
             return Ok(Vec::new());
@@ -377,25 +395,31 @@ fn read_layout(dl: &DLTensor) -> PyResult<DLLayout> {
             })
             .collect()
     };
+
     let shape = dims(dl.shape, "size")?;
     let size = dtype.size_of();
     let byte_offset = dl.byte_offset as usize;
+
     let strides = if dl.strides.is_null() {
         if byte_offset != 0 {
             return Err(PyBufferError::new_err(
                 "a DLPack tensor without strides must have byte_offset 0",
             ));
         }
+
         contiguous_strides(&shape)
     } else {
         dims(dl.strides, "stride")?
     };
+
     if !byte_offset.is_multiple_of(size) {
         return Err(PyBufferError::new_err(format!(
             "DLPack byte_offset {byte_offset} is not a multiple of the element size {size}"
         )));
     }
+
     let offset = byte_offset / size;
+
     // Extent from `data` to the furthest element, which bounds the adopted buffer.
     let nbytes = if shape.contains(&0) {
         0
@@ -403,11 +427,13 @@ fn read_layout(dl: &DLTensor) -> PyResult<DLLayout> {
         let last: usize = shape.iter().zip(&strides).map(|(&n, &s)| (n - 1) * s).sum();
         (offset + last + 1) * size
     };
+
     if dl.data.is_null() && nbytes != 0 {
         return Err(PyBufferError::new_err(
             "DLPack tensor has a null data pointer",
         ));
     }
+
     Ok(DLLayout {
         data: dl.data.cast(),
         device,
@@ -451,11 +477,13 @@ impl<T: Managed> Allocator for Adopted<T> {
 
     unsafe fn deallocate(&self, ptr: NonNull<u8>, nbytes: usize) {
         let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
+
         match buffer.take() {
             Some((addr, producer)) if addr == ptr.as_ptr().addr() => producer.release(),
             other => {
                 *buffer = other;
                 drop(buffer);
+
                 unsafe { self.device.deallocate(ptr, nbytes) }
             }
         }
@@ -465,12 +493,15 @@ impl<T: Managed> Allocator for Adopted<T> {
 /// Wraps a producer's memory in a tensor whose storage releases `managed` when dropped.
 fn adopt<T: Managed>(managed: *mut T, layout: DLLayout) -> Tensor {
     let data = NonNull::new(layout.data).unwrap_or(NonNull::dangling());
+
     let allocator = Adopted {
         device: allocator_for(layout.device).expect("checked in read_layout"),
         buffer: Mutex::new(Some((data.as_ptr().addr(), Producer(managed)))),
     };
+
     let data = unsafe { DataPtr::from_raw_parts(data, layout.nbytes, Arc::new(allocator)) };
     let storage = Storage::from_data_ptr(data, layout.device);
+
     Tensor::from_storage(
         Arc::new(storage),
         layout.dtype,
@@ -500,9 +531,11 @@ fn dtype_of(dtype: DLDataType) -> PyResult<DType> {
             dtype.code, dtype.bits, dtype.lanes
         ))
     };
+
     if dtype.lanes != 1 {
         return Err(unsupported());
     }
+
     Ok(match (dtype.code, dtype.bits) {
         (K_DL_BOOL, 8) => DType::Bool,
         (K_DL_UINT, 8) => DType::U8,

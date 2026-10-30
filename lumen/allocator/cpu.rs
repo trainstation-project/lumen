@@ -31,6 +31,7 @@ impl Allocator for CpuAllocator {
     /// Returns 64-byte aligned memory; zero-byte requests get a dangling aligned pointer.
     fn allocate(&self, nbytes: usize) -> NonNull<u8> {
         let layout = Layout::from_size_align(nbytes, 64).expect("invalid allocation layout");
+
         if nbytes == 0 {
             return NonNull::new(std::ptr::without_provenance_mut(layout.align())).unwrap();
         }
@@ -43,12 +44,15 @@ impl Allocator for CpuAllocator {
             let addr = ptr.as_ptr().addr();
             let total = ALLOCATED.fetch_add(nbytes, Ordering::Relaxed) + nbytes;
             crate::profiler::report_memory(Device::Cpu(0), addr, nbytes as i64, total, total);
+
             PROFILED
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .insert(addr);
+
             PROFILED_COUNT.fetch_add(1, Ordering::Relaxed);
         }
+
         ptr
     }
 

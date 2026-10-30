@@ -41,12 +41,14 @@ pub(crate) fn array_dtype(dtype: DType) -> Result<i64, String> {
 /// Encodes a MIL `ValueType` for a tensor of type code `dtype` and `shape`.
 fn tensor_type(dtype: i64, shape: &[usize]) -> Message {
     let mut t = Message::new().int(1, dtype).int(2, shape.len() as i64);
+
     for &d in shape {
         t = t.message(
             3,
             Message::new().message(1, Message::new().int(1, d as i64)),
         );
     }
+
     Message::new().message(1, t)
 }
 
@@ -66,6 +68,7 @@ fn string_value(s: &str) -> Message {
 /// Encodes little-endian `data` as a MIL tensor value in the field matching `dtype`.
 fn tensor_value(dtype: DType, data: &[u8]) -> Message {
     let words = |n: usize| data.chunks_exact(n);
+
     match dtype {
         DType::F16 => Message::new().message(7, Message::new().bytes(1, data)),
         DType::F32 => {
@@ -75,6 +78,7 @@ fn tensor_value(dtype: DType, data: &[u8]) -> Message {
         DType::I32 => {
             let ints =
                 words(4).map(|w| i64::from(i32::from_le_bytes(w.try_into().expect("4 bytes"))));
+
             Message::new().message(2, Message::new().packed_ints(1, ints))
         }
         _ => Message::new().message(
@@ -91,6 +95,7 @@ fn scalar_bytes(dtype: DType, value: Scalar) -> Vec<u8> {
         Scalar::Int(i) => i as f64,
         Scalar::Float(f) => f,
     };
+
     match dtype {
         DType::F16 => crate::tensor::dtype::to_f16(f).to_le_bytes().to_vec(),
         DType::F32 => (f as f32).to_le_bytes().to_vec(),
@@ -150,16 +155,21 @@ impl Lower<'_> {
         shape: &[usize],
     ) -> Result<String, String> {
         let mut op = Message::new().string(1, kind);
+
         for (parameter, arguments) in inputs {
             let mut argument = Message::new();
+
             for a in arguments {
                 argument = argument.message(1, Message::new().string(1, a));
             }
+
             op = op.entry(2, parameter, argument);
         }
+
         let output = Message::new()
             .string(1, &name)
             .message(2, tensor_type(mil_dtype(dtype)?.0, shape));
+
         op = op.message(3, output).entry(5, "name", string_value(&name));
         self.owners.push((name.clone(), self.node));
         self.ops.push(op);
@@ -170,6 +180,7 @@ impl Lower<'_> {
     fn constant(&mut self, dtype: DType, shape: &[usize], data: &[u8]) -> Result<String, String> {
         let name = self.fresh();
         let code = mil_dtype(dtype)?.0;
+
         let op = Message::new()
             .string(1, "const")
             .message(
@@ -180,6 +191,7 @@ impl Lower<'_> {
             )
             .entry(5, "val", value(code, shape, tensor_value(dtype, data)))
             .entry(5, "name", string_value(&name));
+
         self.ops.push(op);
         Ok(name)
     }
@@ -190,6 +202,7 @@ impl Lower<'_> {
             .iter()
             .flat_map(|&v| (v as i32).to_le_bytes())
             .collect();
+
         self.constant(DType::I32, &[values.len()], &data)
     }
 
@@ -207,17 +220,21 @@ impl Lower<'_> {
     fn full(&mut self, v: Var) -> Result<String, String> {
         let ty = self.graph.type_of(v).clone();
         let (name, shape) = self.vals[v].clone().ok_or("a value before its producer")?;
+
         if shape == ty.shape {
             return Ok(name);
         }
+
         let reps: Vec<usize> = ty.shape.iter().zip(&shape).map(|(&n, &s)| n / s).collect();
         let reps = self.ints(&reps)?;
+
         let tiled = self.op(
             "tile",
             &[("x", vec![name]), ("reps", vec![reps])],
             ty.dtype,
             &ty.shape,
         )?;
+
         self.vals[v] = Some((tiled.clone(), ty.shape.clone()));
         Ok(tiled)
     }
@@ -225,6 +242,7 @@ impl Lower<'_> {
     /// Emits a reshape of `name` to `shape`.
     fn reshape(&mut self, name: String, dtype: DType, shape: &[usize]) -> Result<String, String> {
         let s = self.ints(shape)?;
+
         self.op(
             "reshape",
             &[("x", vec![name]), ("shape", vec![s])],
@@ -243,16 +261,20 @@ impl Lower<'_> {
         perm: &[usize],
     ) -> Result<(String, Vec<usize>), String> {
         let out: Vec<usize> = perm.iter().map(|&p| shape[p]).collect();
+
         if perm.iter().enumerate().all(|(i, &p)| i == p) {
             return Ok((name, out));
         }
+
         let p = self.ints(perm)?;
+
         let name = self.op(
             "transpose",
             &[("x", vec![name]), ("perm", vec![p])],
             dtype,
             &out,
         )?;
+
         Ok((name, out))
     }
 
@@ -262,6 +284,7 @@ impl Lower<'_> {
         let graph = self.graph;
         let ty = graph.type_of(node.output).clone();
         let input = |k: usize| node.inputs[k];
+
         let elementwise = |this: &mut Self,
                            kind: &str,
                            params: &[&str]|
@@ -273,13 +296,16 @@ impl Lower<'_> {
                 let (name, s) = this.vals[input(k)]
                     .clone()
                     .ok_or("a value before its producer")?;
+
                 shape = shape.iter().zip(&s).map(|(&a, &b)| a.max(b)).collect();
                 args.push((p, vec![name]));
             }
             let name = this.op(kind, &args, ty.dtype, &shape)?;
             Ok((name, shape))
         };
+
         let float = ty.dtype.is_float();
+
         Ok(match &node.primitive {
             Add => elementwise(self, "add", &["x", "y"])?,
             Sub => elementwise(self, "sub", &["x", "y"])?,
@@ -298,27 +324,33 @@ impl Lower<'_> {
                 let (x, shape) = self.vals[input(0)]
                     .clone()
                     .ok_or("a value before its producer")?;
+
                 let minus =
                     self.constant(ty.dtype, &[], &scalar_bytes(ty.dtype, Scalar::Int(-1)))?;
+
                 let name = self.op(
                     "mul",
                     &[("x", vec![x]), ("y", vec![minus])],
                     ty.dtype,
                     &shape,
                 )?;
+
                 (name, shape)
             }
             Cast { new_dtype } => {
                 let (x, shape) = self.vals[input(0)]
                     .clone()
                     .ok_or("a value before its producer")?;
+
                 let d = self.constant_string(mil_dtype(*new_dtype)?.1)?;
+
                 let name = self.op(
                     "cast",
                     &[("x", vec![x]), ("dtype", vec![d])],
                     ty.dtype,
                     &shape,
                 )?;
+
                 (name, shape)
             }
             Full {
@@ -339,9 +371,11 @@ impl Lower<'_> {
                 // Only the iota axis is materialized; the other dims broadcast.
                 let mut compact = vec![1; shape.len()];
                 compact[*dimension] = shape[*dimension];
+
                 let data: Vec<u8> = (0..shape[*dimension])
                     .flat_map(|i| scalar_bytes(*dtype, Scalar::Int(i as i64)))
                     .collect();
+
                 let name = self.constant(*dtype, &compact, &data)?;
                 (name, compact)
             }
@@ -358,25 +392,30 @@ impl Lower<'_> {
                 perm.sort_by_key(|&i| broadcast_dimensions[i]);
                 let (name, xs) = self.transpose(name, dtype, &xs, &perm)?;
                 let mut compact = vec![1; shape.len()];
+
                 for (k, &i) in perm.iter().enumerate() {
                     compact[broadcast_dimensions[i]] = xs[k];
                 }
+
                 let name = match compact == xs {
                     true => name,
                     false => self.reshape(name, dtype, &compact)?,
                 };
+
                 (name, compact)
             }
             Transpose { permutation } => {
                 let (name, xs) = self.vals[input(0)]
                     .clone()
                     .ok_or("a value before its producer")?;
+
                 self.transpose(name, ty.dtype, &xs, permutation)?
             }
             Reshape { new_sizes } => {
                 let (name, xs) = self.vals[input(0)]
                     .clone()
                     .ok_or("a value before its producer")?;
+
                 // A broadcast scalar can reshape without tiling; anything else must be materialized first.
                 if xs.iter().all(|&d| d == 1) {
                     let ones = vec![1; new_sizes.len()];
@@ -390,10 +429,12 @@ impl Lower<'_> {
                 let x = input(0);
                 let xt = graph.type_of(x).clone();
                 let mut name = self.full(x)?;
+
                 let kind = match &node.primitive {
                     ReduceSum { accum_dtype, .. } => {
                         if *accum_dtype != xt.dtype {
                             let d = self.constant_string(mil_dtype(*accum_dtype)?.1)?;
+
                             name = self.op(
                                 "cast",
                                 &[("x", vec![name]), ("dtype", vec![d])],
@@ -401,17 +442,21 @@ impl Lower<'_> {
                                 &xt.shape,
                             )?;
                         }
+
                         "reduce_sum"
                     }
                     _ => "reduce_max",
                 };
+
                 let a = self.ints(axes)?;
                 let keep = self.boolean(false)?;
+
                 let args = [
                     ("x", vec![name]),
                     ("axes", vec![a]),
                     ("keep_dims", vec![keep]),
                 ];
+
                 (self.op(kind, &args, ty.dtype, &ty.shape)?, ty.shape.clone())
             }
             Slice {
@@ -422,12 +467,14 @@ impl Lower<'_> {
                 let x = self.full(input(0))?;
                 let (b, e) = (self.ints(start_indices)?, self.ints(limit_indices)?);
                 let s = self.ints(&vec![1; start_indices.len()])?;
+
                 let args = [
                     ("x", vec![x]),
                     ("begin", vec![b]),
                     ("end", vec![e]),
                     ("stride", vec![s]),
                 ];
+
                 (
                     self.op("slice_by_index", &args, ty.dtype, &ty.shape)?,
                     ty.shape.clone(),
@@ -435,15 +482,19 @@ impl Lower<'_> {
             }
             Concatenate { dimension, .. } => {
                 let mut values = Vec::new();
+
                 for &v in &node.inputs {
                     values.push(self.full(v)?);
                 }
+
                 let (axis, interleave) = (self.int(*dimension as i64)?, self.boolean(false)?);
+
                 let args = [
                     ("values", values),
                     ("axis", vec![axis]),
                     ("interleave", vec![interleave]),
                 ];
+
                 (
                     self.op("concat", &args, ty.dtype, &ty.shape)?,
                     ty.shape.clone(),
@@ -456,24 +507,29 @@ impl Lower<'_> {
                 let i = self.full(i)?;
                 // Clamp gather indices into `[0, n)` since MIL gather does not validate them.
                 let lo = self.constant(it.dtype, &[], &scalar_bytes(it.dtype, Scalar::Int(0)))?;
+
                 let hi = self.constant(
                     it.dtype,
                     &[],
                     &scalar_bytes(it.dtype, Scalar::Int(n as i64 - 1)),
                 )?;
+
                 let i = self.op(
                     "maximum",
                     &[("x", vec![i]), ("y", vec![lo])],
                     it.dtype,
                     &it.shape,
                 )?;
+
                 let i = self.op(
                     "minimum",
                     &[("x", vec![i]), ("y", vec![hi])],
                     it.dtype,
                     &it.shape,
                 )?;
+
                 let (a, b, check) = (self.int(*axis as i64)?, self.int(0)?, self.boolean(false)?);
+
                 let args = [
                     ("x", vec![x]),
                     ("indices", vec![i]),
@@ -481,6 +537,7 @@ impl Lower<'_> {
                     ("batch_dims", vec![b]),
                     ("validate_indices", vec![check]),
                 ];
+
                 (
                     self.op("gather", &args, ty.dtype, &ty.shape)?,
                     ty.shape.clone(),
@@ -499,6 +556,7 @@ impl Lower<'_> {
     /// Emits a scalar string constant.
     fn constant_string(&mut self, s: &str) -> Result<String, String> {
         let name = self.fresh();
+
         let op = Message::new()
             .string(1, "const")
             .message(
@@ -509,6 +567,7 @@ impl Lower<'_> {
             )
             .entry(5, "val", string_value(s))
             .entry(5, "name", string_value(&name));
+
         self.ops.push(op);
         Ok(name)
     }
@@ -528,12 +587,15 @@ impl Lower<'_> {
         else {
             unreachable!("a dot_general")
         };
+
         let graph = self.graph;
         let ty = graph.type_of(node.output).clone();
+
         let (l, r) = (
             graph.type_of(node.inputs[0]).clone(),
             graph.type_of(node.inputs[1]).clone(),
         );
+
         // Compute in float16 only for f16-to-f16 dots; everything else is cast to float32.
         let dtype = match (l.dtype, *output_dtype) {
             (DType::F16, DType::F16) => DType::F16,
@@ -544,28 +606,35 @@ impl Lower<'_> {
                 ));
             }
         };
+
         let free = |rank: usize, batch: &[usize], contracting: &[usize]| -> Vec<usize> {
             (0..rank)
                 .filter(|d| !batch.contains(d) && !contracting.contains(d))
                 .collect()
         };
+
         let (lf, rf) = (
             free(l.shape.len(), lhs_batch, lhs_contracting),
             free(r.shape.len(), rhs_batch, rhs_contracting),
         );
+
         let size =
             |t: &TensorType, dims: &[usize]| dims.iter().map(|&d| t.shape[d]).product::<usize>();
+
         let (b, m, k, n) = (
             size(&l, lhs_batch),
             size(&l, &lf),
             size(&l, lhs_contracting),
             size(&r, &rf),
         );
+
         let batched = !lhs_batch.is_empty();
+
         let folded = |rows: usize, cols: usize| match batched {
             true => vec![b, rows, cols],
             false => vec![rows, cols],
         };
+
         let operand = |this: &mut Self,
                        v: Var,
                        t: &TensorType,
@@ -575,6 +644,7 @@ impl Lower<'_> {
             let mut name = this.full(v)?;
             if t.dtype != dtype {
                 let d = this.constant_string(mil_dtype(dtype)?.1)?;
+
                 name = this.op(
                     "cast",
                     &[("x", vec![name]), ("dtype", vec![d])],
@@ -588,22 +658,27 @@ impl Lower<'_> {
                 false => this.reshape(name, dtype, &shape),
             }
         };
+
         let lhs_order = [lhs_batch.as_slice(), &lf, lhs_contracting].concat();
         let rhs_order = [rhs_batch.as_slice(), rhs_contracting, &rf].concat();
         let x = operand(self, node.inputs[0], &l, lhs_order, folded(m, k))?;
         let y = operand(self, node.inputs[1], &r, rhs_order, folded(k, n))?;
         let (tx, ty_) = (self.boolean(false)?, self.boolean(false)?);
+
         let args = [
             ("x", vec![x]),
             ("y", vec![y]),
             ("transpose_x", vec![tx]),
             ("transpose_y", vec![ty_]),
         ];
+
         let product = self.op("matmul", &args, dtype, &folded(m, n))?;
+
         let name = match folded(m, n) == ty.shape {
             true => product,
             false => self.reshape(product, dtype, &ty.shape)?,
         };
+
         Ok((name, ty.shape.clone()))
     }
 }
@@ -622,8 +697,10 @@ pub(crate) fn lower(
         node: None,
         owners: Vec::new(),
     };
+
     let mut function = Message::new();
     let mut description = Message::new();
+
     let feature = |name: &str, ty: &TensorType| -> Result<Message, String> {
         let shape = io_shape(&ty.shape);
         let array = Message::new()
@@ -633,22 +710,27 @@ pub(crate) fn lower(
             .string(1, name)
             .message(3, Message::new().message(5, array)))
     };
+
     let mut runtime = 0;
+
     for (&v, constant) in graph.inputs().iter().zip(constants) {
         let ty = graph.type_of(v).clone();
         let code = mil_dtype(ty.dtype)?.0;
+
         let name = match constant {
             Some(data) => lower.constant(ty.dtype, &ty.shape, data)?,
             None => {
                 let name = format!("in{runtime}");
                 runtime += 1;
                 description = description.message(1, feature(&name, &ty)?);
+
                 function = function.message(
                     1,
                     Message::new()
                         .string(1, &name)
                         .message(2, tensor_type(code, &io_shape(&ty.shape))),
                 );
+
                 // Rank-0 inputs are fed as `[1]` and reshaped back to scalars.
                 match ty.shape.is_empty() {
                     true => lower.reshape(name, ty.dtype, &[])?,
@@ -656,20 +738,25 @@ pub(crate) fn lower(
                 }
             }
         };
+
         lower.vals[v] = Some((name, ty.shape.clone()));
     }
+
     for (i, node) in graph.nodes().iter().enumerate() {
         lower.node = Some(i);
         let lowered = lower.lower_node(node)?;
         lower.vals[node.output] = Some(lowered);
     }
+
     lower.node = None;
     let mut outputs = Vec::new();
+
     for (k, &v) in graph.outputs().iter().enumerate() {
         let ty = graph.type_of(v).clone();
         description = description.message(10, feature(&format!("out{k}"), &ty)?);
         let x = lower.full(v)?;
         let name = format!("out{k}");
+
         // Outputs get their `out{k}` name via a final reshape or identity op.
         match ty.shape.is_empty() {
             true => {
@@ -685,21 +772,28 @@ pub(crate) fn lower(
                 &ty.shape,
             )?,
         };
+
         outputs.push(name);
     }
+
     let mut block = Message::new();
+
     for out in &outputs {
         block = block.string(2, out);
     }
+
     for op in lower.ops {
         block = block.message(3, op);
     }
+
     let function = function.string(2, "CoreML7").entry(3, "CoreML7", block);
     let program = Message::new().int(1, 1).entry(2, "main", function);
+
     let spec = Message::new()
         .int(1, 8)
         .message(2, description)
         .message(502, program)
         .into_bytes();
+
     Ok((spec, lower.owners))
 }

@@ -18,10 +18,12 @@ pub(super) fn copy_h2d(dst: &Tensor, src: &Tensor) {
     let Device::Tpu(index) = dst.device() else {
         unreachable!("the TPU copy kernel runs on TPU tensors")
     };
+
     let nbytes = dst.nbytes();
     let bytes = unsafe { std::slice::from_raw_parts(src.data_ptr(), nbytes) };
     let host = layout(dst).tile(bytes);
     debug_assert!(host.len().is_multiple_of(ROW));
+
     let launched = Launch {
         module: "lumen.runtime.device_transfer.tpu",
         kernel: "copy_h2d".to_owned(),
@@ -31,6 +33,7 @@ pub(super) fn copy_h2d(dst: &Tensor, src: &Tensor) {
         host: &host,
         sparse: None,
     };
+
     launch(index, launched)
         .unwrap_or_else(|e| panic!("copying {nbytes} bytes to tpu:{index} failed: {e}"));
 }
@@ -40,17 +43,23 @@ pub(super) fn copy_d2h(dst: &Tensor, src: &Tensor) {
     let Device::Tpu(index) = src.device() else {
         unreachable!("the TPU copy kernel runs on TPU tensors")
     };
+
     let nbytes = dst.nbytes();
+
     // A null pointer is an empty tensor with nothing to copy.
     let Some(ptr) = NonNull::new(src.data_ptr()) else {
         return;
     };
+
     flush(index)
         .unwrap_or_else(|e| panic!("running tpu:{index}'s launches before a copy failed: {e}"));
+
     let layout = layout(src);
     let mut memory = vec![0u8; layout.bytes()];
+
     crate::allocator::tpu::copy_to_host(index, ptr, &mut memory)
         .unwrap_or_else(|e| panic!("copying {nbytes} bytes from tpu:{index} failed: {e}"));
+
     let dst = unsafe { std::slice::from_raw_parts_mut(dst.data_ptr(), nbytes) };
     layout.untile(&memory, dst);
 }
