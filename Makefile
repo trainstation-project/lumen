@@ -40,12 +40,14 @@ TPU_ENV := $(if $(HAS_TPU),TPU_LIBRARY_PATH="$${TPU_LIBRARY_PATH:-$$($(PYTHON) -
 # building without it here catches code that breaks when it is cfg'd out.
 NO_METAL_FEATURES := --no-default-features --features cuda
 
-## install: the whole package into the checkout's .venv, which uv makes on
-## Python 3.12 (.python-version) when missing: lumen, built by maturin in
-## release mode with the device features of the machine's hardware (rebuilt
-## every time: uv would not notice changed Rust sources), and its test, dev
-## and device extras. Benchmarks and the dashboard measure this build.
+## install: the whole package into the checkout's .venv, made first with
+## uv venv (on Python 3.12, from .python-version) when missing: lumen,
+## built by maturin in release mode with the device features of the
+## machine's hardware (rebuilt every time: uv would not notice changed Rust
+## sources), and its test, dev and device extras. Benchmarks and the
+## dashboard measure this build.
 install:
+	test -d .venv || uv venv
 	MATURIN_PEP517_ARGS="$(MATURIN_FEATURES)" uv sync --reinstall-package lumen $(EXTRAS)
 
 ## test: every test: the unit and doc tests, then the Python tests. CPU
