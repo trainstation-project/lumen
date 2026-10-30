@@ -155,7 +155,7 @@ fn maps(body: &Graph) -> Result<Vec<Option<Vec<Dim>>>, String> {
                 assign(&mut maps, x, xm)?;
             }
             Primitive::Iota { .. } | Primitive::Full { .. } => {}
-            p if super::fusible(p) => {
+            p if crate::codegen::tpu::fusible(p) => {
                 for &v in &node.inputs {
                     if !body.type_of(v).shape.is_empty() {
                         assign(&mut maps, v, m.clone())?;
