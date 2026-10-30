@@ -22,6 +22,7 @@ impl TransposeTiling {
 impl LayoutCodegen for Mps {
     /// The kernel's name and source.
     type Code = (String, String);
+    type Options = HashMap<usize, (usize, Vec<usize>)>;
 
     /// The tiled transpose kernel: loads each hero transpose's input into a tile at input order, then
     /// computes and stores the outputs reading the tile transposed.

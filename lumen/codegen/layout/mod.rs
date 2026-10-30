@@ -7,8 +7,6 @@ pub(crate) mod mps;
 pub(crate) mod tpu;
 pub(crate) mod triton;
 
-use std::collections::HashMap;
-
 use crate::codegen::kinds::{gemm_dot, reduction_root, row_reductions};
 use crate::graph::{Graph, Node, Primitive, TensorType, Var};
 use crate::tensor::contiguous_strides;
@@ -16,17 +14,19 @@ use crate::tensor::contiguous_strides;
 /// A backend's layout code generator: the code moving elements between layouts. Backends whose layout
 /// ops run as views or fixed kernels instead fail on them.
 pub(crate) trait LayoutCodegen {
-    /// The generated code: a Metal kernel's name and source, or a TPU program's kernel and spec.
+    /// The generated code: a Metal kernel's name and source, a Triton `BODY` function's, or a TPU program's
+    /// kernel and spec.
     type Code;
+    /// What a transpose's code is generated for beyond the body: the output views (offset, strides) MPS
+    /// writes outputs through, the tensors' layouts Triton's loads and stores are generated for, or `()`.
+    type Options: ?Sized;
 
     /// Code for the fusion `body` whose output is computed elementwise from transposes, staged through
-    /// tiles; the inputs flagged in `by_value` are passed as scalars and the outputs in `views` written at
-    /// their (offset, strides).
-    #[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
+    /// tiles; the inputs flagged in `by_value` are passed as scalars.
     fn transpose(
         body: &Graph,
         by_value: &[bool],
-        views: &HashMap<usize, (usize, Vec<usize>)>,
+        options: &Self::Options,
     ) -> Result<Self::Code, String>;
 
     /// Code for a reshape of `from` into `to`.

@@ -1,5 +1,6 @@
 """Python side of the Triton backend: compiles generated kernel sources and launches them."""
 
+import importlib
 import linecache
 import struct
 
@@ -92,6 +93,20 @@ def compiled_launch(kernel, grid, args, kwargs):
         and not md.profile_scratch_size
     )
     return int(c.function), md.num_warps, md.shared, plain, types
+
+
+def template(module, kernel, tensors, scalars, specs, constexprs, programs, block_size, warps, compile=False):
+    """Launches template kernel `kernel` of `module` on a 1-D grid of `programs` blocks, or, with `compile`,
+    returns its `compiled_launch` instead: `tensors` reach it as its `EXTRA` tuple (those whose index is in
+    `scalars` by value), `specs` supply its generated jit functions and `constexprs` its other constants."""
+    if programs == 0:
+        return None
+    kernel = getattr(importlib.import_module(module), kernel)
+    extra = tuple(scalar(x) if k in scalars else x for k, x in enumerate(tensors))
+    kwargs = dict(**functions(specs), **constexprs, BLOCK_SIZE=block_size, num_warps=warps, enable_fp_fusion=False)
+    if compile:
+        return compiled_launch(kernel, (programs,), (extra,), kwargs)
+    kernel[(programs,)](extra, **kwargs)
 
 
 def launch(name, source, inputs, scalars, out, specs, n, programs, block_size, warps, compile=False):

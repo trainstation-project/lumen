@@ -522,13 +522,28 @@ fn triton_loop(
     programs: usize,
 ) -> Result<(), String> {
     crate::kernels::launched::launched(&kernel.name, || {
-        let source = format!(
-            "# BLOCK_SIZE={} warps={}\n{}",
-            config.block_size, config.warps, kernel.source
-        );
+        let source = match kernel.template {
+            Some(template) => {
+                let (module, name) = template.kernel();
+
+                format!(
+                    "# @triton.jit: {module}'s {name}, BLOCK_SIZE={} warps={}\n",
+                    config.block_size, config.warps
+                )
+            }
+            None => format!(
+                "# BLOCK_SIZE={} warps={}\n{}",
+                config.block_size, config.warps, kernel.source
+            ),
+        };
 
         Some(triton_code(&source, functions))
     });
+
+    let constexprs = kernel
+        .template
+        .map(|t| t.constexprs(n, &kernel.segments))
+        .unwrap_or_default();
 
     #[cfg(not(lumen_cuda_linked))]
     let _ = launches;
@@ -541,6 +556,47 @@ fn triton_loop(
         let scalars: Vec<usize> = (0..kernel.by_value.len())
             .filter(|&k| kernel.by_value[k])
             .collect();
+
+        // A template kernel takes the tensors as its `EXTRA` tuple and its constexprs by name.
+        if let Some(template) = kernel.template {
+            let (module, name) = template.kernel();
+
+            let tensors: Vec<PyTensor> = inputs
+                .into_iter()
+                .chain([PyTensor::wrap(out.clone())])
+                .collect();
+
+            let values = PyDict::new(py);
+
+            for (key, value) in &constexprs {
+                match value {
+                    super::triton::Constexpr::Int(v) => values.set_item(key, v)?,
+                    super::triton::Constexpr::Ints(v) => {
+                        values.set_item(key, pyo3::types::PyTuple::new(py, v)?)?
+                    }
+                }
+            }
+
+            return py
+                .import("lumen.codegen.triton")?
+                .getattr("template")?
+                .call(
+                    (
+                        module,
+                        name,
+                        tensors,
+                        scalars,
+                        triton_functions(functions),
+                        values,
+                        programs,
+                        config.block_size,
+                        config.warps,
+                    ),
+                    kwargs.as_ref(),
+                )
+                .map(Bound::unbind);
+        }
+
         py.import("lumen.codegen.triton")?
             .getattr("launch")?
             .call(
@@ -572,15 +628,18 @@ fn triton_loop(
                 true => Value::scalar(t),
                 false => Value::of(t),
             })
-            .chain([Value::of(out), Value::Int(n as i128)])
+            .chain([Value::of(out)])
+            // A template kernel's element counts are constexprs; a generated one takes `n`.
+            .chain(kernel.template.is_none().then_some(Value::Int(n as i128)))
             .collect();
         let identity = || {
             format!(
-                "loop|{}|{}|{}|{}",
+                "loop|{}|{}|{}|{}|{:?}",
                 kernel.name,
                 config.block_size,
                 config.warps,
-                names(functions)
+                names(functions),
+                constexprs
             )
         };
         let tiles = [config.block_size, config.warps, 0, 0, 0, 0];
