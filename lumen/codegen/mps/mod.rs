@@ -84,21 +84,28 @@ pub(crate) fn kernel(
     if let Some(dot) = row_dot(body) {
         return gemm_row_kernel(body, by_value, dot, config, gemv_config(body));
     }
+
     if let Some(dot) = gemm_dot(body) {
         return gemm_kernel(body, by_value, dot);
     }
+
     let rows = row_reductions(body);
+
     if !rows.is_empty() {
         return row_kernel(body, by_value, &rows, config, None);
     }
+
     if let Some(root) = reduction_root(body) {
         return Mps::reduction(body, by_value, root)
             .expect("a Metal reduction of every reduction body");
     }
+
     if let Some(tiling) = transpose_tiling(body) {
         return transpose_kernel(body, by_value, &tiling, views);
     }
+
     let tuning = tuning.unwrap_or_else(|| loop_tuning(body));
+
     Mps::elementwise(body, by_value, views, &tuning)
         .expect("a Metal loop of every elementwise body")
 }
@@ -113,6 +120,7 @@ pub(crate) fn formatted(source: &str) -> String {
     let mut out = String::new();
     let mut open: Vec<(char, usize)> = Vec::new();
     let mut statement = 0;
+
     // `open` stacks each unclosed bracket with the column its continuation lines align to;
     // `statement` is the indent of the statement the current line belongs to.
     for line in source.lines().map(str::trim).filter(|l| !l.is_empty()) {
@@ -121,22 +129,29 @@ pub(crate) fn formatted(source: &str) -> String {
             Some(&(_, column)) => column,
             None => 0,
         };
+
         if !matches!(open.last(), Some(&(b, _)) if b != '{') {
             statement = indent;
         }
+
         writeln!(out, "{}{line}", " ".repeat(indent)).unwrap();
         let chars: Vec<char> = line.chars().collect();
+
         let code = chars
             .windows(2)
             .position(|w| w == ['/', '/'])
             .unwrap_or(chars.len());
+
         let aligned = |k: usize| match chars[k + 1..code].iter().all(|c| c.is_whitespace()) {
             true => statement + 4,
             false => indent + k + 1,
         };
+
         let mut quoted = false;
+
         for (k, &c) in chars[..code].iter().enumerate() {
             let after_name = k > 0 && (chars[k - 1].is_alphanumeric() || chars[k - 1] == '_');
+
             match c {
                 '"' => quoted = !quoted,
                 _ if quoted => {}
@@ -152,15 +167,18 @@ pub(crate) fn formatted(source: &str) -> String {
                     while matches!(open.last(), Some(('<', _))) {
                         open.pop();
                     }
+
                     open.pop();
                 }
                 _ => {}
             }
         }
+
         if open.is_empty() && line.starts_with('}') {
             writeln!(out).unwrap();
         }
     }
+
     out
 }
 
@@ -178,9 +196,11 @@ fn loads(source: &str) -> String {
                 .chars()
                 .take_while(char::is_ascii_digit)
                 .collect();
+
             digits.parse().ok()
         })
         .collect();
+
     ks.sort_unstable();
     ks.dedup();
     ks.iter().map(|&k| load_helper("NAME", k, "i")).collect()
@@ -210,6 +230,7 @@ pub(crate) fn strided_load(
     let index = gather_index("i", shape, strides);
     let plain = load_helper(name, k, "i");
     let strided = load_helper(name, k, &index);
+
     source
         .contains(&plain)
         .then(|| source.replace(&plain, &strided))
@@ -234,19 +255,24 @@ pub(super) fn io_params(
     extra: &[String],
 ) -> (String, usize) {
     let (mut params, mut index) = (String::new(), 0);
+
     let mut param = |decl: String| {
         writeln!(params, "{decl} [[buffer({index})]],").unwrap();
         index += 1;
     };
+
     let scalar = |k: usize| by_value.get(k) == Some(&true);
     let inputs = body.inputs().iter().enumerate();
+
     for (k, &v) in inputs.clone().filter(|&(k, _)| !scalar(k)) {
         param(format!(
             "device const {} *in{k}",
             metal_type(body.type_of(v).dtype)
         ));
     }
+
     param(format!("device {out} *out"));
+
     for (e, &v) in body.outputs()[1..].iter().enumerate() {
         param(format!(
             "device {} *out{}",
@@ -254,15 +280,18 @@ pub(super) fn io_params(
             e + 1
         ));
     }
+
     for decl in extra {
         param(decl.clone());
     }
+
     for (k, &v) in inputs.filter(|&(k, _)| scalar(k)) {
         param(format!(
             "constant {} &in{k}",
             metal_type(body.type_of(v).dtype)
         ));
     }
+
     (params, index)
 }
 
@@ -288,6 +317,7 @@ pub(crate) fn metal_type(dtype: DType) -> &'static str {
 /// Metal functor struct name implementing an elementwise primitive.
 pub(super) fn functor(p: &Primitive) -> &'static str {
     use Primitive::*;
+
     match p {
         Add => "Add",
         Sub => "Sub",
@@ -308,10 +338,12 @@ pub(super) fn functor(p: &Primitive) -> &'static str {
 /// Metal expression that reproduces `value` in `dtype` bit-exactly via `as_type`.
 pub(super) fn constant(dtype: DType, value: Scalar) -> String {
     let bytes = element_arg(dtype, value);
+
     let bits = bytes
         .iter()
         .rev()
         .fold(0u64, |acc, &b| (acc << 8) | b as u64);
+
     match dtype {
         DType::Bool => (bits != 0).to_string(),
         _ => {
@@ -321,6 +353,7 @@ pub(super) fn constant(dtype: DType, value: Scalar) -> String {
                 4 => ("uint", "u"),
                 _ => ("ulong", "ul"),
             };
+
             format!(
                 "as_type<{}>({raw}(0x{bits:x}{suffix})) /* {} */",
                 metal_type(dtype),

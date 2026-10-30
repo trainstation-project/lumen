@@ -30,6 +30,7 @@ impl ElementwiseCodegen for Triton {
         _: &(),
     ) -> Result<(String, String), String> {
         let outputs = body.outputs().len();
+
         let extra = (1..outputs)
             .map(|k| format!("out{k}"))
             .collect::<Vec<_>>()
@@ -51,6 +52,7 @@ impl ElementwiseCodegen for Triton {
                 .iter()
                 .map(|&k| {
                     let result = emitter.value(body.outputs()[k], "BLOCK".into());
+
                     match k {
                         0 => format!("    STORE(out, BLOCK, {result}, MASK)\n"),
                         k => format!("    STORE{k}(out{k}, BLOCK, {result}, MASK)\n"),
@@ -65,6 +67,7 @@ impl ElementwiseCodegen for Triton {
         let code = match segments.as_slice() {
             [(_, k)] => {
                 let code = stored(&mut emitter, k);
+
                 formatdoc!(
                     "
                         BLOCK_ID = tl.program_id(0).to(tl.int64)
@@ -75,6 +78,7 @@ impl ElementwiseCodegen for Triton {
             }
             _ => {
                 let mut code = String::from("    BLOCK_ID = tl.program_id(0).to(tl.int64)\n");
+
                 // `FIRST_BLOCK_ID_{s}` is the first program of segment `s`; segment 0 starts at 0.
                 for (s, (numel, _)) in segments.iter().enumerate().take(segments.len() - 1) {
                     let previous = match s {

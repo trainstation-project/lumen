@@ -17,11 +17,14 @@ pub(crate) fn split_launches(body: &Graph) -> (&'static str, &'static str) {
     let root = reduction_root(body).expect("a reduction fusion");
     let nodes = body.nodes();
     let mut producer = vec![None; body.types.len()];
+
     for (i, node) in nodes.iter().enumerate() {
         producer[node.output] = Some(i);
     }
+
     let mut epilogue = vec![false; nodes.len()];
     let mut stack = vec![body.outputs()[0]];
+
     while let Some(v) = stack.pop() {
         match producer[v] {
             Some(i) if v != root.output && !epilogue[i] => {
@@ -31,12 +34,15 @@ pub(crate) fn split_launches(body: &Graph) -> (&'static str, &'static str) {
             _ => {}
         }
     }
+
     let names = |second: bool| {
         let members: Vec<usize> = (0..nodes.len())
             .filter(|&i| nodes[i].output == root.output || epilogue[i] == second)
             .collect();
+
         fusion::label(body, &producer, &members)
     };
+
     (names(false), names(true))
 }
 
@@ -59,29 +65,37 @@ impl ReductionCodegen for Mps {
         let mut emitter = Emitter::new(body, by_value);
         let element = emitter.value(x, "j".into());
         let mut writes = String::new();
+
         for (e, &v) in body.outputs()[1..].iter().enumerate() {
             let value = emitter.value(v, "j".into());
             writeln!(writes, "        out{}[j] = {value};", e + 1).unwrap();
         }
+
         let t = metal_type(ty.dtype);
         let (mut fields, mut members) = (String::new(), Vec::new());
+
         for (k, &v) in body.inputs().iter().enumerate() {
             let vt = metal_type(body.type_of(v).dtype);
+
             match by_value.get(k) == Some(&true) {
                 true => writeln!(fields, "    {vt} in{k};").unwrap(),
                 false => writeln!(fields, "    device const {vt} *in{k};").unwrap(),
             }
+
             members.push(format!("in{k}"));
         }
+
         for (e, &v) in body.outputs()[1..].iter().enumerate() {
             let vt = metal_type(body.type_of(v).dtype);
             writeln!(fields, "    device {vt} *out{};", e + 1).unwrap();
             members.push(format!("out{}", e + 1));
         }
+
         let first_arg = io_params(body, by_value, t, &[]).1;
         let arg = |k: usize, decl: &str| format!("constant {decl} [[buffer({})]]", first_arg + k);
         let out = body.outputs()[0];
         let o = metal_type(body.type_of(out).dtype);
+
         let epilogue = (out != root.output).then(|| {
             let mut e = Emitter::new(body, by_value);
             e.invariant = vec![true; body.types.len()];
@@ -89,6 +103,7 @@ impl ReductionCodegen for Mps {
             let value = e.value(out, "i".into());
             let a = metal_type(body.type_of(root.output).dtype);
             let hoisted = &e.hoisted;
+
             formatdoc!(
                 "
                 struct NAME_epilogue {{
@@ -99,19 +114,23 @@ impl ReductionCodegen for Mps {
                 "
             )
         });
+
         let (op, axes) = match &root.primitive {
             Primitive::ReduceSum { axes, .. } => ("Add", axes),
             Primitive::ReduceMax { axes } => ("Max", axes),
             p => unreachable!("{p} is not a reduction"),
         };
+
         let a = metal_type(body.type_of(root.output).dtype);
         let shared = format!("threadgroup {a} shared[REDUCE_THREADS];");
         let split = reduce::splits(ty, axes);
+
         // A split reduction writes raw partials; the epilogue then runs only in the final pass.
         let (epi, written) = match (&epilogue, split) {
             (Some(_), false) => (", NAME_epilogue()", o),
             _ => ("", a),
         };
+
         let (args, call) = match reduce::layout(ty, axes) {
             reduce::Layout::Rows => {
                 let args = [arg(0, "ulong &count"), arg(1, "ulong &chunk")].join(",\n")
@@ -120,12 +139,14 @@ impl ReductionCodegen for Mps {
                         uint3 groups [[threadgroups_per_grid]],
                         uint3 tid [[thread_position_in_threadgroup]],
                         uint3 size [[threads_per_threadgroup]]"};
+
                 let call = formatdoc!(
                     "
                     {shared}
                     reduce_rows<{op}, {a}>(input, out, count, chunk, shared,
                                            group, groups.x, tid.y * size.x + tid.x{epi});"
                 );
+
                 (args, call)
             }
             reduce::Layout::Cols => {
@@ -137,10 +158,12 @@ impl ReductionCodegen for Mps {
                 ]
                 .join(",\n")
                     + ",\nuint i [[thread_position_in_grid]]";
+
                 let call = formatdoc!(
                     "
                     reduce_cols<{op}, {a}>(input, out, cols, count, chunk, chunks, i{epi});"
                 );
+
                 (args, call)
             }
             reduce::Layout::Grouped => {
@@ -160,6 +183,7 @@ impl ReductionCodegen for Mps {
                     + indoc! {",
                         uint3 group [[threadgroup_position_in_grid]],
                         uint3 tid [[thread_position_in_threadgroup]]"};
+
                 let call = formatdoc!(
                     "
                     {shared}
@@ -169,12 +193,14 @@ impl ReductionCodegen for Mps {
                                               count, lanes, outputs, shared,
                                               group.x, tid.y * 16 + tid.x{epi});"
                 );
+
                 (args, call)
             }
             reduce::Layout::Generic => {
                 unreachable!("reduction fusions read fewer than 2^32 elements")
             }
         };
+
         let last = match (&epilogue, split, reduce::layout(ty, axes)) {
             (Some(_), true, reduce::Layout::Rows) => formatdoc!(
                 "
@@ -207,15 +233,19 @@ impl ReductionCodegen for Mps {
             ),
             _ => String::new(),
         };
+
         let (epilogue, lines) = (epilogue.as_deref().unwrap_or(""), &emitter.lines);
+
         let (params, members) = (
             io_params(body, by_value, written, &[]).0,
             members.join(", "),
         );
+
         let members = match members.len() > 80 {
             true => format!("\n{}\n", members.replace(", ", ",\n")),
             false => members,
         };
+
         Ok(named(formatdoc!(
             "
             {epilogue}struct NAME_input {{

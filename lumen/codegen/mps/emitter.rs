@@ -61,9 +61,11 @@ impl<'a> Emitter<'a> {
         if expr == "j" || expr.parse::<u64>().is_ok() {
             return expr;
         }
+
         if let Some(name) = self.indices.get(&expr) {
             return name.clone();
         }
+
         let name = self.fresh("i");
         let ty = if self.wide { "ulong" } else { "uint" };
         writeln!(self.lines, "        {ty} {name} = {expr};").unwrap();
@@ -77,6 +79,7 @@ impl<'a> Emitter<'a> {
         let body = self.body;
         let (x, ty) = (body.type_of(node.inputs[0]), body.type_of(node.output));
         let x_strides = contiguous_strides(&x.shape);
+
         match &node.primitive {
             Reshape { .. } => idx,
             BroadcastInDim {
@@ -84,11 +87,13 @@ impl<'a> Emitter<'a> {
                 ..
             } => {
                 let mut strides = vec![0; ty.shape.len()];
+
                 for (k, &d) in broadcast_dimensions.iter().enumerate() {
                     if x.shape[k] != 1 {
                         strides[d] = x_strides[k];
                     }
                 }
+
                 self.index(gather_index(&idx, &ty.shape, &strides))
             }
             Transpose { permutation } => {
@@ -101,6 +106,7 @@ impl<'a> Emitter<'a> {
                     .zip(&x_strides)
                     .map(|(s, st)| s * st)
                     .sum();
+
                 let i = gather_index(&idx, &ty.shape, &x_strides);
                 self.index(format!("{start} + {i}"))
             }
@@ -114,19 +120,24 @@ impl<'a> Emitter<'a> {
         if !self.invariant[v] {
             return self.element(v, idx);
         }
+
         if let Some(name) = self.row_locals.get(&v) {
             return name.clone();
         }
+
         // Emit the invariant value into a fresh buffer with empty caches, then restore the loop's.
         let lines = std::mem::take(&mut self.lines);
+
         let caches = (
             std::mem::take(&mut self.values),
             std::mem::take(&mut self.indices),
         );
+
         let idx = match self.body.type_of(v).numel() {
             1 => "0",
             _ => "row",
         };
+
         let name = self.element(v, idx.into());
         let hoisted = std::mem::replace(&mut self.lines, lines);
         self.hoisted.push_str(&hoisted);
@@ -138,15 +149,19 @@ impl<'a> Emitter<'a> {
     /// Emits the statements computing `v` at flat index `idx` and returns the local holding it.
     pub(super) fn element(&mut self, v: Var, idx: String) -> String {
         let key = (v, idx.clone());
+
         if let Some(name) = self.values.get(&key) {
             return name.clone();
         }
+
         let body = self.body;
         let ty = body.type_of(v);
         let t = metal_type(ty.dtype);
+
         let expr = match self.producer.get(&v) {
             None => {
                 let k = body.inputs().iter().position(|&i| i == v).unwrap();
+
                 match self.by_value.get(k) == Some(&true) {
                     true => format!("in{k}"),
                     false => format!("{}{idx})", load(k)),
@@ -155,12 +170,14 @@ impl<'a> Emitter<'a> {
             Some(&i) => {
                 let node = &body.nodes()[i];
                 use Primitive::*;
+
                 match &node.primitive {
                     Add | Sub | Mul | Div | Max | Eq | Lt => {
                         let (x, y) = (
                             self.value(node.inputs[0], idx.clone()),
                             self.value(node.inputs[1], idx),
                         );
+
                         let op = functor(&node.primitive);
                         format!("{op}::apply({x}, {y})")
                     }
@@ -176,6 +193,7 @@ impl<'a> Emitter<'a> {
                     }
                     Unary(op) => {
                         let x = self.value(node.inputs[0], idx);
+
                         match op {
                             UnaryOp::ReducePrecision {
                                 exponent_bits,
@@ -201,6 +219,7 @@ impl<'a> Emitter<'a> {
                         if self.invariant[node.inputs[0]] {
                             return self.value(node.inputs[0], idx);
                         }
+
                         let i = self.operand_index(node, idx);
                         return self.value(node.inputs[0], i);
                     }
@@ -212,28 +231,36 @@ impl<'a> Emitter<'a> {
                         let n = x.shape[*axis];
                         let inner: usize = x.shape[axis + 1..].iter().product();
                         let mut t = idx.clone();
+
                         if inner != 1 {
                             t = format!("{t} / {inner}u");
                         }
+
                         if m != ty.numel() / inner.max(1) {
                             t = format!("({t}) % {m}u");
                         }
+
                         let t = self.index(t);
                         let k = self.value(node.inputs[1], t);
+
                         let (int, u) = if self.wide {
                             ("ulong", "ul")
                         } else {
                             ("uint", "u")
                         };
+
                         let k = self.index(format!("{int}({k})"));
                         let mut terms = Vec::new();
+
                         if ty.numel() > m * inner {
                             terms.push(format!("({idx} / {}{u}) * {}{u}", m * inner, n * inner));
                         }
+
                         terms.push(match inner {
                             1 => k,
                             _ => format!("{k} * {inner}{u} + {idx} % {inner}{u}"),
                         });
+
                         let i = self.index(terms.join(" + "));
                         return self.value(node.inputs[0], i);
                     }
@@ -243,29 +270,37 @@ impl<'a> Emitter<'a> {
                         // Coordinate along the concatenated dim, then one branch per operand with the index rebased
                         // into that operand.
                         let mut c = idx.clone();
+
                         if span != 1 {
                             c = format!("{c} / {span}u");
                         }
+
                         let outer = ty.shape[..d].iter().product::<usize>();
+
                         if outer != 1 {
                             c = format!("({c}) % {}u", ty.shape[d]);
                         }
+
                         let c = self.index(c);
                         let name = self.fresh("v");
                         writeln!(self.lines, "        {t} {name};").unwrap();
                         self.values.insert(key, name.clone());
                         let mut start = 0;
+
                         for (k, &x) in node.inputs.iter().enumerate() {
                             let n = body.type_of(x).shape[d];
+
                             let branch = match k {
                                 0 => format!("if ({c} < {}u)", start + n),
                                 _ if k + 1 == node.inputs.len() => "else".into(),
                                 _ => format!("else if ({c} < {}u)", start + n),
                             };
+
                             writeln!(self.lines, "        {branch} {{").unwrap();
                             // Each branch has its own scope, so locals cached inside it can't be reused after it.
                             let saved = (self.values.clone(), self.indices.clone());
                             let mut terms = Vec::new();
+
                             if outer != 1 {
                                 terms.push(format!(
                                     "({idx} / {}u) * {}u",
@@ -273,13 +308,16 @@ impl<'a> Emitter<'a> {
                                     span * n
                                 ));
                             }
+
                             terms.push(match span {
                                 1 => format!("{c} - {start}u"),
                                 _ => format!("({c} - {start}u) * {span}u"),
                             });
+
                             if span != 1 {
                                 terms.push(format!("{idx} % {span}u"));
                             }
+
                             let i = self.index(terms.join(" + "));
                             let v = self.value(x, i);
                             writeln!(self.lines, "{name} = {v};").unwrap();
@@ -287,6 +325,7 @@ impl<'a> Emitter<'a> {
                             (self.values, self.indices) = saved;
                             start += n;
                         }
+
                         return name;
                     }
                     Full { fill_value, .. } => constant(ty.dtype, *fill_value),
@@ -305,6 +344,7 @@ impl<'a> Emitter<'a> {
                 }
             }
         };
+
         let name = self.fresh("v");
         writeln!(self.lines, "        {t} {name} = {expr};").unwrap();
         self.values.insert(key, name.clone());
@@ -316,13 +356,16 @@ impl<'a> Emitter<'a> {
 /// dims that stay contiguous under `strides` into one divide/modulo term.
 pub(super) fn gather_index(idx: &str, shape: &[usize], strides: &[usize]) -> String {
     let spans = contiguous_strides(shape);
+
     struct Run {
         first: usize,
         last: usize,
         size: usize,
         stride: usize,
     }
+
     let mut runs: Vec<Run> = Vec::new();
+
     for d in (0..shape.len()).filter(|&d| shape[d] != 1 && strides[d] != 0) {
         match runs.last_mut() {
             Some(run)
@@ -341,22 +384,28 @@ pub(super) fn gather_index(idx: &str, shape: &[usize], strides: &[usize]) -> Str
             }),
         }
     }
+
     let terms: Vec<String> = runs
         .iter()
         .map(|run| {
             let mut c = idx.to_string();
+
             if spans[run.last] != 1 {
                 c = format!("{c} / {}u", spans[run.last]);
             }
+
             if shape[..run.first].iter().any(|&n| n != 1) {
                 c = format!("({c}) % {}u", run.size);
             }
+
             if run.stride != 1 {
                 c = format!("({c}) * {}u", run.stride);
             }
+
             c
         })
         .collect();
+
     if terms.is_empty() {
         "0".into()
     } else {

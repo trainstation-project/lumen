@@ -100,6 +100,7 @@ impl PySafeOpen {
     fn new(filename: PathBuf, device: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
         let device = resolve_device(device)?;
         let file = SafeTensorsFile::open(filename).map_err(to_py)?;
+
         Ok(Self {
             file: Some(file),
             device,
@@ -131,6 +132,7 @@ impl PySafeOpen {
             Some(d) if !d.is_none() => resolve_device(Some(d))?,
             _ => self.device,
         };
+
         let t = self.file()?.tensor(name, device).map_err(to_py)?;
         Ok(PyTensor::wrap(t))
     }

@@ -26,11 +26,13 @@ const PACKAGES: [(&str, Register); 12] = [
 #[pyo3(name = "_native")]
 fn native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let modules = m.py().import("sys")?.getattr("modules")?;
+
     for (package, register) in PACKAGES {
         let sub = PyModule::new(m.py(), &format!("{}.{package}._C", crate::LIBRARY_NAME))?;
         register(&sub)?;
         modules.set_item(sub.name()?, &sub)?;
     }
+
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
     m.add("LIBRARY_NAME", crate::LIBRARY_NAME)?;
     Ok(())

@@ -24,6 +24,7 @@ pub(crate) fn skinny(
         contiguous_strides(&lhs.shape),
         contiguous_strides(&rhs.shape),
     );
+
     plan_matmul(dot, lhs, rhs, out, &ls, &rs, "", None).is_ok_and(|launch_| {
         let [m, n, k, ..] = launch_.p;
         m <= SKINNY_ROWS && launch_.p[8] == 1 && m * n * k >= SKINNY_WORK

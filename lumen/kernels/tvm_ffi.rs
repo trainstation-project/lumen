@@ -57,6 +57,7 @@ impl TVMFFIByteArray {
         if self.data.is_null() {
             return String::new();
         }
+
         let bytes = unsafe { std::slice::from_raw_parts(self.data.cast::<u8>(), self.size) };
         String::from_utf8_lossy(bytes).into_owned()
     }
@@ -104,21 +105,27 @@ pub(crate) fn load(path: &str) -> Result<(), String> {
     if LIBRARY.get().is_some() {
         return Ok(());
     }
+
     let error = || {
         let e = unsafe { dlerror() };
+
         if e.is_null() {
             "unknown error".to_owned()
         } else {
             unsafe { CStr::from_ptr(e) }.to_string_lossy().into_owned()
         }
     };
+
     let c_path = CString::new(path).map_err(|e| e.to_string())?;
     let lib = unsafe { dlopen(c_path.as_ptr(), RTLD_NOW) };
+
     if lib.is_null() {
         return Err(format!("cannot open {path}: {}", error()));
     }
+
     let symbol = |name: &CStr| {
         let ptr = unsafe { dlsym(lib, name.as_ptr()) };
+
         if ptr.is_null() {
             Err(format!(
                 "{path} has no {}: {}",
@@ -129,6 +136,7 @@ pub(crate) fn load(path: &str) -> Result<(), String> {
             Ok(ptr)
         }
     };
+
     let library = unsafe {
         Library {
             function_call: std::mem::transmute::<*mut c_void, FunctionCall>(symbol(
@@ -142,6 +150,7 @@ pub(crate) fn load(path: &str) -> Result<(), String> {
             )?),
         }
     };
+
     let _ = LIBRARY.set(library);
     Ok(())
 }
@@ -157,12 +166,15 @@ pub(crate) fn launch(
     let library = LIBRARY
         .get()
         .expect("libtvm_ffi is loaded before a launcher is cached");
+
     let mut args = [
         TVMFFIAny::new(K_TVM_FFI_OPAQUE_PTR, address as u64),
         TVMFFIAny::scalar(value),
         TVMFFIAny::new(K_TVM_FFI_OPAQUE_PTR, stream as u64),
     ];
+
     let mut result = TVMFFIAny::new(K_TVM_FFI_NONE, 0);
+
     let status = unsafe {
         (library.function_call)(
             function as *mut c_void,
@@ -171,25 +183,32 @@ pub(crate) fn launch(
             &mut result,
         )
     };
+
     if status == 0 {
         return Ok(());
     }
+
     let mut error = std::ptr::null_mut();
+
     unsafe {
         (library.error_move_from_raised)(&mut error);
+
         if error.is_null() {
             return Err(format!("TVM-FFI call failed ({status})"));
         }
+
         // the error payload follows the object header; take the message before dropping our reference
         let cell = &*error
             .cast::<u8>()
             .add(OBJECT_HEADER_SIZE)
             .cast::<TVMFFIErrorCell>();
+
         let message = format!(
             "{}: {}",
             cell.kind.to_string_lossy(),
             cell.message.to_string_lossy()
         );
+
         (library.object_dec_ref)(error);
         Err(message)
     }

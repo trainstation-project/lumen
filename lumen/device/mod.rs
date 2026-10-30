@@ -24,6 +24,7 @@ pub trait DeviceBackend: Sync {
     /// `Ok` if device `index` exists, else a message saying why not.
     fn check(&self, index: usize) -> Result<(), String> {
         let count = self.device_count();
+
         match index < count {
             true => Ok(()),
             false => Err(format!(

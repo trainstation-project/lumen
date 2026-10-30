@@ -119,9 +119,11 @@ impl Tensor {
     ) -> Self {
         let op = crate::profiler::record_op(op_name!("full"), Vec::new);
         let (fill_value, options) = (fill_value.into(), options.into());
+
         let dtype = options
             .dtype_opt()
             .unwrap_or_else(|| fill_value.inferred_dtype());
+
         recorded(op, Self::filled(size, fill_value, options.dtype(dtype)))
     }
 
@@ -131,10 +133,12 @@ impl Tensor {
         let (end, options) = (end.into(), options.into());
         let dtype = options.dtype_opt().unwrap_or_else(|| end.inferred_dtype());
         let n = end.to_f64().ceil().max(0.0) as i64;
+
         let t = dispatch_dtype!(dtype, T => {
             let data: Vec<T> = (0..n).map(|i| T::from_scalar(Scalar::Int(i))).collect();
             Self::from_values(&data, device_of(&options))
         });
+
         recorded(op, t)
     }
 
@@ -143,6 +147,7 @@ impl Tensor {
         let op = crate::profiler::record_op(op_name!("from_slice"), Vec::new);
         let options = options.into();
         let device = device_of(&options);
+
         let t = match options.dtype_opt() {
             None => Self::from_values(data, device),
             Some(dtype) if dtype == T::DTYPE => Self::from_values(data, device),
@@ -151,6 +156,7 @@ impl Tensor {
                 Self::from_values(&data, device)
             }),
         };
+
         recorded(op, t)
     }
 
@@ -166,18 +172,22 @@ impl Tensor {
         if self.numel() == 0 || self.device() == Device::Meta(0) {
             return;
         }
+
         if let Device::Cpu(_) = self.device() {
             return dispatch_dtype!(self.dtype, T => self.fill_host(T::from_scalar(value)));
         }
+
         if let Device::Cuda(_) = self.device() {
             return crate::graph_compiler::triton::fill(self, value)
                 .unwrap_or_else(|e| panic!("fill_: {e}"));
         }
+
         #[cfg(lumen_mps_linked)]
         if let Device::Mps(_) = self.device() {
             return crate::graph_compiler::mps::fill(self, value)
                 .unwrap_or_else(|e| panic!("fill_: {e}"));
         }
+
         // Other devices fill a host tensor and copy it over.
         let host = unsafe { Self::empty(&self.shape, self.dtype) };
         host.fill(value);
@@ -188,12 +198,15 @@ impl Tensor {
     fn fill_host<T: Element>(&self, value: T) {
         self.wait_();
         let base = self.data_ptr().cast::<T>();
+
         if self.is_contiguous() {
             for i in 0..self.numel() {
                 unsafe { base.add(i).write_unaligned(value) };
             }
+
             return;
         }
+
         for_each_index(&self.shape, |idx| {
             unsafe {
                 base.add(flat_offset(&idx, &self.strides))
@@ -220,13 +233,17 @@ impl Tensor {
     /// Copies `data` into this contiguous tensor; a no-op on meta.
     fn write<T: Element>(&self, data: &[T]) {
         self.check_dtype::<T>();
+
         if self.device() == Device::Meta(0) {
             return;
         }
+
         if self.device() != Device::Cpu(0) {
             return copy_h2d(self, &Self::host(data));
         }
+
         assert!(self.is_contiguous() && self.numel() == data.len());
+
         unsafe {
             std::ptr::copy_nonoverlapping(data.as_ptr().cast(), self.data_ptr(), size_of_val(data))
         }
@@ -320,14 +337,17 @@ impl Tensor {
     pub(crate) fn view_bytes(&self, byte_offset: usize, dtype: DType, shape: &[usize]) -> Self {
         let start = self.offset * self.dtype.size_of() + byte_offset;
         let size = dtype.size_of();
+
         assert!(
             self.is_contiguous() && start.is_multiple_of(size),
             "an aligned view"
         );
+
         assert!(
             byte_offset + device_bytes(self.device(), dtype, shape) <= self.nbytes(),
             "a view within the tensor"
         );
+
         Tensor {
             storage: self.storage.clone(),
             dtype,
@@ -348,10 +368,12 @@ impl Tensor {
     ) -> Self {
         let start = self.offset * self.dtype.size_of() + byte_offset;
         let size = dtype.size_of();
+
         assert!(
             self.is_contiguous() && start.is_multiple_of(size),
             "an aligned view"
         );
+
         // One past the furthest element the view reaches.
         let extent = match shape.contains(&0) {
             true => 0,
@@ -363,10 +385,12 @@ impl Tensor {
                     .sum::<usize>()
             }
         };
+
         assert!(
             byte_offset + extent * size <= self.nbytes(),
             "a view within the tensor"
         );
+
         Tensor {
             storage: self.storage.clone(),
             dtype,
@@ -389,11 +413,14 @@ impl Tensor {
     /// A view with a new shape; requires a contiguous tensor. On TPU a reshape that changes the tiled layout copies through the host.
     pub fn reshape(&self, shape: &[usize]) -> Self {
         let op = crate::profiler::record_op(op_name!("reshape"), || vec![self.ty()]);
+
         assert!(
             self.is_contiguous(),
             "reshape requires a contiguous tensor; call .contiguous() first"
         );
+
         let numel: usize = shape.iter().product();
+
         assert_eq!(
             numel,
             self.numel(),
@@ -401,12 +428,14 @@ impl Tensor {
             self.shape,
             self.numel()
         );
+
         if let Device::Tpu(_) = self.device()
             && !crate::device::tpu::layout::same(&self.ty(), &TensorType::new(self.dtype, shape))
         {
             let host = self.to(Device::Cpu(0)).reshape(shape);
             return recorded(op, host.to(self.device()));
         }
+
         let t = Tensor {
             storage: Arc::clone(&self.storage),
             dtype: self.dtype,
@@ -414,6 +443,7 @@ impl Tensor {
             strides: contiguous_strides(shape),
             offset: self.offset,
         };
+
         recorded(op, t)
     }
 
@@ -421,11 +451,13 @@ impl Tensor {
     pub fn narrow(&self, dim: usize, start: usize, len: usize) -> Self {
         let op = crate::profiler::record_op(op_name!("narrow"), || vec![self.ty()]);
         assert!(dim < self.ndim(), "dim {dim} out of range");
+
         assert!(
             start + len <= self.shape[dim],
             "narrow({dim}, {start}, {len}) out of bounds for size {}",
             self.shape[dim]
         );
+
         let mut t = self.clone();
         t.offset += start * self.strides[dim];
         t.shape[dim] = len;
@@ -435,11 +467,13 @@ impl Tensor {
     /// The view of `len` entries along `dim` taking every `step`th from `start`.
     pub(crate) fn stepped(&self, dim: usize, start: usize, len: usize, step: usize) -> Self {
         assert!(dim < self.ndim(), "dim {dim} out of range");
+
         assert!(
             len == 0 || start + (len - 1) * step < self.shape[dim],
             "stepped({dim}, {start}, {len}, {step}) out of bounds for size {}",
             self.shape[dim]
         );
+
         let mut t = self.clone();
         t.offset += start * self.strides[dim];
         t.shape[dim] = len;
@@ -469,15 +503,18 @@ impl Tensor {
         assert_eq!(dims.len(), self.ndim(), "permute must list every dim");
         let mut seen = vec![false; self.ndim()];
         let mut t = self.clone();
+
         for (new, &old) in dims.iter().enumerate() {
             assert!(
                 old < self.ndim() && !seen[old],
                 "invalid permutation {dims:?}"
             );
+
             seen[old] = true;
             t.shape[new] = self.shape[old];
             t.strides[new] = self.strides[old];
         }
+
         recorded(op, t)
     }
 
@@ -496,11 +533,13 @@ impl Tensor {
         let op = crate::profiler::record_op(op_name!("unsqueeze"), || vec![self.ty()]);
         assert!(dim <= self.ndim(), "dim out of range");
         let mut t = self.clone();
+
         let stride = if dim < self.ndim() {
             self.strides[dim] * self.shape[dim]
         } else {
             1
         };
+
         t.shape.insert(dim, 1);
         t.strides.insert(dim, stride);
         recorded(op, t)
@@ -509,17 +548,21 @@ impl Tensor {
     /// This tensor if contiguous, else a contiguous copy on the same device; `T` is the element type for host copies.
     pub fn contiguous<T: Element>(&self) -> Self {
         let op = crate::profiler::record_op(op_name!("contiguous"), || vec![self.ty()]);
+
         if self.is_contiguous() {
             return recorded(op, self.clone());
         }
+
         if self.device() == Device::Meta(0) {
             return recorded(op, unsafe { self.empty_like() });
         }
+
         if let Device::Cuda(_) | Device::Mps(_) = self.device() {
             let t = unsafe { self.empty_like() };
             t.copy_(self).unwrap_or_else(|e| panic!("contiguous: {e}"));
             return recorded(op, t);
         }
+
         let values = self.to_vec::<T>();
         let t = unsafe { self.empty_like() };
         t.write(&values);
@@ -537,6 +580,7 @@ impl Tensor {
         if dtype == self.dtype {
             return Ok(self.clone());
         }
+
         let mut g = crate::graph::Graph::new();
         let x = g.input(self.ty());
         let convert = crate::graph::Primitive::Cast { new_dtype: dtype };
@@ -552,37 +596,46 @@ impl Tensor {
         if device == self.device() {
             return self.clone();
         }
+
         assert!(
             self.device() != Device::Meta(0),
             "cannot copy a meta tensor to {device}: meta tensors have no data"
         );
+
         // Device-to-device copies go through the host.
         if device != Device::Cpu(0) && self.device() != Device::Cpu(0) {
             return self.copy_to(Device::Cpu(0)).copy_to(device);
         }
+
         // TPU tensors are tiled, so they are copied whole and contiguous.
         if let (Device::Tpu(_), _) | (_, Device::Tpu(_)) = (device, self.device()) {
             assert!(
                 self.device() == Device::Cpu(0) || self.is_contiguous(),
                 "a TPU tensor is copied whole: contiguous"
             );
+
             let src = dispatch_dtype!(self.dtype, T => self.contiguous::<T>());
             let options = TensorOptions::new().dtype(self.dtype).device(device);
             let out = unsafe { Self::empty(&self.shape, options) };
+
             match device {
                 Device::Cpu(_) => copy_d2h(&out, &src),
                 _ => copy_h2d(&out, &src),
             }
+
             return out;
         }
+
         let span = self.span();
         let options = TensorOptions::new().dtype(self.dtype).device(device);
         let out = unsafe { Self::empty(&span.shape, options) };
+
         match device {
             Device::Meta(_) => {}
             Device::Cpu(_) => copy_d2h(&out, &span),
             _ => copy_h2d(&out, &span),
         }
+
         Tensor {
             storage: out.storage,
             dtype: self.dtype,
@@ -605,17 +658,21 @@ impl Tensor {
             self.device() != Device::Meta(0),
             "meta tensors have no data"
         );
+
         let mut out = Vec::with_capacity(self.numel());
+
         if self.numel() == 0 {
             return out;
         }
 
         let host = self.copy_to(Device::Cpu(0));
         let base = host.storage.data_ptr().cast_const().cast::<T>();
+
         for_each_index(&self.shape, |idx| {
             let off = host.offset + flat_offset(&idx, &host.strides);
             out.push(unsafe { base.add(off).read_unaligned() });
         });
+
         out
     }
 
@@ -630,8 +687,10 @@ impl Tensor {
                 .zip(&self.strides)
                 .map(|(&n, &s)| (n - 1) * s)
                 .sum();
+
             last + 1
         };
+
         Tensor {
             storage: Arc::clone(&self.storage),
             dtype: self.dtype,
@@ -672,9 +731,11 @@ impl Tensor {
     /// Storage offset of the element at `index`, panicking when out of bounds.
     fn physical_offset(&self, index: &[usize]) -> usize {
         assert_eq!(index.len(), self.ndim(), "expected {} indices", self.ndim());
+
         for (d, &i) in index.iter().enumerate() {
             assert!(i < self.shape[d], "index {i} out of bounds for dim {d}");
         }
+
         self.offset + flat_offset(index, &self.strides)
     }
 
@@ -707,25 +768,30 @@ impl Tensor {
     pub fn copy_(&self, src: &Tensor) -> Result<&Self, String> {
         let mut op = crate::profiler::record_op(op_name!("copy_"), || vec![src.ty(), self.ty()]);
         op.outputs(|| vec![self.ty()]);
+
         if src.dtype != self.dtype || src.shape != self.shape {
             return Err(format!(
                 "copy_: cannot copy {}{:?} into {}{:?}",
                 src.dtype, src.shape, self.dtype, self.shape
             ));
         }
+
         if src.device() == Device::Meta(0) {
             return Err("copy_: meta tensors have no data".into());
         }
+
         if self.device() == Device::Meta(0) {
             self.copy_into_placements(src)?;
             return Ok(self);
         }
+
         if let Device::Cuda(_) = self.device()
             && src.device() == self.device()
         {
             if self.numel() > 0 {
                 crate::graph_compiler::triton::copy(self, src)?;
             }
+
             return Ok(self);
         }
 
@@ -740,25 +806,32 @@ impl Tensor {
                 let keep = vec![src.clone(), self.clone()];
                 crate::kernels::dynamic_slice::mps::copy(from, to, &self.ty(), keep, "copy_")?;
             }
+
             return Ok(self);
         }
+
         #[cfg(lumen_mps_linked)]
         if self.device() == Device::Mps(0) && src.device() == Device::Mps(0) {
             if self.numel() > 0 {
                 crate::graph_compiler::mps::copy(self, src)?;
             }
+
             return Ok(self);
         }
+
         // Remaining cases stage `src` as a contiguous host tensor.
         let host = dispatch_dtype!(src.dtype, T => src.copy_to(Device::Cpu(0)).contiguous::<T>());
+
         if self.is_contiguous() {
             copy_h2d(self, &host);
             return Ok(self);
         }
+
         if let Device::Cuda(_) = self.device() {
             crate::graph_compiler::triton::copy(self, &host.copy_to(self.device()))?;
             return Ok(self);
         }
+
         if !matches!(self.device(), Device::Cpu(_) | Device::Mps(_)) {
             return Err(format!(
                 "copy_: a strided view on {} is not supported",
@@ -770,8 +843,10 @@ impl Tensor {
         self.wait_();
         let size = self.dtype.size_of();
         let mut k = 0;
+
         for_each_index(&self.shape, |idx| {
             let at = flat_offset(&idx, &self.strides) * size;
+
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     host.data_ptr().add(k * size),
@@ -779,8 +854,10 @@ impl Tensor {
                     size,
                 )
             };
+
             k += 1;
         });
+
         Ok(self)
     }
 
@@ -801,9 +878,11 @@ fn recorded(mut op: RecordGuard, t: Tensor) -> Tensor {
 /// Row-major element strides for `shape`.
 pub(crate) fn contiguous_strides(shape: &[usize]) -> Vec<usize> {
     let mut strides = vec![1; shape.len()];
+
     for d in (0..shape.len().saturating_sub(1)).rev() {
         strides[d] = strides[d + 1] * shape[d + 1];
     }
+
     strides
 }
 
@@ -817,6 +896,7 @@ impl std::fmt::Display for Tensor {
                 self.shape, self.dtype
             );
         }
+
         match self.dtype {
             DType::F32 => self.fmt_typed::<f32>(f),
             DType::F64 => self.fmt_typed::<f64>(f),
@@ -857,20 +937,25 @@ pub(crate) fn flat_offset(index: &[usize], strides: &[usize]) -> usize {
 /// Calls `f` with every index of `shape` in row-major order; it always calls `f` at least once, so callers skip empty tensors.
 pub(crate) fn for_each_index(shape: &[usize], mut f: impl FnMut(Vec<usize>)) {
     let mut idx = vec![0; shape.len()];
+
     loop {
         f(idx.clone());
 
         // Increment the index like an odometer, last dim fastest.
         let mut d = shape.len();
+
         loop {
             if d == 0 {
                 return;
             }
+
             d -= 1;
             idx[d] += 1;
+
             if idx[d] < shape[d] {
                 break;
             }
+
             idx[d] = 0;
         }
     }

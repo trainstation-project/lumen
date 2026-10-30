@@ -16,6 +16,7 @@ use crate::graph_compiler::plan::Step;
 #[cfg(feature = "python")]
 fn lower(module: &str, spec: &str) -> Result<String, String> {
     use pyo3::prelude::*;
+
     Python::attach(|py| {
         py.import("lumen.kernels.tpu.pallas")?
             .call_method1("lower", (module, spec))?
@@ -34,6 +35,7 @@ fn lower_source(
     rows: usize,
 ) -> Result<String, String> {
     use pyo3::prelude::*;
+
     Python::attach(|py| {
         py.import("lumen.kernels.tpu.pallas")?
             .call_method1("lower_source", (source, scalars, host_rows, rows))?
@@ -160,6 +162,7 @@ impl Hlo {
             ),
             "tensor<1xi32>",
         );
+
         self.reshape(&one, "tensor<1xi32>", "tensor<i32>")
     }
 }
@@ -175,19 +178,23 @@ fn indices(
     of: &Indices,
 ) -> String {
     let column = sparse.width / 128;
+
     let (values, n) = match &of.values {
         Values::Rows { scalar: j, shape } => {
             let r = shape.len();
             let n: usize = shape.iter().product();
+
             // Rank > 1 index tensors are stored in (8, 128) tiles padded to whole tiles.
             let (lead, m, s) = match r {
                 1 => (1, 1, shape[0]),
                 _ => (shape[..r - 2].iter().product(), shape[r - 2], shape[r - 1]),
             };
+
             let (mp, sp) = match r {
                 1 => (1, s),
                 _ => (m.div_ceil(8) * 8, s.div_ceil(128) * 128),
             };
+
             let total = lead * mp * sp;
             let flat_t = format!("tensor<{}xui32>", rows * 128);
             let flat = h.reshape(memory, &format!("tensor<{rows}x1x128xui32>"), &flat_t);
@@ -195,11 +202,14 @@ fn indices(
             let words = h.constant(128, "tensor<i32>");
             let start = h.binary("multiply", &row, &words, "tensor<i32>");
             let total_t = format!("tensor<{total}xui32>");
+
             let mut x = h.op(
                 &format!("\"stablehlo.dynamic_slice\"({flat}, {start}) {{slice_sizes = array<i64: {total}>}} : ({flat_t}, tensor<i32>)"),
                 &total_t,
             );
+
             let mut x_t = total_t;
+
             if r > 1 {
                 // Untile: (tile row, tile col, 8, 128) -> (rows, cols), then drop the padding.
                 let tiles = format!("tensor<{lead}x{}x{}x8x128xui32>", mp / 8, sp / 128);
@@ -209,6 +219,7 @@ fn indices(
                 let padded = format!("tensor<{lead}x{mp}x{sp}xui32>");
                 x = h.reshape(&x, &rows_t, &padded);
                 let kept = format!("tensor<{lead}x{m}x{s}xui32>");
+
                 x = h.op(
                     &format!(
                         "\"stablehlo.slice\"({x}) {{start_indices = array<i64: 0, 0, 0>, limit_indices = array<i64: {lead}, {m}, {s}>, \
@@ -216,18 +227,23 @@ fn indices(
                     ),
                     &kept,
                 );
+
                 x_t = kept;
             } else if total != n {
                 x = h.op(
                     &format!("\"stablehlo.slice\"({x}) {{start_indices = array<i64: 0>, limit_indices = array<i64: {n}>, strides = array<i64: 1>}} : ({x_t})"),
                     &format!("tensor<{n}xui32>"),
                 );
+
                 x_t = format!("tensor<{n}xui32>");
             }
+
             let flat_n = format!("tensor<{n}xui32>");
+
             if x_t != flat_n {
                 x = h.reshape(&x, &x_t, &flat_n);
             }
+
             (
                 h.op(
                     &format!("\"stablehlo.bitcast_convert\"({x}) : ({flat_n})"),
@@ -239,35 +255,45 @@ fn indices(
         Values::Iota { dims, strides } => {
             let n: usize = dims.iter().product();
             let ty = format!("tensor<{n}xi32>");
+
             let i = h.assign(&format!(
                 "\"stablehlo.iota\"() {{iota_dimension = 0 : i64}} : () -> {ty}"
             ));
+
             let mut sum: Option<String> = None;
             let mut inner = 1;
+
             // Flat position: the coordinate of each dim (div/mod of the iota) times its stride.
             for (&d, &stride) in dims.iter().zip(strides).rev() {
                 let mut term = i.clone();
+
                 if inner != 1 {
                     let c = h.constant(inner as i64, &ty);
                     term = h.binary("divide", &term, &c, &ty);
                 }
+
                 if inner * d != n {
                     let c = h.constant(d as i64, &ty);
                     term = h.binary("remainder", &term, &c, &ty);
                 }
+
                 if stride != 1 {
                     let c = h.constant(stride as i64, &ty);
                     term = h.binary("multiply", &term, &c, &ty);
                 }
+
                 sum = Some(match sum {
                     Some(s) => h.binary("add", &s, &term, &ty),
                     None => term,
                 });
+
                 inner *= d;
             }
+
             (sum.expect("an index of a dimension"), n)
         }
     };
+
     let ty = format!("tensor<{n}xi32>");
     let row = scalar(h, of.base);
     // Offset by the base row, converted to rows of the view.
@@ -275,15 +301,18 @@ fn indices(
     let base = h.binary("divide", &row, &c, "tensor<i32>");
     let base = h.splat(&base, n);
     let mut out = h.binary("add", &values, &base, &ty);
+
     if sparse.count > n {
         let last = h.op(
             &format!("\"stablehlo.slice\"({out}) {{start_indices = array<i64: {}>, limit_indices = array<i64: {n}>, strides = array<i64: 1>}} : ({ty})", n - 1),
             "tensor<1xi32>",
         );
+
         let pad = h.op(
             &format!("\"stablehlo.broadcast_in_dim\"({last}) {{broadcast_dimensions = array<i64: 0>}} : (tensor<1xi32>)"),
             &format!("tensor<{}xi32>", sparse.count - n),
         );
+
         out = h.op(
             &format!(
                 "\"stablehlo.concatenate\"({out}, {pad}) {{dimension = 0 : i64}} : ({ty}, tensor<{}xi32>)",
@@ -292,6 +321,7 @@ fn indices(
             &format!("tensor<{}xi32>", sparse.count),
         );
     }
+
     out
 }
 
@@ -308,11 +338,13 @@ fn sparse_core_call(
     let column = sparse.width / 128;
     let x = rows * 128 / sparse.width;
     let scalar = |h: &mut Hlo, j: usize| h.scalar(scalars, count, j);
+
     let offsets: Vec<String> = sparse
         .indices
         .iter()
         .map(|of| indices(h, memory, rows, &scalar, sparse, of))
         .collect();
+
     let region = format!("tensor<{rows}x1x128xui32>");
     let tiles = format!("tensor<{}x{column}x8x128xui32>", x / 8);
     let rows_t = format!("tensor<{}x8x{column}x128xui32>", x / 8);
@@ -324,10 +356,12 @@ fn sparse_core_call(
     let offsets_t = format!("tensor<{}xi32>", sparse.count);
     let scalars_t = format!("tensor<{count}xi32>");
     let passed = sparse.scalars.then_some(scalars);
+
     let operand_types: Vec<String> = std::iter::once(view_t.clone())
         .chain(offsets.iter().map(|_| offsets_t.clone()))
         .chain(passed.map(|_| scalars_t.clone()))
         .collect();
+
     let layouts: Vec<&str> = std::iter::once("dense<[1, 0]> : tensor<2xindex>")
         .chain(
             operand_types[1..]
@@ -335,10 +369,12 @@ fn sparse_core_call(
                 .map(|_| "dense<0> : tensor<1xindex>"),
         )
         .collect();
+
     let operands: Vec<String> = std::iter::once(view)
         .chain(offsets)
         .chain(passed.map(str::to_owned))
         .collect();
+
     let called = h.op(
         &format!(
             "stablehlo.custom_call @tpu_custom_call({}) {{backend_config = \"{{\\22custom_call_config\\22: \
@@ -354,6 +390,7 @@ fn sparse_core_call(
         ),
         &view_t,
     );
+
     let t = h.reshape(&called, &view_t, &rows_t);
     let t = h.transpose(&t, &rows_t, &tiles, "0, 2, 1, 3");
     h.reshape(&t, &tiles, &region)
@@ -372,6 +409,7 @@ fn program(
     types.extend(host.map(rows_of));
     types.push(rows_of(rows));
     let memory = types.len() - 1;
+
     let params: Vec<String> = types
         .iter()
         .enumerate()
@@ -380,25 +418,31 @@ fn program(
             false => format!("%arg{i}: {t}"),
         })
         .collect();
+
     let layouts: Vec<&str> = (0..types.len())
         .map(|i| match i {
             0 => "dense<0> : tensor<1xindex>",
             _ => "dense<[2, 1, 0]> : tensor<3xindex>",
         })
         .collect();
+
     let result = rows_of(rows);
     let mut body = String::new();
     let (mut start, mut value) = (0, format!("%arg{memory}"));
+
     let mut hlo = Hlo {
         body: String::new(),
         names: 0,
     };
+
     for (k, &(name, mosaic, count, sparse)) in kernels.iter().enumerate() {
         let mut scalars = types[0].clone();
         let mut operands = vec!["%arg0".to_string()];
+
         if count != total {
             scalars = format!("tensor<{count}xi32>");
             operands[0] = format!("%s{k}");
+
             body += &format!(
                 "    %s{k} = \"stablehlo.slice\"(%arg0) {{start_indices = array<i64: {start}>, \
                  limit_indices = array<i64: {}>, strides = array<i64: 1>}} : ({}) -> {scalars}\n",
@@ -406,9 +450,12 @@ fn program(
                 types[0],
             );
         }
+
         start += count;
+
         if let Some(sparse) = sparse {
             hlo.body = std::mem::take(&mut body);
+
             value = sparse_core_call(
                 &mut hlo,
                 &value,
@@ -417,17 +464,22 @@ fn program(
                 sparse,
                 (name, mosaic),
             );
+
             body = std::mem::take(&mut hlo.body);
             continue;
         }
+
         let mut operand_types = vec![scalars];
+
         if host.is_some() {
             operands.push("%arg1".into());
             operand_types.push(types[1].clone());
         }
+
         operands.push(value);
         operand_types.push(result.clone());
         value = format!("%m{k}");
+
         body += &format!(
             "    {value} = stablehlo.custom_call @tpu_custom_call({}) {{backend_config = \
              \"{{\\22custom_call_config\\22: {{\\22body\\22: \\22{}\\22, \\22serialization_format\\22: 1, \
@@ -443,6 +495,7 @@ fn program(
             operand_types.join(", "),
         );
     }
+
     format!(
         "module @lumen attributes {{mhlo.num_partitions = 1 : i32, mhlo.num_replicas = 1 : i32}} {{\n  \
          func.func public @main({}) -> {result} {{\n{body}    return {value} : {result}\n  }}\n}}\n",
@@ -454,11 +507,13 @@ fn program(
 fn base64(bytes: &[u8]) -> String {
     const DIGITS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+
     for chunk in bytes.chunks(3) {
         let n = chunk
             .iter()
             .enumerate()
             .fold(0u32, |n, (i, &b)| n | u32::from(b) << (16 - 8 * i));
+
         for i in 0..4 {
             match i <= chunk.len() {
                 true => out.push(DIGITS[(n >> (18 - 6 * i) & 63) as usize] as char),
@@ -466,6 +521,7 @@ fn base64(bytes: &[u8]) -> String {
             }
         }
     }
+
     out
 }
 
@@ -488,15 +544,18 @@ fn lowered(module: &str, spec: &str) -> Result<Arc<str>, String> {
 /// Mosaic cached under `key`, lowered by `lower` the first time.
 fn cached(key: String, lower: impl FnOnce() -> Result<String, String>) -> Result<Arc<str>, String> {
     static CACHE: OnceLock<Mutex<HashMap<String, Arc<str>>>> = OnceLock::new();
+
     let cache = || {
         CACHE
             .get_or_init(Default::default)
             .lock()
             .unwrap_or_else(|e| e.into_inner())
     };
+
     if let Some(mosaic) = cache().get(&key) {
         return Ok(Arc::clone(mosaic));
     }
+
     let mosaic: Arc<str> = lower()?.into();
     cache().insert(key, Arc::clone(&mosaic));
     Ok(mosaic)
@@ -523,6 +582,7 @@ fn compiled(
 ) -> Result<Executable, String> {
     static CACHE: OnceLock<Mutex<HashMap<String, Executable>>> = OnceLock::new();
     let mut key = format!("{index} {host:?} {rows}");
+
     for l in launches {
         key += &format!(
             "\n{} {} {} {:?}",
@@ -532,13 +592,16 @@ fn compiled(
             l.sparse
         );
     }
+
     let mut cache = CACHE
         .get_or_init(Default::default)
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+
     if let Some(&executable) = cache.get(&key) {
         return Ok(executable);
     }
+
     let kernels: Vec<(&str, &str, usize, Option<&SparseCore>)> = launches
         .iter()
         .map(|l| {
@@ -550,12 +613,16 @@ fn compiled(
             )
         })
         .collect();
+
     let code = program(&kernels, host, rows);
+
     let executable =
         unsafe { ffi::lumen_tpu_compile(code.as_ptr().cast(), code.len(), index as i32) };
+
     if executable.is_null() {
         return Err(error());
     }
+
     cache.insert(key, Executable(executable));
     Ok(Executable(executable))
 }
@@ -565,19 +632,25 @@ fn run(index: usize, launches: &[Lowered], host: &[u8]) -> Result<(), String> {
     if launches.is_empty() {
         return Ok(());
     }
+
     let what = || {
         let modules: Vec<&str> = launches.iter().map(|l| l.module.as_str()).collect();
         modules.join(", ")
     };
+
     let rows = crate::allocator::tpu::rows(index)?;
     let host_rows = (!host.is_empty()).then_some(host.len() / crate::allocator::tpu::ROW);
+
     let executable =
         compiled(index, launches, host_rows, rows).map_err(|e| format!("{}: {e}", what()))?;
+
     let scalars: Vec<i32> = launches
         .iter()
         .flat_map(|l| l.scalars.iter().copied())
         .collect();
+
     crate::profiler::tpu::ran(index, launches.len());
+
     crate::allocator::tpu::run(index, executable.0, &scalars, host)
         .map_err(|e| format!("{}: {e}", what()))
 }
@@ -615,6 +688,7 @@ pub(crate) fn flush(index: usize) -> Result<(), String> {
         Some((i, launches)) if *i == index => std::mem::take(launches),
         _ => Vec::new(),
     });
+
     match pending.is_empty() {
         true => Ok(()),
         false => run(index, &pending, &[]),
@@ -655,15 +729,18 @@ pub(crate) fn launch(index: usize, launch: Launch) -> Result<(), String> {
     let rows = crate::allocator::tpu::rows(index)?;
     let scalars = launch.rows.len() + launch.scalars.len();
     let host = (!launch.host.is_empty()).then_some(launch.host.len() / crate::allocator::tpu::ROW);
+
     let device = format!(
         "\"scalars\": {scalars}, \"host_rows\": {}, \"rows\": {rows}",
         host.map_or("null".to_string(), |h| h.to_string())
     );
+
     let spec = match (launch.module, launch.spec.as_str()) {
         (GENERATED, source) => source.to_owned(),
         (_, "") => format!("{{{device}}}"),
         (_, fields) => format!("{{{fields}, {device}}}"),
     };
+
     // A generated program's Mosaic depends on the device's memory as well as its source.
     let mosaic = match launch.module {
         GENERATED => cached(format!("{scalars} {host:?} {rows}\n{spec}"), || {
@@ -671,6 +748,7 @@ pub(crate) fn launch(index: usize, launch: Launch) -> Result<(), String> {
         }),
         module => lowered(module, &spec),
     };
+
     let lowered = Lowered {
         mosaic: mosaic.map_err(|e| format!("{}: {e}", launch.kernel))?,
         module: launch.module.to_owned(),
@@ -682,21 +760,27 @@ pub(crate) fn launch(index: usize, launch: Launch) -> Result<(), String> {
         .concat(),
         sparse: launch.sparse.map(Box::new),
     };
+
     crate::profiler::tpu::launched(index, &launch.kernel);
+
     crate::kernels::launched::templated(&launch.kernel, || {
         // A generated program's script is its source, run on this device's memory.
         let template = match launch.module {
             GENERATED => {
                 let host = host.map_or("None".to_string(), |h| h.to_string());
+
                 let device =
                     format!("{{\"scalars\": {scalars}, \"host_rows\": {host}, \"rows\": {rows}}}");
+
                 let script = format!("{}\nmosaic = program({device})\n", lowered.spec);
                 (GENERATED.to_owned(), script)
             }
             _ => (lowered.module.clone(), lowered.spec.clone()),
         };
+
         (Some(lowered.mosaic.to_string()), Some(template))
     });
+
     let batched = BATCHES.with(|b| match b.borrow_mut().last_mut() {
         Some((i, launches)) if *i == index => match launch.host.is_empty() {
             true => {
@@ -707,6 +791,7 @@ pub(crate) fn launch(index: usize, launch: Launch) -> Result<(), String> {
         },
         _ => Err(lowered),
     });
+
     match batched {
         Ok(None) => Ok(()),
         Ok(Some((before, lowered))) => {
@@ -727,28 +812,34 @@ fn encode_loop(
     let Primitive::Fusion { body, .. } = &step.primitive else {
         unreachable!("a loop fusion")
     };
+
     if step.output.1.numel() == 0 {
         return Ok(());
     }
+
     let views: HashMap<usize, (usize, Vec<usize>)> = step
         .output_views
         .iter()
         .enumerate()
         .filter_map(|(k, v)| v.as_ref().map(|v| (k, (v.offset, v.strides.clone()))))
         .collect();
+
     let code =
         Tpu::elementwise(body, &[], &views, &()).map_err(|e| format!("{}: {e}", step.label))?;
+
     // An indexed loop takes its inputs, then its output; a plain one its output after the step's own inputs.
     let n = match code.indexed {
         true => inputs.len(),
         false => step.inputs.len(),
     };
+
     let rows: Vec<*const u8> = inputs[..n]
         .iter()
         .copied()
         .chain([output.cast_const()])
         .chain(inputs[n..].iter().copied())
         .collect();
+
     let launched = Launch {
         module: GENERATED,
         kernel: code.kernel,
@@ -758,6 +849,7 @@ fn encode_loop(
         host: &[],
         sparse: None,
     };
+
     launch(index, launched)
 }
 
@@ -798,12 +890,14 @@ pub(crate) fn encode(
         Primitive::PallasCall { kernel, .. } => {
             // Pallas kernels see their inputs, then the output, then any scratch buffers.
             let n = step.inputs.len();
+
             let rows: Vec<*const u8> = inputs[..n]
                 .iter()
                 .copied()
                 .chain(std::iter::once(output.cast_const()))
                 .chain(inputs[n..].iter().copied())
                 .collect();
+
             let launched = Launch {
                 module: "lumen.pallas",
                 kernel: step.primitive.name().to_owned(),
@@ -813,6 +907,7 @@ pub(crate) fn encode(
                 host: &[],
                 sparse: None,
             };
+
             launch(index, launched).map_err(|e| format!("{}: {e}", step.label))
         }
         _ => Err(format!("{} does not run on TPU yet", step.primitive.name())),

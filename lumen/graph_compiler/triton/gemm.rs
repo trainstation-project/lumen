@@ -78,6 +78,7 @@ fn prepare(step: &Step, inputs: &[Tensor], out: &Tensor, outs: &[Tensor]) -> Pre
             layout(&inputs[1]),
             layout(out),
         );
+
         return Prepared {
             functions: vec![
                 Function::new("PROLOGUE_A", code.prologue_a),
@@ -94,31 +95,38 @@ fn prepare(step: &Step, inputs: &[Tensor], out: &Tensor, outs: &[Tensor]) -> Pre
             launches: Launches::default(),
         };
     };
+
     // A fusion: the dot computes into a contiguous tile and the epilogue writes the fusion's outputs.
     let dot = codegen::gemm_dot(body).expect("a GEMM epilogue's dot");
     let (lhs, rhs) = operands(body, dot, inputs);
+
     let by_value: Vec<bool> = step
         .inputs
         .iter()
         .map(|(b, _)| matches!(b, Buffer::Scalar(_)))
         .collect();
+
     let code = match name.as_str() {
         // A GEMM whose rows a normalization reads: the row kernel's epilogues.
         DOT_PARTIALS | DOT_ROW => {
             let product = body.type_of(dot.output);
             let contiguous = contiguous_strides(&product.shape);
+
             let mut code = codegen::gemm(
                 &dot.primitive,
                 layout(lhs),
                 layout(rhs),
                 (&product.shape, &contiguous),
             );
+
             let layouts: Vec<_> = inputs.iter().map(layout).collect();
             let [_, rows, _, cols] = code.sizes;
             let outputs: Vec<_> = std::iter::once(out).chain(outs).map(layout).collect();
+
             code.epilogue = match name.as_str() {
                 DOT_PARTIALS => {
                     let width = codegen::partial_tile(cols).expect("a partial tile width");
+
                     codegen::partials_epilogue(
                         body,
                         &by_value,
@@ -131,20 +139,24 @@ fn prepare(step: &Step, inputs: &[Tensor], out: &Tensor, outs: &[Tensor]) -> Pre
                 }
                 _ => codegen::row_epilogue(body, &by_value, dot, &layouts, &outputs, [rows, cols]),
             };
+
             code
         }
         _ => {
             let owned = |t: &Tensor| (t.shape().to_vec(), t.strides().to_vec());
+
             let layouts = codegen::Layouts {
                 lhs: owned(lhs),
                 rhs: owned(rhs),
                 inputs: inputs.iter().map(owned).collect(),
                 outputs: std::iter::once(out).chain(outs).map(owned).collect(),
             };
+
             codegen::Triton::gemm(body, dot, &by_value, &layouts)
                 .expect("a Triton GEMM of every GEMM body")
         }
     };
+
     let flags = match name == DOT_ROW || name == DOT_PARTIALS {
         true => codegen::EpilogueFlags {
             group: 1,
@@ -152,6 +164,7 @@ fn prepare(step: &Step, inputs: &[Tensor], out: &Tensor, outs: &[Tensor]) -> Pre
         },
         false => codegen::gemm_flags(body, dot),
     };
+
     Prepared {
         functions: vec![
             Function::new("PROLOGUE_A", code.prologue_a),
@@ -172,6 +185,7 @@ fn operands<'a>(body: &Graph, dot: &Node, inputs: &'a [Tensor]) -> (&'a Tensor, 
         let at = body.inputs().iter().position(|&v| v == dot.inputs[k]);
         &inputs[at.expect("the dot's operands are the fusion's inputs")]
     };
+
     (operand(0), operand(1))
 }
 
@@ -188,15 +202,20 @@ fn gemm(
     let launch = GEMM
         .get()
         .ok_or("the Triton backend's GEMM is Python's (lumen.kernels.dot_general.triton): none is installed")?;
+
     if let Primitive::LinearCrossEntropy = step.primitive {
         let config = tuned.copied().unwrap_or(CONFIGS[UNTUNED]);
         return super::cross_entropy::run(*launch, step, inputs, out, &config);
     }
+
     let key = super::layouts(inputs.iter().chain([out]).chain(outs));
+
     let prepared = step
         .memo
         .get(key, || Ok(prepare(step, inputs, out, outs)))?;
+
     let cols = prepared.sizes[3];
+
     // A row epilogue needs whole rows in each program's tile.
     let config = match (&step.primitive, tuned) {
         (_, Some(c)) => *c,
@@ -205,13 +224,16 @@ fn gemm(
         }
         _ => CONFIGS[UNTUNED],
     };
+
     let Primitive::Fusion { body, .. } = &step.primitive else {
         let tensors = [&inputs[0], &inputs[1], out];
+
         let plain = Epilogue {
             tensors: &[],
             scalars: &[],
             flags: prepared.flags,
         };
+
         return launch(
             tensors,
             prepared.sizes,
@@ -222,14 +244,17 @@ fn gemm(
             &plain,
         );
     };
+
     let dot = codegen::gemm_dot(body).expect("a GEMM epilogue's dot");
     let (lhs, rhs) = operands(body, dot, inputs);
     let extra: Vec<Tensor> = inputs.iter().chain(outs).cloned().collect();
+
     let fused = Epilogue {
         tensors: &extra,
         scalars: &prepared.scalars,
         flags: prepared.flags,
     };
+
     launch(
         [lhs, rhs, out],
         prepared.sizes,
@@ -246,6 +271,7 @@ fn accum_dtype(dot: &Primitive) -> DType {
     let Primitive::DotGeneral { accum_dtype, .. } = dot else {
         unreachable!("a dot_general")
     };
+
     *accum_dtype
 }
 
@@ -297,6 +323,7 @@ impl Kernels for Gemms {
     fn build(&mut self, _: &Step, config: Config) -> Tuned {
         let run: Run =
             Box::new(move |step, inputs, out, outs| gemm(step, inputs, out, outs, Some(&config)));
+
         Tuned::new(format!("{config:?}"), run)
     }
 }

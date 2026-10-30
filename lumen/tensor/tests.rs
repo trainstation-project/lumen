@@ -139,10 +139,12 @@ mod options {
         let i = Tensor::full(&[2], 7, TensorOptions::new());
         assert_eq!(i.dtype(), DType::I64);
         assert_eq!(i.to_vec::<i64>(), vec![7, 7]);
+
         assert_eq!(
             Tensor::full(&[1], true, TensorOptions::new()).dtype(),
             DType::Bool
         );
+
         let f = Tensor::full(&[1], 1.5, TensorOptions::new());
         assert_eq!(f.dtype(), DType::F32);
         assert_eq!(f.to_vec::<f32>(), vec![1.5]);
@@ -152,14 +154,17 @@ mod options {
     #[test]
     fn full_converts_the_fill_value_to_the_given_dtype() {
         assert_eq!(Tensor::full(&[1], 2.9, DType::I32).to_vec::<i32>(), vec![2]);
+
         assert_eq!(
             Tensor::full(&[1], 3, DType::F16).to_vec::<f16>(),
             vec![f16::from_f32(3.0)]
         );
+
         assert_eq!(
             Tensor::full(&[2], 0, DType::Bool).to_vec::<bool>(),
             vec![false, false]
         );
+
         let t = Tensor::full(&[2, 2], Scalar::Float(0.5), DType::F64);
         assert_eq!(t.shape(), &[2, 2]);
         assert_eq!(t.to_vec::<f64>(), vec![0.5; 4]);
@@ -182,10 +187,12 @@ mod options {
         let f = Tensor::arange(2.5, TensorOptions::new());
         assert_eq!(f.dtype(), DType::F32);
         assert_eq!(f.to_vec::<f32>(), vec![0.0, 1.0, 2.0]);
+
         assert_eq!(
             Tensor::arange(3, DType::F64).to_vec::<f64>(),
             vec![0.0, 1.0, 2.0]
         );
+
         assert_eq!(Tensor::arange(0, TensorOptions::new()).numel(), 0);
     }
 
@@ -236,15 +243,18 @@ mod fill {
         let t = Tensor::arange(12, DType::F32).reshape(&[3, 4]);
         t.select(0, 1).fill_(-1.0);
         t.select(1, 2).zero_();
+
         assert_eq!(
             t.to_vec::<f32>(),
             vec![
                 0.0, 1.0, 0.0, 3.0, -1.0, -1.0, 0.0, -1.0, 8.0, 9.0, 0.0, 11.0
             ]
         );
+
         let tt = Tensor::arange(4, DType::I64)
             .reshape(&[2, 2])
             .transpose(0, 1);
+
         tt.fill_(7);
         assert_eq!(tt.to_vec::<i64>(), vec![7; 4]);
     }
@@ -264,10 +274,12 @@ mod fill {
             Tensor::full(&[2, 2], 0, DType::F64).to_vec::<f64>(),
             vec![0.0; 4]
         );
+
         assert_eq!(
             Tensor::full(&[3], -1, DType::I8).to_vec::<i8>(),
             vec![-1; 3]
         );
+
         assert_eq!(Tensor::ones(&[3], DType::U8).to_vec::<u8>(), vec![1; 3]);
         assert_eq!(Tensor::ones(&[2], DType::F32).to_vec::<f32>(), vec![1.0; 2]);
     }
@@ -364,6 +376,7 @@ mod storage_semantics {
         let t = Tensor::arange(6, DType::F32)
             .reshape(&[2, 3])
             .transpose(0, 1);
+
         let c = t.contiguous::<f32>();
         assert!(c.is_contiguous());
         assert!(!c.shares_storage_with(&t));
@@ -495,6 +508,7 @@ mod device_kernels {
         t.fill_(2.5);
         assert_eq!(t.to_vec::<f32>(), vec![2.5; 3]);
         t.fill_(-0.0);
+
         assert!(
             t.to_vec::<f32>()
                 .iter()
@@ -514,10 +528,12 @@ mod device_kernels {
     #[test]
     fn empty_allocates_with_the_options_and_is_writable() {
         let t = unsafe { Tensor::empty(&[2, 3], TensorOptions::new().dtype(DType::I32)) };
+
         assert_eq!(
             (t.dtype(), t.device(), t.shape()),
             (DType::I32, Device::Cpu(0), &[2, 3][..])
         );
+
         assert_eq!(t.storage().nbytes(), 6 * 4);
         assert_eq!(t.fill_(3).to_vec::<i32>(), vec![3; 6]);
         let d = unsafe { Tensor::empty(&[1], TensorOptions::new()) };
@@ -545,6 +561,7 @@ mod mps {
     #[test]
     fn tensor_on_mps_roundtrips() {
         require_mps!();
+
         let t = crate::Tensor::arange(
             6,
             TensorOptions::new()
@@ -552,6 +569,7 @@ mod mps {
                 .device(Device::Mps(0)),
         )
         .reshape(&[2, 3]);
+
         assert_eq!(t.device(), Device::Mps(0));
         assert_eq!(t.get::<f32>(&[1, 2]), 5.0);
         t.set(&[0, 1], 9.0f32);
@@ -581,12 +599,14 @@ mod mps {
     #[test]
     fn zeros_on_mps_are_zero() {
         require_mps!();
+
         let t = crate::Tensor::zeros(
             &[3, 5],
             TensorOptions::new()
                 .dtype(DType::Bool)
                 .device(Device::Mps(0)),
         );
+
         assert!(t.to_vec::<bool>().iter().all(|&b| !b));
     }
 
@@ -616,27 +636,34 @@ mod mps {
     #[test]
     fn fill_on_mps_uses_metal_and_respects_views() {
         require_mps!();
+
         let opts = TensorOptions::new()
             .dtype(DType::F32)
             .device(Device::Mps(0));
+
         let t = crate::Tensor::arange(12, opts).reshape(&[3, 4]);
         t.select(0, 1).zero_();
         t.select(1, 3).fill_(2.5);
+
         assert_eq!(
             t.to_vec::<f32>(),
             vec![0.0, 1.0, 2.0, 2.5, 0.0, 0.0, 0.0, 2.5, 8.0, 9.0, 10.0, 2.5]
         );
+
         let bytes = crate::Tensor::zeros(
             &[5],
             TensorOptions::new().dtype(DType::U8).device(Device::Mps(0)),
         );
+
         assert_eq!(bytes.fill_(0xC3).to_vec::<u8>(), vec![0xC3; 5]);
+
         let ones = crate::Tensor::ones(
             &[4],
             TensorOptions::new()
                 .dtype(DType::Bool)
                 .device(Device::Mps(0)),
         );
+
         assert_eq!(ones.to_vec::<bool>(), vec![true; 4]);
     }
 
@@ -644,16 +671,19 @@ mod mps {
     #[test]
     fn fills_on_mps_run_in_order() {
         require_mps!();
+
         let t = crate::Tensor::zeros(
             &[1 << 20],
             TensorOptions::new()
                 .dtype(DType::F32)
                 .device(Device::Mps(0)),
         );
+
         for i in 0..100 {
             t.fill_(i as f32);
             t.narrow(0, 0, 1 << 19).zero_();
         }
+
         let mut expected = vec![99.0f32; 1 << 20];
         expected[..1 << 19].fill(0.0);
         assert_eq!(t.to_vec::<f32>(), expected);
@@ -666,21 +696,25 @@ mod mps {
         use crate::tensor::dtype::f16;
         let on_mps = |dtype| TensorOptions::new().dtype(dtype).device(Device::Mps(0));
         let view = |t: &crate::Tensor| t.permute(&[2, 0, 1]).narrow(0, 1, 2).narrow(2, 0, 3);
+
         let expected = |fill: f64| -> Vec<f64> {
             let base = crate::Tensor::zeros(&[4, 3, 5], TensorOptions::new().dtype(DType::F64));
             view(&base).fill_(fill);
             base.to_vec::<f64>()
         };
+
         let bytes = crate::Tensor::zeros(&[4, 3, 5], on_mps(DType::U8));
         view(&bytes).fill_(7u8);
         let want: Vec<u8> = expected(7.0).iter().map(|&x| x as u8).collect();
         assert_eq!(bytes.to_vec::<u8>(), want);
         let halves = crate::Tensor::zeros(&[4, 3, 5], on_mps(DType::F16));
         view(&halves).fill_(f16::from_f32(1.5));
+
         let want: Vec<f16> = expected(1.5)
             .iter()
             .map(|&x| f16::from_f32(x as f32))
             .collect();
+
         assert_eq!(halves.to_vec::<f16>(), want);
         let floats = crate::Tensor::ones(&[4, 3, 5], on_mps(DType::F32));
         view(&floats).zero_();
@@ -745,10 +779,12 @@ mod cuda {
     #[test]
     fn tensor_moves_between_gpus() {
         require_cuda!();
+
         if cuda::CUDA.device_count() < 2 {
             eprintln!("fewer than 2 CUDA devices, skipping");
             return;
         }
+
         let a = Tensor::arange(4, on_gpu(DType::F64));
         let b = a.to(Device::Cuda(1));
         assert_eq!(b.device(), Device::Cuda(1));
@@ -774,30 +810,40 @@ mod meta {
         let meta = |n: usize| Tensor::zeros(&[2, n], options());
         let cpu = |v: &[f32], n: usize| Tensor::from_slice(v, DType::F32).reshape(&[2, n]);
         let (a, b) = (meta(3), meta(3));
+
         let block = Tensor::pack(&[a.clone(), b.clone()], 1, &[2], Device::Cpu(0))
             .unwrap()
             .unwrap();
+
         assert_eq!(block.shape(), [2, 6]);
+
         let (pa, pb) = (
             a.placed(Device::Cpu(0)).unwrap(),
             b.placed(Device::Cpu(0)).unwrap(),
         );
+
         assert_eq!((pa.strides(), pb.strides()), (&[6, 2][..], &[6, 2][..]));
         assert_eq!((pa.storage_offset(), pb.storage_offset()), (0, 1));
         pa.copy_(&cpu(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], 3)).unwrap();
+
         pb.copy_(&cpu(&[-1.0, -2.0, -3.0, -4.0, -5.0, -6.0], 3))
             .unwrap();
+
         assert_eq!(
             block.to_vec::<f32>(),
             [
                 1.0, -1.0, 2.0, -2.0, 3.0, -3.0, 4.0, -4.0, 5.0, -5.0, 6.0, -6.0
             ]
         );
+
         let members = [meta(2), meta(2), meta(1), meta(1), meta(2)];
+
         let block = Tensor::pack(&members, 1, &[2, 2, 1], Device::Cpu(0))
             .unwrap()
             .unwrap();
+
         assert_eq!(block.shape(), [2, 8]);
+
         let values = [
             [10.0, 11.0, 12.0, 13.0],
             [20.0, 21.0, 22.0, 23.0],
@@ -805,13 +851,16 @@ mod meta {
             [40.0, 41.0, 0.0, 0.0],
             [50.0, 51.0, 52.0, 53.0],
         ];
+
         for (m, v) in members.iter().zip(&values) {
             let n = m.shape()[1];
+
             m.placed(Device::Cpu(0))
                 .unwrap()
                 .copy_(&cpu(&v[..2 * n], n))
                 .unwrap();
         }
+
         assert_eq!(
             block.to_vec::<f32>(),
             [
@@ -819,6 +868,7 @@ mod meta {
                 52.0, 53.0
             ]
         );
+
         assert!(Tensor::pack(&[meta(3), meta(4)], 1, &[2], Device::Cpu(0)).is_err());
         let three: Vec<Tensor> = (0..3).map(|_| meta(3)).collect();
         assert!(Tensor::pack(&three, 1, &[2], Device::Cpu(0)).is_err());
@@ -834,19 +884,23 @@ mod meta {
         ] {
             assert_eq!((t.device(), t.shape()), (Device::Meta(0), &[2, 3][..]));
         }
+
         let t = Tensor::arange(5, meta(DType::I64));
         assert_eq!(t.shape(), [5]);
         let t = Tensor::zeros(&[2, 3], meta(DType::F32));
         let view = t.transpose(0, 1);
         assert!(view.shares_storage_with(&t));
         let packed = view.contiguous::<f32>();
+
         assert_eq!(
             (packed.device(), packed.shape()),
             (Device::Meta(0), &[3, 2][..])
         );
+
         assert!(packed.is_contiguous());
         t.fill_(1.0f32).zero_();
         t.set(&[0, 0], 1.0f32);
+
         assert_eq!(
             t.to_string(),
             "Tensor(shape=[2, 3], dtype=f32, device=meta)"
@@ -858,6 +912,7 @@ mod meta {
     fn to_meta_drops_the_data() {
         let t = Tensor::from_slice(&[1.0f32, 2.0, 3.0], DType::F32).reshape(&[3, 1]);
         let m = t.to(Device::Meta(0));
+
         assert_eq!(
             (m.device(), m.shape(), m.strides()),
             (Device::Meta(0), &[3, 1][..], &[1, 1][..])
@@ -890,23 +945,30 @@ mod to_dtype {
         let x = Tensor::from_slice(&[1.0f32, 2.5, -3.7, 1e6], DType::F32);
         let b = x.to_dtype(DType::BF16).unwrap();
         assert_eq!(b.dtype(), DType::BF16);
+
         let expected: Vec<bf16> = [1.0f32, 2.5, -3.703125, 999424.0]
             .iter()
             .map(|&v| bf16::from_f32(v))
             .collect();
+
         assert_eq!(b.to_vec::<bf16>(), expected);
+
         assert_eq!(
             x.to_dtype(DType::I32).unwrap().to_vec::<i32>(),
             [1, 2, -3, 1_000_000]
         );
+
         assert!(x.to_dtype(DType::F32).unwrap().shares_storage_with(&x));
+
         let meta = Tensor::zeros(&[2, 3], Device::Meta(0))
             .to_dtype(DType::F16)
             .unwrap();
+
         assert_eq!(
             (meta.device(), meta.dtype(), meta.shape()),
             (Device::Meta(0), DType::F16, &[2, 3][..])
         );
+
         if crate::device::mps::MPS.is_available() {
             let m = x.to(Device::Mps(0)).to_dtype(DType::BF16).unwrap();
             assert_eq!(m.device(), Device::Mps(0));
@@ -922,18 +984,22 @@ fn half_floats_round_to_nearest_once() {
     let above = f64::from(f32::from_bits(0x3f80_8001));
     assert_eq!(to_bf16(above).to_bits(), 0x3f81);
     assert_eq!(to_bf16(-28.312_508_f32 as f64).to_f32(), -28.375);
+
     assert_eq!(
         to_bf16(f64::from(f32::from_bits(0x3f80_8000))).to_bits(),
         0x3f80
     );
+
     assert_eq!(
         to_bf16(f64::from(f32::from_bits(0x3f81_8000))).to_bits(),
         0x3f82
     );
+
     assert_eq!(
         to_f16(1.0 + 2f64.powi(-11) + 2f64.powi(-40)).to_bits(),
         0x3c01
     );
+
     assert_eq!(to_f16(1.0 + 2f64.powi(-11)).to_bits(), 0x3c00);
     assert_eq!(to_bf16(1.5).to_f32(), 1.5);
     assert_eq!(to_bf16(-1e-300).to_bits(), 0x8000);
@@ -947,22 +1013,27 @@ fn narrow_dtypes_are_ml_dtypes_bytes() {
     use crate::tensor::dtype::{f8e4m3b11fnuz, f8e4m3fn, f8e5m2, i2, i4, u4};
     let values = [-1.5, 448.0, 1000.0, f64::NAN, f64::INFINITY, -0.0];
     let bytes = |f: fn(f64) -> u8| values.map(f);
+
     assert_eq!(
         bytes(|x| f8e4m3fn::from_f64(x).0),
         [188, 126, 127, 127, 127, 128]
     );
+
     assert_eq!(
         bytes(|x| f8e5m2::from_f64(x).0),
         [190, 95, 100, 126, 124, 128]
     );
+
     assert_eq!(
         bytes(|x| f8e4m3b11fnuz::from_f64(x).0),
         [220, 128, 128, 128, 128, 0]
     );
+
     assert_eq!([-1.0, -8.0, 7.0].map(|x| i4::from_f64(x).0), [15, 8, 7]);
     assert_eq!([-1.0, -2.0, 1.0].map(|x| i2::from_f64(x).0), [3, 2, 1]);
     assert_eq!(i4(8).to_f64(), -8.0);
     assert_eq!(u4(15).to_f64(), 15.0);
+
     for b in 0..=255u8 {
         for (to, from) in [
             (
@@ -979,6 +1050,7 @@ fn narrow_dtypes_are_ml_dtypes_bytes() {
             }
         }
     }
+
     assert_eq!(f8e4m3fn::from_f64(1.0625).to_f64(), 1.0);
     assert_eq!(f8e4m3fn::from_f64(1.1875).to_f64(), 1.25);
 }

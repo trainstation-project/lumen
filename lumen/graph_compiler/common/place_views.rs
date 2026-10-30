@@ -14,6 +14,7 @@ pub(crate) fn place_views(
 ) {
     for v in dot_views(graph, reads, gemm_dot) {
         let node = graph.nodes.iter_mut().find(|n| n.output == v);
+
         if let Some(Primitive::Slice { view, .. }) = node.map(|n| &mut n.primitive) {
             *view = true;
         }
@@ -28,17 +29,22 @@ fn dot_views(
 ) -> Vec<Var> {
     let nodes = graph.nodes();
     let mut views = Vec::new();
+
     for node in nodes {
         let (Primitive::Slice { .. }, &[x]) = (&node.primitive, node.inputs.as_slice()) else {
             continue;
         };
+
         let v = node.output;
+
         if graph.outputs().contains(&v) || views.contains(&x) {
             continue;
         }
+
         let strides = contiguous_strides(&graph.type_of(x).shape);
         let mut readers = nodes.iter().filter(|n| n.inputs.contains(&v)).peekable();
         let read = readers.peek().is_some();
+
         let in_place = readers.all(|n| match &n.primitive {
             Primitive::DotGeneral { .. } => {
                 let operands = [graph.type_of(n.inputs[0]), graph.type_of(n.inputs[1])];
@@ -49,10 +55,12 @@ fn dot_views(
             }),
             _ => false,
         });
+
         if read && in_place {
             views.push(v);
         }
     }
+
     views
 }
 
@@ -67,12 +75,16 @@ pub(crate) fn fusion_reads_strided(
     let (Some(dot), Some(&v)) = (gemm_dot(body), body.inputs().get(k)) else {
         return false;
     };
+
     let side = dot.inputs.iter().position(|&u| u == v);
+
     let only = body
         .nodes()
         .iter()
         .all(|n| std::ptr::eq(n, dot) || !n.inputs.contains(&v));
+
     let operands = [body.type_of(dot.inputs[0]), body.type_of(dot.inputs[1])];
+
     match side {
         Some(side) if only && dot.inputs[0] != dot.inputs[1] => {
             reads(&dot.primitive, operands, side, strides)

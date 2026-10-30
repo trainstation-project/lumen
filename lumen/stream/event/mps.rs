@@ -51,6 +51,7 @@ impl Event for MpsEvent {
         let Some(marks) = &self.marks else {
             return Ok(());
         };
+
         crate::stream::mps::flush();
         marks.wait().map(|_| ())
     }

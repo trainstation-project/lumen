@@ -34,8 +34,10 @@ impl Value {
                 matches!(t.device(), crate::Device::Cpu(_)),
                 "a by-value scalar lives on the host"
             );
+
             unsafe { std::ptr::read_unaligned(t.data_ptr().cast::<T>()) }
         }
+
         match t.dtype() {
             DType::F64 => Value::Int(read::<f64>(t).to_bits() as i64 as i128),
             DType::F32 => Value::Float(read::<f32>(t) as f64),
@@ -65,6 +67,7 @@ impl Value {
                     v if i64::try_from(v).is_ok() => Width::I64,
                     _ => Width::U64,
                 };
+
                 Class::Int(width, v % 16 == 0, v == 1)
             }
             Value::Float(_) => Class::Float,
@@ -105,6 +108,7 @@ impl Class {
                     Width::I64 => "i64",
                     Width::U64 => "u64",
                 };
+
                 format!(
                     "{ty}{}{}",
                     if div { "D" } else { "" },
@@ -143,6 +147,7 @@ pub(crate) fn compiled(
     compile: impl FnOnce() -> Result<Compiled, String>,
 ) -> Result<Arc<Compiled>, String> {
     static CACHE: Mutex<Option<HashMap<String, Arc<Compiled>>>> = Mutex::new(None);
+
     if let Some(c) = CACHE
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -151,12 +156,15 @@ pub(crate) fn compiled(
     {
         return Ok(c.clone());
     }
+
     let c = Arc::new(compile()?);
+
     CACHE
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .get_or_insert_with(HashMap::new)
         .insert(key.to_owned(), c.clone());
+
     Ok(c)
 }
 
@@ -166,7 +174,9 @@ const RTLD_NOW: c_int = 2;
 #[link(name = "dl")]
 unsafe extern "C" {
     fn dlopen(filename: *const c_char, flags: c_int) -> *mut c_void;
+
     fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+
     fn dlerror() -> *const c_char;
 }
 
@@ -197,24 +207,30 @@ struct Driver {
 /// Loads `libcuda.so.1` once and resolves the driver entry points.
 fn driver() -> Result<&'static Driver, String> {
     static DRIVER: OnceLock<Result<Driver, String>> = OnceLock::new();
+
     DRIVER
         .get_or_init(|| {
             let name = CString::new("libcuda.so.1").expect("no NUL");
             let handle = unsafe { dlopen(name.as_ptr(), RTLD_NOW) };
+
             if handle.is_null() {
                 let reason = unsafe { CStr::from_ptr(dlerror()) }.to_string_lossy();
+
                 return Err(format!(
                     "loading the CUDA driver (libcuda.so.1) failed: {reason}"
                 ));
             }
+
             let symbol = |name: &str| -> Result<*mut c_void, String> {
                 let c = CString::new(name).expect("a symbol name has no NUL");
                 let f = unsafe { dlsym(handle, c.as_ptr()) };
+
                 match f.is_null() {
                     true => Err(format!("libcuda.so.1 has no {name}")),
                     false => Ok(f),
                 }
             };
+
             // Each pointer is the named driver function, whose C signature the field's type spells out.
             unsafe {
                 Ok(Driver {
@@ -234,11 +250,13 @@ fn driver() -> Result<&'static Driver, String> {
 /// The bytes Triton type `ty` passes `value` as, or `None` for a parameter specialized away.
 fn bytes(ty: &str, value: Value) -> Result<Option<[u8; 8]>, String> {
     let mut out = [0u8; 8];
+
     let int = |v: Value| match v {
         Value::Int(i) => Ok(i),
         Value::Bool(b) => Ok(b as i128),
         v => Err(format!("a {ty} parameter got {v:?}")),
     };
+
     match ty {
         "constexpr" => return Ok(None),
         t if t.starts_with('*') => match value {
@@ -263,6 +281,7 @@ fn bytes(ty: &str, value: Value) -> Result<Option<[u8; 8]>, String> {
             ));
         }
     }
+
     Ok(Some(out))
 }
 
@@ -276,19 +295,25 @@ pub(crate) fn launch(kernel: &Compiled, grid: [usize; 3], values: &[Value]) -> R
             values.len()
         ));
     }
+
     let mut storage: Vec<[u8; 8]> = Vec::with_capacity(values.len() + 2);
+
     for (ty, &value) in kernel.types.iter().zip(values) {
         if let Some(b) = bytes(ty, value)? {
             storage.push(b);
         }
     }
+
     storage.extend([[0u8; 8]; 2]);
     let mut params: Vec<*mut c_void> = storage.iter_mut().map(|b| b.as_mut_ptr().cast()).collect();
+
     if grid.contains(&0) {
         return Ok(());
     }
+
     let driver = driver()?;
     let [x, y, z] = grid.map(|g| g as c_uint);
+
     let result = unsafe {
         (driver.launch)(
             kernel.function as *mut c_void,
@@ -304,15 +329,19 @@ pub(crate) fn launch(kernel: &Compiled, grid: [usize; 3], values: &[Value]) -> R
             std::ptr::null_mut(),
         )
     };
+
     match result {
         0 => Ok(()),
         e => {
             let mut message: *const c_char = std::ptr::null();
+
             unsafe { (driver.error)(e, &mut message) };
+
             let message = match message.is_null() {
                 true => "unknown".into(),
                 false => unsafe { CStr::from_ptr(message) }.to_string_lossy(),
             };
+
             Err(format!("cuLaunchKernel failed: {message} (error {e})"))
         }
     }

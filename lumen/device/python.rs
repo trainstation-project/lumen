@@ -16,6 +16,7 @@ pub(crate) fn parse_device(device: Option<&Bound<'_, PyAny>>) -> PyResult<core::
                 let spec: &str = d.extract().map_err(|_| {
                     PyTypeError::new_err("device must be a string or a lumen.device")
                 })?;
+
                 PyDevice::parse(spec)?.to_core()
             }
         },
@@ -57,11 +58,13 @@ impl PyDevice {
             }
             Some(i) => Some(i as usize),
         };
+
         let device = core::Device::of_type(kind, index.unwrap_or(0)).ok_or_else(|| {
             PyValueError::new_err(format!(
                 "Expected one of cpu, mps, cuda, meta device type at start of device string: {kind}"
             ))
         })?;
+
         Ok(PyDevice {
             device,
             indexed: index.is_some(),
@@ -80,9 +83,11 @@ impl PyDevice {
                     .ok_or_else(|| {
                         PyValueError::new_err(format!("Invalid device string: '{spec}'"))
                     })?;
+
                 (kind, Some(parsed))
             }
         };
+
         Self::checked(kind, index)
     }
 
@@ -117,8 +122,10 @@ impl PyDevice {
                     "device(device) does not take an index",
                 ));
             }
+
             return Ok(other.get().clone());
         }
+
         let spec: &str = device.extract().map_err(|_| {
             PyTypeError::new_err(format!(
                 "device() expects a string or a device, got {}",
@@ -128,6 +135,7 @@ impl PyDevice {
                     .map_or("?".into(), |n| n.to_string())
             ))
         })?;
+
         match index {
             None => Self::parse(spec),
             Some(_) if spec.contains(':') => Err(PyValueError::new_err(format!(
@@ -177,21 +185,25 @@ impl PyDevice {
 fn device_module<'py>(py: Python<'py>, kind: &'static str) -> PyResult<Bound<'py, PyModule>> {
     use pyo3::types::{PyCFunction, PyDict, PyTuple};
     let m = PyModule::new(py, &format!("{}.{kind}", crate::LIBRARY_NAME))?;
+
     let backend = core::Device::of_type(kind, 0)
         .expect("a device type")
         .backend();
+
     m.add_function(PyCFunction::new_closure(
         py,
         Some(c"device_count"),
         None,
         move |_: &Bound<'_, PyTuple>, _: Option<&Bound<'_, PyDict>>| backend.device_count(),
     )?)?;
+
     m.add_function(PyCFunction::new_closure(
         py,
         Some(c"is_available"),
         None,
         move |_: &Bound<'_, PyTuple>, _: Option<&Bound<'_, PyDict>>| backend.is_available(),
     )?)?;
+
     m.add_function(PyCFunction::new_closure(
         py,
         Some(c"synchronize"),
@@ -218,16 +230,19 @@ fn device_module<'py>(py: Python<'py>, kind: &'static str) -> PyResult<Bound<'py
             Ok(())
         },
     )?)?;
+
     Ok(m)
 }
 
 /// Registers the device class and each device-type submodule (also in `sys.modules`) on `m`.
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let modules = m.py().import("sys")?.getattr("modules")?;
+
     for kind in ["cpu", "cuda", "meta", "mps", "tpu"] {
         let sub = device_module(m.py(), kind)?;
         modules.set_item(sub.name()?, &sub)?;
         m.add(kind, sub)?;
     }
+
     m.add_class::<PyDevice>()
 }

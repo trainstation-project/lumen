@@ -49,6 +49,7 @@ impl Kernels for Loops<'_> {
         let Primitive::Fusion { name, body, .. } = &step.primitive else {
             return Vec::new();
         };
+
         match self.tunable.contains_key(name)
             && codegen::TUNED_ELEMENTS.contains(&step.output.1.numel())
         {
@@ -62,15 +63,20 @@ impl Kernels for Loops<'_> {
         let Primitive::Fusion { name, body, .. } = &step.primitive else {
             unreachable!("a fusion")
         };
+
         let t = &self.tunable[name];
+
         let (kernel, source) =
             codegen::kernel(body, &t.by_value, self.config, &t.views, Some(tuning));
+
         record_launch(&kernel, body, Some(tuning));
         self.sources.insert(kernel.clone(), source);
         let name = kernel.clone();
+
         let encode: Encode = Box::new(move |step, inputs, output, scratch, keep| {
             super::encode_with(step, &name, None, inputs, output, scratch, keep)
         });
+
         Tuned::new(kernel, encode)
     }
 
@@ -118,8 +124,10 @@ pub(super) fn matmul_of(
     let Primitive::Fusion { body, .. } = &step.primitive else {
         return None;
     };
+
     let dot = codegen::gemm_dot(body)?;
     let ty = |v| body.type_of(v);
+
     Some((
         &dot.primitive,
         ty(dot.inputs[0]),
@@ -132,6 +140,7 @@ pub(super) fn matmul_of(
 fn tiled_gemm(step: &Step) -> bool {
     let float = step.output.1.dtype.is_float();
     let whole = step.views.iter().all(Option::is_none);
+
     let tiled = match &step.primitive {
         Primitive::Fusion { name, body, .. } => {
             !name.starts_with(crate::graph::NEURAL_ENGINE)
@@ -140,6 +149,7 @@ fn tiled_gemm(step: &Step) -> bool {
         }
         _ => false,
     };
+
     float && whole && tiled
 }
 
@@ -151,19 +161,24 @@ impl Kernels for Gemms {
         let Some((dot, lhs, rhs, out)) = matmul_of(step) else {
             return Vec::new();
         };
+
         let Primitive::Fusion { body, .. } = &step.primitive else {
             return Vec::new();
         };
+
         let Some(d) = codegen::gemm_dot(body) else {
             return Vec::new();
         };
+
         let epilogue = codegen::gemm_flags(body, d);
         let group = codegen::gemm_group(body, d);
         let dual = codegen::gemm_mpp_pair(body, d);
         let staged = !epilogue.plain() && !dual;
+
         if tiled_gemm(step) && codegen::gemv_config(body).is_some() {
             let (vector_lhs, _) = codegen::gemv_of(body, d).expect("a matrix-vector dot");
             let tiles = codegen::tile_scratch(body).is_some();
+
             return gemm::gemv_configs(vector_lhs)
                 .iter()
                 .filter(|c| {
@@ -173,14 +188,18 @@ impl Kernels for Gemms {
                 .copied()
                 .collect();
         }
+
         let skinny = gemm::skinny(dot, lhs, rhs, out);
         let large = out.numel() >= TUNED_OUTPUTS;
+
         if !tiled_gemm(step) || !(large || skinny) {
             return Vec::new();
         }
+
         // Threadgroup bytes for the per-simdgroup epilogue staging area.
         let stage = |c: &GemmConfig| c.threads / 32 * 64 * 4;
         let halves = epilogue.group > 1 && !epilogue.interleaved;
+
         let mpp_fits = |c: &&GemmConfig| match () {
             _ if dual => c.bn >= 2 * 32,
             _ if staged => {
@@ -188,17 +207,21 @@ impl Kernels for Gemms {
                     true => c.bm,
                     false => c.bn,
                 };
+
                 c.bm * c.bn * 4 + stage(c) <= gemm::MAX_THREADGROUP_BYTES
                     && (!halves || half >= 2 * 32)
             }
             _ => true,
         };
+
         let skinny_fits = |c: &&GemmConfig| {
             let partials = c.threads / (c.bn / c.bk) * (c.bn + 1) * 4;
             epilogue.plain() || partials + 8 * c.bn * 4 + stage(c) <= gemm::MAX_THREADGROUP_BYTES
         };
+
         let mpp =
             large && gemm::mpp_transposes(dot, lhs, rhs, out).is_some() && super::mpp_available();
+
         let mpp: Vec<GemmConfig> = match mpp {
             true => gemm::mpp_configs()
                 .iter()
@@ -207,14 +230,17 @@ impl Kernels for Gemms {
                 .collect(),
             false => Vec::new(),
         };
+
         // Row-tile epilogues only tune between the row-tile config and wide MPP tiles.
         if codegen::tile_scratch(body).is_some() {
             let wide = mpp.iter().filter(|c| c.bn % codegen::ROW_TILE == 0);
+
             return match mpp.is_empty() {
                 true => Vec::new(),
                 false => std::iter::once(&ROW_TILES).chain(wide).copied().collect(),
             };
         }
+
         let skinny: Vec<GemmConfig> = match skinny {
             true => gemm::skinny_configs()
                 .iter()
@@ -223,6 +249,7 @@ impl Kernels for Gemms {
                 .collect(),
             false => Vec::new(),
         };
+
         gemm::configs()
             .iter()
             .chain(&mpp)
@@ -237,18 +264,22 @@ impl Kernels for Gemms {
         let Primitive::Fusion { body, .. } = &step.primitive else {
             unreachable!("a GEMM fusion")
         };
+
         let by_value: Vec<bool> = step
             .inputs
             .iter()
             .map(|(b, _)| matches!(b, Buffer::Scalar(_)))
             .collect();
+
         let (kernel, source) = codegen::gemm_variant(body, &by_value, config, &self.config);
         self.sources.insert(kernel.clone(), source);
         let name = kernel.clone();
+
         let encode: Encode = Box::new(move |step, inputs, output, scratch, keep| {
             let Primitive::Fusion { name: fusion, .. } = &step.primitive else {
                 unreachable!("a GEMM fusion")
             };
+
             super::encode_with(
                 step,
                 fusion,
@@ -259,6 +290,7 @@ impl Kernels for Gemms {
                 keep,
             )
         });
+
         Tuned::new(kernel, encode)
     }
 
@@ -267,6 +299,7 @@ impl Kernels for Gemms {
         let (mpp, sg): (BTreeMap<_, _>, BTreeMap<_, _>) = uncompiled(&mut self.sources)
             .into_iter()
             .partition(|(_, source)| source.contains("matmul_mpp"));
+
         compile_kernels(sg)?;
         compile_mpp_kernels(mpp)
     }
@@ -311,6 +344,7 @@ pub(super) struct Buffers {
 /// Bytes spanned by a tensor of type `ty` under `view`, including the view's offset when `offset` is set.
 fn extent(ty: &TensorType, view: Option<&View>, offset: bool) -> usize {
     let size = ty.dtype.size_of();
+
     match view {
         _ if ty.numel() == 0 => 0,
         None => ty.numel() * size,
@@ -321,6 +355,7 @@ fn extent(ty: &TensorType, view: Option<&View>, offset: bool) -> usize {
                 .zip(&view.strides)
                 .map(|(&d, &s)| (d - 1) * s)
                 .sum();
+
             (last + 1 + if offset { view.offset } else { 0 }) * size
         }
     }
@@ -344,16 +379,19 @@ impl Buffers {
             })
             .map(aligned)
             .collect();
+
         let outputs: Vec<usize> = std::iter::once(&step.output)
             .chain(&step.extra_outputs)
             .enumerate()
             .map(|(k, (_, ty))| extent(ty, step.output_views.get(k).and_then(Option::as_ref), true))
             .map(aligned)
             .collect();
+
         let scratch = aligned(step.scratch.map_or(0, |(_, bytes)| bytes));
         let read: usize = inputs.iter().sum();
         let written: usize = outputs.iter().sum();
         let mut copies = COLD_BYTES.div_ceil(read).clamp(2, MOST_COPIES);
+
         let memory = loop {
             match Scratch::zeroed(read * copies + written + scratch) {
                 Some(memory) => break memory,
@@ -361,26 +399,32 @@ impl Buffers {
                 None => return None,
             }
         };
+
         // Layout: `copies` input sets back to back, then the outputs, then scratch.
         let base = memory.as_ptr();
         let mut at = read * copies;
         let mut outs = Vec::with_capacity(outputs.len());
+
         for size in &outputs {
             outs.push(base.wrapping_add(at));
             at += size;
         }
+
         let copies = (0..copies)
             .map(|c| {
                 let mut at = c * read;
+
                 let ins = inputs.iter().map(|size| {
                     let p = base.wrapping_add(at).cast_const();
                     at += size;
                     p
                 });
+
                 ins.chain(outs[1..].iter().map(|p| p.cast_const()))
                     .collect()
             })
             .collect();
+
         Some(Buffers {
             output: outs[0],
             scratch: base.wrapping_add(at),

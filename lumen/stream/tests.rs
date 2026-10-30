@@ -12,6 +12,7 @@ fn every_present_device_has_a_stream() {
         Device::Mps(0),
         Device::Cuda(0),
     ];
+
     for device in devices.into_iter().filter(|d| d.check().is_ok()) {
         stream_for(device).unwrap().synchronize();
     }

@@ -18,23 +18,28 @@ pub(crate) fn update(x: &TensorType, update: &TensorType, by_value: &[bool]) -> 
         contiguous_strides(&update.shape),
         contiguous_strides(&x.shape),
     );
+
     // Per dimension: the update coordinate of flat index `j` plus the clamped start, times x's stride.
     let terms: Vec<String> = (0..x.shape.len())
         .filter(|&d| x.shape[d] != 1)
         .map(|d| {
             let start = scalar(2 + d, by_value);
             let most = x.shape[d] - update.shape[d];
+
             format!(
                 "((j // {}) % {} + tl.minimum(tl.maximum({start}, 0), {most})) * {}",
                 spans[d], update.shape[d], strides[d]
             )
         })
         .collect();
+
     let at = match terms.is_empty() {
         true => "j".to_string(),
         false => terms.join(" + "),
     };
+
     let params = params(by_value, None, 1);
+
     let source = formatdoc!(
         "
         @triton.jit
@@ -45,6 +50,7 @@ pub(crate) fn update(x: &TensorType, update: &TensorType, by_value: &[bool]) -> 
             STORE(out, {at}, LOAD1(in1, j, mask), mask)
         "
     );
+
     named("update", source)
 }
 
@@ -53,10 +59,12 @@ pub(crate) fn update(x: &TensorType, update: &TensorType, by_value: &[bool]) -> 
 pub(crate) fn scatter_add(x: &TensorType, axis: usize, picks: usize) -> (String, String) {
     let after: usize = x.shape[axis + 1..].iter().product();
     let length = x.shape[axis];
+
     let params = params(&[false; 3], None, 1).replace(
         "    BLOCK_SIZE: tl.constexpr,",
         "    OUTLOAD: tl.constexpr,\n    BLOCK_SIZE: tl.constexpr,",
     );
+
     let source = formatdoc!(
         "
         @triton.jit
@@ -73,6 +81,7 @@ pub(crate) fn scatter_add(x: &TensorType, axis: usize, picks: usize) -> (String,
                 STORE(out, at, value, mask)
         "
     );
+
     named("scatter_add", source)
 }
 
@@ -89,28 +98,36 @@ pub(crate) fn updates(
         contiguous_strides(&update.shape),
         contiguous_strides(&x.shape),
     );
+
     let rank = x.shape.len();
+
     // Element `j`'s coordinates in the update, then its offset in `x` before a start is added.
     let mut code: String = (0..rank)
         .filter(|&d| update.shape[d] != 1)
         .map(|d| format!("    c{d} = (j // {}) % {}\n", spans[d], update.shape[d]))
         .collect();
+
     let coordinate = |d: usize| match update.shape[d] {
         1 => "0".to_string(),
         _ => format!("c{d}"),
     };
+
     let terms: Vec<String> = (0..rank)
         .filter(|&d| update.shape[d] != 1)
         .map(|d| format!("c{d} * {}", strides[d]))
         .collect();
+
     let at = match terms.is_empty() {
         true => "j".to_string(),
         false => terms.join(" + "),
     };
+
     writeln!(code, "    at = {at}").unwrap();
     let chain = crate::graph_compiler::common::updates::overlaps(&x.shape, &update.shape, starts);
+
     for (k, (start, later)) in chain.iter().enumerate() {
         let offset: usize = (0..rank).map(|d| start[d] * strides[d]).sum();
+
         // Elements a later overlapping update writes over are left to it.
         let covered: Vec<String> = later
             .iter()
@@ -122,24 +139,30 @@ pub(crate) fn updates(
                         format!("({c} + {s} >= {t}) & ({c} + {s} < {})", t + update.shape[d])
                     })
                     .collect();
+
                 match inside.is_empty() {
                     true => "(j >= 0)".to_string(),
                     false => format!("({})", inside.join(" & ")),
                 }
             })
             .collect();
+
         let mask = match covered.is_empty() {
             true => "mask".to_string(),
             false => format!("mask & ~({})", covered.join(" | ")),
         };
+
         let k = k + 1;
+
         writeln!(
             code,
             "    STORE(out, at + {offset}, LOAD{k}(in{k}, j, {mask}), {mask})"
         )
         .unwrap();
     }
+
     let params = params(&vec![false; starts.len() + 1], None, 1);
+
     let source = formatdoc!(
         "
         @triton.jit
@@ -149,5 +172,6 @@ pub(crate) fn updates(
             mask = j < n
         {code}"
     );
+
     named("updates", source)
 }

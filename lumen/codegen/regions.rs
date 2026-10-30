@@ -56,19 +56,25 @@ pub(crate) fn gemm_regions<'a>(body: &'a Graph, dot: &Node) -> Option<Vec<Column
     else {
         return None;
     };
+
     let rank = body.type_of(dot.output).shape.len();
+
     let one_free = |side: usize, contracting: &[usize]| {
         body.type_of(dot.inputs[side]).shape.len() == contracting.len() + 1
     };
+
     // batched dots, dots that are graph outputs and scalars never fuse epilogues
     if !lhs_batch.is_empty() || body.outputs().contains(&dot.output) || rank == 0 {
         return None;
     }
+
     // prefer the column axis when the rhs contributes exactly one free dimension, otherwise try the row axis
     let along = |axis: usize| regions_along(body, dot, axis).or_else(|| halves(body, dot, axis));
+
     let columns = one_free(1, rhs_contracting)
         .then(|| along(rank - 1))
         .flatten();
+
     columns.or_else(|| {
         (one_free(0, lhs_contracting) && rank > 1)
             .then(|| along(0))
@@ -80,6 +86,7 @@ pub(crate) fn gemm_regions<'a>(body: &'a Graph, dot: &Node) -> Option<Vec<Column
 fn halves<'a>(body: &'a Graph, dot: &Node, axis: usize) -> Option<Vec<Columns<'a>>> {
     let shape = &body.type_of(dot.output).shape;
     let n = shape[axis];
+
     let half = |node: &Node, start: usize| match &node.primitive {
         Primitive::Slice {
             start_indices,
@@ -91,11 +98,13 @@ fn halves<'a>(body: &'a Graph, dot: &Node, axis: usize) -> Option<Vec<Columns<'a
         }),
         _ => false,
     };
+
     let (a, b) = match readers_of(body, dot.output).as_slice() {
         [a, b] if half(a, 0) && half(b, n / 2) => (*a, *b),
         [a, b] if half(b, 0) && half(a, n / 2) => (*b, *a),
         _ => return None,
     };
+
     n.is_multiple_of(2).then(|| {
         vec![Columns {
             axis,
@@ -112,6 +121,7 @@ fn regions_along<'a>(body: &'a Graph, dot: &Node, axis: usize) -> Option<Vec<Col
     let shape = &body.type_of(dot.output).shape;
     let (rank, n) = (shape.len(), shape[axis]);
     let outputs = body.outputs();
+
     // a slice that keeps every dim but `axis` whole yields its `(start, limit)` on `axis`
     let along = |node: &Node, of: &[usize], axis: usize| match &node.primitive {
         Primitive::Slice {
@@ -123,6 +133,7 @@ fn regions_along<'a>(body: &'a Graph, dot: &Node, axis: usize) -> Option<Vec<Col
             .then(|| (start_indices[axis], limit_indices[axis])),
         _ => None,
     };
+
     // a reshape of `width` columns into `(width / k, k)` whose readers each pick one tuple index
     let group = |tupling: &'a Node, width: usize| -> Option<Region<'a>> {
         let Primitive::Reshape { new_sizes: tuples } = &tupling.primitive else {
@@ -141,34 +152,42 @@ fn regions_along<'a>(body: &'a Graph, dot: &Node, axis: usize) -> Option<Vec<Col
         let mut members: Vec<Option<&Node>> = vec![None; k];
         for member in readers_of(body, tupling.output) {
             let (first, last) = along(member, tuples, axis + 1)?;
+
             if last != first + 1 || members[first].is_some() {
                 return None;
             }
+
             members[first] = Some(member);
         }
         Some(Region::Group(
             members.into_iter().collect::<Option<Vec<_>>>()?,
         ))
     };
+
     let mut regions: Vec<Columns> = Vec::new();
+
     for top in readers_of(body, dot.output) {
         let (start, width, region) = match &top.primitive {
             Primitive::Reshape { .. } => (0, n, group(top, n)?),
             _ => {
                 let (start, limit) = along(top, shape, axis)?;
                 let width = limit - start;
+
                 let region = match readers_of(body, top.output).as_slice() {
                     [r] if matches!(r.primitive, Primitive::Reshape { .. }) => {
                         if outputs.contains(&top.output) {
                             return None;
                         }
+
                         group(r, width)?
                     }
                     _ => Region::Plain(top),
                 };
+
                 (start, width, region)
             }
         };
+
         regions.push(Columns {
             axis,
             offset: start,
@@ -176,19 +195,24 @@ fn regions_along<'a>(body: &'a Graph, dot: &Node, axis: usize) -> Option<Vec<Col
             region,
         });
     }
+
     // regions must tile `0..n` exactly with no gaps or overlaps
     regions.sort_by_key(|c| c.offset);
+
     let covers = regions.first().is_some_and(|c| c.offset == 0)
         && regions
             .windows(2)
             .all(|w| w[0].offset + w[0].width == w[1].offset)
         && regions.last().is_some_and(|c| c.offset + c.width == n);
+
     // only worth a split when some region interleaves members or writes a graph output directly
     let grouped = regions.iter().any(|c| c.k() > 1);
+
     let returned = axis + 1 == rank
         && regions
             .iter()
             .any(|c| c.members().iter().any(|v| outputs.contains(v)));
+
     let one_pair = axis + 1 == rank && regions.len() == 1 && regions[0].k() == 2;
     let windows = one_pair || regions.iter().all(|c| c.width % ROW_COLUMNS == 0);
     (covers && (grouped || returned) && windows).then_some(regions)
@@ -206,6 +230,7 @@ pub(crate) fn readers_of(body: &Graph, v: Var) -> Vec<&Node> {
 /// two-member group along the last axis (e.g. a gated activation).
 pub(crate) fn gemm_pair<'a>(body: &'a Graph, dot: &Node) -> Option<(&'a Node, &'a Node)> {
     let rank = body.type_of(dot.output).shape.len();
+
     match gemm_regions(body, dot)?.as_slice() {
         [
             Columns {
@@ -235,6 +260,7 @@ pub(crate) fn expansion(graph: &Graph, dot: &Node, concat: &Node) -> Option<Expa
     let Primitive::Concatenate { dimension, .. } = concat.primitive else {
         return None;
     };
+
     let Primitive::DotGeneral {
         lhs_batch,
         lhs_contracting,
@@ -243,19 +269,24 @@ pub(crate) fn expansion(graph: &Graph, dot: &Node, concat: &Node) -> Option<Expa
     else {
         return None;
     };
+
     let shape = &graph.type_of(dot.output).shape;
     let rank = shape.len();
+
     let shaped = |of: &[usize]| {
         concat.inputs.len() == 2 && concat.inputs.iter().all(|&v| graph.type_of(v).shape == of)
     };
+
     let tupled = |at: usize| {
         let mut tupled = shape.clone();
         tupled.insert(at, 1);
         tupled
     };
+
     let rows = lhs_batch.is_empty()
         && rank >= 2
         && graph.type_of(dot.inputs[0]).shape.len() == lhs_contracting.len() + 1;
+
     match dimension {
         d if d + 1 == rank && shaped(shape) => Some(Expansion::Columns),
         d if d == rank && shaped(&tupled(rank)) => Some(Expansion::Pairs),
@@ -270,6 +301,7 @@ pub(crate) fn gemm_expanded(body: &Graph, dot: &Node) -> Option<([Var; 2], Expan
     let out = body.outputs()[0];
     let concat = body.nodes().iter().find(|n| n.output == out)?;
     let layout = expansion(body, dot, concat)?;
+
     match concat.inputs.as_slice() {
         &[a, b] if gemm_pair(body, dot).is_none() => Some(([a, b], layout)),
         _ => None,

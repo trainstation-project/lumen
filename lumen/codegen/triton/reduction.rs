@@ -23,11 +23,13 @@ impl Tile {
     ) -> Self {
         // Lanes go along the minor axis when the innermost non-unit dim is reduced, for coalesced loads.
         let rows = shape.iter().rposition(|&n| n != 1).is_none_or(reduced);
+
         let most = match (rows, split) {
             (true, false) => ROW_LANES,
             (true, true) => SPLIT_ROW_LANES,
             (false, _) => COLUMN_LANES,
         };
+
         Tile {
             lanes: count.next_power_of_two().min(most),
             rows,
@@ -84,6 +86,7 @@ pub(crate) fn combine(sum: bool, dtype: DType) -> &'static str {
 /// max propagates NaN, a bool max is `or`).
 pub(crate) fn reduce_along(x: &str, axis: usize, sum: bool, dtype: DType, combine: &str) -> String {
     let t = triton_type(dtype).expect("a Triton dtype");
+
     match (sum, dtype) {
         (true, d) if d != DType::Bool => format!("tl.sum({x}, {axis}, dtype={t})"),
         (false, d) if !d.is_float() && d != DType::Bool => format!("tl.max({x}, {axis})"),
@@ -117,21 +120,26 @@ pub(crate) fn scan(
     let (lanes, outputs, axis) = (tile.lanes, tile.outputs(), tile.axis());
     // Offset of each output's line: outer index times the axis span plus the inner index.
     let line = format!("(o // {inner}) * {} + o % {inner}", length * inner);
+
     let step = match reverse {
         true => format!("({} - k) * {inner}", length.max(1) - 1),
         false => format!("k * {inner}"),
     };
+
     let (j, mask, carried) = (
         tile.join("jo", "jk", "+"),
         tile.join("(o < n)", &format!("(k < {length})"), "&"),
         tile.spread("carry"),
     );
+
     let element = match x.dtype == a {
         true => "LOAD0(in0, j, mask)".to_string(),
         false => format!("LOAD0(in0, j, mask).to({acc})"),
     };
+
     let params = params(&[false], None, 1);
     let total = reduce_along("x", axis, true, a, "NAME_combine");
+
     let source = formatdoc!(
         "
         @triton.jit
@@ -156,6 +164,7 @@ pub(crate) fn scan(
                 carry = carry + {total}
         "
     );
+
     let (name, source) = named("scan", source);
     (name, source, lanes)
 }

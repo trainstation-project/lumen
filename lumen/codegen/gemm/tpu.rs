@@ -34,11 +34,14 @@ impl Epilogue {
     /// Reads the epilogue of the GEMM fusion `body`, returning it with the body's dot node.
     pub(crate) fn of(body: &Graph) -> (Epilogue, &Node) {
         let all = body.nodes();
+
         let at = all
             .iter()
             .position(|n| matches!(n.primitive, Primitive::DotGeneral { .. }))
             .expect("a dot");
+
         let dot = &all[at];
+
         // A concatenated lhs comes from horizontally fused GEMMs sharing their rhs.
         let (lhs, lhs_axis) = match all[..at].iter().find(|n| n.output == dot.inputs[0]) {
             Some(Node {
@@ -54,20 +57,25 @@ impl Epilogue {
             ),
             _ => (Vec::new(), 0),
         };
+
         // Inputs after the lhs pieces and the rhs are the epilogue's extra operands.
         let first = lhs.len().max(1) + 1;
         let extras = &body.inputs()[first..];
         let shape = &body.type_of(dot.output).shape;
+
         let slices: Vec<&Node> = all[at + 1..]
             .iter()
             .filter(|n| matches!(n.primitive, Primitive::Slice { .. }) && n.inputs[0] == dot.output)
             .collect();
+
         let results = slices.len().max(1);
         let mut value: HashMap<Var, usize> = HashMap::from([(dot.output, 0)]);
         let mut member: HashMap<Var, usize> = HashMap::new();
+
         for (k, &v) in extras.iter().enumerate() {
             value.insert(v, results + k);
         }
+
         // The split axis is the one along which the first slice is narrower than the dot output.
         let axis = slices
             .first()
@@ -81,13 +89,16 @@ impl Epilogue {
                     .unwrap_or(shape.len() - 1),
                 _ => unreachable!("a slice"),
             });
+
         let (mut widths, mut nodes) = (Vec::new(), Vec::new());
         let mut readers: HashMap<Var, usize> = HashMap::new();
         let mut together = false;
+
         if slices.is_empty() {
             widths.push(shape[axis]);
             member.insert(dot.output, 0);
         }
+
         for node in &all[at + 1..] {
             if let Primitive::Slice {
                 start_indices,
@@ -102,8 +113,10 @@ impl Epilogue {
                 continue;
             }
             let args: Vec<usize> = node.inputs.iter().map(|v| value[v]).collect();
+
             nodes.push(crate::codegen::tpu::node(&node.primitive, &args));
             value.insert(node.output, results + extras.len() + nodes.len() - 1);
+
             // Track which piece each value comes from to tell whether pieces stay independent.
             let mut of: Vec<usize> = node
                 .inputs
@@ -111,17 +124,21 @@ impl Epilogue {
                 .filter_map(|v| member.get(v))
                 .copied()
                 .collect();
+
             of.sort_unstable();
             of.dedup();
             together |= of.len() > 1;
+
             if let Some(&p) = of.first() {
                 member.insert(node.output, p);
+
                 for &v in &node.inputs {
                     together |= readers.get(&v).is_some_and(|&q| q != p) && extras.contains(&v);
                     readers.entry(v).or_insert(p);
                 }
             }
         }
+
         let epilogue = Epilogue {
             lhs,
             lhs_axis,
@@ -132,6 +149,7 @@ impl Epilogue {
                 .iter()
                 .map(|v| {
                     let ty = body.type_of(*v);
+
                     (
                         ty.dtype,
                         ty.shape.is_empty(),
@@ -146,6 +164,7 @@ impl Epilogue {
                 .map(|v| (value[v], member[v], body.type_of(*v).dtype))
                 .collect(),
         };
+
         (epilogue, dot)
     }
 
@@ -192,26 +211,33 @@ fn form(p: &Primitive, lhs: &[usize], rhs: &[usize]) -> Result<Form, String> {
     else {
         unreachable!("a dot_general's form")
     };
+
     let run = |dims: &[usize], start: usize| dims.iter().enumerate().all(|(i, &d)| d == start + i);
     let nb = lhs_batch.len();
     let product = |dims: &[usize]| dims.iter().product::<usize>();
+
     if !(run(lhs_batch, 0) && run(rhs_batch, 0)) {
         return Err("dot_general on TPU: the operands' batch dimensions must lead them".into());
     }
+
     let lhs_transposed = lhs.len() == nb + 2 && *lhs_contracting == [nb];
+
     if (*lhs_contracting != [lhs.len() - 1] && !lhs_transposed) || lhs.len() < nb + 2 {
         return Err(
             "dot_general on TPU: the lhs must be batch, free then one contracting dimension, or batch, contracting then free"
                 .into(),
         );
     }
+
     if rhs.len() != nb + 2 || rhs_contracting.len() != 1 {
         return Err(
             "dot_general on TPU: the rhs must be batch, then one contracting and one free dimension"
                 .into(),
         );
     }
+
     let transposed = rhs_contracting[0] == nb + 1;
+
     Ok(Form {
         batch: product(&lhs[..nb]),
         lead: product(&lhs[nb..lhs.len() - 2]),
@@ -251,12 +277,15 @@ fn footprint(
 ) -> usize {
     let operands = parts * bm * bk + members * bk * bn;
     let mut bytes = 2 * operands * operand.size_of() + 2 * bm * bn * streamed;
+
     if kb > 1 || parts > 1 {
         bytes += members * bm * bn * 4;
     }
+
     if operand == DType::F32 {
         bytes += operands * 4;
     }
+
     bytes
 }
 
@@ -282,55 +311,70 @@ pub(crate) fn spec(
     epilogue: Option<Epilogue>,
 ) -> Result<(String, String), String> {
     let out = &step.output.1;
+
     let Primitive::DotGeneral { accum_dtype, .. } = *dot else {
         unreachable!("a dot_general step")
     };
+
     let f = form(dot, &lhs.shape, &rhs.shape)?;
     let e = epilogue.unwrap_or_else(|| Epilogue::plain(f.n, out.dtype));
+
     let lhs_k = !e.lhs.is_empty()
         && e.lhs_axis
             == match f.lhs_transposed {
                 true => lhs.shape.len() - 2,
                 false => lhs.shape.len() - 1,
             };
+
     let lhs_m = !e.lhs.is_empty() && !lhs_k;
+
     let gcd_of = |n: usize, parts: &[usize], on: bool| match on {
         true => parts.iter().fold(n, |g, &w| gcd(g, w)),
         false => n,
     };
+
     let windows: Vec<Option<(usize, usize)>> =
         (0..e.outputs.len()).map(|o| window(step, o)).collect();
+
     if e.rows && windows.iter().any(Option::is_some) {
         return Err("dot_general on TPU: members of rows written into a wider buffer".into());
     }
+
     // Blocks must divide every member and window start so none straddles two members.
     let starts: Vec<usize> = windows.iter().flatten().map(|w| w.1).collect();
     let unit_n = gcd_of(gcd_of(f.n, &e.widths, !e.rows), &starts, true);
     let whole_m = gcd_of(gcd_of(f.m, &e.widths, e.rows), &e.lhs, lhs_m);
     let whole_k = gcd_of(f.k, &e.lhs, lhs_k);
+
     if lhs.dtype != rhs.dtype || accum_dtype != DType::F32 {
         return Err(format!(
             "dot_general on TPU: operands of one dtype accumulating in float32, got {} · {} in {}",
             lhs.dtype, rhs.dtype, accum_dtype
         ));
     }
+
     let streams: Vec<DType> = e
         .outputs
         .iter()
         .map(|o| o.2)
         .chain(e.inputs.iter().filter(|i| !i.1).map(|i| i.0))
         .collect();
+
     let values = match e.nodes.is_empty() {
         true => 0,
         false => 4,
     };
+
     let streamed: usize = streams.iter().map(|d| d.size_of()).sum::<usize>() + values;
     let mut unit_m = tile_rows(lhs.dtype, "the operands")?.max(tile_rows(value, "the output")?);
+
     for &d in &streams {
         unit_m = unit_m.max(Layout::new(d, &[1, 1])?.rows);
     }
+
     let (mut cap_m, mut cap_n, mut cap_k) = caps(lhs.dtype, whole_k);
     let mut blocks;
+
     // Shrink the K, then N, then M caps until the blocks fit in VMEM.
     loop {
         blocks = (
@@ -338,9 +382,11 @@ pub(crate) fn spec(
             block(unit_n, 128, cap_n),
             block(whole_k, 128, cap_k),
         );
+
         let (Some(bm), Some(bn), Some(bk)) = blocks else {
             break;
         };
+
         if footprint(
             bm,
             bn,
@@ -356,6 +402,7 @@ pub(crate) fn spec(
         {
             break;
         }
+
         match (cap_m, cap_n, cap_k) {
             (_, _, k) if k > 512 => cap_k = k / 2,
             (_, n, _) if n > 512 => cap_n = n / 2,
@@ -363,15 +410,19 @@ pub(crate) fn spec(
             _ => break,
         }
     }
+
     // Halve wide N blocks when the grid would have fewer than four steps.
     while let (Some(bm), Some(bn), Some(bk)) = blocks {
         let steps = f.batch * f.lead * (f.m / bm) * (f.n / bn) * (f.k / bk);
+
         if steps >= 4 || cap_n <= 256 || bn < 512 {
             break;
         }
+
         cap_n = bn / 2;
         blocks.1 = block(unit_n, 128, cap_n);
     }
+
     let (Some(bm), Some(bn), Some(bk)) = blocks else {
         let failed = [
             (
@@ -387,21 +438,25 @@ pub(crate) fn spec(
                 format!("K ({}) at most {cap_k} or a multiple of 128", f.k),
             ),
         ];
+
         let failed: Vec<String> = failed
             .into_iter()
             .filter_map(|(b, why)| b.is_none().then_some(why))
             .collect();
+
         return Err(format!(
             "dot_general on TPU of {} needs {}",
             lhs.dtype,
             failed.join(" and ")
         ));
     };
+
     let inputs_spec: Vec<String> = e
         .inputs
         .iter()
         .map(|(d, scalar, p)| format!("[\"{}\", {scalar}, {p}]", d.full_name()))
         .collect();
+
     let outputs_spec: Vec<String> = e
         .outputs
         .iter()
@@ -411,6 +466,7 @@ pub(crate) fn spec(
             format!("[{v}, {p}, \"{}\", {whole}, {start}]", d.full_name())
         })
         .collect();
+
     let spec = format!(
         "\"batch\": {}, \"lead\": {}, \"m\": {}, \"n\": {}, \"k\": {}, \"transposed\": {}, \"lhs_transposed\": {}, \"lhs\": {:?}, \"lhs_k\": {lhs_k}, \"together\": {}, \"split_rows\": {}, \
          \"operands\": \"{}\", \"value\": \"{}\", \"blocks\": [{bm}, {bn}, {bk}], \"widths\": {:?}, \
@@ -432,6 +488,7 @@ pub(crate) fn spec(
         e.nodes.join(", "),
         outputs_spec.join(", "),
     );
+
     Ok((
         format!("matmul_{}_f32_{}_{bm}x{bn}x{bk}", lhs.dtype, value),
         spec,
@@ -450,6 +507,7 @@ impl GemmCodegen for Tpu {
     fn gemm(body: &Graph, dot: &Node, _: &[bool], step: &Step) -> Result<(String, String), String> {
         let (epilogue, _) = Epilogue::of(body);
         let ty = |v: Var| body.type_of(v);
+
         spec(
             step,
             &dot.primitive,

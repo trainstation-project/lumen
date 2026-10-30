@@ -17,6 +17,7 @@ fn constant(k: &mut Kernel, v: i64) -> usize {
         fill_value: Scalar::Int(v),
         dtype: DType::I32,
     };
+
     k.apply(full, &[]).unwrap()
 }
 
@@ -24,12 +25,15 @@ fn constant(k: &mut Kernel, v: i64) -> usize {
 #[test]
 fn a_copy_kernel_lowers_to_a_dma_at_a_scalar_row() {
     let mut k = Kernel::new(1, Some(4), 64);
+
     let [scalars, host, _, result] = k.params()[..] else {
         unreachable!()
     };
+
     let sem = k.alloc(Type::Semaphore(vec![])).unwrap();
     let zero = constant(&mut k, 0);
     let row = k.load(scalars, &[zero]).unwrap();
+
     let to = k
         .slice(
             result,
@@ -39,9 +43,11 @@ fn a_copy_kernel_lowers_to_a_dma_at_a_scalar_row() {
             vec![false; 3],
         )
         .unwrap();
+
     k.dma(host, to, sem, false).unwrap();
     k.dma(host, to, sem, true).unwrap();
     let text = lower(&k, "copy").unwrap();
+
     for expected in [
         "{stable_mosaic.version = 17 : i64}",
         "^bb0(%arg0: memref<1xi32, #tpu.memory_space<smem>>, %arg1: memref<4x1x128xi32, \
@@ -71,19 +77,23 @@ fn a_loop_accumulates_a_matmul_in_vmem() {
     let (i, carried) = k.begin_for(lo, hi, &[zero]).unwrap();
     let first = k.apply(Primitive::Eq, &[i, carried[0]]).unwrap();
     k.begin_if(first).unwrap();
+
     let zeros = Primitive::Full {
         shape: vec![8, 256],
         fill_value: Scalar::Float(0.0),
         dtype: DType::F32,
     };
+
     let zeros = k.apply(zeros, &[]).unwrap();
     k.store(acc, zeros, &[]).unwrap();
     k.end_if(&[]).unwrap();
+
     let (xv, yv, av) = (
         k.load(x, &[]).unwrap(),
         k.load(y, &[]).unwrap(),
         k.load(acc, &[]).unwrap(),
     );
+
     let dot = Primitive::DotGeneral {
         lhs_contracting: vec![1],
         rhs_contracting: vec![1],
@@ -92,6 +102,7 @@ fn a_loop_accumulates_a_matmul_in_vmem() {
         accum_dtype: DType::F32,
         output_dtype: DType::F32,
     };
+
     let product = k.apply(dot, &[xv, yv]).unwrap();
     let sum = k.apply(Primitive::Add, &[av, product]).unwrap();
     k.store(acc, sum, &[]).unwrap();
@@ -99,6 +110,7 @@ fn a_loop_accumulates_a_matmul_in_vmem() {
     assert_eq!(out.len(), 1);
     assert_eq!(*k.type_of(out[0]), Type::Value(i32_scalar()));
     let text = lower(&k, "matmul").unwrap();
+
     for expected in [
         "= \"stable_mosaic.scf.for\"(",
         "^bb0(%v",
@@ -119,21 +131,26 @@ fn a_loop_accumulates_a_matmul_in_vmem() {
 #[test]
 fn bit_ops_unpack_a_bfloat16_word() {
     let mut k = Kernel::new(1, None, 64);
+
     let words = k
         .alloc(Type::Ref(
             TensorType::new(DType::U32, &[8, 128]),
             Space::Vmem,
         ))
         .unwrap();
+
     let w = k.load(words, &[]).unwrap();
+
     let sixteen = Primitive::Full {
         shape: vec![8, 128],
         fill_value: Scalar::Int(16),
         dtype: DType::U32,
     };
+
     let sixteen = k.apply(sixteen, &[]).unwrap();
     let low = k.bits(Op::ShiftLeft, &[w, sixteen]).unwrap();
     let float = k.bits(Op::Bitcast(DType::F32), &[low]).unwrap();
+
     let narrow = k
         .apply(
             Primitive::Cast {
@@ -142,11 +159,14 @@ fn bit_ops_unpack_a_bfloat16_word() {
             &[float],
         )
         .unwrap();
+
     assert_eq!(
         *k.type_of(narrow),
         Type::Value(TensorType::new(DType::BF16, &[8, 128]))
     );
+
     let text = lower(&k, "unpack").unwrap();
+
     for expected in [
         "{value = dense<16> : vector<8x128xi32>}",
         "\"stable_mosaic.arith.shli\"(",
@@ -161,22 +181,29 @@ fn bit_ops_unpack_a_bfloat16_word() {
 #[test]
 fn constants_are_exact() {
     let mut k = Kernel::new(1, None, 64);
+
     let full = |v, dtype| Primitive::Full {
         shape: vec![],
         fill_value: v,
         dtype,
     };
+
     k.apply(full(Scalar::Int(0xFFFF0000), DType::U32), &[])
         .unwrap();
+
     k.apply(full(Scalar::Float(0.1), DType::F32), &[]).unwrap();
+
     k.apply(full(Scalar::Float(f64::NEG_INFINITY), DType::F32), &[])
         .unwrap();
+
     let text = lower(&k, "constants").unwrap();
     assert!(text.contains("{value = -65536 : i32}"), "{text}");
+
     assert!(
         text.contains("{value = 1.00000000000000006e-1 : f32}"),
         "{text}"
     );
+
     assert!(text.contains("{value = 0xFF800000 : f32}"), "{text}");
 }
 
@@ -184,13 +211,16 @@ fn constants_are_exact() {
 #[test]
 fn kernels_refuse_what_tpus_cannot_do() {
     let mut k = Kernel::new(1, None, 64);
+
     let [scalars, memory, _] = k.params()[..] else {
         unreachable!()
     };
+
     assert!(k.load(memory, &[]).is_err());
     assert!(k.load(scalars, &[]).is_err());
     let hbm = Type::Ref(TensorType::new(DType::F32, &[8, 128]), Space::Any);
     assert!(k.alloc(hbm).is_err());
+
     assert!(
         k.slice(
             memory,
@@ -201,11 +231,13 @@ fn kernels_refuse_what_tpus_cannot_do() {
         )
         .is_err()
     );
+
     let t = Primitive::Full {
         shape: vec![],
         fill_value: Scalar::Bool(true),
         dtype: DType::Bool,
     };
+
     let t = k.apply(t, &[]).unwrap();
     k.begin_if(t).unwrap();
     assert!(lower(&k, "open").is_err());
@@ -219,33 +251,42 @@ fn a_sparse_core_kernel_gathers_rows_by_their_offsets() {
     let view = TensorType::new(DType::U32, &[64, 256]);
     let offsets = TensorType::new(DType::I32, &[16]);
     let mut k = Kernel::sparse_core(&[view.clone(), offsets.clone(), view], [2, 16]);
+
     let [core, _, _, src, region] = k.params()[..] else {
         unreachable!()
     };
+
     let at = k
         .alloc(Type::Ref(TensorType::new(DType::I32, &[8]), Space::Vmem))
         .unwrap();
+
     let rows = k
         .alloc(Type::Ref(
             TensorType::new(DType::U32, &[8, 256]),
             Space::Vmem,
         ))
         .unwrap();
+
     let sem = k.alloc(Type::Semaphore(vec![])).unwrap();
     let eight = constant(&mut k, 8);
     let start = k.apply(Primitive::Mul, &[core, eight]).unwrap();
+
     let window = k
         .slice(src, vec![None], &[start], vec![8], vec![false])
         .unwrap();
+
     k.dma(window, at, sem, false).unwrap();
     k.dma(window, at, sem, true).unwrap();
     k.indirect_dma(region, rows, at, sem, false).unwrap();
     k.indirect_dma(region, rows, at, sem, true).unwrap();
+
     assert!(
         k.indirect_dma(rows, rows, at, sem, false).is_err(),
         "between HBM rows and VMEM"
     );
+
     let text = lower(&k, "gather").unwrap();
+
     for expected in [
         "^bb0(%arg0: i32, %arg1: i32, %arg2: memref<64x256xi32, #tpu.memory_space<hbm>>, %arg3: \
          memref<16xi32, #tpu.memory_space<hbm>>, %arg4: memref<64x256xi32, #tpu.memory_space<hbm>>,",
@@ -265,21 +306,28 @@ fn a_sparse_core_kernel_gathers_rows_by_their_offsets() {
 fn an_integer_power_takes_its_sign_from_the_exponents_parity() {
     let mut k = Kernel::new(1, None, 64);
     let shape = [8, 128];
+
     let base = k
         .alloc(Type::Ref(TensorType::new(DType::BF16, &shape), Space::Vmem))
         .unwrap();
+
     let exponent = k
         .alloc(Type::Ref(TensorType::new(DType::I32, &shape), Space::Vmem))
         .unwrap();
+
     let (x, e) = (k.load(base, &[]).unwrap(), k.load(exponent, &[]).unwrap());
+
     let y = k
         .apply(Primitive::Binary(crate::graph::BinaryOp::Pow), &[x, e])
         .unwrap();
+
     assert_eq!(
         *k.type_of(y),
         Type::Value(TensorType::new(DType::BF16, &shape))
     );
+
     let text = lower(&k, "power").unwrap();
+
     for expected in [
         "\"stable_mosaic.arith.sitofp\"(%t3) : (vector<8x128xi32>) -> vector<8x128xf32>",
         "\"stable_mosaic.math.absf\"(",
@@ -290,5 +338,6 @@ fn an_integer_power_takes_its_sign_from_the_exponents_parity() {
     ] {
         assert!(text.contains(expected), "{expected}\nin\n{text}");
     }
+
     assert!(!text.contains("i32>) -> vector<8x128xbf16>"), "{text}");
 }

@@ -95,6 +95,7 @@ fn record_function_ranges_nest() {
         let _outer = record_function("outer");
         let _inner = record_function("inner");
     });
+
     let (outer, inner) = (one(&p, "outer"), one(&p, "inner"));
     assert_eq!(outer.kind, EventKind::UserRange);
     assert_eq!(inner.parent, Some(outer.id));
@@ -103,10 +104,12 @@ fn record_function_ranges_nest() {
     let rows = p.key_averages(false);
     let (o, i) = (row(&rows, "outer"), row(&rows, "inner"));
     assert_eq!(o.cpu_time_total, outer.duration_ns());
+
     assert_eq!(
         o.self_cpu_time_total,
         outer.duration_ns() - inner.duration_ns()
     );
+
     assert_eq!(i.self_cpu_time_total, i.cpu_time_total);
 }
 
@@ -121,6 +124,7 @@ fn guards_dropped_out_of_order_are_tolerated() {
         drop(b);
         drop(c);
     });
+
     assert_eq!(one(&p, "c").parent, Some(one(&p, "b").id));
     assert!(STACK.with(|s| s.borrow().is_empty()));
 }
@@ -132,6 +136,7 @@ fn tensor_ops_are_recorded_nested_like_pytorch() {
         let t = Tensor::zeros(&[2, 3], DType::F32);
         t.select(0, 1).fill_(1.0);
     });
+
     let zeros = one(&p, "lumen::zeros");
     assert_eq!(zeros.kind, EventKind::Op);
     assert_eq!(one(&p, "lumen::empty").parent, Some(zeros.id));
@@ -156,7 +161,9 @@ fn types_are_recorded_only_with_record_shapes() {
                 let _ = Tensor::zeros(&[2, 3], DType::I32).reshape(&[3, 2]);
             },
         );
+
         let (zeros, reshape) = (one(&p, "lumen::zeros"), one(&p, "lumen::reshape"));
+
         (
             zeros.inputs.clone(),
             zeros.outputs.clone(),
@@ -164,7 +171,9 @@ fn types_are_recorded_only_with_record_shapes() {
             reshape.outputs.clone(),
         )
     };
+
     let ty = |shape: &[usize]| TensorType::new(DType::I32, shape);
+
     assert_eq!(
         types(true),
         (
@@ -174,6 +183,7 @@ fn types_are_recorded_only_with_record_shapes() {
             vec![ty(&[3, 2])]
         )
     );
+
     assert_eq!(types(false), (vec![], vec![], vec![], vec![]));
 }
 
@@ -185,7 +195,9 @@ fn device_events_have_their_ops_types() {
         record_shapes: true,
         ..cpu()
     };
+
     let ty = |shape: &[usize]| TensorType::new(DType::F16, shape);
+
     let p = profile(config, || {
         let mut op = record_op("lumen::matmul", || vec![ty(&[2, 3]), ty(&[3, 4])]);
         op.outputs(|| vec![ty(&[2, 4])]);
@@ -193,22 +205,27 @@ fn device_events_have_their_ops_types() {
         let t = now_ns();
         record_gpu("matmul_kernel", Device::Cuda(0), t, t + 1000);
     });
+
     let kernel = one(&p, "matmul_kernel");
     assert_eq!(kernel.inputs, [ty(&[2, 3]), ty(&[3, 4])]);
     assert_eq!(kernel.outputs, [ty(&[2, 4])]);
     assert_eq!(kernel.accum, [DType::F32]);
     let trace = p.chrome_trace();
+
     let line = trace
         .split("},{")
         .find(|e| e.contains("\"cat\":\"kernel\""))
         .expect("the kernel's event");
+
     assert!(line.contains("\"Accum type\":[\"f32\"]"), "{line}");
+
     let tensors = concat!(
         "\"Tensors\":[",
         "{\"tensor\":\"input 0\",\"dtype\":\"f16\",\"shape\":\"[2, 3]\",\"strides\":\"\"},",
         "{\"tensor\":\"input 1\",\"dtype\":\"f16\",\"shape\":\"[3, 4]\",\"strides\":\"\"},",
         "{\"tensor\":\"output 0\",\"dtype\":\"f16\",\"shape\":\"[2, 4]\",\"strides\":\"\"}]"
     );
+
     assert!(trace.contains(tensors), "{trace}");
 }
 
@@ -219,28 +236,36 @@ fn rows_group_by_input_shape_with_their_shapes_and_strides() {
         record_shapes: true,
         ..cpu()
     };
+
     let ty = |shape: &[usize]| TensorType::new(DType::BF16, shape);
+
     let p = profile(config, || {
         for (shape, strides) in [([2, 3], [3, 1]), ([2, 3], [3, 1]), ([4, 3], [1, 4])] {
             let mut op = record_op("lumen::matmul", || vec![ty(&shape)]);
             op.strides(|| (vec![strides.to_vec()], vec![]));
         }
     });
+
     let rows = p.key_averages(true);
+
     let matmuls: Vec<(&str, &str, u64)> = rows
         .iter()
         .filter(|r| r.name == "lumen::matmul")
         .map(|r| (r.input_shapes.as_str(), r.input_strides.as_str(), r.count))
         .collect();
+
     assert_eq!(
         matmuls,
         [("bf16[2,3]", "[3, 1]", 2), ("bf16[4,3]", "[1, 4]", 1)]
     );
+
     assert_eq!(row(&p.key_averages(false), "lumen::matmul").count, 3);
     let table = p.table(None, None, true);
+
     for cell in ["Input Shapes", "Input Strides", "bf16[4,3]", "[1, 4]"] {
         assert!(table.contains(cell), "missing {cell:?} in\n{table}");
     }
+
     assert!(!p.table(None, None, false).contains("Input Shapes"));
 }
 
@@ -257,6 +282,7 @@ fn without_the_cpu_activity_no_ops_are_recorded() {
             let _ = Tensor::zeros(&[4], DType::F32);
         },
     );
+
     assert!(p.events().iter().all(|e| e.kind == EventKind::Memory));
     assert_eq!(p.events().len(), 2, "one allocation, one free");
 }
@@ -267,19 +293,23 @@ fn events_on_other_threads_carry_their_own_thread_id() {
     let _lock = exclusive();
     start(cpu()).unwrap();
     let here = thread_id();
+
     let there = std::thread::spawn(|| {
         let _r = record_function("on another thread");
         thread_id()
     })
     .join()
     .unwrap();
+
     let p = stop().unwrap();
     assert_ne!(here, there);
+
     let e = p
         .events()
         .iter()
         .find(|e| e.name == "on another thread")
         .unwrap();
+
     assert_eq!(e.thread, there);
     assert!(p.for_thread(here).events().iter().all(|e| e.thread == here));
 }
@@ -290,6 +320,7 @@ fn cpu_allocations_and_frees_are_attributed_to_their_ops() {
     let p = profile(with_memory(), || {
         drop(Tensor::zeros(&[2, 3], DType::F32));
     });
+
     let memory = named(&p, "[memory]");
     assert_eq!(memory.len(), 2);
     let (alloc, free) = (memory[0], memory[1]);
@@ -300,14 +331,17 @@ fn cpu_allocations_and_frees_are_attributed_to_their_ops() {
     assert_eq!(free.parent, None, "freed outside any op");
     let rows = p.key_averages(false);
     let (empty, zeros) = (row(&rows, "lumen::empty"), row(&rows, "lumen::zeros"));
+
     assert_eq!(
         (empty.self_cpu_memory_usage, empty.cpu_memory_usage),
         (24, 24)
     );
+
     assert_eq!(
         (zeros.self_cpu_memory_usage, zeros.cpu_memory_usage),
         (0, 24)
     );
+
     assert!(
         rows.iter().all(|r| r.name != "[memory]"),
         "memory is not a row"
@@ -340,17 +374,23 @@ fn region_reports_allocations_with_its_totals() {
     let reserve = |n| crate::CpuAllocator.allocate(n);
     let first = region.take(1, reserve, || {});
     region.give(first, 1);
+
     let p = profile(with_memory(), || {
         let block = region.take(100, reserve, || {});
         region.give(block, 100);
     });
+
     let base = region.base().expect("reserved above");
+
     unsafe { crate::CpuAllocator.deallocate(base, 2 << 20) };
+
     let memory: Vec<&Event> = named(&p, "[memory]")
         .into_iter()
         .filter(|e| e.device == Device::Cpu(0))
         .collect();
+
     assert_eq!(memory.len(), 2, "{memory:#?}");
+
     assert_eq!(
         (
             memory[0].bytes,
@@ -359,6 +399,7 @@ fn region_reports_allocations_with_its_totals() {
         ),
         (100, 100, 2 << 20)
     );
+
     assert_eq!(
         (
             memory[1].bytes,
@@ -376,6 +417,7 @@ fn device_work_is_attributed_to_the_issuing_op() {
         activities: vec![Activity::Cpu, Activity::Cuda],
         ..cpu()
     };
+
     let p = profile(config, || {
         let _outer = record_function("outer");
         let _op = record_function("op");
@@ -383,28 +425,34 @@ fn device_work_is_attributed_to_the_issuing_op() {
         record_gpu("Memcpy HtoD", Device::Cuda(0), t, t + 1000);
         record_gpu("Memcpy HtoD", Device::Mps(0), t, t + 1000);
     });
+
     let gpu = named(&p, "Memcpy HtoD");
     assert_eq!(gpu.len(), 1);
     assert_eq!(gpu[0].kind, EventKind::Gpu);
     assert_eq!(gpu[0].parent, Some(one(&p, "op").id));
     let rows = p.key_averages(false);
+
     let (op, outer, copy) = (
         row(&rows, "op"),
         row(&rows, "outer"),
         row(&rows, "Memcpy HtoD"),
     );
+
     assert_eq!(
         (op.self_device_time_total, op.device_time_total),
         (1000, 1000)
     );
+
     assert_eq!(
         (outer.self_device_time_total, outer.device_time_total),
         (0, 1000)
     );
+
     assert_eq!(
         (copy.self_device_time_total, copy.cpu_time_total),
         (1000, 0)
     );
+
     assert!(copy.is_device_event && !op.is_device_event);
     let table = p.table(None, None, false);
     assert!(table.contains("Self CUDA time total: 1.000us"), "{table}");
@@ -420,6 +468,7 @@ fn device_work_needs_its_activity() {
         let t = now_ns();
         record_gpu("Memset", Device::Cuda(0), t, t + 10);
     });
+
     assert!(named(&p, "Memset").is_empty());
 }
 
@@ -431,13 +480,16 @@ fn table_has_pytorchs_columns_and_honors_sort_and_limit() {
         profile_memory: true,
         record_shapes: false,
     };
+
     let p = profile(config, || {
         let _big = record_function("big");
         drop(Tensor::zeros(&[1024], DType::F32));
         let t = now_ns();
         record_gpu("Memset", Device::Cuda(0), t, t + 5000);
     });
+
     let table = p.table(None, None, false);
+
     for column in [
         "Name",
         "Self CPU %",
@@ -455,20 +507,24 @@ fn table_has_pytorchs_columns_and_honors_sort_and_limit() {
     ] {
         assert!(table.contains(column), "missing {column:?} in\n{table}");
     }
+
     assert!(table.contains("big") && table.contains("lumen::zeros") && table.contains("Memset"));
     assert!(table.contains("Self CPU time total:") && table.contains("Self CUDA time total:"));
     assert!(table.contains("4.00 Kb"), "zeros(1024) of f32:\n{table}");
+
     assert!(
         !table.contains("CUDA Mem"),
         "only CPU memory here:\n{table}"
     );
 
     let limited = p.table(Some(SortBy::DeviceTimeTotal), Some(2), false);
+
     let first_cells: Vec<&str> = limited
         .lines()
         .filter_map(|l| l.split_whitespace().next())
         .filter(|&c| c == "big" || c == "Memset" || c == "lumen::zeros")
         .collect();
+
     assert_eq!(
         first_cells,
         ["big", "Memset"],
@@ -482,6 +538,7 @@ fn cpu_only_tables_omit_device_and_memory_columns() {
     let p = profile(cpu(), || {
         let _r = record_function("r");
     });
+
     let table = p.table(Some(SortBy::CpuTimeTotal), None, false);
     assert!(table.contains("Self CPU"));
     assert!(!table.contains("CUDA") && !table.contains("Mem"), "{table}");
@@ -494,14 +551,17 @@ fn sort_keys_parse_pytorchs_names() {
         SortBy::parse("self_cpu_time_total"),
         Some(SortBy::SelfCpuTimeTotal)
     );
+
     assert_eq!(
         SortBy::parse("cuda_time_total"),
         Some(SortBy::DeviceTimeTotal)
     );
+
     assert_eq!(
         SortBy::parse("self_cuda_memory_usage"),
         Some(SortBy::SelfDeviceMemoryUsage)
     );
+
     assert_eq!(SortBy::parse("count"), Some(SortBy::Count));
     assert_eq!(SortBy::parse("flops"), None);
 }
@@ -527,13 +587,16 @@ fn chrome_trace_has_pytorchs_event_layout() {
         profile_memory: true,
         record_shapes: true,
     };
+
     let p = profile(config, || {
         let _r = record_function("quote \" and \\ backslash");
         Tensor::zeros(&[3], DType::F32).fill_(1.0);
         let t = now_ns();
         record_gpu("Memcpy DtoH", Device::Cuda(0), t, t + 2000);
     });
+
     let trace = p.chrome_trace();
+
     for needle in [
         "\"traceEvents\":[",
         "\"cat\":\"cpu_op\",\"name\":\"lumen::zeros\"",
@@ -549,6 +612,7 @@ fn chrome_trace_has_pytorchs_event_layout() {
     ] {
         assert!(trace.contains(needle), "missing {needle} in\n{trace}");
     }
+
     let (open, close) = (trace.matches('{').count(), trace.matches('}').count());
     assert_eq!(open, close, "balanced braces");
 }
@@ -562,25 +626,30 @@ fn host_kernels_are_apart_from_their_dispatch() {
     g.set_outputs(&[y]).unwrap();
     let plan = crate::graph_compiler::Plan::compile(&g);
     let x = Tensor::zeros(&[4], DType::F32);
+
     let p = profile(cpu(), || {
         plan.run(&[x]).unwrap();
     });
+
     let op = p
         .events()
         .iter()
         .find(|e| e.name == "exp" && e.kind == EventKind::Op)
         .expect("the step's op");
+
     let kernel = p
         .events()
         .iter()
         .find(|e| e.kind == EventKind::HostKernel)
         .expect("its kernel");
+
     assert_eq!((kernel.name.as_str(), kernel.parent), ("exp", Some(op.id)));
     assert!(op.start_ns <= kernel.start_ns && kernel.end_ns <= op.end_ns);
     let rows = p.key_averages(false);
     assert_eq!(row(&rows, "exp").count, 2);
     let trace = p.chrome_trace();
     let (host, dispatch) = (chrome::host_pid(), std::process::id());
+
     for needle in [
         format!(
             "\"cat\":\"kernel\",\"name\":\"exp\",\"pid\":{host},\"tid\":{}",
@@ -610,6 +679,7 @@ fn within(gpu: &Event, op: &Event, slack_ns: u64) {
         gpu.start_ns + slack_ns >= op.start_ns,
         "{gpu:?} before {op:?}"
     );
+
     assert!(gpu.end_ns <= op.end_ns + slack_ns, "{gpu:?} after {op:?}");
     assert!(gpu.end_ns >= gpu.start_ns);
 }
@@ -632,27 +702,34 @@ mod mps {
         if !mps::MPS.is_available() {
             return eprintln!("Metal unavailable, skipping");
         }
+
         let config = ProfilerConfig {
             activities: vec![Activity::Cpu, Activity::Mps],
             ..cpu()
         };
+
         let t = Tensor::zeros(&[1 << 24], on_mps(DType::F32));
+
         let p = profile(config, || {
             for _ in 0..8 {
                 t.zero_();
                 t.fill_(2.0f32);
             }
         });
+
         let mut work: Vec<&Event> = p
             .events()
             .iter()
             .filter(|e| e.kind == EventKind::Gpu)
             .collect();
+
         work.sort_by_key(|e| e.start_ns);
         assert_eq!(work.len(), 16);
+
         for pair in work.windows(2) {
             assert!(pair[1].start_ns + 50_000 >= pair[0].end_ns, "{pair:#?}");
         }
+
         assert_eq!(t.to_vec::<f32>(), vec![2.0; 1 << 24]);
     }
 }
@@ -670,28 +747,35 @@ mod cuda {
         if !cuda::CUDA.is_available() {
             return eprintln!("no CUDA device, skipping");
         }
+
         let config = ProfilerConfig {
             activities: vec![Activity::Cpu, Activity::Cuda],
             profile_memory: true,
             record_shapes: false,
         };
+
         let on_gpu = TensorOptions::new()
             .dtype(DType::F32)
             .device(Device::Cuda(0));
+
         let p = profile(config, || {
             let t = Tensor::from_slice(&[1.0f32, 2.0, 3.0], on_gpu);
             assert_eq!(t.to_vec::<f32>(), vec![1.0, 2.0, 3.0]);
         });
+
         let htod = one(&p, "Memcpy HtoD");
         within(htod, one(&p, "lumen::from_slice"), 1_000_000);
         let dtoh = one(&p, "Memcpy DtoH");
         let copy = one(&p, "lumen::copy_d2h");
         assert_eq!(dtoh.parent, Some(copy.id));
         assert_eq!(copy.parent, Some(one(&p, "lumen::to_vec").id));
+
         for e in [htod, dtoh] {
             assert_eq!((e.kind, e.device), (EventKind::Gpu, Device::Cuda(0)));
         }
+
         let table = p.table(Some(SortBy::SelfDeviceTimeTotal), None, false);
+
         assert!(
             table.contains("Self CUDA") && table.contains("CUDA Mem"),
             "{table}"
@@ -704,9 +788,11 @@ mod cuda {
         if !cuda::CUDA.is_available() {
             return eprintln!("no CUDA device, skipping");
         }
+
         let on_gpu = TensorOptions::new()
             .dtype(DType::U8)
             .device(Device::Cuda(0));
+
         let p = profile(cpu(), || drop(Tensor::from_slice(&[1u8; 16], on_gpu)));
         assert!(named(&p, "Memcpy HtoD").is_empty());
     }
@@ -719,35 +805,47 @@ fn ranges_are_annotated_on_the_gpu_timeline() {
         activities: vec![Activity::Cpu, Activity::Cuda],
         ..cpu()
     };
+
     let p = profile(config, || {
         let _model = record_function("model");
         let t = now_ns();
+
         {
             let _layer = record_function("layer");
             record_gpu("kernel_a", Device::Cuda(0), t + 100, t + 300);
         }
+
         record_gpu("kernel_b", Device::Cuda(0), t + 400, t + 900);
     });
+
     let trace = p.chrome_trace();
+
     let annotations: Vec<&str> = trace
         .lines()
         .filter(|l| l.contains("\"gpu_user_annotation\""))
         .collect();
+
     assert_eq!(annotations.len(), 2, "{trace}");
+
     let model = annotations
         .iter()
         .find(|l| l.contains("\"name\":\"model\""))
         .unwrap();
+
     assert!(model.contains("\"dur\":0.800"), "{model}");
+
     let layer = annotations
         .iter()
         .find(|l| l.contains("\"name\":\"layer\""))
         .unwrap();
+
     assert!(layer.contains("\"dur\":0.200"), "{layer}");
+
     assert!(
         annotations.iter().all(|l| l.contains("\"tid\":8")),
         "{trace}"
     );
+
     assert!(
         trace.contains("\"args\":{\"name\":\"annotations\"}"),
         "{trace}"

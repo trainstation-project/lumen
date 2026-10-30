@@ -18,11 +18,13 @@ impl<M: Module> CompilerPass<M> for PlaceConcats {
     /// Marks the concatenations `in_place` accepts.
     fn apply(&mut self, m: &mut M) -> Result<(), String> {
         let concats = in_place(m.graph());
+
         for c in concats {
             if let Primitive::Concatenate { in_place, .. } = &mut m.graph_mut().nodes[c].primitive {
                 *in_place = true;
             }
         }
+
         Ok(())
     }
 }
@@ -36,24 +38,30 @@ fn in_place(graph: &Graph) -> Vec<usize> {
     let nodes = graph.nodes();
     let mut producer: Vec<Option<usize>> = vec![None; graph.types.len()];
     let mut readers: Vec<usize> = vec![0; graph.types.len()];
+
     for (i, node) in nodes.iter().enumerate() {
         producer[node.output] = Some(i);
         node.inputs.iter().for_each(|&v| readers[v] += 1);
     }
+
     let writes = |v: usize| {
         let Some(p) = producer[v] else {
             return false;
         };
+
         let node = &nodes[p];
+
         let copies = matches!(
             node.primitive,
             Primitive::Transpose { .. }
                 | Primitive::BroadcastInDim { .. }
                 | Primitive::Slice { view: false, .. }
         );
+
         let kernel = fusible(graph, node) && (elementwise(&node.primitive) || copies);
         kernel || matches!(node.primitive, Primitive::DotGeneral { .. })
     };
+
     nodes
         .iter()
         .enumerate()

@@ -50,6 +50,7 @@ fn address(acc: &Access, batch: &[usize]) -> Result<String, String> {
 /// `BLOCK_ID_H`, zero where masked.
 fn attention_load(acc: &Access, batch: &[usize]) -> Result<(String, String), String> {
     let at = address(acc, batch)?;
+
     Ok(named(
         "attention_load",
         formatdoc!(
@@ -65,6 +66,7 @@ fn attention_load(acc: &Access, batch: &[usize]) -> Result<(String, String), Str
 /// A jit helper storing `value`, cast to the operand's dtype, to the tile at `rows` and `cols` of `acc`.
 fn attention_store(acc: &Access, batch: &[usize]) -> Result<(String, String), String> {
     let at = address(acc, batch)?;
+
     Ok(named(
         "attention_store",
         formatdoc!(
@@ -97,6 +99,7 @@ fn attention_output(
         .collect();
 
     let mut loads = String::new();
+
     let mut code = formatdoc!(
         "
         j = at
@@ -145,6 +148,7 @@ fn attention_output(
 /// A jit helper adding float32 `value` atomically to the tile at `rows` and `cols` of `acc`.
 fn attention_atomic_add(acc: &Access, batch: &[usize]) -> Result<(String, String), String> {
     let at = address(acc, batch)?;
+
     Ok(named(
         "attention_atomic_add",
         formatdoc!(
@@ -186,6 +190,7 @@ impl AttentionCodegen for Triton {
         let root = body.nodes()[a.root].output;
         // The attention values are also written as they are when the body outputs them too.
         let raw = body.outputs()[1..].contains(&root);
+
         // Each query row's log-sum-exp, `[batch.., sq]`, is written at its output's strides, or contiguous.
         let lse_strides = a.lse.and_then(|n| {
             let v = body.nodes()[n].output;
@@ -197,6 +202,7 @@ impl AttentionCodegen for Triton {
         shape.push(a.sq);
 
         let lse_strides = lse_strides.unwrap_or_else(|| contiguous_strides(&shape));
+
         let lse = Access {
             base: 0,
             offset: 0,

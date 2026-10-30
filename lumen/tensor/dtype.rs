@@ -42,6 +42,7 @@ impl DType {
     /// Bytes each element takes in memory (sub-byte types take a whole byte).
     pub const fn size_of(self) -> usize {
         use DType::*;
+
         match self {
             Bool | U8 | I8 | I2 | I4 | U2 | U4 | F8E4M3FN | F8E5M2 | F8E4M3B11FNUZ => 1,
             U16 | I16 | F16 | BF16 => 2,
@@ -53,6 +54,7 @@ impl DType {
     /// Short name, such as `f32` or `bf16`.
     pub const fn name(self) -> &'static str {
         use DType::*;
+
         match self {
             Bool => "bool",
             U8 => "u8",
@@ -89,6 +91,7 @@ impl DType {
     /// NumPy-style name, such as `float32` or `bfloat16`.
     pub const fn full_name(self) -> &'static str {
         use DType::*;
+
         match self {
             F32 => "float32",
             F64 => "float64",
@@ -215,9 +218,11 @@ impl Element for bool {
 fn round_to_odd(x: f64) -> f32 {
     let f = x as f32;
     let bits = f.to_bits();
+
     if !f.is_finite() || f64::from(f) == x || bits & 1 == 1 {
         return f;
     }
+
     // Step the truncated value one ulp away from zero when `x` lies beyond it.
     let outward = (f64::from(f) < x) != f.is_sign_negative();
     f32::from_bits(if outward { bits + 1 } else { bits - 1 })
@@ -236,9 +241,11 @@ pub(crate) fn to_bf16(x: f64) -> bf16 {
 impl Element for f16 {
     const DTYPE: DType = DType::F16;
     const ZERO: Self = f16::ZERO;
+
     fn from_scalar(v: Scalar) -> Self {
         to_f16(v.to_f64())
     }
+
     fn to_scalar(self) -> Scalar {
         Scalar::Float(self.to_f64())
     }
@@ -247,9 +254,11 @@ impl Element for f16 {
 impl Element for bf16 {
     const DTYPE: DType = DType::BF16;
     const ZERO: Self = bf16::ZERO;
+
     fn from_scalar(v: Scalar) -> Self {
         to_bf16(v.to_f64())
     }
+
     fn to_scalar(self) -> Scalar {
         Scalar::Float(self.to_f64())
     }
@@ -287,6 +296,7 @@ impl Float8 {
         let sign = if bits & 0x80 != 0 { -1.0 } else { 1.0 };
         let e = u32::from(bits >> self.mantissa) & e_max;
         let m = u32::from(bits) & m_max;
+
         match self.kind {
             Kind::Fnuz if bits == 0x80 => return f64::NAN,
             Kind::Ieee if e == e_max && m == 0 => return sign * f64::INFINITY,
@@ -294,11 +304,14 @@ impl Float8 {
             Kind::Fn if e == e_max && m == m_max => return f64::NAN,
             _ => {}
         }
+
         let unit = f64::from(1u32 << self.mantissa);
+
         let value = match e {
             0 => f64::from(m) / unit * pow2(1 - self.bias),
             e => (1.0 + f64::from(m) / unit) * pow2(e as i32 - self.bias),
         };
+
         sign * value
     }
 
@@ -309,12 +322,16 @@ impl Float8 {
             Kind::Fn => 0x7F,
             Kind::Fnuz => 0x80,
         };
+
         let sign: u8 = if x.is_sign_negative() { 0x80 } else { 0 };
+
         if x.is_nan() {
             return nan;
         }
+
         let a = x.abs();
         let inf = (((1u32 << self.exponent) - 1) << self.mantissa) as u8;
+
         if a.is_infinite() {
             return if self.kind == Kind::Ieee {
                 sign | inf
@@ -322,8 +339,10 @@ impl Float8 {
                 nan
             };
         }
+
         let min_exp = 1 - self.bias;
         let m = self.mantissa as i32;
+
         // Subnormals are multiples of the smallest subnormal; normals round their mantissa at exponent `e`.
         let bits: u32 = if a < pow2(min_exp) {
             (a / pow2(min_exp - m)).round_ties_even() as u32
@@ -332,14 +351,17 @@ impl Float8 {
             let q = (a / pow2(e - m)).round_ties_even() as u32;
             (((e - min_exp + 1) as u32) << self.mantissa) + q - (1 << self.mantissa)
         };
+
         if bits == 0 && self.kind == Kind::Fnuz {
             return 0;
         }
+
         let largest = match self.kind {
             Kind::Ieee => u32::from(inf) - 1,
             Kind::Fn => u32::from(inf) | ((1 << self.mantissa) - 2),
             Kind::Fnuz => 0x7F,
         };
+
         match bits > largest {
             true if self.kind == Kind::Ieee => sign | inf,
             true => nan,
@@ -428,12 +450,15 @@ const DTYPE_IS_FLOAT: [bool; 20] = {
         DType::F8E5M2,
         DType::F8E4M3B11FNUZ,
     ];
+
     let mut out = [false; 20];
     let mut i = 0;
+
     while i < all.len() {
         out[all[i] as usize] = all[i].is_float();
         i += 1;
     }
+
     out
 };
 

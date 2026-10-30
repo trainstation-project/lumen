@@ -22,13 +22,16 @@ impl Target for Loops {
     /// alone joins only when elementwise (MPS runs a lone fill, iota or the like as its own step).
     fn candidate(&self, graph: &Graph, node: &Node) -> bool {
         let elements = graph.type_of(node.output).numel();
+
         let Primitive::Fusion { name, body, .. } = &node.primitive else {
             return false;
         };
+
         let alone = match body.nodes() {
             [n] => !elementwise(&n.primitive),
             _ => false,
         };
+
         name == "loop"
             && elements > 0
             && elements <= MAX_ELEMENTS

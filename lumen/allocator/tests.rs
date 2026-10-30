@@ -16,11 +16,13 @@ mod cpu {
     #[test]
     fn allocation_is_64_byte_aligned() {
         let data = CpuAllocator.allocate(256);
+
         assert_eq!(
             data.as_ptr() as usize % 64,
             0,
             "pointer must be 64-byte aligned"
         );
+
         unsafe { CpuAllocator.deallocate(data, 256) };
     }
 
@@ -28,11 +30,14 @@ mod cpu {
     #[test]
     fn can_write_and_read_back_through_the_pointer() {
         let data = CpuAllocator.allocate(64);
+
         unsafe {
             let bytes = std::slice::from_raw_parts_mut(data.as_ptr(), 64);
+
             for (i, b) in bytes.iter_mut().enumerate() {
                 *b = i as u8;
             }
+
             assert_eq!(bytes[0], 0);
             assert_eq!(bytes[63], 63);
             CpuAllocator.deallocate(data, 64);
@@ -44,6 +49,7 @@ mod cpu {
     fn zero_byte_allocation_is_safe() {
         let data = CpuAllocator.allocate(0);
         assert_eq!(data.as_ptr() as usize % 64, 0);
+
         unsafe { CpuAllocator.deallocate(data, 0) };
     }
 
@@ -53,6 +59,7 @@ mod cpu {
         for i in 0..100 {
             let nbytes = 1 << (i % 12);
             let data = CpuAllocator.allocate(nbytes);
+
             unsafe { CpuAllocator.deallocate(data, nbytes) };
         }
     }
@@ -80,6 +87,7 @@ mod region {
                 self.reservations.fetch_add(1, Ordering::Relaxed);
                 CpuAllocator.allocate(n)
             };
+
             self.region.take(nbytes, reserve, || {})
         }
 
@@ -93,6 +101,7 @@ mod region {
         fn drop(&mut self) {
             if let Some(base) = self.region.base() {
                 self.releases.fetch_add(1, Ordering::Relaxed);
+
                 unsafe { CpuAllocator.deallocate(base, self.region.capacity()) }
             }
         }
@@ -111,11 +120,13 @@ mod region {
     fn counted(capacity: usize) -> (Host, Arc<AtomicUsize>, Arc<AtomicUsize>) {
         let (reservations, releases) =
             (Arc::new(AtomicUsize::new(0)), Arc::new(AtomicUsize::new(0)));
+
         let host = Host {
             region: Region::new(Device::Cpu(0), capacity),
             reservations: Arc::clone(&reservations),
             releases: Arc::clone(&releases),
         };
+
         (host, reservations, releases)
     }
 
@@ -134,10 +145,12 @@ mod region {
     fn the_region_is_reserved_once_and_released_with_the_allocator() {
         let (allocator, reservations, releases) = counted(1 << 20);
         assert_eq!(reservations.load(Ordering::Relaxed), 0);
+
         let (a, b) = (
             Allocator::allocate(&allocator, 100),
             Allocator::allocate(&allocator, 100),
         );
+
         assert_eq!(reservations.load(Ordering::Relaxed), 1);
         assert_eq!(allocator.capacity(), 1 << 20);
         free(&allocator, a, 100);
@@ -191,16 +204,19 @@ mod region {
     #[test]
     fn a_loop_with_live_inputs_does_not_grow() {
         let allocator = allocator(4096);
+
         let _inputs = (
             Allocator::allocate(&allocator, 1000),
             Allocator::allocate(&allocator, 1000),
         );
+
         for _ in 0..100 {
             let workspace = Allocator::allocate(&allocator, 700);
             let output = Allocator::allocate(&allocator, 300);
             free(&allocator, workspace, 700);
             free(&allocator, output, 300);
         }
+
         assert_eq!(allocator.used(), 1024 + 1000);
     }
 
@@ -208,12 +224,15 @@ mod region {
     #[test]
     fn freed_neighbours_merge() {
         let allocator = allocator(1024);
+
         let blocks: Vec<_> = (0..4)
             .map(|_| Allocator::allocate(&allocator, 256))
             .collect();
+
         for i in [2, 0, 3, 1] {
             free(&allocator, blocks[i], 256);
         }
+
         assert_eq!(Allocator::allocate(&allocator, 1024), blocks[0]);
     }
 
@@ -222,12 +241,14 @@ mod region {
     fn a_full_allocator_refuses_allocations() {
         let allocator = allocator(1024);
         let _a = Allocator::allocate(&allocator, 1000);
+
         assert!(
             allocator
                 .try_take(1, |n| CpuAllocator.allocate(n))
                 .is_none(),
             "the next offset is past the end"
         );
+
         assert!(
             allocator
                 .try_take(1 << 20, |n| CpuAllocator.allocate(n))
@@ -241,16 +262,20 @@ mod region {
         let allocator = allocator(1 << 16);
         let a = Allocator::allocate(&allocator, 300);
         let base = a.as_ptr().addr();
+
         let b = allocator
             .try_take_aligned(4096, 4096, |n| CpuAllocator.allocate(n))
             .unwrap();
+
         assert_eq!(b.as_ptr().addr() - base, 4096);
         let c = Allocator::allocate(&allocator, 1000);
+
         assert_eq!(
             c.as_ptr().addr() - base,
             512,
             "the gap before an aligned block is free"
         );
+
         free(&allocator, b, 4096);
         free(&allocator, c, 1000);
         free(&allocator, a, 300);
@@ -307,19 +332,23 @@ mod devices {
     #[test]
     fn every_device_has_one_shared_allocator() {
         use std::sync::Arc;
+
         let devices = [
             Device::Cpu(0),
             Device::Meta(0),
             Device::Mps(0),
             Device::Cuda(0),
         ];
+
         for device in devices.into_iter().filter(|d| d.check().is_ok()) {
             let (a, b) = (
                 allocator_for(device).unwrap(),
                 allocator_for(device).unwrap(),
             );
+
             assert!(Arc::ptr_eq(&a, &b), "{device}");
             let ptr = a.allocate(64);
+
             unsafe { a.deallocate(ptr, 64) };
         }
     }
@@ -328,8 +357,10 @@ mod devices {
     #[test]
     fn storage_is_send_and_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
+
         assert_send_sync::<Storage>();
         let storage = Storage::new(16, Device::Cpu(0));
+
         std::thread::spawn(move || assert!(!storage.data_ptr().is_null()))
             .join()
             .unwrap();
@@ -342,8 +373,10 @@ mod devices {
             let err = allocator_for(Device::Cuda(0)).err().unwrap();
             assert!(err.contains("CUDA device 0 is not available"), "{err}");
         }
+
         let past_last = Device::Cuda(crate::device::cuda::CUDA.device_count());
         assert!(allocator_for(past_last).is_err());
+
         if !crate::device::mps::MPS.is_available() {
             assert!(allocator_for(Device::Mps(0)).is_err());
         }
@@ -369,6 +402,7 @@ mod cuda {
             crate::device::cuda::CUDA.is_available(),
             crate::device::cuda::CUDA.device_count() > 0
         );
+
         assert!(allocator_for(Device::Cuda(crate::device::cuda::CUDA.device_count())).is_err());
     }
 
@@ -394,6 +428,7 @@ mod cuda {
         fn reports_cuda_devices() {
             require_cuda!();
             let last = crate::device::cuda::CUDA.device_count() - 1;
+
             assert_eq!(
                 Storage::new(8, Device::Cuda(last)).device(),
                 Device::Cuda(last)
@@ -409,10 +444,12 @@ mod cuda {
             let b = allocator.allocate(1000);
             assert_eq!(a.as_ptr().addr() % ALIGNMENT, 0);
             assert_eq!(b.as_ptr().addr() - a.as_ptr().addr(), 1024);
+
             unsafe {
                 allocator.deallocate(a, 1000);
                 allocator.deallocate(b, 1000);
             }
+
             assert_eq!(allocator.allocate(8), a);
         }
 
@@ -420,10 +457,12 @@ mod cuda {
         #[test]
         fn get_returns_the_same_global_instance() {
             require_cuda!();
+
             let (a, b) = (
                 allocator_for(Device::Cuda(0)).unwrap(),
                 allocator_for(Device::Cuda(0)).unwrap(),
             );
+
             assert!(std::sync::Arc::ptr_eq(&a, &b));
         }
     }
@@ -462,10 +501,12 @@ mod mps {
     #[test]
     fn get_returns_the_same_global_instance() {
         require_mps!();
+
         let (a, b) = (
             allocator_for(Device::Mps(0)).unwrap(),
             allocator_for(Device::Mps(0)).unwrap(),
         );
+
         assert!(std::sync::Arc::ptr_eq(&a, &b));
     }
 
@@ -476,9 +517,11 @@ mod mps {
         let allocator = fresh();
         let data = allocator.allocate(1024);
         let slice = unsafe { std::slice::from_raw_parts_mut(data.as_ptr(), 1024) };
+
         for (i, b) in slice.iter_mut().enumerate() {
             *b = (i % 251) as u8;
         }
+
         assert!(slice.iter().enumerate().all(|(i, &b)| b == (i % 251) as u8));
     }
 
@@ -523,6 +566,7 @@ mod tpu {
         macro_rules! require_tpu {
             () => {
                 let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+
                 if !TPU.is_available() {
                     eprintln!("no TPU device, skipping");
                     return;
@@ -542,10 +586,12 @@ mod tpu {
         fn reports_tpu_devices() {
             require_tpu!();
             let last = TPU.device_count() - 1;
+
             assert_eq!(
                 Storage::new(8, Device::Tpu(last)).device(),
                 Device::Tpu(last)
             );
+
             assert_eq!(Device::of_type("tpu", 1), Some(Device::Tpu(1)));
             assert_eq!(Device::Tpu(1).to_string(), "tpu:1");
         }
@@ -562,10 +608,12 @@ mod tpu {
             let b = allocator.allocate(1000);
             assert_eq!(b.as_ptr().addr() - a.as_ptr().addr(), 1024);
             assert!(memory(0).unwrap().0 >= before + capacity);
+
             unsafe {
                 allocator.deallocate(b, 1000);
                 allocator.deallocate(a, 1000);
             }
+
             assert_eq!(allocator.allocate(ALIGNMENT), a);
             drop(allocator);
             assert!(memory(0).unwrap().0 < before + capacity);
@@ -583,6 +631,7 @@ mod tpu {
             let inside = NonNull::new(a.as_ptr().wrapping_add(100)).unwrap();
             assert_eq!(read(inside, 200), whole[100..300]);
             assert_eq!(read(b, 300).len(), 300);
+
             unsafe {
                 allocator.deallocate(b, 300);
                 allocator.deallocate(a, 4096);
@@ -597,6 +646,7 @@ mod tpu {
             let a = allocator.allocate(256);
             let past = NonNull::new(a.as_ptr().wrapping_add(4 << 30)).unwrap();
             assert!(copy_to_host(0, past, &mut [0; 16]).is_err());
+
             unsafe { allocator.deallocate(a, 256) };
         }
 
@@ -604,18 +654,22 @@ mod tpu {
         #[test]
         fn a_tpu_tensor_copies_to_the_host() {
             require_tpu!();
+
             let options = TensorOptions::new()
                 .dtype(DType::F32)
                 .device(Device::Tpu(0));
+
             let t = unsafe { Tensor::empty(&[64, 3], options) };
             let host = t.to(Device::Cpu(0));
             assert_eq!(host.shape(), &[64, 3]);
             let ptr = NonNull::new(t.data_ptr()).unwrap();
+
             let bytes: Vec<u8> = host
                 .to_vec::<f32>()
                 .iter()
                 .flat_map(|x| x.to_ne_bytes())
                 .collect();
+
             assert_eq!(bytes, read(ptr, 64 * 3 * 4));
         }
     }

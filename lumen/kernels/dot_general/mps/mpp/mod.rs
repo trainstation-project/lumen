@@ -20,21 +20,26 @@ pub(crate) fn mpp_transposes(
         contiguous_strides(&lhs.shape),
         contiguous_strides(&rhs.shape),
     );
+
     let launch_ = plan_matmul(dot, lhs, rhs, out, &ls, &rs, "", None).ok()?;
     let [m, n, k, _, sm, sk, _, rk, rn] = launch_.p;
+
     let fits = [lhs.numel(), rhs.numel(), m * n]
         .iter()
         .all(|&e| e <= i32::MAX as usize);
+
     // Row-major when K (lhs) or N (rhs) is contiguous; transposed when the other dim is.
     let left = match (sk, sm) {
         (1, _) => false,
         (_, 1) if k > 1 => true,
         _ => return None,
     };
+
     let right = match (rn, rk) {
         (1, _) => false,
         (_, 1) if n > 1 => true,
         _ => return None,
     };
+
     fits.then_some((left, right))
 }

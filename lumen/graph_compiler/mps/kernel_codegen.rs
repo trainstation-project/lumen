@@ -26,6 +26,7 @@ impl<'a> CompilerPass<MpsModule<'a>> for Codegen {
         // Concatenations no longer valid in place get copied by their own loop kernel.
         let valid = in_place_concats(&m.graph, &m.kernels, false);
         let mut unmarked = false;
+
         for (i, node) in m.graph.nodes.iter_mut().enumerate() {
             if let Primitive::Concatenate { in_place, .. } = &mut node.primitive
                 && *in_place
@@ -35,8 +36,10 @@ impl<'a> CompilerPass<MpsModule<'a>> for Codegen {
                 unmarked = true;
             }
         }
+
         if unmarked {
             let kernels = &mut m.kernels;
+
             let concatenate = |n: &crate::graph::Node| {
                 matches!(
                     n.primitive,
@@ -46,29 +49,36 @@ impl<'a> CompilerPass<MpsModule<'a>> for Codegen {
                     }
                 )
             };
+
             m.graph = wrapped(&m.graph, &[], concatenate, |_, _| {
                 request(kernels, Kernel::Loop(Vec::new()))
             });
         }
+
         // Output views per fusion, keyed by output index, for fusions writing straight into a placed buffer.
         let placements = m.graph.placements();
         let mut views: HashMap<Var, HashMap<usize, (usize, Vec<usize>)>> = HashMap::new();
+
         for node in &m.graph.nodes {
             let (fusion, index) = match node.primitive {
                 Primitive::Fusion { .. } => (node.output, 0),
                 Primitive::FusionOutput { index, .. } => (node.inputs[0], index),
                 _ => continue,
             };
+
             if let Some((_, at)) = &placements[node.output] {
                 let at = (at.offset, at.strides.clone());
                 views.entry(fusion).or_default().insert(index, at);
             }
         }
+
         for node in m.graph.nodes.iter_mut() {
             let output = node.output;
+
             let Primitive::Fusion { name, body, .. } = &mut node.primitive else {
                 continue;
             };
+
             if name == crate::graph::UPDATES {
                 let (kernel, source) = codegen::updates_kernel(body);
                 super::record_launch(&kernel, body, None);
@@ -76,18 +86,23 @@ impl<'a> CompilerPass<MpsModule<'a>> for Codegen {
                 *name = kernel;
                 continue;
             }
+
             let Some(k) = name.strip_prefix(PENDING) else {
                 continue;
             };
+
             let k: usize = k.parse().expect("a requested kernel's index");
+
             let (kernel, source) = match &m.kernels[k] {
                 Kernel::Loop(by_value) => {
                     let views = views.remove(&output).unwrap_or_default();
                     let (kernel, source) = codegen::kernel(body, by_value, config, &views, None);
+
                     let tunable = Tunable {
                         by_value: by_value.clone(),
                         views,
                     };
+
                     m.tunable.insert(kernel.clone(), tunable);
                     (kernel, source)
                 }
@@ -100,15 +115,19 @@ impl<'a> CompilerPass<MpsModule<'a>> for Codegen {
                         outputs: views.remove(&output).unwrap_or_default(),
                         ..Strides::default()
                     };
+
                     let b = attention::backward_of_body_strided(body, &strides)
                         .expect("an attention backward");
+
                     codegen::Mps::backward(body, &b, &strides)?
                 }
             };
+
             super::record_launch(&kernel, body, codegen::tuning_of(body));
             m.sources.insert(kernel.clone(), source);
             *name = kernel;
         }
+
         Ok(())
     }
 }

@@ -29,9 +29,11 @@ impl Target for Horizontal<'_> {
     /// Small elementwise nodes or loop fusions without reductions, attention, GEMMs or updates.
     fn candidate(&self, graph: &Graph, node: &Node) -> bool {
         let elements = graph.type_of(node.output).numel();
+
         if elements == 0 || elements > MAX_ELEMENTS {
             return false;
         }
+
         match &node.primitive {
             Primitive::Fusion { name, .. } if name == crate::graph::UPDATES => false,
             Primitive::Fusion { body, .. } => {
@@ -41,6 +43,7 @@ impl Target for Horizontal<'_> {
                         Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. }
                     )
                 });
+
                 !reduces
                     && attention::of_body(body).is_none()
                     && attention::backward_of_body(body).is_none()
@@ -62,6 +65,7 @@ impl Target for Horizontal<'_> {
     /// Whether a group stays under the buffer limit and, for tiled kernels, the transpose limit.
     fn fits(&self, graph: &Graph, members: &[usize], buffers: usize) -> bool {
         let nodes = graph.nodes();
+
         let transposes = |m: &usize| match &nodes[*m].primitive {
             Primitive::Fusion { body, .. } => body
                 .nodes()
@@ -70,8 +74,10 @@ impl Target for Horizontal<'_> {
                 .count(),
             _ => 0,
         };
+
         let heroes = !tiled(&nodes[members[0]])
             || members.iter().map(transposes).sum::<usize>() <= codegen::MAX_HEROES;
+
         heroes && buffers <= MAX_BUFFERS
     }
 

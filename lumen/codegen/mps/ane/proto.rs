@@ -20,6 +20,7 @@ impl Message {
             self.0.push(v as u8 | 0x80);
             v >>= 7;
         }
+
         self.0.push(v as u8);
     }
 
@@ -56,9 +57,11 @@ impl Message {
     /// Appends a packed repeated varint field.
     pub(crate) fn packed_ints(self, field: u32, values: impl IntoIterator<Item = i64>) -> Self {
         let mut packed = Message::new();
+
         for v in values {
             packed.varint(v as u64);
         }
+
         self.bytes(field, &packed.0)
     }
 

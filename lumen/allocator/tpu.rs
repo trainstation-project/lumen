@@ -37,10 +37,12 @@ impl TpuAllocator {
     /// Allocator for device `index`, rounding `capacity` down to a whole number of `TILE_ROWS` rows.
     pub fn new(index: usize, capacity: usize) -> Self {
         let unit = TILE_ROWS * ROW;
+
         let capacity = match capacity >= unit {
             true => capacity - capacity % unit,
             false => capacity,
         };
+
         TpuAllocator {
             index,
             region: Region::new(Device::Tpu(index), capacity),
@@ -54,6 +56,7 @@ impl TpuAllocator {
         let mut base = 0;
         let buffer = unsafe { ffi::lumen_tpu_alloc(self.index as i32, nbytes, &mut base) };
         let reserved = NonNull::new(buffer).zip(NonNull::new(base as *mut u8));
+
         let (buffer, ptr) = reserved.unwrap_or_else(|| {
             panic!(
                 "TPU out of memory: failed to reserve {nbytes} bytes on tpu:{}: {}",
@@ -61,11 +64,13 @@ impl TpuAllocator {
                 error()
             )
         });
+
         *self.lock() = Some(Reserved {
             buffer,
             base,
             size: nbytes,
         });
+
         ptr
     }
 
@@ -77,10 +82,13 @@ impl TpuAllocator {
     /// Copies `dst.len()` bytes at `ptr` from the device buffer into `dst`.
     fn read(&self, ptr: NonNull<u8>, dst: &mut [u8]) -> Result<(), String> {
         let reserved = self.lock();
+
         let Some(&Reserved { buffer, base, size }) = reserved.as_ref() else {
             return Err(format!("nothing is allocated on tpu:{}", self.index));
         };
+
         let offset = ptr.as_ptr().addr().wrapping_sub(base);
+
         if offset.checked_add(dst.len()).is_none_or(|end| end > size) {
             return Err(format!(
                 "{} bytes at offset {offset} are outside tpu:{}'s {size}",
@@ -88,6 +96,7 @@ impl TpuAllocator {
                 self.index
             ));
         }
+
         let failed = unsafe {
             ffi::lumen_tpu_read(
                 buffer.as_ptr(),
@@ -97,6 +106,7 @@ impl TpuAllocator {
                 dst.len(),
             )
         };
+
         match failed {
             0 => Ok(()),
             _ => Err(error()),
@@ -106,11 +116,14 @@ impl TpuAllocator {
     /// Converts device pointers into row indices of the buffer, rejecting unaligned or outside ones.
     fn rows_of(&self, ptrs: &[*const u8]) -> Result<Vec<i32>, String> {
         let reserved = self.lock();
+
         let Some(&Reserved { base, size, .. }) = reserved.as_ref() else {
             return Err(format!("nothing is allocated on tpu:{}", self.index));
         };
+
         let row = |ptr: &*const u8| {
             let offset = ptr.addr().wrapping_sub(base);
+
             match offset < size && offset % ROW == 0 {
                 true => Ok((offset / ROW) as i32),
                 false => Err(format!(
@@ -120,16 +133,20 @@ impl TpuAllocator {
                 )),
             }
         };
+
         ptrs.iter().map(row).collect()
     }
 
     /// Runs `executable` on the buffer with `scalars` and `host` bytes as extra inputs.
     fn run(&self, executable: *mut c_void, scalars: &[i32], host: &[u8]) -> Result<(), String> {
         let mut reserved = self.lock();
+
         let Some(Reserved { buffer, .. }) = reserved.as_mut() else {
             return Err(format!("nothing is allocated on tpu:{}", self.index));
         };
+
         let mut region = buffer.as_ptr();
+
         let failed = unsafe {
             ffi::lumen_tpu_run(
                 executable,
@@ -141,8 +158,10 @@ impl TpuAllocator {
                 &mut region,
             )
         };
+
         // The run donates the buffer and hands back its output as the new region.
         *buffer = NonNull::new(region).expect("a run's result is the region");
+
         match failed {
             0 => Ok(()),
             _ => Err(error()),
@@ -152,9 +171,11 @@ impl TpuAllocator {
     /// Blocks until work queued on the buffer finishes; nothing to wait for when unreserved.
     fn wait(&self) -> Result<(), String> {
         let reserved = self.lock();
+
         let Some(Reserved { buffer, .. }) = reserved.as_ref() else {
             return Ok(());
         };
+
         match unsafe { ffi::lumen_tpu_wait(buffer.as_ptr()) } {
             0 => Ok(()),
             _ => Err(error()),
@@ -164,9 +185,11 @@ impl TpuAllocator {
     /// Event that fires when the buffer is ready, `None` when nothing is reserved.
     fn ready_event(&self) -> Result<Option<NonNull<c_void>>, String> {
         let reserved = self.lock();
+
         let Some(Reserved { buffer, .. }) = reserved.as_ref() else {
             return Ok(None);
         };
+
         match NonNull::new(unsafe { ffi::lumen_tpu_ready_event(buffer.as_ptr()) }) {
             Some(event) => Ok(Some(event)),
             None => Err(error()),
@@ -188,6 +211,7 @@ impl Allocator for TpuAllocator {
     /// Takes `nbytes` rounded up to whole rows at a multiple of `alignment` (at least a row).
     fn allocate_aligned(&self, nbytes: usize, alignment: usize) -> NonNull<u8> {
         let nbytes = nbytes.next_multiple_of(ROW);
+
         self.region
             .take_aligned(nbytes, alignment.max(ROW), |n| self.reserve(n), || {})
     }
@@ -210,6 +234,7 @@ impl Drop for TpuAllocator {
 /// Locks the per-device TPU allocator table.
 fn allocators() -> std::sync::MutexGuard<'static, HashMap<usize, Arc<TpuAllocator>>> {
     static ALLOCATORS: OnceLock<Mutex<HashMap<usize, Arc<TpuAllocator>>>> = OnceLock::new();
+
     ALLOCATORS
         .get_or_init(Default::default)
         .lock()
@@ -220,9 +245,11 @@ fn allocators() -> std::sync::MutexGuard<'static, HashMap<usize, Arc<TpuAllocato
 pub(super) fn allocator(index: usize) -> Arc<dyn Allocator> {
     let capacity = super::config::static_allocator_bytes();
     let mut allocators = allocators();
+
     let allocator = allocators
         .entry(index)
         .or_insert_with(|| Arc::new(TpuAllocator::new(index, capacity)));
+
     Arc::clone(allocator) as Arc<dyn Allocator>
 }
 

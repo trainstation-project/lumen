@@ -7,6 +7,7 @@ use super::super::{Algorithm, GemmConfig};
 /// Every MPP config autotuning tries: each (tile, simdgroups) pair with K steps of 32, 64 and 128.
 pub(crate) fn mpp_configs() -> &'static [GemmConfig] {
     static CONFIGS: OnceLock<Vec<GemmConfig>> = OnceLock::new();
+
     CONFIGS.get_or_init(|| {
         let tiles = [
             (64, 64, 4),
@@ -15,6 +16,7 @@ pub(crate) fn mpp_configs() -> &'static [GemmConfig] {
             (128, 64, 4),
             (128, 128, 8),
         ];
+
         tiles
             .into_iter()
             .flat_map(|(bm, bn, simds)| {

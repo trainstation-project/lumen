@@ -27,8 +27,10 @@ unsafe extern "C" {
         done: Completion,
         context: *mut c_void,
     ) -> i32;
+
     /// Returns the compute pipeline for kernel `name`, or null if no such kernel exists.
     fn lumen_mps_pipeline(name: *const c_char) -> *mut c_void;
+
     /// Dispatches an already-built pipeline; `groups` says whether `grid` counts threadgroups, `group` is the threadgroup size (0 for the default).
     fn lumen_mps_launch_pipeline(
         pipeline: *mut c_void,
@@ -101,18 +103,22 @@ impl Pointers<'_> {
             let at = (p as usize).wrapping_sub(base as usize);
             (at < len.max(1)).then_some(at)
         };
+
         if p.is_null() {
             return Ok(Slot::Null);
         }
+
         if let Some(at) = within(self.workspace) {
             return Ok(Slot::Workspace(at));
         }
+
         let mut found = self
             .operands
             .iter()
             .enumerate()
             .filter_map(|(k, &operand)| within(operand).map(|at| Slot::Operand(k, at)))
             .chain(within(self.output).map(Slot::Output));
+
         match (found.next(), found.next()) {
             (Some(slot), None) => Ok(slot),
             (Some(_), Some(_)) => Err(Unprepared::Ambiguous),
@@ -147,6 +153,7 @@ pub(crate) fn prepare(captured: Vec<Captured>, at: &Pointers) -> Result<Prepared
             .iter()
             .map(|&p| at.slot(p))
             .collect::<Result<_, _>>()?;
+
         Ok(Replay {
             pipeline: c.pipeline as usize,
             buffers,
@@ -158,6 +165,7 @@ pub(crate) fn prepare(captured: Vec<Captured>, at: &Pointers) -> Result<Prepared
             label: c.label,
         })
     });
+
     launches.collect::<Result<_, _>>().map(Prepared)
 }
 
@@ -166,11 +174,14 @@ pub(crate) fn replay(prepared: &Prepared, at: &Pointers, keep: Vec<Tensor>) -> R
     let Some((last, first)) = prepared.0.split_last() else {
         return Ok(());
     };
+
     let mut buffers = Vec::new();
+
     for (r, keep) in first.iter().map(|r| (r, Vec::new())).chain([(last, keep)]) {
         buffers.clear();
         buffers.extend(r.buffers.iter().map(|&slot| at.pointer(slot)));
         let launch = (r.sizes, r.groups, r.group);
+
         dispatch(
             r.pipeline as *mut c_void,
             &buffers,
@@ -181,6 +192,7 @@ pub(crate) fn replay(prepared: &Prepared, at: &Pointers, keep: Vec<Tensor>) -> R
             &r.kernel,
         )?;
     }
+
     Ok(())
 }
 
@@ -205,16 +217,20 @@ const MAX_ARGS: usize = 31;
 fn pipeline(kernel: &str) -> Result<*mut c_void, String> {
     static PIPELINES: Mutex<BTreeMap<String, usize>> = Mutex::new(BTreeMap::new());
     let mut pipelines = PIPELINES.lock().unwrap_or_else(PoisonError::into_inner);
+
     if let Some(&pipeline) = pipelines.get(kernel) {
         return Ok(pipeline as *mut c_void);
     }
+
     let name = CString::new(kernel).expect("kernel names have no NUL");
     let pipeline = unsafe { lumen_mps_pipeline(name.as_ptr()) };
+
     if pipeline.is_null() {
         return Err(format!(
             "the MPS kernel {kernel} could not run (no such kernel)"
         ));
     }
+
     pipelines.insert(kernel.to_owned(), pipeline as usize);
     Ok(pipeline)
 }
@@ -235,6 +251,7 @@ pub(crate) fn encode(
 ) -> Result<(), String> {
     use Primitive::*;
     let n = step.output.1.numel();
+
     if n > u32::MAX as usize {
         return Err(format!(
             "{}: {n} elements are more than MPS kernels index",
@@ -249,6 +266,7 @@ pub(crate) fn encode(
     {
         return encode(step, inputs, output, scratch, keep);
     }
+
     if let ReduceSum { .. } | ReduceMax { .. } = step.primitive {
         return super::reduction::mps::encode(step, inputs, output, scratch, keep);
     }
@@ -320,6 +338,7 @@ pub(crate) fn encode(
         PallasCall { .. } => unreachable!("a plan with a lumen.pallas kernel runs on a TPU"),
         TakeAlongAxis { .. } => unreachable!("rewritten as a gather (passes/take_along_axis.rs)"),
     };
+
     encode(step, inputs, output, keep)
 }
 
@@ -354,18 +373,22 @@ pub(crate) fn u64_arg(v: usize) -> Vec<u8> {
 /// Packs dimensions as a `u64` array argument; empty becomes `[0]` so the buffer is never zero-sized.
 pub(crate) fn dims_arg(v: impl IntoIterator<Item = usize>) -> Vec<u8> {
     let mut v: Vec<u64> = v.into_iter().map(|d| d as u64).collect();
+
     if v.is_empty() {
         v.push(0);
     }
+
     as_bytes(&v).to_vec()
 }
 
 /// Packs dimensions as a `u32` array argument; empty becomes `[0]` so the buffer is never zero-sized.
 pub(crate) fn dims32_arg(v: impl IntoIterator<Item = usize>) -> Vec<u8> {
     let mut v: Vec<u32> = v.into_iter().map(|d| d as u32).collect();
+
     if v.is_empty() {
         v.push(0);
     }
+
     as_bytes(&v).to_vec()
 }
 
@@ -410,6 +433,7 @@ pub(crate) fn mark_event(
     let (context, done) = mps::submit_event(recorded);
     let sizes = [1usize, 1, 1];
     mps::fence();
+
     let status = unsafe {
         lumen_mps_launch_kernel(
             c_name.as_ptr(),
@@ -425,10 +449,12 @@ pub(crate) fn mark_event(
             context,
         )
     };
+
     if status != 0 {
         mps::cancel(context);
         return Err(format!("recording an MPS event failed ({status})"));
     }
+
     mps::fence();
     Ok(())
 }
@@ -448,16 +474,20 @@ pub(crate) fn launch(
         Grid::GroupsOf { groups, threads } => (groups, true, threads),
         Grid::Elementwise { threads, group } => ([threads, 1, 1], false, group),
     };
+
     if sizes.contains(&0) {
         crate::profiler::clear_next_launch();
         return Ok(());
     }
+
     let pipeline = pipeline(kernel)?;
+
     if args.len() > MAX_ARGS {
         return Err(format!(
             "the MPS kernel {kernel} takes at most {MAX_ARGS} arguments"
         ));
     }
+
     let captured = CAPTURED.with_borrow_mut(|c| {
         c.as_mut().map(|c| {
             c.push(Captured {
@@ -472,9 +502,11 @@ pub(crate) fn launch(
             })
         })
     });
+
     if captured.is_some() {
         return Ok(());
     }
+
     dispatch(
         pipeline,
         buffers,
@@ -498,11 +530,14 @@ fn dispatch(
 ) -> Result<(), String> {
     let mut pointers = [std::ptr::null::<u8>(); MAX_ARGS];
     let mut lens = [0usize; MAX_ARGS];
+
     for (k, a) in args.iter().enumerate() {
         pointers[k] = a.as_ptr();
         lens[k] = a.len();
     }
+
     let (context, done, timed) = mps::submit(keep, name, kernel);
+
     let status = unsafe {
         lumen_mps_launch_pipeline(
             pipeline,
@@ -519,9 +554,11 @@ fn dispatch(
             context,
         )
     };
+
     if status != 0 {
         mps::cancel(context);
         return Err(format!("the MPS kernel {kernel} could not run ({status})"));
     }
+
     Ok(())
 }

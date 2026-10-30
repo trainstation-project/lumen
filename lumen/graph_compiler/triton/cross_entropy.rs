@@ -30,16 +30,20 @@ fn prepare(h: &Tensor, w: &Tensor, target: &Tensor) -> Prepared {
         accum_dtype: DType::F32,
         output_dtype: DType::F32,
     };
+
     let (rows, classes) = (h.shape()[0], w.shape()[0]);
     let logits = [rows, classes];
+
     let code = codegen::gemm(
         &dot,
         (h.shape(), h.strides()),
         (w.shape(), w.strides()),
         (&logits, &contiguous_strides(&logits)),
     );
+
     let epilogue =
         codegen::cross_entropy_epilogue(rows, classes, (target.shape(), target.strides()));
+
     Prepared {
         functions: vec![
             Function::new("PROLOGUE_A", code.prologue_a),
@@ -64,14 +68,18 @@ pub(super) fn run(
     let [h, w, target] = inputs else {
         unreachable!("linear_cross_entropy reads h, w and the labels")
     };
+
     let key = super::layouts(inputs.iter().chain([out]));
     let prepared = step.memo.get(key, || Ok(prepare(h, w, target)))?;
     let [_, rows, _, classes] = prepared.sizes;
+
     if rows == 0 {
         return Ok(());
     }
+
     let tiles = classes.div_ceil(config.block_n);
     let options = TensorOptions::new().dtype(DType::F32).device(out.device());
+
     // Each tile's max and sum of exps a row, and each row's label logit.
     let (peaks, sums, picked) = unsafe {
         (
@@ -80,7 +88,9 @@ pub(super) fn run(
             Tensor::empty(&[rows], options),
         )
     };
+
     let extra = [sums.clone(), picked.clone(), target.clone()];
+
     let epilogue = Epilogue {
         tensors: &extra,
         scalars: &[],
@@ -89,6 +99,7 @@ pub(super) fn run(
             ..codegen::EpilogueFlags::default()
         },
     };
+
     gemm(
         [h, w, &peaks],
         prepared.sizes,
@@ -98,14 +109,18 @@ pub(super) fn run(
         &prepared.launches,
         &epilogue,
     )?;
+
     let (name, source) = codegen::cross_entropy_combine(tiles, (out.shape(), out.strides()));
     let partials = [peaks, sums, picked];
+
     let functions: Vec<Function> = partials
         .iter()
         .enumerate()
         .map(|(k, t)| Function::new(format!("LOAD{k}"), codegen::load(t.shape(), t.strides())))
         .collect();
+
     let loop_config = LOOP_CONFIGS[UNTUNED_LOOP];
+
     // One program a row: its lanes are the whole block.
     let kernel = Kernel {
         name,
@@ -115,6 +130,7 @@ pub(super) fn run(
         splits: 1,
         segments: Vec::new(),
     };
+
     super::launch(
         &kernel,
         &loop_config,

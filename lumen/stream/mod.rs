@@ -38,6 +38,7 @@ pub trait Stream: Send + Sync {
 /// lumen's stream on `device`; errors if the device is not available.
 pub fn stream_for(device: Device) -> Result<Arc<dyn Stream>, String> {
     device.check()?;
+
     Ok(match device {
         Device::Cpu(_) => Arc::new(CpuStream),
         Device::Meta(_) => Arc::new(MetaStream),
@@ -68,6 +69,7 @@ impl Drop for Hold {
 /// `Hold` drops; only CUDA and MPS queues are stalled, other devices get an empty hold.
 pub(crate) fn hold(device: Device) -> Result<Hold, String> {
     device.check()?;
+
     Ok(Hold(match device {
         #[cfg(lumen_cuda_linked)]
         Device::Cuda(index) => Some(cuda::hold(index)?),

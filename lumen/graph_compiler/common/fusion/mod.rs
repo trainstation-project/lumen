@@ -45,6 +45,7 @@ fn is_reduction(node: &Node) -> bool {
 /// Whether `node` is costly enough per element that recomputing it in each reader is a bad trade.
 fn expensive(graph: &Graph, node: &Node) -> bool {
     use Primitive::*;
+
     match node.primitive {
         Exp | Log | Sqrt | Tanh | Logistic => true,
         Div => graph.type_of(node.output).dtype.is_float(),
@@ -68,6 +69,7 @@ pub(crate) fn fuse(
     let mut root = hosts::roots(&a, &rows, &reductions, &dots);
     let mut host = hosts::hosts(&a, &rows, backend, &root, &reductions, &dots);
     let mut fusions = emit::fusions(&a, backend, &mut root, &mut host);
+
     emit::row_dots(
         &a,
         &rows,
@@ -77,6 +79,7 @@ pub(crate) fn fuse(
         &mut host,
         &mut fusions,
     );
+
     emit::emitted(
         &a,
         scalars,

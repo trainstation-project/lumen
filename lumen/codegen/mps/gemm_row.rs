@@ -10,23 +10,29 @@ pub(crate) const ROW_TILE: usize = 64;
 /// rows, or `None` when the body doesn't fit that kernel.
 pub(crate) fn row_dot(body: &Graph) -> Option<&Node> {
     let dot = gemm_dot(body)?;
+
     let Primitive::DotGeneral { lhs_batch, .. } = &dot.primitive else {
         return None;
     };
+
     let dots = body
         .nodes()
         .iter()
         .filter(|n| matches!(n.primitive, Primitive::DotGeneral { .. }))
         .count();
+
     if dots != 1 || !lhs_batch.is_empty() || row_reductions(body).is_empty() {
         return None;
     }
+
     let float = |v: Var| matches!(body.type_of(v).dtype, DType::F16 | DType::BF16 | DType::F32);
     let (rows, n) = row_shape(body);
+
     let rows_fit = match n <= ROW_TILE {
         true => simd_rows(body),
         false => tile_reductions(body).is_some(),
     };
+
     let fits = body.type_of(dot.output).shape == [rows, n]
         && rows_fit
         && row_partials(body).is_empty()
@@ -35,6 +41,7 @@ pub(crate) fn row_dot(body: &Graph) -> Option<&Node> {
             .iter()
             .all(|v| body.inputs().contains(v) && float(*v))
         && float(dot.output);
+
     fits.then_some(dot)
 }
 
@@ -43,12 +50,14 @@ pub(crate) fn row_dot(body: &Graph) -> Option<&Node> {
 pub(super) fn tile_reductions(body: &Graph) -> Option<Vec<usize>> {
     let reductions = row_reductions(body);
     let first = crate::graph_compiler::common::diamonds::tile_reductions(body, &reductions)?;
+
     let simd = |&k: &usize| {
         matches!(
             body.type_of(reductions[k].output).dtype,
             DType::F32 | DType::F16 | DType::I32
         )
     };
+
     first.iter().all(simd).then_some(first)
 }
 
@@ -57,18 +66,22 @@ pub(super) fn tile_reductions(body: &Graph) -> Option<Vec<usize>> {
 pub(crate) fn tile_scratch(body: &Graph) -> Option<(Vec<usize>, usize)> {
     let dot = row_dot(body)?;
     let (rows, n) = row_shape(body);
+
     if n <= ROW_TILE {
         return None;
     }
+
     let reductions = row_reductions(body);
     let tiles = n.div_ceil(ROW_TILE);
     let aligned = |bytes: usize| bytes.next_multiple_of(crate::graph_compiler::plan::ALIGNMENT);
     let mut offsets = vec![0];
     let mut at = aligned(rows * n * body.type_of(dot.output).dtype.size_of());
+
     for k in tile_reductions(body)? {
         offsets.push(at);
         at += aligned(rows * tiles * body.type_of(reductions[k].output).dtype.size_of());
     }
+
     Some((offsets, at))
 }
 
@@ -89,22 +102,27 @@ pub(super) fn gemm_tiles(
     let Primitive::DotGeneral { accum_dtype, .. } = dot.primitive else {
         unreachable!("a dot")
     };
+
     let accum = metal_type(accum_dtype);
     let t = metal_type(body.type_of(dot.inputs[0]).dtype);
     let o = metal_type(body.type_of(dot.output).dtype);
     let out = metal_type(body.type_of(body.outputs()[0]).dtype);
+
     let operand = |v: Var| {
         let k = body.inputs().iter().position(|&i| i == v);
         format!("in{}", k.expect("a dot's operands are the fusion's inputs"))
     };
+
     let (lhs, rhs) = (operand(dot.inputs[0]), operand(dot.inputs[1]));
     let (tile, tiles) = (ROW_TILE, n.div_ceil(ROW_TILE));
     // MPP and GEMV kernels tile by config, so the partial's tile index comes from the column.
     let mpp = gemm.filter(|c| c.algorithm != Algorithm::Tiled);
+
     let at = match mpp {
         Some(_) => format!("(uint(n0) + c0) / {tile}u"),
         None => "group.x".to_owned(),
     };
+
     let mut extra = vec![format!("device {o} *dotv")];
     // The rows body reads the dot value as one extra input after the original ones.
     let mut read = by_value.to_vec();
@@ -112,18 +130,22 @@ pub(super) fn gemm_tiles(
     read.push(false);
     let mut e = Emitter::new(rows_body, &read);
     let (mut init, mut step, mut write) = (String::new(), String::new(), String::new());
+
     for &(k, _) in first {
         let r = reductions[k];
         let a = metal_type(rows_body.type_of(r.output).dtype);
         let op = functor_of_reduction(&r.primitive);
         let value = e.value(r.inputs[0], "j".into());
+
         let lanes = match op {
             "Add" => "simd_sum",
             _ => "simd_max",
         };
+
         extra.push(format!("device {a} *tiles{k}"));
         writeln!(init, "{a} acc{k} = {op}::template identity<{a}>();").unwrap();
         writeln!(step, "acc{k} = {op}::apply(acc{k}, {a}({value}));").unwrap();
+
         writedoc!(
             write,
             "
@@ -135,16 +157,21 @@ pub(super) fn gemm_tiles(
         )
         .unwrap();
     }
+
     let staged = rows_body.inputs().len() - 1;
     let (params, first_arg) = io_params(body, by_value, out, &extra);
+
     if let Some(c) = mpp {
         let lines = read_staged(&format!("{}{}", e.hoisted, e.lines), staged, |x| {
             format!("dotv[{x}]")
         });
+
         let (bm, bn, bk, threads, simds) = (c.bm, c.bn, c.bk, c.threads, c.threads / 32);
+
         let product = match c.algorithm {
             Algorithm::Gemv => {
                 let (_, vectors) = gemv_of(body, dot).expect("a matrix-vector dot");
+
                 format!(
                     "matmul_gemv<{t}, {accum}, {o}, {bn}, {simds}, {bk}, {vectors}, true, {o}, Same>(\n\
                      {lhs}, {rhs}, dotv, p, group, sg, lane);"
@@ -152,6 +179,7 @@ pub(super) fn gemm_tiles(
             }
             _ => {
                 let ty = |v: Var| body.type_of(v);
+
                 let (left, right) = mpp_transposes(
                     &dot.primitive,
                     ty(dot.inputs[0]),
@@ -159,12 +187,14 @@ pub(super) fn gemm_tiles(
                     ty(dot.output),
                 )
                 .expect("a layout Metal Performance Primitives read");
+
                 format!(
                     "matmul_mpp<{t}, {accum}, {o}, {bm}, {bn}, {bk}, {simds}, {left}, {right}, {o}, Same>(\n\
                      {lhs}, {rhs}, dotv, p, group);"
                 )
             }
         };
+
         return formatdoc!(
             "
             [[max_total_threads_per_threadgroup({threads})]]
@@ -190,9 +220,11 @@ pub(super) fn gemm_tiles(
             "
         );
     }
+
     let lines = read_staged(&format!("{}{}", e.hoisted, e.lines), staged, |x| {
         format!("staged[(ulong({x}) / {n}ul - m0) * {tile}ul + ulong({x}) % {n}ul - n0]")
     });
+
     formatdoc!(
         "
         struct NAME_tiles_staging {{
@@ -265,22 +297,27 @@ pub(crate) fn gemm_row_kernel(
 ) -> (String, String) {
     let mut rows = Graph::new();
     let mut var: HashMap<Var, Var> = HashMap::new();
+
     for &v in body.inputs() {
         var.insert(v, rows.input(body.type_of(v).clone()));
     }
+
     var.insert(dot.output, rows.input(body.type_of(dot.output).clone()));
+
     for node in body.nodes().iter().filter(|n| n.output != dot.output) {
         rows.set_origin(node);
         let inputs: Vec<Var> = node.inputs.iter().map(|v| var[v]).collect();
         let v = rows.apply(node.primitive.clone(), &inputs);
         var.insert(node.output, v.expect("a node of the body"));
     }
+
     let outputs: Vec<Var> = body.outputs().iter().map(|v| var[v]).collect();
     rows.set_outputs(&outputs).expect("the body's outputs");
     let mut read = by_value.to_vec();
     read.resize(body.inputs().len(), false);
     read.push(false);
     let reductions = row_reductions(&rows);
+
     row_kernel(
         &rows,
         &read,
@@ -295,13 +332,16 @@ pub(crate) fn gemm_row_kernel(
 pub(super) fn read_staged(source: &str, k: usize, staged: impl Fn(&str) -> String) -> String {
     let name = load(k);
     let (mut out, mut rest) = (String::new(), source);
+
     while let Some(at) = rest.find(&name) {
         let ident = rest[..at]
             .chars()
             .last()
             .is_some_and(|c| c.is_alphanumeric() || c == '_');
+
         let after = &rest[at + name.len()..];
         let mut depth = 1;
+
         let end = after
             .char_indices()
             .find(|&(_, c)| {
@@ -310,17 +350,22 @@ pub(super) fn read_staged(source: &str, k: usize, staged: impl Fn(&str) -> Strin
                     ')' => -1,
                     _ => 0,
                 };
+
                 depth == 0
             })
             .map(|(i, _)| i)
             .expect("a closing parenthesis");
+
         out.push_str(&rest[..at]);
+
         match ident {
             true => out.push_str(&rest[at..at + name.len() + end + 1]),
             false => out.push_str(&staged(&after[..end])),
         }
+
         rest = &after[end + 1..];
     }
+
     out.push_str(rest);
     out
 }
@@ -338,17 +383,21 @@ pub(super) fn gemm_rows(
     let Primitive::DotGeneral { accum_dtype, .. } = dot.primitive else {
         unreachable!("a dot")
     };
+
     let accum = metal_type(accum_dtype);
     let t = metal_type(body.type_of(dot.inputs[0]).dtype);
     let o = metal_type(body.type_of(dot.output).dtype);
     let out = metal_type(body.type_of(body.outputs()[0]).dtype);
+
     let operand = |v: Var| {
         let k = body.inputs().iter().position(|&i| i == v);
         format!("in{}", k.expect("a dot's operands are the fusion's inputs"))
     };
+
     let (lhs, rhs) = (operand(dot.inputs[0]), operand(dot.inputs[1]));
     let (params, first) = io_params(body, by_value, out, &[]);
     let tile = ROW_TILE;
+
     named(formatdoc!(
         "
         struct NAME_staging {{

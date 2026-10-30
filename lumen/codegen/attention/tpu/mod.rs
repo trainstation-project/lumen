@@ -47,6 +47,7 @@ fn view(
     matrix: Option<usize>,
 ) -> Result<String, String> {
     let shape = &op.ty.shape;
+
     let failed = |why: &str| {
         Err(format!(
             "flash attention on TPU: {name}, read from {} (offset {}, rows {} apart, columns {} apart): {why}",
@@ -60,6 +61,7 @@ fn view(
 
     let (rows, width) = (shape[shape.len() - 2], shape[shape.len() - 1]);
     let tiles = Layout::new(op.ty.dtype, shape)?.rows;
+
     // A sequence that divides the rows in whole tiles makes each slab one head's matrix.
     let rows = match matrix {
         Some(seq) if rows.is_multiple_of(seq) && seq.is_multiple_of(tiles) => seq,
@@ -74,6 +76,7 @@ fn view(
         Some(_) => col == 1 && row == width,
         None => col == width,
     };
+
     if !fits {
         return failed("an operand whose rows are not its tiles' rows");
     }
@@ -98,6 +101,7 @@ fn view(
     }
 
     let heads: usize = batch.iter().product();
+
     // Check every head's start lands where the per-dim slab and column steps put it.
     for g in 0..heads {
         let (mut rest, mut address, mut at) = (g, op.acc.offset, (l0, r0, c0));
@@ -110,6 +114,7 @@ fn view(
         }
 
         let whole = split(address) == at && at.1 == 0 && at.0 < slabs;
+
         if !whole || !at.2.is_multiple_of(unit) || at.2 + unit > width {
             return failed("heads that are not whole tiles of their operand");
         }
@@ -196,11 +201,13 @@ pub(crate) fn kernel(name: &str, body: &Graph) -> Result<(&'static str, String),
         "flash_attention" => {
             let a = attention::of_body(body)
                 .ok_or("flash attention on TPU: no attention in its body")?;
+
             Tpu::forward(body, &a, &strides)
         }
         _ => {
             let b = attention::backward_of_body(body)
                 .ok_or("flash attention backward on TPU: no attention backward in its body")?;
+
             Tpu::backward(body, &b, &strides)
         }
     }
@@ -236,6 +243,7 @@ impl AttentionCodegen for Tpu {
                 .ok_or("flash attention on TPU: an output written through other than its layout")?;
 
             let acc = written_at(body, &a.out, &a.batch, k)?.1;
+
             let shown = view(
                 "the output",
                 &output(body, k, acc, a.hv),
@@ -303,6 +311,7 @@ impl AttentionCodegen for Tpu {
         let delta = match rows_of(body, &b.delta, usize::MAX) {
             usize::MAX => {
                 let o = inside(body, &b.delta, &b.d_o, &b.batch, b.sq)?;
+
                 format!(
                     "\"delta\": null, \"o\": {}",
                     view("o", &operand(body, &o, b.hv), &b.batch, Some(b.sq))?
@@ -395,6 +404,7 @@ fn inside(
         || Err("flash attention backward on TPU: delta neither an operand nor rowsum(dO o)".into());
 
     let producer = |v: Var| body.nodes().iter().find(|n| n.output == v);
+
     let Some(dot) = producer(delta.base) else {
         return failed();
     };
@@ -455,31 +465,38 @@ fn inside(
                 );
 
                 let (fs, ts) = (contiguous_strides(from), contiguous_strides(to));
+
                 a = (0..from.len())
                     .map(|d| ((a / fs[d]) % from[d]) * ts[permutation[d]])
                     .sum();
             }
         }
+
         a
     };
 
     let out = body.type_of(dot.output).shape.clone();
+
     if contracting.len() != 1 || out.len() != dims.len() {
         return failed();
     }
 
     let (strides, out_strides) = (contiguous_strides(&shape), contiguous_strides(&out));
+
     let at = |a: usize, h: usize| {
         let mut address = h * strides[contracting[0]];
+
         for (k, &d) in dims.iter().enumerate() {
             address += ((a / out_strides[k]) % out[k]) * strides[d];
         }
+
         through(address)
     };
 
     let offset = at(delta.offset, 0);
     // Fit each batch dim's step as (stride, period): heads within one period read the same place.
     let mut fitted = Vec::new();
+
     for (d, &(stride, div)) in delta.batch.iter().enumerate() {
         let size = batch[d];
         let of = |i: usize| at(delta.offset + (i / div) * stride, 0);
@@ -503,6 +520,7 @@ fn inside(
 
     // Check the first and last query row of every head against the fitted access.
     let heads: usize = batch.iter().product();
+
     for g in 0..heads {
         for q in [0, sq - 1] {
             let (mut rest, mut from, mut to) =
@@ -543,6 +561,7 @@ fn path(body: &Graph, from: Var, k: usize) -> Option<Vec<&Node>> {
 
     while v != from {
         let n = producer(v)?;
+
         let step = matches!(
             n.primitive,
             Primitive::Reshape { .. } | Primitive::ReduceSum { .. }
@@ -581,6 +600,7 @@ fn epilogue_spec(body: &Graph, chain: &[&Node], from: Var) -> Result<String, Str
         .collect();
 
     let mut needed = vec![false; nodes.len()];
+
     let mut stack: Vec<Var> = chain
         .iter()
         .flat_map(|n| n.inputs.iter().copied())
@@ -588,6 +608,7 @@ fn epilogue_spec(body: &Graph, chain: &[&Node], from: Var) -> Result<String, Str
         .collect();
 
     let mut scalars: Vec<Var> = Vec::new();
+
     // Collect the non-path values the chain reads, failing on any non-scalar body input.
     while let Some(v) = stack.pop() {
         match producer(v) {
@@ -616,6 +637,7 @@ fn epilogue_spec(body: &Graph, chain: &[&Node], from: Var) -> Result<String, Str
 
     for (i, n) in nodes.iter().enumerate() {
         let wanted = needed[i] || chain.iter().any(|m| m.output == n.output);
+
         if !wanted {
             continue;
         }
@@ -640,6 +662,7 @@ fn epilogue_spec(body: &Graph, chain: &[&Node], from: Var) -> Result<String, Str
                 .iter()
                 .position(|&u| u == v)
                 .expect("an input");
+
             format!("[{row}, \"{}\"]", body.type_of(v).dtype.full_name())
         })
         .collect();
@@ -704,6 +727,7 @@ fn written_at(
     };
 
     let offset = f(acc.offset);
+
     let step = |s: usize| {
         if s == 0 {
             0
@@ -737,6 +761,7 @@ fn written_at(
     };
 
     let heads: usize = batch.iter().product();
+
     for g in 0..heads {
         let (mut rest, mut before, mut after) = (g, acc.offset, mapped.offset);
 
@@ -803,6 +828,7 @@ pub(crate) fn encode(
     }
 
     let n = step.inputs.len();
+
     let rows: Vec<*const u8> = inputs[..n]
         .iter()
         .copied()

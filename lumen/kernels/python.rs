@@ -56,14 +56,18 @@ impl Launcher {
         } else {
             launcher.clone()
         };
+
         if function.is_none() || !function.hasattr("__chandle__")? {
             return Ok(Launcher::Python(launcher.unbind()));
         }
+
         let path: String = py
             .import("tvm_ffi.libinfo")?
             .call_method0("find_libtvm_ffi")?
             .extract()?;
+
         core::kernels::tvm_ffi::load(&path).map_err(PyRuntimeError::new_err)?;
+
         Ok(Launcher::TvmFfi {
             handle: function.call_method0("__chandle__")?.extract()?,
             _owner: launcher.unbind(),
@@ -91,6 +95,7 @@ fn check_op(name: &str) -> PyResult<&'static str> {
         .map(|(op, _)| *op)
         .ok_or_else(|| {
             let known: Vec<&str> = OP_SIGNATURES.iter().map(|(op, _)| *op).collect();
+
             PyKeyError::new_err(format!(
                 "no op {name:?} accepts Python kernels; supported: {}",
                 known.join(", ")
@@ -114,13 +119,16 @@ impl KernelHandle {
     ) -> bool {
         let value = dispatch_dtype!(dtype, T => T::from_scalar(value).to_scalar());
         let vector_size = core::kernels::vector_size(shape, strides, dtype.size_of(), address);
+
         // fast path: a cached TVM FFI launcher runs without attaching to Python
         let run = || {
             #[cfg(lumen_cuda_linked)]
             if let core::Device::Cuda(index) = device {
                 crate::device::cuda::CUDA.set_device(index);
             }
+
             let key = (self.0, dtype, shape.to_vec(), strides.to_vec(), vector_size);
+
             let cached = LAUNCHERS
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
@@ -130,11 +138,13 @@ impl KernelHandle {
                     Launcher::TvmFfi { handle, .. } => Some(*handle),
                     Launcher::Python(_) => None,
                 });
+
             let step = match cached {
                 Some(Some(handle)) => Ok(Step::TvmFfi(handle)),
                 _ => Python::attach(|py| self.launch_python(py, op, key, address, value))
                     .map_err(|e| e.to_string()),
             };
+
             let launched = match step {
                 Ok(Step::TvmFfi(handle)) => {
                     core::kernels::tvm_ffi::launch(handle, address, value, STREAM).map(|()| true)
@@ -142,12 +152,15 @@ impl KernelHandle {
                 Ok(Step::Done(launched)) => Ok(launched),
                 Err(e) => Err(e),
             };
+
             launched.unwrap_or_else(|e| panic!("python kernel for {op} failed: {e}"))
         };
+
         #[cfg(lumen_cupti_linked)]
         if let core::Device::Cuda(_) = device {
             return crate::profiler::cupti::correlated(device, run);
         }
+
         let _ = device;
         run()
     }
@@ -170,43 +183,54 @@ impl KernelHandle {
                 Launcher::Python(launcher) => launcher.clone_ref(py),
                 Launcher::TvmFfi { _owner, .. } => _owner.clone_ref(py),
             });
+
         if let Some(launcher) = cached {
             launcher
                 .bind(py)
                 .call1((address, scalar_to_py(py, value)?, STREAM))?;
+
             return Ok(Step::Done(true));
         }
+
         let compile = KERNELS
             .read()
             .unwrap_or_else(|e| e.into_inner())
             .get(self.0)
             .filter(|(name, _)| *name == op)
             .map(|(_, compile)| compile.clone_ref(py));
+
         let Some(compile) = compile else {
             return Ok(Step::Done(false));
         };
+
         let (dtype, shape, strides, vector_size) = (key.1, &key.2, &key.3, key.4);
+
         let compiled = compile.bind(py).call1((
             dtype_name(dtype),
             PyTuple::new(py, shape)?,
             PyTuple::new(py, strides)?,
             vector_size,
         ))?;
+
         let launcher = Launcher::new(py, compiled)?;
+
         let step = match &launcher {
             Launcher::TvmFfi { handle, .. } => Step::TvmFfi(*handle),
             Launcher::Python(launcher) => {
                 launcher
                     .bind(py)
                     .call1((address, scalar_to_py(py, value)?, STREAM))?;
+
                 Step::Done(true)
             }
         };
+
         LAUNCHERS
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get_or_insert_with(HashMap::new)
             .insert(key, launcher);
+
         Ok(step)
     }
 }
@@ -222,6 +246,7 @@ enum Step {
 /// Converts a scalar argument to the matching Python int, float or bool.
 fn scalar_to_py(py: Python<'_>, value: Scalar) -> PyResult<Py<PyAny>> {
     use pyo3::IntoPyObjectExt;
+
     match value {
         Scalar::Bool(v) => v.into_py_any(py),
         Scalar::Int(v) => v.into_py_any(py),
@@ -239,10 +264,12 @@ pub(crate) fn handle_for(op: &str, key: DispatchKey) -> Option<KernelHandle> {
 #[pyo3(signature = (name, device))]
 fn _unregister_kernel(py: Python<'_>, name: &str, device: &Bound<'_, PyAny>) -> PyResult<bool> {
     let name = check_op(name)?;
+
     let device = match resolve_device(Some(device)) {
         Err(e) if e.is_instance_of::<PyRuntimeError>(py) => return Ok(false),
         device => device?,
     };
+
     Ok(python_op(name).unregister(DispatchKey::of(device)))
 }
 
@@ -256,10 +283,13 @@ fn _register_kernel(
     kernel: Py<PyAny>,
 ) -> PyResult<()> {
     let name = check_op(name)?;
+
     if !kernel.bind(py).is_callable() {
         return Err(PyValueError::new_err("kernel must be callable"));
     }
+
     let key = DispatchKey::of(resolve_device(Some(device))?);
+
     if key == DispatchKey::Cpu {
         return Err(PyRuntimeError::new_err(
             "registering a Python kernel for the CPU is not supported",
@@ -281,6 +311,7 @@ fn _register_kernel(
 #[pyfunction]
 fn _registered_ops(py: Python<'_>) -> Vec<(String, String)> {
     let _ = py;
+
     OP_SIGNATURES
         .iter()
         .map(|(op, sig)| ((*op).to_owned(), (*sig).to_owned()))

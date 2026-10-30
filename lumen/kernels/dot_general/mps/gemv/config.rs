@@ -17,6 +17,7 @@ fn config(vector_lhs: bool, rows: usize, simds: usize) -> GemmConfig {
         true => (GEMV_VECTORS, rows),
         false => (rows, GEMV_VECTORS),
     };
+
     GemmConfig {
         bm,
         bn,
@@ -31,9 +32,11 @@ fn config(vector_lhs: bool, rows: usize, simds: usize) -> GemmConfig {
 /// Every GEMV config autotuning tries, for the given vector side.
 pub(crate) fn gemv_configs(vector_lhs: bool) -> &'static [GemmConfig] {
     static CONFIGS: OnceLock<[Vec<GemmConfig>; 2]> = OnceLock::new();
+
     let all = CONFIGS.get_or_init(|| {
         [false, true].map(|vector_lhs| {
             let mut out = Vec::new();
+
             for rows in [8, 16, 32, 64] {
                 for simds in [1, 2, 4, 8] {
                     // Each simdgroup owns whole rows, at most eight of them.
@@ -42,9 +45,11 @@ pub(crate) fn gemv_configs(vector_lhs: bool) -> &'static [GemmConfig] {
                     }
                 }
             }
+
             out
         })
     });
+
     &all[usize::from(vector_lhs)]
 }
 

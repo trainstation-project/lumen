@@ -58,6 +58,7 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         use Error::*;
+
         match self {
             InvalidHeader(e) => write!(f, "invalid UTF-8 in header: {e}"),
             InvalidHeaderDeserialization(e) => write!(f, "invalid JSON in header: {e}"),
@@ -264,6 +265,7 @@ impl Metadata {
         tensors: Vec<(String, TensorInfo)>,
     ) -> Result<Self, Error> {
         let mut index = HashMap::with_capacity(tensors.len());
+
         for (i, (name, _)) in tensors.iter().enumerate() {
             if index.insert(name.clone(), i).is_some() {
                 return Err(Error::InvalidHeaderDeserialization(format!(
@@ -271,11 +273,13 @@ impl Metadata {
                 )));
             }
         }
+
         let metadata = Self {
             metadata,
             tensors,
             index,
         };
+
         metadata.validate()?;
         Ok(metadata)
     }
@@ -284,27 +288,35 @@ impl Metadata {
     /// returns the data section's length.
     fn validate(&self) -> Result<usize, Error> {
         let mut start = 0;
+
         for (name, info) in &self.tensors {
             let (s, e) = info.data_offsets;
+
             if s != start || e < s {
                 return Err(Error::InvalidOffset(name.clone()));
             }
+
             start = e;
+
             let elements = info
                 .shape
                 .iter()
                 .try_fold(1usize, |n, &d| n.checked_mul(d))
                 .ok_or(Error::ValidationOverflow)?;
+
             let bits = elements
                 .checked_mul(info.dtype.bitsize())
                 .ok_or(Error::ValidationOverflow)?;
+
             if bits % 8 != 0 {
                 return Err(Error::MisalignedSlice);
             }
+
             if e - s != bits / 8 {
                 return Err(Error::TensorInvalidInfo);
             }
         }
+
         Ok(start)
     }
 
@@ -331,22 +343,27 @@ impl Metadata {
     /// Parses JSON header text, separating `__metadata__` and ordering tensors by data offset.
     fn parse(header: &str) -> Result<Self, Error> {
         let bad = |msg: String| Error::InvalidHeaderDeserialization(msg);
+
         let Value::Object(members) = json::parse(header).map_err(bad)? else {
             return Err(bad("the header is not a JSON object".into()));
         };
+
         let mut metadata = None;
         let mut tensors = Vec::with_capacity(members.len());
+
         for (key, value) in members {
             if key == "__metadata__" {
                 if metadata.is_some() {
                     return Err(bad("duplicate `__metadata__`".into()));
                 }
+
                 metadata = parse_string_map(value).map_err(bad)?;
             } else {
                 let info = parse_info(value).map_err(|e| bad(format!("tensor `{key}`: {e}")))?;
                 tensors.push((key, info));
             }
         }
+
         tensors.sort_by_key(|(_, info)| info.data_offsets);
         Metadata::new(metadata, tensors)
     }
@@ -354,34 +371,43 @@ impl Metadata {
     /// Writes the header as compact JSON: `__metadata__` first, then tensors in data order.
     fn to_json(&self) -> String {
         let mut out = String::from("{");
+
         if let Some(metadata) = &self.metadata {
             out.push_str("\"__metadata__\":{");
+
             for (i, (k, v)) in metadata.iter().enumerate() {
                 if i > 0 {
                     out.push(',');
                 }
+
                 json::write_string(&mut out, k);
                 out.push(':');
                 json::write_string(&mut out, v);
             }
+
             out.push('}');
+
             if !self.tensors.is_empty() {
                 out.push(',');
             }
         }
+
         for (i, (name, info)) in self.tensors.iter().enumerate() {
             if i > 0 {
                 out.push(',');
             }
+
             json::write_string(&mut out, name);
             let shape: Vec<String> = info.shape.iter().map(usize::to_string).collect();
             let (s, e) = info.data_offsets;
+
             out.push_str(&format!(
                 ":{{\"dtype\":\"{}\",\"shape\":[{}],\"data_offsets\":[{s},{e}]}}",
                 info.dtype,
                 shape.join(",")
             ));
         }
+
         out.push('}');
         out
     }
@@ -403,14 +429,17 @@ fn parse_string_map(value: Value) -> Result<Option<BTreeMap<String, String>>, St
         Value::Null => Ok(None),
         Value::Object(members) => {
             let mut map = BTreeMap::new();
+
             for (k, v) in members {
                 let Value::String(v) = v else {
                     return Err(format!("`__metadata__` value of `{k}` is not a string"));
                 };
+
                 if map.insert(k.clone(), v).is_some() {
                     return Err(format!("duplicate `__metadata__` key `{k}`"));
                 }
             }
+
             Ok(Some(map))
         }
         _ => Err("`__metadata__` is not an object".into()),
@@ -422,6 +451,7 @@ fn parse_info(value: Value) -> Result<TensorInfo, String> {
     let Value::Object(fields) = value else {
         return Err("not an object".into());
     };
+
     let field = |name: &str| {
         fields
             .iter()
@@ -429,18 +459,23 @@ fn parse_info(value: Value) -> Result<TensorInfo, String> {
             .map(|(_, v)| v)
             .ok_or_else(|| format!("missing `{name}`"))
     };
+
     let dtype = match field("dtype")? {
         Value::String(s) => Dtype::parse(s).ok_or_else(|| format!("unknown dtype `{s}`"))?,
         _ => return Err("`dtype` is not a string".into()),
     };
+
     let Value::Array(shape) = field("shape")? else {
         return Err("`shape` is not an array".into());
     };
+
     let shape = shape.iter().map(parse_usize).collect::<Result<_, _>>()?;
+
     let offsets = match field("data_offsets")? {
         Value::Array(o) if o.len() == 2 => (parse_usize(&o[0])?, parse_usize(&o[1])?),
         _ => return Err("`data_offsets` is not an array of two integers".into()),
     };
+
     Ok(TensorInfo {
         dtype,
         shape,
@@ -460,29 +495,37 @@ fn prepare<'a>(
     if cfg!(target_endian = "big") {
         return Err(Error::BigEndian);
     }
+
     for &(name, t) in tensors {
         if Dtype::from_lumen(t.dtype()).is_none() {
             let dtype = t.dtype().full_name().to_owned();
             return Err(Error::UnsupportedDtype(name.to_owned(), dtype));
         }
     }
+
     // Widest dtypes first (then by name) keeps every tensor's offset a multiple of its element size.
     let mut order = tensors.to_vec();
+
     order.sort_by(|(ln, lt), (rn, rt)| {
         Dtype::from_lumen(rt.dtype())
             .cmp(&Dtype::from_lumen(lt.dtype()))
             .then(ln.cmp(rn))
     });
+
     let mut offset = 0;
     let mut infos = Vec::with_capacity(order.len());
+
     for &(name, t) in &order {
         if t.device() == Device::Meta(0) {
             return Err(Error::MetaTensor(name.to_owned()));
         }
+
         if !t.is_contiguous() {
             return Err(Error::NotContiguous(name.to_owned()));
         }
+
         let n = t.numel() * t.dtype().size_of();
+
         infos.push((
             name.to_owned(),
             TensorInfo {
@@ -491,14 +534,18 @@ fn prepare<'a>(
                 data_offsets: (offset, offset + n),
             },
         ));
+
         offset += n;
     }
+
     let mut header = Metadata::new(metadata, infos)?.to_json().into_bytes();
     // Pad with spaces so the data section starts 8-byte aligned.
     header.resize(header.len().next_multiple_of(N_LEN), b' ');
+
     if header.len() > MAX_HEADER_SIZE {
         return Err(Error::HeaderTooLarge);
     }
+
     Ok((header, order))
 }
 
@@ -516,12 +563,15 @@ fn host_accessible(device: Device) -> bool {
 /// first when the host cannot read its device.
 fn with_bytes<R>(t: &Tensor, f: impl FnOnce(&[u8]) -> R) -> R {
     let n = t.numel() * t.dtype().size_of();
+
     if n == 0 {
         return f(&[]);
     }
+
     if !host_accessible(t.device()) {
         return with_bytes(&t.to(Device::Cpu(0)), f);
     }
+
     t.wait_();
     f(unsafe { std::slice::from_raw_parts(t.data_ptr().cast_const(), n) })
 }
@@ -532,16 +582,20 @@ pub fn serialize(
     metadata: Option<BTreeMap<String, String>>,
 ) -> Result<Vec<u8>, Error> {
     let (header, order) = prepare(tensors, metadata)?;
+
     let data: usize = order
         .iter()
         .map(|(_, t)| t.numel() * t.dtype().size_of())
         .sum();
+
     let mut out = Vec::with_capacity(N_LEN + header.len() + data);
     out.extend((header.len() as u64).to_le_bytes());
     out.extend(&header);
+
     for (_, t) in order {
         with_bytes(t, |b| out.extend_from_slice(b));
     }
+
     Ok(out)
 }
 
@@ -556,10 +610,13 @@ pub fn save_file(
 ) -> Result<(), Error> {
     let path = path.as_ref();
     let (header, order) = prepare(tensors, metadata)?;
+
     let name = path
         .file_name()
         .map_or_else(Default::default, |n| n.to_string_lossy());
+
     let temp = path.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
+
     let write = || -> Result<(), Error> {
         let mut f = io::BufWriter::with_capacity(1 << 20, std::fs::File::create(&temp)?);
         f.write_all(&(header.len() as u64).to_le_bytes())?;
@@ -573,6 +630,7 @@ pub fn save_file(
         std::fs::rename(&temp, path)?;
         Ok(())
     };
+
     write().inspect_err(|_| {
         let _ = std::fs::remove_file(&temp);
     })
@@ -585,12 +643,15 @@ fn header_len(prefix: &[u8]) -> Result<usize, Error> {
         .ok_or(Error::HeaderTooSmall)?
         .try_into()
         .expect("8 bytes");
+
     let n: usize = u64::from_le_bytes(bytes)
         .try_into()
         .map_err(|_| Error::HeaderTooLarge)?;
+
     if n > MAX_HEADER_SIZE {
         return Err(Error::HeaderTooLarge);
     }
+
     Ok(n)
 }
 
@@ -599,19 +660,23 @@ fn parse_header(bytes: &[u8], n: usize, file_len: usize) -> Result<Metadata, Err
     let text = std::str::from_utf8(bytes).map_err(Error::InvalidHeader)?;
     let metadata = Metadata::parse(text)?;
     let end = metadata.validate()?;
+
     if end.checked_add(N_LEN + n) != Some(file_len) {
         return Err(Error::MetadataIncompleteBuffer);
     }
+
     Ok(metadata)
 }
 
 /// Parses the header of a serialized buffer; returns the header length and its contents.
 pub fn read_metadata(buffer: &[u8]) -> Result<(usize, Metadata), Error> {
     let n = header_len(buffer)?;
+
     let header = N_LEN
         .checked_add(n)
         .and_then(|stop| buffer.get(N_LEN..stop))
         .ok_or(Error::InvalidHeaderLength)?;
+
     Ok((n, parse_header(header, n, buffer.len())?))
 }
 
@@ -626,24 +691,31 @@ fn load_tensor(
     if cfg!(target_endian = "big") {
         return Err(Error::BigEndian);
     }
+
     let dtype = info
         .dtype
         .to_lumen()
         .ok_or_else(|| Error::UnsupportedDtype(name.to_owned(), info.dtype.to_string()))?;
+
     let host = if host_accessible(device) {
         device
     } else {
         Device::Cpu(0)
     };
+
     let options = TensorOptions::new().dtype(dtype).device(host);
     let t = unsafe { Tensor::empty(&info.shape, options) };
+
     if host == Device::Meta(0) {
         return Ok(t);
     }
+
     let n = info.data_offsets.1 - info.data_offsets.0;
+
     if n > 0 {
         let bytes = unsafe { std::slice::from_raw_parts_mut(t.data_ptr(), n) };
         fill(bytes)?;
+
         // Files may store any nonzero byte as true; lumen bools are 0 or 1.
         if dtype == DType::Bool {
             for b in bytes {
@@ -651,6 +723,7 @@ fn load_tensor(
             }
         }
     }
+
     Ok(if host == device { t } else { t.to(device) })
 }
 
@@ -658,15 +731,18 @@ fn load_tensor(
 pub fn deserialize(buffer: &[u8], device: Device) -> Result<Vec<(String, Tensor)>, Error> {
     let (n, metadata) = read_metadata(buffer)?;
     let data = &buffer[N_LEN + n..];
+
     metadata
         .tensors
         .iter()
         .map(|(name, info)| {
             let (s, e) = info.data_offsets;
+
             let t = load_tensor(name, info, device, |dst| {
                 dst.copy_from_slice(&data[s..e]);
                 Ok(())
             })?;
+
             Ok((name.clone(), t))
         })
         .collect()
@@ -685,23 +761,30 @@ impl SafeTensorsFile {
     /// Opens `path` and reads and validates its header; tensor data stays on disk.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, Error> {
         let file = std::fs::File::open(path)?;
+
         let file_len: usize = file
             .metadata()?
             .len()
             .try_into()
             .map_err(|_| Error::ValidationOverflow)?;
+
         let mut prefix = [0u8; N_LEN];
+
         if file_len < N_LEN {
             return Err(Error::HeaderTooSmall);
         }
+
         read_at(&file, &mut prefix, 0)?;
         let n = header_len(&prefix)?;
+
         if N_LEN.checked_add(n).is_none_or(|stop| stop > file_len) {
             return Err(Error::InvalidHeaderLength);
         }
+
         let mut header = vec![0u8; n];
         read_at(&file, &mut header, N_LEN as u64)?;
         let metadata = parse_header(&header, n, file_len)?;
+
         Ok(Self {
             file,
             data_start: (N_LEN + n) as u64,
@@ -720,6 +803,7 @@ impl SafeTensorsFile {
             .metadata
             .info(name)
             .ok_or_else(|| Error::TensorNotFound(name.to_owned()))?;
+
         let start = self.data_start + info.data_offsets.0 as u64;
         load_tensor(name, info, device, |dst| read_at(&self.file, dst, start))
     }

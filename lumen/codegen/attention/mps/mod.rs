@@ -66,12 +66,14 @@ impl AttentionCodegen for Mps {
     fn forward(body: &Graph, a: &Attention, _: &Strides) -> Result<(String, String), String> {
         // With dropout, the last two body inputs are the seed and offset passed as constants.
         let n = body.inputs().len() - if a.dropout.is_some() { 2 } else { 0 };
+
         let input = |base: Var| {
             let k = body.inputs().iter().position(|&v| v == base);
             format!("in{}", k.expect("an input of the body"))
         };
 
         let index = |name: &str, acc: &Access| ix_method(name, acc, &a.batch);
+
         let ix = formatdoc!(
             "
             struct NAME_ix {{
@@ -141,12 +143,14 @@ impl AttentionCodegen for Mps {
         let mut buffer = n;
 
         let raw = body.outputs()[1..].contains(&root);
+
         if raw {
             buffer += 1;
             params.push(format!("device {o} *raw [[buffer({buffer})]]"));
         }
 
         let lse = a.lse.is_some();
+
         if lse {
             buffer += 1;
             params.push(format!("device float *lse [[buffer({buffer})]]"));
@@ -158,6 +162,7 @@ impl AttentionCodegen for Mps {
         let (drop, epi) = match &a.dropout {
             Some(d) => {
                 params.extend(random_state(buffer + 1));
+
                 let epi = if epi.is_empty() {
                     ", Same()".to_owned()
                 } else {
@@ -173,6 +178,7 @@ impl AttentionCodegen for Mps {
         let (q, k, v) = (input(a.q.base), input(a.k.base), input(a.v.base));
         let score = Self::score(&a.scores);
         let (causal, offset) = (a.causal.is_some(), a.causal.unwrap_or(0));
+
         let offset = match a.offset {
             Some(v) => format!("{offset} + int({}[0])", input(v)),
             None => offset.to_string(),
@@ -195,6 +201,7 @@ impl AttentionCodegen for Mps {
             ),
             false => {
                 let bk = key_block(a);
+
                 formatdoc!(
                     "
                     threadgroup {t} ks[{bk} * {h}], vs[{bk} * {hv}];
@@ -237,6 +244,7 @@ impl AttentionCodegen for Mps {
         ];
 
         let outputs = [("dv", &b.dv_out), ("dk", &b.dk_out), ("dq", &b.dq_out)];
+
         let outputs = outputs
             .iter()
             .filter_map(|(name, out)| out.as_ref().map(|(_, acc)| (*name, acc)));
@@ -272,6 +280,7 @@ impl AttentionCodegen for Mps {
 
         let dkdv = b.dv_out.is_some();
         let dq = b.dq_out.is_some();
+
         let outs: &[&str] = match (dkdv, dq) {
             (true, true) => &["dv", "dk", "dq"],
             (true, false) => &["dv", "dk"],
@@ -316,6 +325,7 @@ impl AttentionCodegen for Mps {
         let (h, hv, sq, sk) = (b.h, b.hv, b.sq, b.sk);
         let heads = grid_batch(&b.batch).1;
         let ds_scale = constant(DType::F32, Scalar::Float(b.ds_scale));
+
         let rows = match dkdv && dq {
             true => backward_block_with_dq(b).expect("a fused backward fits"),
             false => backward_block(b),
@@ -369,6 +379,7 @@ impl AttentionCodegen for Mps {
         };
 
         let params = params.join(",\n");
+
         Ok(named(formatdoc!(
             "
             {ix}{score}{drop}kernel void NAME({params},

@@ -41,10 +41,12 @@ fn the_static_registry_is_used_first() {
     static OP: Op<Kernel> = Op::new("test::static_first", cpu_only);
     assert_eq!(OP.dispatch(Device::Cpu(0))(), "static");
     let err = OP.register(DispatchKey::Cpu, registered).unwrap_err();
+
     assert!(
         err.contains("test::static_first") && err.contains("Cpu"),
         "{err}"
     );
+
     assert_eq!(
         OP.dispatch(Device::Cpu(0))(),
         "static",

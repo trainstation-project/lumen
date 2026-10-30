@@ -13,6 +13,7 @@ pub(crate) fn block(n: usize, unit: usize, cap: usize) -> Option<usize> {
     if n <= cap {
         return Some(n);
     }
+
     (1..=cap / unit)
         .rev()
         .map(|i| i * unit)
@@ -36,9 +37,11 @@ pub(crate) fn encode(
     output: *mut u8,
 ) -> Result<(), String> {
     let out = &step.output.1;
+
     if out.numel() == 0 {
         return Ok(());
     }
+
     let (kernel, spec) = match &step.primitive {
         Primitive::Fusion { body, .. } => {
             let dot = body
@@ -46,6 +49,7 @@ pub(crate) fn encode(
                 .iter()
                 .find(|n| matches!(n.primitive, Primitive::DotGeneral { .. }))
                 .expect("a dot");
+
             Tpu::gemm(body, dot, &[], step)?
         }
         p => gemm::spec(
@@ -57,13 +61,16 @@ pub(crate) fn encode(
             None,
         )?,
     };
+
     let n = step.inputs.len();
+
     let rows: Vec<*const u8> = inputs[..n]
         .iter()
         .copied()
         .chain([output.cast_const()])
         .chain(inputs[n..].iter().copied())
         .collect();
+
     let launched = Launch {
         module: "lumen.kernels.dot_general.tpu",
         kernel,
@@ -73,5 +80,6 @@ pub(crate) fn encode(
         host: &[],
         sparse: None,
     };
+
     launch(index, launched)
 }

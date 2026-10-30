@@ -65,9 +65,11 @@ fn d2h_kernels(key: DispatchKey) -> Option<CopyKernel> {
 /// Copies CPU tensor `src` into device tensor `dst` of the same dtype and size.
 pub fn copy_h2d(dst: &Tensor, src: &Tensor) {
     check(dst, src, src);
+
     if dst.numel() == 0 {
         return;
     }
+
     let _op = transfer(&COPY_H2D, dst, src, dst.device());
     COPY_H2D.dispatch(dst.device())(dst, src);
 }
@@ -75,9 +77,11 @@ pub fn copy_h2d(dst: &Tensor, src: &Tensor) {
 /// Copies device tensor `src` into CPU tensor `dst`, waiting for `src`'s pending writes first.
 pub fn copy_d2h(dst: &Tensor, src: &Tensor) {
     check(dst, src, dst);
+
     if src.numel() == 0 {
         return;
     }
+
     let _op = transfer(&COPY_D2H, dst, src, src.device());
     src.wait_();
     COPY_D2H.dispatch(src.device())(dst, src);
@@ -93,6 +97,7 @@ fn transfer(
     if device == Device::Cpu(0) {
         return None;
     }
+
     let mut guard = crate::profiler::record_op(op.name(), || vec![src.ty()]);
     guard.outputs(|| vec![dst.ty()]);
     Some(guard)
@@ -105,11 +110,14 @@ fn check(dst: &Tensor, src: &Tensor, host: &Tensor) {
         Device::Cpu(0),
         "the host side of a copy must be a CPU tensor"
     );
+
     assert_eq!(dst.dtype(), src.dtype(), "copy between dtypes");
     assert_eq!(dst.numel(), src.numel(), "copy between sizes");
+
     assert!(
         dst.is_contiguous() && src.is_contiguous(),
         "copy of a non-contiguous tensor"
     );
+
     assert!(!dst.shares_storage_with(src), "copy within one storage");
 }

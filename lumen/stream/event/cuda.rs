@@ -54,19 +54,23 @@ impl Event for CudaEvent {
 
     fn record(&mut self) -> Result<(), String> {
         CUDA.set_device(self.index);
+
         let event = match self.event {
             Some(event) => event,
             None => {
                 let mut event = std::ptr::null_mut();
                 let flags = if self.timing { 0 } else { DISABLE_TIMING };
+
                 checked(
                     unsafe { ffi::cudaEventCreateWithFlags(&mut event, flags) },
                     "cudaEventCreateWithFlags",
                 )?;
+
                 self.event = Some(event);
                 event
             }
         };
+
         checked(
             unsafe { ffi::cudaEventRecord(event, std::ptr::null_mut()) },
             "cudaEventRecord",
@@ -102,18 +106,23 @@ impl Event for CudaEvent {
 
     fn elapsed_time(&self, end: &dyn Event) -> Result<f64, String> {
         timed(self, end)?;
+
         let end = end
             .as_any()
             .downcast_ref::<CudaEvent>()
             .expect("a CUDA event, as on one device");
+
         let (Some(start), Some(stop)) = (self.event, end.event) else {
             unreachable!("both recorded")
         };
+
         let mut ms = 0f32;
+
         checked(
             unsafe { ffi::cudaEventElapsedTime(&mut ms, start, stop) },
             "cudaEventElapsedTime",
         )?;
+
         Ok(ms as f64)
     }
 }

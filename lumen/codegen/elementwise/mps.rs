@@ -51,6 +51,7 @@ impl ElementwiseCodegen for Mps {
         // Each segment's statements live in their own branch, so each gets a fresh emitter.
         for (_, outputs) in &segments {
             let mut emitter = Emitter::new(body, by_value);
+
             for &k in outputs {
                 results[k] = emitter.value(body.outputs()[k], "j".into());
             }
@@ -85,6 +86,7 @@ impl ElementwiseCodegen for Mps {
                     };
 
                     let stored: Vec<&str> = outputs.iter().map(|&k| writes[k]).collect();
+
                     let thread_id = match start {
                         0 => "THREAD_ID".to_string(),
                         start => format!("THREAD_ID - {start}u"),
@@ -98,6 +100,7 @@ impl ElementwiseCodegen for Mps {
                         stored.join("\n"),
                     )
                     .unwrap();
+
                     start = end;
                 }
 

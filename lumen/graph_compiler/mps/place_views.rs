@@ -27,7 +27,9 @@ pub(crate) fn loads_strided(body: &Graph, k: usize) -> bool {
     let Some(&v) = body.inputs().get(k) else {
         return false;
     };
+
     let template = |p: &Primitive| matches!(p, Primitive::DotGeneral { .. });
+
     attention::of_body(body).is_none()
         && attention::backward_of_body(body).is_none()
         && !body

@@ -73,14 +73,18 @@ pub(crate) const LOOP_CONFIGS: [LoopConfig; BLOCK_SIZES.len() * WARPS.len()] = {
         block_size: 0,
         warps: 0,
     }; BLOCK_SIZES.len() * WARPS.len()];
+
     let mut i = 0;
+
     while i < configs.len() {
         configs[i] = LoopConfig {
             block_size: BLOCK_SIZES[i / WARPS.len()],
             warps: WARPS[i % WARPS.len()],
         };
+
         i += 1;
     }
+
     configs
 };
 
@@ -164,6 +168,7 @@ pub(crate) fn loop_configs(lanes: usize) -> Vec<LoopConfig> {
         .into_iter()
         .filter(|c| c.block_size >= lanes)
         .collect();
+
     match fitting.is_empty() {
         true => WARPS
             .iter()
@@ -180,6 +185,7 @@ pub(crate) fn loop_configs(lanes: usize) -> Vec<LoopConfig> {
 /// they don't fit.
 pub(crate) fn untuned_loop(lanes: usize) -> LoopConfig {
     let config = LOOP_CONFIGS[UNTUNED_LOOP];
+
     LoopConfig {
         block_size: config.block_size.max(lanes),
         ..config
@@ -200,10 +206,12 @@ const ROW_TILE_ELEMENTS: usize = 32 << 10;
 pub(crate) fn row_gemm_configs(n: usize) -> Vec<Config> {
     let block_n = n.next_power_of_two().max(16);
     let mut configs = Vec::new();
+
     for block_m in [16, 32, 64] {
         if block_m > 16 && block_m * block_n > ROW_TILE_ELEMENTS {
             continue;
         }
+
         for block_k in [32, 64] {
             for warps in [4, 8] {
                 configs.push(Config {
@@ -217,6 +225,7 @@ pub(crate) fn row_gemm_configs(n: usize) -> Vec<Config> {
             }
         }
     }
+
     configs
 }
 
@@ -224,6 +233,7 @@ pub(crate) fn row_gemm_configs(n: usize) -> Vec<Config> {
 /// allows (at least 16), `BLOCK_SIZE_K` 32, two stages, 8 warps.
 pub(crate) fn untuned_row_gemm(n: usize) -> Config {
     let block_n = n.next_power_of_two().max(16);
+
     Config {
         block_m: (ROW_TILE_ELEMENTS / block_n).clamp(16, 64),
         block_n,

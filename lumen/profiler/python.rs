@@ -27,9 +27,11 @@ fn start(activities: Vec<String>, profile_memory: bool, record_shapes: bool) -> 
             ))),
         })
         .collect::<PyResult<Vec<_>>>()?;
+
     if activities.contains(&Activity::Cuda) && !cuda_timing() {
         return Err(PyRuntimeError::new_err(CUDA_TIMING_MISSING));
     }
+
     super::start(ProfilerConfig {
         activities,
         profile_memory,
@@ -116,12 +118,14 @@ fn event_dict<'py>(py: Python<'py>, e: &Event) -> PyResult<Bound<'py, PyDict>> {
     d.set_item("thread", e.thread)?;
     d.set_item("parent", e.parent)?;
     d.set_item("device", e.device.to_string())?;
+
     let types = |types: &[crate::graph::TensorType]| -> Vec<(&'static str, Vec<usize>)> {
         types
             .iter()
             .map(|t| (dtype_name(t.dtype), t.shape.clone()))
             .collect()
     };
+
     d.set_item("inputs", types(&e.inputs))?;
     d.set_item("input_strides", &e.input_strides)?;
     d.set_item("outputs", types(&e.outputs))?;

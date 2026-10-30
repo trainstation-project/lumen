@@ -100,6 +100,7 @@ pub(crate) fn gemm_flags(body: &Graph, dot: &Node) -> EpilogueFlags {
     }
 
     let expansion = gemm_expanded(body, dot).map(|(_, e)| e);
+
     EpilogueFlags {
         expanded: expansion.is_some(),
         interleaved: expansion == Some(Expansion::Pairs),
@@ -142,6 +143,7 @@ fn staged_call(
                         true => (2, flags.interleaved),
                         false => (1, false),
                     };
+
                     formatdoc!(
                         "
                         matmul_mpp<{t}, {a}, {o}, {bm}, {bn}, {bk}, {simds}, {left}, {right}, {w}, NAME_epi, {members_per_group}, {interleaved}>(
@@ -251,6 +253,7 @@ pub(crate) fn region_ends(body: &Graph, regions: &[Columns]) -> Vec<Vec<usize>> 
         .iter()
         .map(|c| {
             let members = c.members();
+
             (0..body.outputs().len())
                 .filter(|&k| reaches(body.outputs()[k], &members))
                 .collect()
@@ -272,6 +275,7 @@ pub(crate) fn gemm_regions_kernel(
     };
 
     let outputs = body.outputs();
+
     let (t, a, o) = (
         metal_type(body.type_of(dot.inputs[0]).dtype),
         metal_type(accum_dtype),
@@ -294,6 +298,7 @@ pub(crate) fn gemm_regions_kernel(
 
     for (c, ends) in regions.iter().zip(&ends) {
         let (offset, size, limit, k) = (c.offset, c.size(), c.offset + c.width, c.k());
+
         // Builds one epilogue element: binds the region's accumulator reads to locals and stores every
         // output the region reaches at index `index`.
         let element = |locals: &[(Var, String)], index: &str| {
@@ -357,6 +362,7 @@ pub(crate) fn gemm_regions_kernel(
             }
             true => {
                 let members = c.members();
+
                 let at = match k {
                     1 => format!("(m - {offset}) * {columns} + n"),
                     _ => format!("(m - {offset}) / {k} * {columns} + n"),
@@ -368,10 +374,12 @@ pub(crate) fn gemm_regions_kernel(
                         .enumerate()
                         .map(|(t, &v)| (v, format!("window[c + {t}][{q}]")))
                         .collect();
+
                     element(&locals, &format!("{at} + {q}"))
                 };
 
                 let (first, second) = (column(0), column(1));
+
                 let both = formatdoc!(
                     "
                     {first}if (n + 1 < {columns}) {second}"
@@ -554,6 +562,7 @@ impl GemmCodegen for Mps {
 
         // Epilogue outputs must have the dot's element count, or half or double it for paired outputs.
         let elements = body.type_of(dot.output).numel();
+
         let indexed =
             |v: &Var| [elements, elements / 2, 2 * elements].contains(&body.type_of(*v).numel());
 
@@ -657,6 +666,7 @@ impl GemmCodegen for Mps {
         };
 
         let (hoisted, lines) = (&e.hoisted, &e.lines);
+
         let mut source = formatdoc!(
             "
             struct NAME_epi {{

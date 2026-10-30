@@ -18,15 +18,19 @@ pub(crate) fn reduction_root(body: &Graph) -> Option<&Node> {
     use Primitive::*;
     let nodes = body.nodes();
     let mut producer = vec![None; body.types.len()];
+
     for (i, node) in nodes.iter().enumerate() {
         producer[node.output] = Some(i);
     }
+
     // Walk back from the first output; any non-elementwise node other than the one reduction
     // rules the body out.
     let (mut found, mut stack) = (None, vec![body.outputs()[0]]);
+
     while let Some(v) = stack.pop() {
         let i = producer[v]?;
         let node = &nodes[i];
+
         match &node.primitive {
             ReduceSum { .. } | ReduceMax { .. } if found.is_none_or(|f| f == i) => found = Some(i),
             p if elementwise(p) || matches!(p, Reshape { .. }) => stack.extend(
@@ -37,10 +41,12 @@ pub(crate) fn reduction_root(body: &Graph) -> Option<&Node> {
             _ => return None,
         }
     }
+
     let reductions = nodes
         .iter()
         .filter(|n| matches!(n.primitive, ReduceSum { .. } | ReduceMax { .. }))
         .count();
+
     found.filter(|_| reductions == 1).map(|i| &nodes[i])
 }
 
@@ -63,7 +69,9 @@ fn reductions_of_rows(body: &Graph, last: bool) -> Vec<&Node> {
     if reduction_root(body).is_some() {
         return Vec::new();
     }
+
     let out = body.outputs()[0];
+
     body.nodes()
         .iter()
         .filter(|n| n.output != out)
