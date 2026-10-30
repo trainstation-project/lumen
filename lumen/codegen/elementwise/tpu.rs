@@ -32,12 +32,14 @@ const STREAM_BYTES: usize = 32 << 20;
 /// otherwise `[leading, rows, columns]` made of whole TPU tiles for every dtype in `dtypes`.
 pub(crate) fn blocks(shape: &[usize], dtypes: &[DType]) -> Result<Vec<usize>, String> {
     let failed = |what: &str| format!("elementwise on TPU: {what} has no block of whole tiles");
+
     if shape.len() < 2 {
         let n = shape.iter().product::<usize>().max(1);
         return Ok(vec![
             block(n, 1024, 64 * 1024).ok_or_else(|| failed("its length"))?,
         ]);
     }
+
     // The row tile is the tallest sublane count among the dtypes, so blocks align for all of them.
     let rows = dtypes
         .iter()
@@ -46,17 +48,20 @@ pub(crate) fn blocks(shape: &[usize], dtypes: &[DType]) -> Result<Vec<usize>, St
         .into_iter()
         .max()
         .unwrap_or(8);
+
     let (m, n) = (shape[shape.len() - 2], shape[shape.len() - 1]);
     let mut bm = block(m, rows, 512).ok_or_else(|| failed("its rows"))?;
     let mut bn = block(n, 128, 2048).ok_or_else(|| failed("its columns"))?;
     let lead: usize = shape[..shape.len() - 2].iter().product();
     let width = dtypes.iter().map(|d| d.size_of()).max().unwrap_or(4);
     let budget = STREAM_BYTES / dtypes.len();
+
     // Halve rows first, then columns, while the block still divides the shape in whole tiles.
     while bm * bn * width > budget {
         let halves = |b: usize, unit: usize, of: usize| {
             (b / 2).is_multiple_of(unit) && of.is_multiple_of(b / 2)
         };
+
         if halves(bm, rows, m) {
             bm /= 2;
         } else if halves(bn, 128, n) {
@@ -65,12 +70,14 @@ pub(crate) fn blocks(shape: &[usize], dtypes: &[DType]) -> Result<Vec<usize>, St
             break;
         }
     }
+
     // Bytes of one padded (bm, bn) tile; batch as many leading rows as fit in BLOCK_BYTES.
     let tile = bm.div_ceil(rows) * rows * bn.div_ceil(128) * 128 * width;
     let bl = (1..=lead)
         .rev()
         .find(|&b| lead.is_multiple_of(b) && b * tile <= BLOCK_BYTES)
         .unwrap_or(1);
+
     Ok(vec![bl, bm, bn])
 }
 
@@ -91,16 +98,27 @@ const COPY: &str = "def copy(src, dst):
 
 /// `dims` as a Python tuple.
 fn tuple(dims: &[usize]) -> String {
-    match dims {
-        [d] => format!("({d},)"),
-        dims => format!(
-            "({})",
-            dims.iter()
-                .map(usize::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
+    let items: Vec<String> = dims.iter().map(usize::to_string).collect();
+    tuple_of(&items)
+}
+
+/// `items` as a Python tuple.
+fn tuple_of(items: &[String]) -> String {
+    match items {
+        [item] => format!("({item},)"),
+        items => format!("({})", items.join(", ")),
     }
+}
+
+/// The statement assigning `values` to the constants `names`, or `None` when there are none.
+fn constants(names: &[String], values: &[usize]) -> Option<String> {
+    let values: Vec<String> = values.iter().map(usize::to_string).collect();
+    (!names.is_empty()).then(|| format!("{} = {}", names.join(", "), values.join(", ")))
+}
+
+/// `name` suffixed by each of `suffixes`.
+fn named(name: &str, suffixes: &[String]) -> Vec<String> {
+    suffixes.iter().map(|s| format!("{name}_{s}")).collect()
 }
 
 /// `value` as a Python literal.
@@ -234,13 +252,14 @@ fn plain(
     let shape = &out.shape;
     let scalar = shape.is_empty();
 
-    let (view, block_shape, spec, grid) = match blocks {
+    // Its leading dims, rows and columns are L, M and N; a rank-1 loop's one dim goes unnamed.
+    let (view, block_shape, spec, grid, consts) = match blocks {
         &[bl, bm, bn] => {
             let (m, n) = (shape[shape.len() - 2], shape[shape.len() - 1]);
             let view = vec![shape[..shape.len() - 2].iter().product(), m, n];
 
             let leading = if bl > 1 {
-                bl.to_string()
+                "BLOCK_SIZE_L".to_string()
             } else {
                 "None".into()
             };
@@ -251,35 +270,49 @@ fn plain(
                 vec![bm, bn]
             };
 
-            let index = "lambda l, i, j: (l, i, j)";
-            let spec = format!("pl.BlockSpec(({leading}, {bm}, {bn}), {index})");
-            let grid = vec![view[0] / bl, m / bm, n / bn];
+            let index =
+                "lambda BLOCK_ID_L, BLOCK_ID_M, BLOCK_ID_N: (BLOCK_ID_L, BLOCK_ID_M, BLOCK_ID_N)";
+            let spec = format!("pl.BlockSpec(({leading}, BLOCK_SIZE_M, BLOCK_SIZE_N), {index})");
+            let dims = ["L".to_string(), "M".into(), "N".into()];
+            let consts = vec![
+                constants(&named("BLOCK_SIZE", &dims), &[bl, bm, bn]),
+                constants(&named("NUM_BLOCKS", &dims), &[view[0] / bl, m / bm, n / bn]),
+            ];
 
-            (view, block_shape, spec, grid)
+            (
+                view,
+                block_shape,
+                spec,
+                tuple_of(&named("NUM_BLOCKS", &dims)),
+                consts,
+            )
         }
         &[b] => {
             let view = vec![shape.iter().product::<usize>().max(1)];
-            (
-                view.clone(),
-                vec![b],
-                format!("pl.BlockSpec(({b},), lambda i: (i,))"),
-                vec![view[0] / b],
-            )
+            let consts = vec![
+                constants(&["BLOCK_SIZE".into()], &[b]),
+                constants(&["NUM_BLOCKS".into()], &[view[0] / b]),
+            ];
+            let spec = "pl.BlockSpec((BLOCK_SIZE,), lambda BLOCK_ID: (BLOCK_ID,))".to_string();
+            (view, vec![b], spec, "(NUM_BLOCKS,)".to_string(), consts)
         }
         blocks => unreachable!("a loop's blocks: {blocks:?}"),
     };
 
     // A windowed first output writes its columns at `start` of a buffer `whole` wide.
     let (out_view, out_spec) = match (window, blocks) {
-        (Some((whole, start)), &[bl, bm, bn]) => {
+        (Some((whole, start)), &[bl, _, bn]) => {
             let leading = if bl > 1 {
-                bl.to_string()
+                "BLOCK_SIZE_L".to_string()
             } else {
                 "None".into()
             };
 
-            let index = format!("lambda l, i, j: (l, i, j + {})", start / bn);
-            let spec = format!("pl.BlockSpec(({leading}, {bm}, {bn}), {index})");
+            let index = format!(
+                "lambda BLOCK_ID_L, BLOCK_ID_M, BLOCK_ID_N: (BLOCK_ID_L, BLOCK_ID_M, BLOCK_ID_N + {})",
+                start / bn
+            );
+            let spec = format!("pl.BlockSpec(({leading}, BLOCK_SIZE_M, BLOCK_SIZE_N), {index})");
             (vec![view[0], view[1], whole], Some(spec))
         }
         _ => (view.clone(), None),
@@ -369,25 +402,25 @@ fn plain(
             lines.join("\n    ")
         ));
 
-        let in_specs = vec!["block"; piped.len()].join(", ");
+        let in_specs = vec!["BLOCK_SPEC"; piped.len()].join(", ");
         let out_specs: Vec<&str> = (0..body.outputs().len())
             .map(|k| match (k, &out_spec) {
-                (0, Some(_)) => "out_block",
-                _ => "block",
+                (0, Some(_)) => "OUT_BLOCK_SPEC",
+                _ => "BLOCK_SPEC",
             })
             .collect();
 
         kernel.push(format!(
-            "pl.emit_pipeline(body, grid={}, in_specs=[{in_specs}], out_specs=[{}])({})",
-            tuple(&grid),
+            "pl.emit_pipeline(body, grid={grid}, in_specs=[{in_specs}], out_specs=[{}])({})",
             out_specs.join(", "),
             refs.join(", ")
         ));
     }
 
-    let mut specs = vec![format!("block = {spec}")];
+    let mut specs: Vec<String> = consts.into_iter().flatten().collect();
+    specs.push(format!("BLOCK_SPEC = {spec}"));
     if let Some(out_spec) = out_spec {
-        specs.push(format!("out_block = {out_spec}"));
+        specs.push(format!("OUT_BLOCK_SPEC = {out_spec}"));
     }
 
     program(&specs, &kernel)
@@ -478,8 +511,7 @@ fn indexed_nodes(body: &Graph, values: &mut Values, plan: &Plan) -> Vec<String> 
                 // The iota's start is the program id along `d` times its block size plus a fixed offset.
                 let base = match map[*dimension] {
                     Dim::Out { d, offset } => format!(
-                        "prims.add(prims.mul(i{d}, prims.full((), {}, \"int32\")), prims.full((), {offset}, \"int32\"))",
-                        plan.blocks[d]
+                        "prims.add(prims.mul(BLOCK_ID_{d}, prims.full((), BLOCK_SIZE_{d}, \"int32\")), prims.full((), {offset}, \"int32\"))"
                     ),
                     Dim::One { offset } => format!("prims.full((), {offset}, \"int32\")"),
                 };
@@ -519,20 +551,36 @@ fn indexed_nodes(body: &Graph, values: &mut Values, plan: &Plan) -> Vec<String> 
 fn indexed(body: &Graph, out: &TensorType, window: Option<(usize, usize)>) -> Result<Loop, String> {
     let plan = plan(body, window.map_or(0, |w| w.1)).map_err(|e| format!("a loop on TPU: {e}"))?;
 
+    // Grid dim `d` is named by its number: BLOCK_ID_d, BLOCK_SIZE_d, NUM_BLOCKS_d.
+    let dims: Vec<String> = (0..plan.blocks.len()).map(|d| d.to_string()).collect();
+    let block_ids = named("BLOCK_ID", &dims).join(", ");
+
     // An operand's block index along each dim: a grid id plus a block offset, or a fixed element.
     let index = |map: &[Dim]| -> String {
         let ids: Vec<String> = map
             .iter()
             .map(|m| match *m {
-                Dim::Out { d, offset } => format!("ids[{d}] + {}", offset / plan.blocks[d]),
+                Dim::Out { d, offset } => format!("BLOCK_ID_{d} + {}", offset / plan.blocks[d]),
                 Dim::One { offset } => offset.to_string(),
             })
             .collect();
 
-        match ids.as_slice() {
-            [id] => format!("lambda *ids: ({id},)"),
-            ids => format!("lambda *ids: ({})", ids.join(", ")),
+        match block_ids.as_str() {
+            "" => format!("lambda: {}", tuple_of(&ids)),
+            params => format!("lambda {params}: {}", tuple_of(&ids)),
         }
+    };
+
+    // An operand's block shape: the grid dim's block size, or one element.
+    let block_shape = |map: &[Dim]| -> String {
+        let sizes: Vec<String> = map
+            .iter()
+            .map(|m| match *m {
+                Dim::Out { d, .. } => format!("BLOCK_SIZE_{d}"),
+                Dim::One { .. } => "1".into(),
+            })
+            .collect();
+        tuple_of(&sizes)
     };
 
     let mut values = Values {
@@ -572,13 +620,13 @@ fn indexed(body: &Graph, out: &TensorType, window: Option<(usize, usize)>) -> Re
         ));
 
         kernel.push(format!(
-            "spec{k} = pl.BlockSpec({}, {})",
-            tuple(&block),
+            "BLOCK_SPEC_{k} = pl.BlockSpec({}, {})",
+            block_shape(map),
             index(map)
         ));
 
         piped.push(k);
-        specs.push(format!("spec{k}"));
+        specs.push(format!("BLOCK_SPEC_{k}"));
         values.shapes.insert(v, block);
     }
 
@@ -613,7 +661,7 @@ fn indexed(body: &Graph, out: &TensorType, window: Option<(usize, usize)>) -> Re
         .collect();
 
     let mut lines: Vec<String> = (0..grid.len())
-        .map(|a| format!("i{a} = pl.program_id({a})"))
+        .map(|a| format!("BLOCK_ID_{a} = pl.program_id({a})"))
         .collect();
 
     lines.extend(piped.iter().map(|k| format!("x{k} = in{k}[...]")));
@@ -633,23 +681,31 @@ fn indexed(body: &Graph, out: &TensorType, window: Option<(usize, usize)>) -> Re
     ));
 
     kernel.push(format!(
-        "out_spec = pl.BlockSpec({}, {})",
-        tuple(&plan.blocks),
+        "OUT_BLOCK_SPEC = pl.BlockSpec({}, {})",
+        block_shape(&out_map),
         index(&out_map)
     ));
 
     kernel.push(format!(
-        "pl.emit_pipeline(body, grid={}, in_specs=[{}], out_specs=[out_spec])({})",
-        tuple(&grid),
+        "pl.emit_pipeline(body, grid={}, in_specs=[{}], out_specs=[OUT_BLOCK_SPEC])({})",
+        tuple_of(&named("NUM_BLOCKS", &dims)),
         specs.join(", "),
         refs.join(", ")
     ));
 
     let shown: Vec<String> = plan.blocks.iter().map(usize::to_string).collect();
 
+    let consts: Vec<String> = [
+        constants(&named("BLOCK_SIZE", &dims), &plan.blocks),
+        constants(&named("NUM_BLOCKS", &dims), &grid),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+
     Ok(Loop {
         kernel: format!("loop_{}_{}", out.dtype, shown.join("x")),
-        source: program(&[], &kernel),
+        source: program(&consts, &kernel),
         indexed: true,
     })
 }

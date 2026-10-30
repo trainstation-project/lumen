@@ -224,7 +224,7 @@ pub(crate) struct Emitter<'a> {
     /// Counter for fresh local names.
     locals: usize,
     /// Mask expression guarding loads at the current point.
-    mask: String,
+    pub(crate) mask: String,
     /// Local holding each row reduction already computed, read at any index (a row kernel's rows).
     reduced: HashMap<Var, String>,
     /// The product a GEMM row epilogue holds whole rows of, at flat index `j` of its tile: a gather
@@ -543,9 +543,10 @@ impl<'a> Emitter<'a> {
         )
     }
 
-    /// Binds an index expression to a local, reusing the local for repeated expressions.
+    /// Binds an index expression to a local, reusing the local for repeated expressions; a bare name or
+    /// number is its own.
     fn index(&mut self, expr: String) -> String {
-        if expr == "j" || expr.parse::<u64>().is_ok() {
+        if expr.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
             return expr;
         }
         if let Some(name) = self.indices.get(&expr) {
