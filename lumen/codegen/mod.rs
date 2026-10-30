@@ -9,5 +9,5 @@ pub(crate) mod mps;
 pub(crate) mod reduction;
 pub(crate) mod regions;
 pub(crate) mod row;
-pub(crate) mod tpu;
 pub(crate) mod triton;
+pub(crate) mod utils;

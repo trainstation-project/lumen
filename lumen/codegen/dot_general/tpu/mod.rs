@@ -5,7 +5,7 @@ use crate::codegen::dot_general::GemmCodegen;
 pub(crate) mod codegen;
 pub(crate) mod row;
 
-use crate::codegen::tpu::Tpu;
+use crate::codegen::utils::tpu::Tpu;
 use crate::graph::Primitive;
 use crate::graph_compiler::plan::Step;
 use crate::kernels::tpu::{Launch, launch};

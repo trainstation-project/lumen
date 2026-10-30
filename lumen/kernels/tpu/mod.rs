@@ -7,7 +7,7 @@ use std::ffi::c_void;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::codegen::elementwise::ElementwiseCodegen;
-use crate::codegen::tpu::Tpu;
+use crate::codegen::utils::tpu::Tpu;
 use crate::device::tpu::{error, ffi};
 use crate::graph::Primitive;
 use crate::graph_compiler::plan::Step;

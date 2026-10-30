@@ -14,7 +14,7 @@ use super::ElementwiseCodegen;
 #[cfg(lumen_tpu_linked)]
 use crate::codegen::dot_general::tpu::block;
 #[cfg(lumen_tpu_linked)]
-use crate::codegen::tpu::{Tpu, fusible, window_at};
+use crate::codegen::utils::tpu::{Tpu, fusible, window_at};
 #[cfg(lumen_tpu_linked)]
 use crate::device::tpu::layout::Layout;
 #[cfg(lumen_tpu_linked)]

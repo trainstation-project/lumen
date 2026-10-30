@@ -1,4 +1,5 @@
-//! TPU code generation: the Rust side that turns fused steps into JSON specs for the Pallas kernels.
+//! What the TPU code generators share: the backend type, which primitives a plain loop runs, the JSON
+//! nodes the Pallas programs rebuild primitives from, and outputs written into windows of wider matrices.
 
 use crate::Scalar;
 use crate::graph::Primitive;
