@@ -30,26 +30,32 @@ fn address(acc: &Access, batch: &[usize]) -> String {
             0 => "rest".to_string(),
             _ => format!("(rest % {size})"),
         };
+
         if stride != 0 {
             let index = match divisor {
                 1 => index,
                 _ => format!("({index} // {divisor})"),
             };
+
             writeln!(code, "at += {index} * {stride}").unwrap();
         }
+
         if k > 0 {
             writeln!(code, "rest = rest // {size}").unwrap();
         }
     }
+
     let mut terms: Vec<String> = [("rows", acc.row), ("cols", acc.col)]
         .into_iter()
         .filter(|&(_, stride)| stride != 0)
         .map(|(name, stride)| format!("{name} * {stride}"))
         .collect();
+
     // Both strides zero (one query row of a per-row tensor): zero offsets still shaped like the tile.
     if terms.is_empty() {
         terms = vec!["rows * 0".into(), "cols * 0".into()];
     }
+
     writeln!(code, "at = at + {}", terms.join(" + ")).unwrap();
     indented(&code)
 }
@@ -152,6 +158,7 @@ fn attention_atomic_add(acc: &Access, batch: &[usize]) -> (String, String) {
 /// products, returning float32.
 fn attention_score(scores: &[Score]) -> (String, String) {
     let mut lines = String::new();
+
     for &score in scores {
         let line = match score {
             Score::Round(d) => format!("s = s.to({})", triton_type(d).expect("a float dtype")),
@@ -163,6 +170,7 @@ fn attention_score(scores: &[Score]) -> (String, String) {
         };
         writeln!(lines, "    {line}").unwrap();
     }
+
     named(
         "attention_score",
         formatdoc!(
