@@ -7,8 +7,8 @@ use super::storage::Storage;
 use super::tensor_options::{DEFAULT_DTYPE, TensorOptions};
 use crate::device::Device;
 use crate::graph::TensorType;
-use crate::kernels::device_transfer::{copy_d2h, copy_h2d};
 use crate::profiler::RecordGuard;
+use crate::runtime::device_transfer::{copy_d2h, copy_h2d};
 
 /// The device in `options`, defaulting to the CPU.
 fn device_of(options: &TensorOptions) -> Device {
