@@ -1,7 +1,16 @@
 //! Metal source for fused flash-attention forward and backward kernels.
-use super::*;
-use crate::codegen::AttentionCodegen;
-use crate::graph_compiler::common::attention::{Strides, Term, grid_batch};
+
+use std::fmt::Write;
+
+use indoc::formatdoc;
+
+use super::AttentionCodegen;
+use crate::codegen::mps::*;
+use crate::graph::{Graph, Var};
+use crate::graph_compiler::common::attention::{
+    Access, Attention, Backward, Dropout, Score, Strides, Term, grid_batch,
+};
+use crate::{DType, Scalar};
 
 /// Buffer parameters for the dropout seed and stream offset starting at buffer `first`.
 pub(super) fn random_state(first: usize) -> [String; 2] {

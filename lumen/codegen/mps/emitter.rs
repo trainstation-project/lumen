@@ -2,12 +2,12 @@
 use super::*;
 
 /// Builds Metal locals for body values, memoizing each `(value, index)` pair.
-pub(super) struct Emitter<'a> {
+pub(crate) struct Emitter<'a> {
     pub(super) body: &'a Graph,
     /// Node index producing each non-input value.
     pub(super) producer: HashMap<Var, usize>,
     /// Emitted statements, in order.
-    pub(super) lines: String,
+    pub(crate) lines: String,
     /// Local already holding each value at each index expression.
     pub(super) values: HashMap<(Var, String), String>,
     /// Local already holding each index expression.
@@ -17,18 +17,18 @@ pub(super) struct Emitter<'a> {
     /// Inputs passed as constant scalars rather than buffers.
     pub(super) by_value: &'a [bool],
     /// Values that are constant across the inner index (per row), computed once into `hoisted`.
-    pub(super) invariant: Vec<bool>,
+    pub(crate) invariant: Vec<bool>,
     /// Locals holding invariant values, or values supplied by the enclosing kernel.
-    pub(super) row_locals: HashMap<Var, String>,
+    pub(crate) row_locals: HashMap<Var, String>,
     /// Statements computing invariant values, emitted before the inner loop.
-    pub(super) hoisted: String,
+    pub(crate) hoisted: String,
     /// Whether any tensor exceeds `u32` elements, so indices need `ulong`.
     pub(super) wide: bool,
 }
 
 impl<'a> Emitter<'a> {
     /// Starts an emitter over `body` with nothing emitted.
-    pub(super) fn new(body: &'a Graph, by_value: &'a [bool]) -> Self {
+    pub(crate) fn new(body: &'a Graph, by_value: &'a [bool]) -> Self {
         Emitter {
             body,
             by_value,
@@ -110,7 +110,7 @@ impl<'a> Emitter<'a> {
 
     /// Local holding `v` at `idx`; invariant values are computed once at `row` (or `0` for
     /// scalars) into the hoisted prelude.
-    pub(super) fn value(&mut self, v: Var, idx: String) -> String {
+    pub(crate) fn value(&mut self, v: Var, idx: String) -> String {
         if !self.invariant[v] {
             return self.element(v, idx);
         }

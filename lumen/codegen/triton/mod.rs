@@ -8,23 +8,20 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use indoc::formatdoc;
 
 use crate::graph::{BinaryOp, Graph, Node, Primitive, UnaryOp, Var};
-use crate::graph_compiler::common::horizontal::segments;
 use crate::graph_compiler::elementwise;
 use crate::tensor::contiguous_strides;
 use crate::tensor::dtype::dispatch_dtype;
 use crate::tensor::storage::as_bytes;
 use crate::{DType, Element, Scalar};
 
-mod attention;
 mod config;
 mod cross_entropy;
 mod gemm;
 mod indexing;
 mod reduction;
 mod row;
-mod utils;
+pub(crate) mod utils;
 
-pub(crate) use attention::gradients;
 pub(crate) use config::{
     ATTENTION_CONFIGS, AttentionConfig, CONFIGS, Config, LOOP_CONFIGS, LoopConfig, ROW_PARTIALS,
     UNTUNED, UNTUNED_LOOP, loop_configs, partial_tile, row_gemm_configs, untuned_attention,
@@ -104,7 +101,7 @@ pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
 /// Kernel parameter list: inputs (`in{k}`), optional `extra`, `out`, `n`, a `LOAD{k}` helper per
 /// by-reference input, `stores` store helpers (`STORE`, then `STORE{k}` from 1) and `BLOCK_SIZE`,
 /// one per line.
-fn params(by_value: &[bool], extra: Option<&str>, stores: usize) -> String {
+pub(crate) fn params(by_value: &[bool], extra: Option<&str>, stores: usize) -> String {
     let inputs = (0..by_value.len())
         .map(|k| format!("in{k}"))
         .chain(extra.map(String::from));
@@ -121,100 +118,6 @@ fn params(by_value: &[bool], extra: Option<&str>, stores: usize) -> String {
         .chain(["BLOCK_SIZE: tl.constexpr".into()])
         .map(|p| format!("    {p},\n"))
         .collect()
-}
-
-/// Generates the elementwise kernel computing every output of the body at each flat index `j`.
-/// Returns `(name, source)`; inputs flagged in `by_value` arrive as scalars. The first output is
-/// `out` stored through `STORE`; output `k` after it is `out{k}`, a parameter right after the
-/// inputs, stored through `STORE{k}`. Outputs of different element counts split the grid: each
-/// `segments` group runs on its own consecutive range of programs, masked by its own count.
-pub(crate) fn kernel(body: &Graph, by_value: &[bool]) -> (String, String) {
-    let outputs = body.outputs().len();
-    let extra = (1..outputs)
-        .map(|k| format!("out{k}"))
-        .collect::<Vec<_>>()
-        .join(",\n    ");
-    let params = params(
-        by_value,
-        (!extra.is_empty()).then_some(extra.as_str()),
-        outputs,
-    );
-    let segments = segments(body);
-    let mut emitter = Emitter::new(body, by_value);
-    // Statements computing and storing the outputs at `k`, then the ones computing them.
-    let stored = |emitter: &mut Emitter, k: &[usize]| {
-        let stores: String = k
-            .iter()
-            .map(|&k| {
-                let result = emitter.value(body.outputs()[k], "j".into());
-                match k {
-                    0 => format!("    STORE(out, j, {result}, mask)\n"),
-                    k => format!("    STORE{k}(out{k}, j, {result}, mask)\n"),
-                }
-            })
-            .collect::<Vec<_>>()
-            .concat();
-        std::mem::take(&mut emitter.lines) + &stores
-    };
-    let code = match segments.as_slice() {
-        [(_, k)] => {
-            let code = stored(&mut emitter, k);
-            formatdoc!(
-                "
-                    j = tl.program_id(0).to(tl.int64) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
-                    mask = j < n
-                {code}"
-            )
-        }
-        _ => {
-            let mut code = String::from("    pid = tl.program_id(0).to(tl.int64)\n");
-            // `first{s}` is the first program of segment `s`; segment 0 starts at 0.
-            for (s, (numel, _)) in segments.iter().enumerate().take(segments.len() - 1) {
-                let previous = match s {
-                    0 => String::new(),
-                    s => format!("first{s} + "),
-                };
-                writeln!(
-                    code,
-                    "    first{} = {previous}({numel} + BLOCK_SIZE - 1) // BLOCK_SIZE",
-                    s + 1
-                )
-                .unwrap();
-            }
-            for (s, (numel, k)) in segments.iter().enumerate() {
-                let branch = match s {
-                    0 => "if pid < first1".to_string(),
-                    s if s == segments.len() - 1 => "else".to_string(),
-                    s => format!("elif pid < first{}", s + 1),
-                };
-                let start = match s {
-                    0 => "pid".to_string(),
-                    s => format!("(pid - first{s})"),
-                };
-                // Values computed in another branch aren't defined in this one.
-                emitter.values.clear();
-                emitter.indices.clear();
-                let statements: String = stored(&mut emitter, k)
-                    .lines()
-                    .map(|line| format!("    {line}\n"))
-                    .collect();
-                write!(
-                    code,
-                    "    {branch}:\n        j = {start} * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)\n        mask = j < {numel}\n{statements}"
-                )
-                .unwrap();
-            }
-            code
-        }
-    };
-    let source = formatdoc!(
-        "
-        @triton.jit
-        def NAME(
-        {params}):
-        {code}"
-    );
-    named("fusion", source)
 }
 
 /// Generates a kernel filling `out` with a constant passed as its raw bits (int64) at launch.
@@ -287,7 +190,7 @@ pub(crate) fn bits(dtype: DType, value: Scalar) -> u64 {
 
 /// Substitutes `NAME` in `source` with `kind` plus a hash of the source, so identical kernels share
 /// a name and compile cache entry. Returns `(name, source)`.
-fn named(kind: &str, source: String) -> (String, String) {
+pub(crate) fn named(kind: &str, source: String) -> (String, String) {
     let mut hasher = DefaultHasher::new();
     source.hash(&mut hasher);
     let name = format!("{kind}_{:016x}", hasher.finish());
@@ -306,18 +209,18 @@ fn raw_type(dtype: DType) -> &'static str {
 
 /// Builds the Python statements computing body values at symbolic flat indices, memoising each
 /// `(var, index)` so shared subexpressions are emitted once.
-struct Emitter<'a> {
+pub(crate) struct Emitter<'a> {
     body: &'a Graph,
     /// Per body input, whether it is passed as a scalar argument rather than a tensor.
     by_value: &'a [bool],
     /// Position in `body.nodes()` of each var's producer.
     producer: HashMap<Var, usize>,
     /// Emitted statements, each indented for a kernel body.
-    lines: String,
+    pub(crate) lines: String,
     /// Local name already holding `(var, index expression)`.
-    values: HashMap<(Var, String), String>,
+    pub(crate) values: HashMap<(Var, String), String>,
     /// Local name already holding each index expression.
-    indices: HashMap<String, String>,
+    pub(crate) indices: HashMap<String, String>,
     /// Counter for fresh local names.
     locals: usize,
     /// Mask expression guarding loads at the current point.
@@ -331,7 +234,7 @@ struct Emitter<'a> {
 
 impl<'a> Emitter<'a> {
     /// Emitter for `body` with no statements yet and the mask named `mask`.
-    fn new(body: &'a Graph, by_value: &'a [bool]) -> Self {
+    pub(crate) fn new(body: &'a Graph, by_value: &'a [bool]) -> Self {
         Emitter {
             body,
             by_value,
@@ -733,7 +636,7 @@ impl<'a> Emitter<'a> {
     }
 
     /// Name of a local holding `v` at flat index `idx`, emitting the statements that compute it.
-    fn value(&mut self, v: Var, idx: String) -> String {
+    pub(crate) fn value(&mut self, v: Var, idx: String) -> String {
         let key = (v, idx.clone());
         if let Some(name) = self.values.get(&key).or_else(|| self.reduced.get(&v)) {
             return name.clone();
@@ -954,7 +857,7 @@ fn unsigned(bits: usize) -> &'static str {
 }
 
 /// Triton expression for the scalar `value` of `dtype`, built bit-exactly from its raw bits.
-fn constant(dtype: DType, value: Scalar) -> String {
+pub(crate) fn constant(dtype: DType, value: Scalar) -> String {
     let (bits, raw) = (bits(dtype, value), raw_type(dtype));
     match dtype {
         DType::Bool => format!("tl.full([], {}, tl.int1)", (bits != 0) as u8),

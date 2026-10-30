@@ -62,6 +62,6 @@ pub(crate) fn encode(
         .chain([output.cast_const()])
         .chain(inputs[n..].iter().copied())
         .collect();
-    let (kind, spec) = crate::codegen::tpu::attention::kernel(name, body)?;
+    let (kind, spec) = crate::codegen::attention::tpu::kernel(name, body)?;
     run(index, kind, spec, &rows)
 }

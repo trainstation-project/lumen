@@ -5,9 +5,9 @@ use std::fmt::Write;
 
 use indoc::formatdoc;
 
-use super::utils::indented;
-use super::{Emitter, constant, load, named, triton_type};
-use crate::codegen::AttentionCodegen;
+use super::AttentionCodegen;
+use crate::codegen::triton::utils::indented;
+use crate::codegen::triton::{Emitter, Triton, constant, load, named, triton_type};
 use crate::graph::Graph;
 use crate::graph_compiler::common::attention::{
     Access, Attention, Backward, Dropout, Score, Strides, Term,
@@ -171,7 +171,7 @@ pub(crate) fn gradients(b: &Backward) -> Vec<(&'static str, &(usize, Access))> {
 
 /// The Python Triton flash-attention kernels are fixed; each fusion generates the jit helpers they
 /// call to read and write its operands in their layout, store its epilogue and apply its score ops.
-impl AttentionCodegen for super::Triton {
+impl AttentionCodegen for Triton {
     /// Each jit helper's `(name, source)` by the kernel parameter it is passed as.
     type Code = Vec<(String, (String, String))>;
 

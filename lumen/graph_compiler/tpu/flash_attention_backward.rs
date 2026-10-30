@@ -394,7 +394,7 @@ fn attentions(graph: &Graph) -> Result<(), String> {
         if let Primitive::Fusion { name, body, .. } = &node.primitive
             && let "flash_attention" | "flash_attention_backward" = name.as_str()
         {
-            crate::codegen::tpu::attention::kernel(name, body)?;
+            crate::codegen::attention::tpu::kernel(name, body)?;
         }
     }
     Ok(())

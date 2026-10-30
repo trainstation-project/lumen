@@ -62,7 +62,7 @@ pub(crate) fn loop_tunings(body: &Graph) -> Vec<Tuning> {
 }
 
 /// Query rows per block for the backward kernel, the largest that fits in threadgroup memory.
-pub(super) fn backward_block(b: &Backward) -> usize {
+pub(crate) fn backward_block(b: &Backward) -> usize {
     let bytes = |n: usize| n * (b.h + b.hv) * b.dtype.size_of() + 2 * n * 4;
     [32, 16, 8]
         .into_iter()
@@ -85,7 +85,7 @@ pub(crate) fn decodes(a: &Attention) -> bool {
 }
 
 /// Keys per block for the forward kernel, the largest whose K/V tiles fit in threadgroup memory.
-pub(super) fn key_block(a: &Attention) -> usize {
+pub(crate) fn key_block(a: &Attention) -> usize {
     let t = a.dtype.size_of();
     let bytes = |bk: usize| bk * (a.h + a.hv) * t;
     [32, 16, 8]

@@ -1,9 +1,9 @@
 //! TPU flash attention: checks that each attention operand and output is read or written as whole
 //! tiles per head and encodes the forward and backward kernel specs.
 
-use super::Tpu;
+use super::AttentionCodegen;
 use crate::DType;
-use crate::codegen::AttentionCodegen;
+use crate::codegen::tpu::Tpu;
 use crate::device::tpu::layout::Layout;
 use crate::graph::{Graph, Node, Primitive, TensorType, Var};
 use crate::graph_compiler::common::attention::{

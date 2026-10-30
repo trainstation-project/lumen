@@ -30,7 +30,7 @@ use super::common::simplify::Simplify;
 use super::common::take_along_axis::TakeAlongAxis;
 use super::pass::{Module, Pipeline};
 use super::{CompilerConfig, MpsConfig, Options};
-use crate::codegen::AttentionCodegen;
+use crate::codegen::attention::AttentionCodegen;
 use crate::codegen::mps as codegen;
 use crate::codegen::mps::Tuning;
 use crate::graph::{Graph, Node, Primitive, TensorType, Var, View};
