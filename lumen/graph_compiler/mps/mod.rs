@@ -50,7 +50,7 @@ use crate::graph_compiler::common::horizontal::segments;
 use crate::graph_compiler::common::updates::Updates;
 use crate::graph_compiler::plan::{Buffer, Step};
 use crate::graph_compiler::{Plan, PlanOptions};
-use crate::kernels::mps::{
+use crate::runtime::mps::{
     Grid, dims_arg, element_arg, elementwise_grid, launch, scratch_bytes, u32_arg,
 };
 use crate::tensor::contiguous_strides;
@@ -71,7 +71,7 @@ unsafe extern "C" {
 
 /// Kernel templates and helpers every generated Metal source is compiled against.
 const PRELUDE: &str = concat!(
-    include_str!("../../kernels/mps/kernels.metal"),
+    include_str!("../../runtime/mps/kernels.metal"),
     include_str!("../../codegen/random/mps/philox.metal"),
     indoc::indoc!(
         "

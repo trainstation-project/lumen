@@ -25,7 +25,6 @@ pub mod device;
 pub mod distributed;
 pub mod graph;
 pub mod graph_compiler;
-pub mod kernels;
 pub mod pallas;
 pub mod profiler;
 #[cfg(feature = "python")]

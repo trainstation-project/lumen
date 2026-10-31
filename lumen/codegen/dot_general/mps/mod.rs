@@ -23,7 +23,7 @@ use crate::graph::Primitive::{self, DotGeneral};
 use crate::graph::TensorType;
 use crate::graph::primitive::free_dims;
 use crate::graph_compiler::plan::Step;
-use crate::kernels::mps::{Grid, dims_arg, launch};
+use crate::runtime::mps::{Grid, dims_arg, launch};
 use crate::tensor::contiguous_strides;
 
 /// Default float tile (rows, columns).

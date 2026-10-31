@@ -39,8 +39,8 @@ Plan                   graph_compiler/plan.rs: every value placed in one
       |                workspace allocated once; the steps to run
       v
 Kernels                lumen/graph/reference.rs (CPU reference: what each
-                       primitive computes), lumen/kernels/*/mps + generated
-                       Metal (lumen/codegen/*/mps), Core ML on the Neural
+                       primitive computes), Metal launched by lumen/runtime/mps
+                       (lumen/codegen/*/mps), Core ML on the Neural
                        Engine (opt-in), CUDA (allocator, streams, fill_)
 ```
 

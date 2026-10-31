@@ -127,7 +127,7 @@ fn build_mps_shim() {
     println!("cargo:rerun-if-changed=lumen/allocator/mps/mps_shim.mm");
     println!("cargo:rerun-if-changed=lumen/stream/mps/mps.mm");
     println!("cargo:rerun-if-changed=lumen/stream/mps/mps.h");
-    println!("cargo:rerun-if-changed=lumen/kernels/mps/shim.mm");
+    println!("cargo:rerun-if-changed=lumen/runtime/mps/shim.mm");
     println!("cargo:rerun-if-changed=lumen/graph_compiler/mps/ane/coreml.mm");
 
     for source in PRIMITIVE_KERNELS {
@@ -143,7 +143,7 @@ fn build_mps_shim() {
     cc::Build::new()
         .file("lumen/allocator/mps/mps_shim.mm")
         .file("lumen/stream/mps/mps.mm")
-        .file("lumen/kernels/mps/shim.mm")
+        .file("lumen/runtime/mps/shim.mm")
         .file("lumen/graph_compiler/mps/ane/coreml.mm")
         .include(PathBuf::from(
             env::var_os("OUT_DIR").expect("OUT_DIR not set"),
@@ -161,7 +161,7 @@ fn build_mps_shim() {
 
 /// Metal sources concatenated into the shim's `kPrimitiveKernels` string.
 const PRIMITIVE_KERNELS: &[&str] = &[
-    "lumen/kernels/mps/kernels.metal",
+    "lumen/runtime/mps/kernels.metal",
     "lumen/codegen/random/mps/philox.metal",
     "lumen/codegen/random/mps/kernel.metal",
     "lumen/codegen/reduction/mps/kernel.metal",

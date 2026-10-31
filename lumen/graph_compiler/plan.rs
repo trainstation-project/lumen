@@ -288,7 +288,7 @@ pub struct Plan {
 
 /// Per step, the prepared MPS launch once captured (`None` when it can't be replayed).
 #[cfg(lumen_mps_linked)]
-type Launches = OnceLock<Vec<OnceLock<Option<crate::kernels::mps::Prepared>>>>;
+type Launches = OnceLock<Vec<OnceLock<Option<crate::runtime::mps::Prepared>>>>;
 
 /// Whether an MPS step's launch can be captured once and replayed with new pointers:
 /// host-side work, custom calls and runtime scalar reads cannot.
@@ -1483,7 +1483,7 @@ impl Plan {
                         keep.push(workspace.holding());
                     }
 
-                    use crate::kernels::mps::{
+                    use crate::runtime::mps::{
                         Pointers, Unprepared, capture, encode, prepare, replay,
                     };
 

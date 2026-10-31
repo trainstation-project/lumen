@@ -3,7 +3,7 @@
 
 use crate::graph::Primitive;
 use crate::graph_compiler::plan::Step;
-use crate::kernels::mps::{Grid, launch, u64_arg};
+use crate::runtime::mps::{Grid, launch, u64_arg};
 use crate::{DType, Tensor};
 
 /// Most threads per grid row; larger launches spill into more rows.

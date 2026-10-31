@@ -4,7 +4,7 @@ use crate::codegen::scan::ScanCodegen;
 use crate::codegen::utils::mps::Mps;
 use crate::graph::{Primitive, TensorType};
 use crate::graph_compiler::plan::Step;
-use crate::kernels::mps::{Grid, launch, u32_arg, u64_arg};
+use crate::runtime::mps::{Grid, launch, u32_arg, u64_arg};
 use crate::{DType, Tensor};
 
 /// Scan length above which a contiguous axis uses the threadgroup row kernel.

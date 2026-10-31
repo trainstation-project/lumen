@@ -8,7 +8,7 @@ use indoc::indoc;
 
 use crate::codegen::store::mps::loads;
 use crate::graph::{Graph, Primitive};
-use crate::kernels::mps::element_arg;
+use crate::runtime::mps::element_arg;
 use crate::{DType, Scalar};
 
 /// The Metal code generator.
