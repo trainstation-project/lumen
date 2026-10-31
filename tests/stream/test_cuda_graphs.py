@@ -121,3 +121,28 @@ def test_cuda_graphs_replay_runtime_scalars_and_write_back(device, cuda_graphs):
         np.testing.assert_allclose(lumen.to_numpy(got), want.sum(), rtol=1e-5)
     np.testing.assert_allclose(lumen.to_numpy(m.w._placed(device).to("cpu")), want, rtol=1e-5)
     assert any(compiled._graphs.values())
+
+
+@pytest.mark.parametrize("device", [CUDA])
+def test_cuda_graphs_replay_under_the_profiler(device, cuda_graphs):
+    """Profiled with CUDA timing, a captured plan still replays: each call
+    is a ``CUDA graph`` range, and each kernel it ran is timed under the
+    step that launched it while capturing, as uncaptured runs name them."""
+    from lumen.profiler import ProfilerActivity, profile
+
+    if ProfilerActivity.CUDA not in lumen.profiler.supported_activities():
+        pytest.skip("this build cannot time CUDA")
+    compiled = lumen.compile(lambda x: F.sum(F.exp(x) * 2.0, -1) + 1.0)
+    X = lumen.from_numpy(rand(64, 1024)).to(device)
+    for _ in range(3):
+        compiled(X)
+    graph = next(iter(compiled._graphs.values()))[0]
+    labels = [s["label"] for s in next(iter(compiled._plans.values()))[6][0][0].steps()]
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+        for _ in range(2):
+            compiled(X)
+    events = prof.events()
+    assert next(iter(compiled._graphs.values()))[0] is graph
+    assert [e["name"] for e in events if e["kind"] == "user_range"] == ["CUDA graph"] * 2
+    kernels = [e["name"] for e in events if e["kind"] == "gpu"]
+    assert kernels and set(kernels) <= set(labels), (kernels, labels)

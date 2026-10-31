@@ -198,10 +198,25 @@ type LaunchKernel = unsafe extern "C" fn(
 /// `cuGetErrorString`: a driver error's message.
 type ErrorString = unsafe extern "C" fn(c_int, *mut *const c_char) -> c_int;
 
+/// `cuStreamGetCaptureInfo_v2`: stream, status, capture id, graph, dependencies, their count.
+type CaptureInfo = unsafe extern "C" fn(
+    *mut c_void,
+    *mut c_int,
+    *mut u64,
+    *mut *mut c_void,
+    *mut *const *mut c_void,
+    *mut usize,
+) -> c_int;
+
+/// `cuGraphGetNodes`: graph, nodes (null to count them), their count.
+type GraphNodes = unsafe extern "C" fn(*mut c_void, *mut *mut c_void, *mut usize) -> c_int;
+
 /// The CUDA driver entry points this module calls.
 struct Driver {
     launch: LaunchKernel,
     error: ErrorString,
+    capture_info: CaptureInfo,
+    graph_nodes: GraphNodes,
 }
 
 /// Loads `libcuda.so.1` once and resolves the driver entry points.
@@ -240,11 +255,59 @@ fn driver() -> Result<&'static Driver, String> {
                     error: std::mem::transmute::<*mut c_void, ErrorString>(symbol(
                         "cuGetErrorString",
                     )?),
+                    capture_info: std::mem::transmute::<*mut c_void, CaptureInfo>(symbol(
+                        "cuStreamGetCaptureInfo_v2",
+                    )?),
+                    graph_nodes: std::mem::transmute::<*mut c_void, GraphNodes>(symbol(
+                        "cuGraphGetNodes",
+                    )?),
                 })
             }
         })
         .as_ref()
         .map_err(Clone::clone)
+}
+
+/// Nodes in the graph lumen's capture stream is capturing, or `None` while none captures.
+fn captured_nodes() -> Option<usize> {
+    let stream = crate::stream::cuda::launch_stream();
+
+    if stream.is_null() {
+        return None;
+    }
+
+    let driver = driver().ok()?;
+    let (mut status, mut id, mut graph, mut count) = (0, 0, std::ptr::null_mut(), 0);
+
+    let read = unsafe {
+        (driver.capture_info)(
+            stream,
+            &mut status,
+            &mut id,
+            &mut graph,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+
+    (read == 0
+        && !graph.is_null()
+        && unsafe { (driver.graph_nodes)(graph, std::ptr::null_mut(), &mut count) } == 0)
+        .then_some(count)
+}
+
+/// Runs `step`'s launches; while a CUDA graph captures, records that each node they add to it is the
+/// step labelled `label`'s, so a profiled replay names its kernels.
+pub(crate) fn counted<R>(label: &'static str, step: impl FnOnce() -> R) -> R {
+    let Some(before) = captured_nodes() else {
+        return step();
+    };
+
+    let result = step();
+    let after = captured_nodes().unwrap_or(before);
+
+    crate::stream::cuda::captured(label, before..after);
+    result
 }
 
 /// The bytes Triton type `ty` passes `value` as, or `None` for a parameter specialized away.

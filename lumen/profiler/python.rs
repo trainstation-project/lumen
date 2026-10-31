@@ -66,6 +66,13 @@ fn enabled() -> bool {
     super::is_enabled()
 }
 
+/// True when a profiler session is timing CUDA kernels.
+#[pyfunction]
+#[pyo3(name = "_profiler_cuda_enabled")]
+fn cuda_enabled() -> bool {
+    super::device_enabled(crate::Device::Cuda(0))
+}
+
 /// An open `record_function` range held by Python until `exit`.
 #[pyclass(name = "_RecordFunction", module = "lumen.profiler._C")]
 struct PyRecordFunction {
@@ -217,6 +224,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(cuda_timing, m)?)?;
     m.add_function(wrap_pyfunction!(stop, m)?)?;
     m.add_function(wrap_pyfunction!(enabled, m)?)?;
+    m.add_function(wrap_pyfunction!(cuda_enabled, m)?)?;
     m.add_function(wrap_pyfunction!(record_function_enter, m)?)?;
     m.add_class::<PyRecordFunction>()?;
     m.add_class::<PyProfile>()?;

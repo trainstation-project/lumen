@@ -585,6 +585,17 @@ pub(crate) struct GpuContext {
     launch: Option<Launch>,
 }
 
+impl GpuContext {
+    /// This context for a launch labelled `name` (a CUDA graph's step, replayed).
+    #[cfg_attr(not(lumen_cupti_linked), allow(dead_code))]
+    pub(crate) fn launching(&self, name: &'static str) -> GpuContext {
+        GpuContext {
+            launch: Some(Launch { name, types: None }),
+            ..self.clone()
+        }
+    }
+}
+
 /// Captures the context for a launch on `device`, consuming any pending launch label; `None` when the device is not profiled.
 #[cfg_attr(
     not(any(lumen_mps_linked, lumen_cupti_linked, lumen_tpu_linked)),

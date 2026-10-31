@@ -1591,6 +1591,10 @@ impl Plan {
                     let kernel = kernels.get(at).and_then(Option::as_ref);
                     let run = || super::triton::run(kernel, step, &inputs, &out, &outs);
 
+                    // Captured into a CUDA graph, the nodes it adds are the step's, by name.
+                    #[cfg(all(feature = "python", lumen_cuda_linked))]
+                    let run = || super::triton::direct::counted(step.label, run);
+
                     // Profiled, the step's kernels are timed under its name (each keeps its own as `kernel`).
                     #[cfg(lumen_cupti_linked)]
                     let run = || {

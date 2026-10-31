@@ -856,14 +856,16 @@ class Compiled:
         replays: each call copies them in (a copy a vector) and launches the
         graph, then writes back as usual. Weights and the
         workspace are read where they were captured; when one moves, the plan
-        is captured again. While the profiler records, calls run uncaptured,
-        so its trace has their steps."""
+        is captured again. While the profiler times CUDA, a replay runs in a
+        ``CUDA graph`` range, each kernel timed under the step that launched
+        it; while it records the host alone, calls run uncaptured, so its
+        trace has their steps."""
         record = self._graphs.get(id(plan), ())
         if record is None or not self._capturable(key, plan):
             return plan.run_in(workspace, inputs)
-        from lumen.profiler._C import _profiler_enabled
+        from lumen.profiler import _C as profiler
 
-        if _profiler_enabled():
+        if profiler._profiler_enabled() and not profiler._profiler_cuda_enabled():
             return plan.run_in(workspace, inputs)
         from lumen.tensor import tensor
 
@@ -884,7 +886,13 @@ class Compiled:
         if record and record[3] == fixed:
             graph, buffers, vectors, _, outputs = record
             stage(buffers, vectors)
-            graph.replay()
+            if profiler._profiler_enabled():
+                from lumen.profiler import record_function
+
+                with record_function("CUDA graph"):
+                    graph.replay()
+            else:
+                graph.replay()
             return outputs
         if id(plan) not in self._warm:
             # The first call compiles the plan's kernels, which capturing cannot.

@@ -41,6 +41,11 @@ pub(crate) mod ffi {
         ) -> i32;
 
         pub fn cudaGraphLaunch(exec: *mut c_void, stream: *mut c_void) -> i32;
+        pub fn cudaGraphGetNodes(
+            graph: *mut c_void,
+            nodes: *mut *mut c_void,
+            count: *mut usize,
+        ) -> i32;
         pub fn cudaGraphDestroy(graph: *mut c_void) -> i32;
         pub fn cudaGraphExecDestroy(exec: *mut c_void) -> i32;
         pub fn cudaGetErrorString(err: i32) -> *const std::ffi::c_char;
@@ -55,6 +60,18 @@ static LAUNCH_STREAM: AtomicUsize = AtomicUsize::new(0);
 #[cfg_attr(not(feature = "python"), allow(dead_code))]
 pub(crate) fn launch_stream() -> *mut c_void {
     LAUNCH_STREAM.load(Ordering::Acquire) as *mut c_void
+}
+
+/// The steps captured so far: each one's label and the nodes it added, by position in the graph.
+static CAPTURED: Mutex<Vec<(&'static str, std::ops::Range<usize>)>> = Mutex::new(Vec::new());
+
+/// Records that the capturing graph's nodes at `nodes` are the step labelled `label`'s.
+#[cfg_attr(not(feature = "python"), allow(dead_code))]
+pub(crate) fn captured(label: &'static str, nodes: std::ops::Range<usize>) {
+    CAPTURED
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((label, nodes));
 }
 
 /// `cudaStreamCaptureModeThreadLocal`: only this thread's unsafe calls invalidate the capture.
@@ -74,12 +91,15 @@ fn checked(err: i32, call: &str) -> Result<(), String> {
 
 /// A CUDA graph of lumen's kernel launches on one device: `begin` redirects them to a capture stream
 /// (blocking, so ordered with the default stream), `end` instantiates what was launched, and `replay`
-/// launches it all again. Memory allocated while capturing stays the graph's until it is dropped.
+/// launches it all again. Memory allocated while capturing stays the graph's until it is dropped;
+/// `labels` names the step each node ran, in order (`None` for one launched outside a step).
 pub struct CudaGraph {
     device: usize,
     stream: usize,
     exec: usize,
     held: Vec<usize>,
+    #[cfg_attr(not(lumen_cupti_linked), allow(dead_code))]
+    labels: Vec<Option<&'static str>>,
 }
 
 impl CudaGraph {
@@ -104,6 +124,7 @@ impl CudaGraph {
         }
 
         crate::allocator::cuda::hold(device);
+        CAPTURED.lock().unwrap_or_else(|e| e.into_inner()).clear();
         LAUNCH_STREAM.store(stream as usize, Ordering::Release);
 
         Ok(CudaGraph {
@@ -111,6 +132,7 @@ impl CudaGraph {
             stream: stream as usize,
             exec: 0,
             held: Vec::new(),
+            labels: Vec::new(),
         })
     }
 
@@ -124,6 +146,7 @@ impl CudaGraph {
     pub fn end(&mut self) -> Result<(), String> {
         LAUNCH_STREAM.store(0, Ordering::Release);
         self.held = crate::allocator::cuda::held(self.device);
+        let steps = std::mem::take(&mut *CAPTURED.lock().unwrap_or_else(|e| e.into_inner()));
 
         let mut graph = std::ptr::null_mut();
 
@@ -131,6 +154,17 @@ impl CudaGraph {
             unsafe { ffi::cudaStreamEndCapture(self.stream as *mut c_void, &mut graph) },
             "cudaStreamEndCapture",
         )?;
+
+        let mut nodes = 0;
+
+        unsafe { ffi::cudaGraphGetNodes(graph, std::ptr::null_mut(), &mut nodes) };
+        self.labels = vec![None; nodes];
+
+        for (label, at) in steps {
+            for node in at.filter(|&n| n < nodes) {
+                self.labels[node] = Some(label);
+            }
+        }
 
         let mut exec = std::ptr::null_mut();
         let made = checked(
@@ -145,7 +179,8 @@ impl CudaGraph {
         Ok(())
     }
 
-    /// Launches the captured graph on its stream.
+    /// Launches the captured graph on its stream; profiled, its kernels are timed under the names of
+    /// the steps that launched them while it captured.
     pub fn replay(&self) -> Result<(), String> {
         if self.exec == 0 {
             return Err("the CUDA graph was never captured".into());
@@ -153,10 +188,24 @@ impl CudaGraph {
 
         CUDA.set_device(self.device);
 
-        checked(
-            unsafe { ffi::cudaGraphLaunch(self.exec as *mut c_void, self.stream as *mut c_void) },
-            "cudaGraphLaunch",
-        )
+        let launch = || {
+            checked(
+                unsafe {
+                    ffi::cudaGraphLaunch(self.exec as *mut c_void, self.stream as *mut c_void)
+                },
+                "cudaGraphLaunch",
+            )
+        };
+
+        #[cfg(lumen_cupti_linked)]
+        return crate::profiler::cupti::replayed(
+            crate::Device::Cuda(self.device),
+            &self.labels,
+            launch,
+        );
+
+        #[cfg(not(lumen_cupti_linked))]
+        launch()
     }
 }
 
