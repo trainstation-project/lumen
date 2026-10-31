@@ -14,13 +14,14 @@ use crate::codegen::reduction::ReductionCodegen;
 use crate::codegen::row::RowCodegen;
 use crate::graph::{Graph, Primitive};
 use crate::graph_compiler::MpsConfig;
-use crate::graph_compiler::common::attention::{Attention, Backward};
 use crate::kernels::mps::element_arg;
 use crate::{DType, Scalar};
 
-mod config;
-
+pub(crate) use crate::codegen::attention::mps::{backward_block_with_dq, decodes};
 pub(crate) use crate::codegen::dot_general::mps::*;
+pub(crate) use crate::codegen::elementwise::mps::{
+    TUNED_ELEMENTS, Tuning, loop_tuning, loop_tunings,
+};
 pub(crate) use crate::codegen::emitter::Emit;
 pub(crate) use crate::codegen::emitter::mps::Emitter;
 pub(crate) use crate::codegen::kinds::reduction_root;
@@ -28,7 +29,6 @@ pub(crate) use crate::codegen::layout::mps::transpose::*;
 pub(crate) use crate::codegen::reduction::mps::{has_epilogue, split_launches};
 pub(crate) use crate::codegen::row::mps::*;
 pub(crate) use crate::codegen::store::mps::{gather_index, written};
-pub(crate) use config::*;
 
 /// The Metal code generator.
 pub(crate) struct Mps;

@@ -12,13 +12,25 @@ use super::RowCodegen;
 use crate::DType;
 use crate::codegen::reduction::triton::Reduction;
 use crate::codegen::reduction::triton::{combine, lowest, reduce_along};
-use crate::codegen::triton::config::MOST_WHOLE_ROW;
 use crate::codegen::triton::*;
 use crate::codegen::utils::triton::indented;
 use crate::graph::TensorType;
 use crate::graph::{Graph, Node, Primitive, Var};
+use crate::graph_compiler::common::diamonds::Partials;
 use crate::graph_compiler::common::diamonds::softmax_pair;
 use crate::graph_compiler::elementwise;
+
+/// Widest row a normalization row kernel holds whole in registers (XMA's `MAX_TRITON_BLOCK_SIZE`);
+/// wider rows are walked in chunks of `BLOCK_SIZE`, a pass a reduction.
+const MOST_WHOLE_ROW: usize = 65536;
+
+/// How column sums (a norm weight's gradient) ride along row kernels: rows up to 8192 wide, each
+/// program holding a partial per column, split into 32 to 256 row groups.
+pub(crate) const ROW_PARTIALS: Partials = Partials {
+    columns: 8192,
+    groups: 256,
+    fewest_groups: 32,
+};
 
 /// The rows a row fusion's `body` reduces: the operand of its first last-axis reduction, or its root
 /// when it has none. A row's results may be its rows' shape or one a row (a cross entropy's loss).

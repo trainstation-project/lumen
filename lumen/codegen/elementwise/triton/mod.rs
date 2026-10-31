@@ -1,6 +1,10 @@
 //! Triton loop kernels: every output of a loop fusion computed elementwise, as the `BODY` of the fixed
 //! `elementwise_kernel` (`__init__.py`).
 
+mod config;
+
+pub(crate) use config::*;
+
 use std::collections::HashMap;
 use std::fmt::Write;
 
