@@ -39,9 +39,10 @@ def test_a_compiled_function_prints_its_program():
     assert str(f) == lumen.viz.program_source(lumen.make_graph(scaled)(lumen.ones([3])))
 
 
-def test_deallocate_memory_frees_the_workspaces_until_allocate_memory():
-    """``deallocate_memory`` frees every plan's workspace, calls raise until
-    ``allocate_memory`` allocates them again, and the plans stay compiled."""
+def test_deallocate_memory_frees_the_current_plans_workspace():
+    """``deallocate_memory`` frees the workspace of the latest call's
+    signature's plan only: other signatures keep running, that one raises
+    until ``allocate_memory`` allocates it again, and nothing retraces."""
     from lumen.profiler import ProfilerActivity, profile
 
     traces = []
@@ -52,14 +53,14 @@ def test_deallocate_memory_frees_the_workspaces_until_allocate_memory():
         return F.sum(x * x, -1)
 
     f = lumen.compile(f)
-    x = lumen.ones([2, 3])
-    f(x)
-    f(lumen.ones([4, 3]))
-    sizes = sorted(plan.workspace_bytes for *_, entries in f._plans.values() for plan, _ in entries)
-
+    small, large = lumen.ones([2, 3]), lumen.ones([4, 3])
+    f(small)
+    f(large)
+    ((large_plan, _),) = f._plans[f._latest[0]][6]
     f.deallocate_memory()
+    assert lumen.to_numpy(f(small)).tolist() == [3.0, 3.0]
     with pytest.raises(RuntimeError, match="allocate_memory"):
-        f(x)
+        f(large)
     # The profiler pairs a free with the allocation it saw, so both happen while it records.
     with profile(activities=[ProfilerActivity.CPU], profile_memory=True) as prof:
         f.allocate_memory()
@@ -67,8 +68,8 @@ def test_deallocate_memory_frees_the_workspaces_until_allocate_memory():
         f.deallocate_memory()
         f.allocate_memory()
     events = [e["bytes"] for e in prof.events() if e["kind"] == "memory"]
-    assert sorted(events[:2]) == sizes and sorted(events[2:4]) == sorted(-n for n in sizes) and len(events) == 6
-    assert lumen.to_numpy(f(x)).tolist() == [3.0, 3.0]
+    assert events == [large_plan.workspace_bytes, -large_plan.workspace_bytes, large_plan.workspace_bytes]
+    assert lumen.to_numpy(f(large)).tolist() == [3.0] * 4
     assert len(traces) == 2
 
 

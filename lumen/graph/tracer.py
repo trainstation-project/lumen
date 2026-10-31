@@ -625,9 +625,9 @@ def compile(fn, device=None):
     ``args``' signature. ``compiled.dump_code(directory)`` writes the code
     of every kernel a call of that signature runs, in the order it runs
     them, a file each (``lumen.viz.dump_code``).
-    ``compiled.deallocate_memory()`` frees the workspaces of its plans and
-    ``compiled.allocate_memory()`` allocates them again; the plans stay
-    compiled.
+    ``compiled.deallocate_memory()`` frees the workspace of the current
+    plan (the latest call's signature's) and ``compiled.allocate_memory()``
+    allocates it again; the plan stays compiled.
 
     With ``lumen.config.compiler.mps.neural_engine``, an MPS plan runs the large
     float16 dots of the weights the function does not write (and the
@@ -642,8 +642,8 @@ class Compiled:
     its arguments' signature, compiling one on a new signature (see
     ``compile``). ``print`` it to read the latest signature's traced
     program; ``dump_graph`` and ``dump_code`` show its plans, and
-    ``deallocate_memory`` and ``allocate_memory`` free and take back their
-    workspaces."""
+    ``deallocate_memory`` and ``allocate_memory`` free and take back the
+    current plan's workspace."""
 
     def __init__(self, fn, device=None):
         """Compiles ``fn`` for ``device`` (default: its tensor arguments') on its calls."""
@@ -657,8 +657,8 @@ class Compiled:
         self._baked = {}
         self._hosts, self._pending = {}, []
         self._fast = {}
-        # Whether `deallocate_memory` freed the workspaces, so calls wait for `allocate_memory`.
-        self._freed = False
+        # The signatures whose plans' workspaces `deallocate_memory` freed: their calls wait for `allocate_memory`.
+        self._freed = set()
 
     def _prepare(self, args, walked=None):
         """The plan for ``args`` (``walked``: their ``_walk``, when the caller
@@ -742,10 +742,6 @@ class Compiled:
 
     def __call__(self, *args):
         """Run ``fn``'s plan for ``args``, compiling one for a new signature; see ``compile``."""
-        if self._freed:
-            raise RuntimeError(
-                f"{self._fn.__name__}: its memory is freed (deallocate_memory); call allocate_memory() first"
-            )
         # Fast path: plain tensor arguments whose signature already has a plan with nothing to write back.
         if all(type(a) is Tensor for a in args):
             hit = self._fast.get((tuple([a._signature for a in args]), _compiler_flags()))
@@ -764,6 +760,11 @@ class Compiled:
                 return _tree_map(returned, out)
         walked = _walk(args)
         graph, plan, workspace, out, inputs = self._prepare(args, walked)
+        if self._latest[0] in self._freed:
+            raise RuntimeError(
+                f"{self._fn.__name__}: the plan for these arguments has its memory freed (deallocate_memory); "
+                "call allocate_memory() first"
+            )
         ran = not (workspace is None or any(isinstance(a, Tensor) and _device_type(a.device) == "meta" for a in args))
         if ran and plan.neural_engine:
             versions = [w._version for w in walked[2]]
@@ -870,27 +871,33 @@ class Compiled:
         return viz.program_source(self._plans[self._latest[0]][0])
 
     def deallocate_memory(self):
-        """Frees the workspace of every plan compiled so far, back to its
-        device's allocator. The plans stay compiled; the weights, shared
-        with their modules and other compiled functions, stay placed.
-        Results of earlier calls are views of a workspace and keep it
-        until they go. Calls raise until ``allocate_memory``."""
-        for *_, entries in self._plans.values():
-            entries[:] = [(plan, None) for plan, _ in entries]
-        self._fast.clear()
-        self._freed = True
+        """Frees the workspace of the current plan, the latest call's
+        signature's, back to its device's allocator. The plan stays
+        compiled and the plans of other signatures keep theirs; the
+        weights, shared with their modules and other compiled functions,
+        stay placed. Results of earlier calls are views of the workspace
+        and keep it until they go. Calls with that signature raise until
+        ``allocate_memory``."""
+        if not self._latest or _device_type(self._latest[0][1]) == "meta":
+            return
+        key = self._latest[0]
+        entries = self._plans[key][6]
+        entries[:] = [(plan, None) for plan, _ in entries]
+        self._fast = {k: v for k, v in self._fast.items() if v[4] != key}
+        self._freed.add(key)
 
     def allocate_memory(self):
-        """Allocates the workspaces ``deallocate_memory`` freed again, so calls run."""
-        if not self._freed:
+        """Allocates the current plan's workspace again, after ``deallocate_memory`` freed it."""
+        if not self._latest or self._latest[0] not in self._freed:
             return
-        for (_, target, _), (*_, entries) in self._plans.items():
-            if _device_type(target) != "meta":
-                entries[:] = [
-                    (plan, Tensor.empty([plan.workspace_bytes], "uint8", target, alignment=plan.workspace_alignment))
-                    for plan, _ in entries
-                ]
-        self._freed = False
+        key = self._latest[0]
+        target = key[1]
+        entries = self._plans[key][6]
+        entries[:] = [
+            (plan, Tensor.empty([plan.workspace_bytes], "uint8", target, alignment=plan.workspace_alignment))
+            for plan, _ in entries
+        ]
+        self._freed.discard(key)
 
     def _planned(self, name, args, device):
         """Graph, a fresh plan on ``device``, ones-filled inputs and a workspace for ``args``' signature, for ``name``."""
