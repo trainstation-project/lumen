@@ -327,7 +327,7 @@ pub(crate) fn encode(
 
         Reshape { .. } => crate::codegen::layout::mps::encode,
         DynamicSlice { .. } | DynamicUpdateSlice => crate::codegen::dynamic_slice::mps::encode,
-        ScatterAdd { .. } => crate::codegen::indexing::mps::scatter_add::encode,
+        ScatterAdd { .. } => crate::codegen::scatter_add::mps::encode,
         HostWait => super::wait::encode,
         ToHost | ToDevice => {
             unreachable!("a stage's transfers are between its plans (compiler::stages)")
