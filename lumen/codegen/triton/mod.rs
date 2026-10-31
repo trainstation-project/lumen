@@ -21,8 +21,7 @@ pub(crate) use crate::codegen::dot_general::triton::{
     CONFIGS, Config, UNTUNED, partial_tile, row_gemm_configs, untuned_row_gemm,
 };
 pub(crate) use crate::codegen::dot_general::triton::{
-    EpilogueFlags, Layouts, cross_entropy_combine, cross_entropy_epilogue, gemm, gemm_dot,
-    gemm_flags,
+    EpilogueFlags, Layouts, gemm, gemm_dot, gemm_flags,
 };
 pub(crate) use crate::codegen::elementwise::triton::{
     LOOP_CONFIGS, LoopConfig, UNTUNED_LOOP, loop_configs, untuned_loop,

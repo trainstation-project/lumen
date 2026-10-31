@@ -89,6 +89,9 @@ pub enum Template {
     Transpose { a: usize, b: usize },
     /// `dynamic_update_slice_kernel` (lumen.codegen.dynamic_slice.triton): blocks of the update's elements.
     DynamicUpdateSlice,
+    /// `cross_entropy_combine_kernel` (lumen.codegen.dot_general.triton.linear_cross_entropy): one row a
+    /// program, its `tiles` partials `BLOCK_SIZE` at a time.
+    CrossEntropyCombine { tiles: usize },
     /// `scatter_add_kernel` (lumen.codegen.scatter_add.triton): blocks of the positions off the `length`-long
     /// axis (`after` inner ones per outer), adding `picks` updates at each.
     ScatterAdd {
@@ -109,6 +112,10 @@ impl Template {
                 "lumen.codegen.dynamic_slice.triton",
                 "dynamic_update_slice_kernel",
             ),
+            Template::CrossEntropyCombine { .. } => (
+                "lumen.codegen.dot_general.triton.linear_cross_entropy",
+                "cross_entropy_combine_kernel",
+            ),
             Template::ScatterAdd { .. } => {
                 ("lumen.codegen.scatter_add.triton", "scatter_add_kernel")
             }
@@ -117,7 +124,7 @@ impl Template {
 
     /// The kernel's constexprs for a launch over `n` outputs in `segments` (empty for one segment): a
     /// loop's segments' element counts, a transpose's output sides and tile, an update's element count, a
-    /// scatter-add's positions off the axis and its sizes.
+    /// cross entropy's rows and tiles, a scatter-add's positions off the axis and its sizes.
     pub fn constexprs(self, n: usize, segments: &[usize]) -> Vec<(&'static str, Constexpr)> {
         match self {
             Template::Elementwise => {
@@ -134,6 +141,9 @@ impl Template {
                 ("TILE", Constexpr::Int(TILE)),
             ],
             Template::DynamicUpdateSlice => vec![("N", Constexpr::Int(n))],
+            Template::CrossEntropyCombine { tiles } => {
+                vec![("N", Constexpr::Int(n)), ("TILES", Constexpr::Int(tiles))]
+            }
             Template::ScatterAdd {
                 length,
                 after,
