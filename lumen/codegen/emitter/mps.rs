@@ -1,5 +1,12 @@
-//! Expression emitter that turns a fused body's values into Metal statements at a given index.
-use super::*;
+//! Metal emitter: Metal statements computing a fused body's values at a given index.
+
+use std::collections::HashMap;
+use std::fmt::Write;
+
+use super::Emit;
+use crate::codegen::mps::*;
+use crate::graph::{Graph, Node, Primitive, UnaryOp, Var};
+use crate::tensor::contiguous_strides;
 
 /// Builds Metal locals for body values, memoizing each `(value, index)` pair.
 pub(crate) struct Emitter<'a> {
@@ -27,28 +34,6 @@ pub(crate) struct Emitter<'a> {
 }
 
 impl<'a> Emitter<'a> {
-    /// Starts an emitter over `body` with nothing emitted.
-    pub(crate) fn new(body: &'a Graph, by_value: &'a [bool]) -> Self {
-        Emitter {
-            body,
-            by_value,
-            producer: body
-                .nodes()
-                .iter()
-                .enumerate()
-                .map(|(i, n)| (n.output, i))
-                .collect(),
-            lines: String::new(),
-            values: HashMap::new(),
-            indices: HashMap::new(),
-            locals: 0,
-            wide: body.types.iter().any(|t| t.numel() > u32::MAX as usize),
-            invariant: vec![false; body.types.len()],
-            row_locals: HashMap::new(),
-            hoisted: String::new(),
-        }
-    }
-
     /// Returns a new unique local name starting with `prefix`.
     pub(crate) fn fresh(&mut self, prefix: &str) -> String {
         self.locals += 1;
@@ -112,38 +97,6 @@ impl<'a> Emitter<'a> {
             }
             p => unreachable!("{p} is not a layout primitive"),
         }
-    }
-
-    /// Local holding `v` at `idx`; invariant values are computed once at `row` (or `0` for
-    /// scalars) into the hoisted prelude.
-    pub(crate) fn value(&mut self, v: Var, idx: String) -> String {
-        if !self.invariant[v] {
-            return self.element(v, idx);
-        }
-
-        if let Some(name) = self.row_locals.get(&v) {
-            return name.clone();
-        }
-
-        // Emit the invariant value into a fresh buffer with empty caches, then restore the loop's.
-        let lines = std::mem::take(&mut self.lines);
-
-        let caches = (
-            std::mem::take(&mut self.values),
-            std::mem::take(&mut self.indices),
-        );
-
-        let idx = match self.body.type_of(v).numel() {
-            1 => "0",
-            _ => "row",
-        };
-
-        let name = self.element(v, idx.into());
-        let hoisted = std::mem::replace(&mut self.lines, lines);
-        self.hoisted.push_str(&hoisted);
-        (self.values, self.indices) = caches;
-        self.row_locals.insert(v, name.clone());
-        name
     }
 
     /// Emits the statements computing `v` at flat index `idx` and returns the local holding it.
@@ -348,6 +301,63 @@ impl<'a> Emitter<'a> {
         let name = self.fresh("v");
         writeln!(self.lines, "        {t} {name} = {expr};").unwrap();
         self.values.insert(key, name.clone());
+        name
+    }
+}
+
+/// Metal emitter: Metal statements a fused body's values are computed in, invariant ones hoisted.
+impl<'a> Emit<'a> for Emitter<'a> {
+    /// Starts an emitter over `body` with nothing emitted.
+    fn new(body: &'a Graph, by_value: &'a [bool]) -> Self {
+        Emitter {
+            body,
+            by_value,
+            producer: body
+                .nodes()
+                .iter()
+                .enumerate()
+                .map(|(i, n)| (n.output, i))
+                .collect(),
+            lines: String::new(),
+            values: HashMap::new(),
+            indices: HashMap::new(),
+            locals: 0,
+            wide: body.types.iter().any(|t| t.numel() > u32::MAX as usize),
+            invariant: vec![false; body.types.len()],
+            row_locals: HashMap::new(),
+            hoisted: String::new(),
+        }
+    }
+
+    /// Local holding `v` at `idx`; invariant values are computed once at `row` (or `0` for
+    /// scalars) into the hoisted prelude.
+    fn value(&mut self, v: Var, idx: String) -> String {
+        if !self.invariant[v] {
+            return self.element(v, idx);
+        }
+
+        if let Some(name) = self.row_locals.get(&v) {
+            return name.clone();
+        }
+
+        // Emit the invariant value into a fresh buffer with empty caches, then restore the loop's.
+        let lines = std::mem::take(&mut self.lines);
+
+        let caches = (
+            std::mem::take(&mut self.values),
+            std::mem::take(&mut self.indices),
+        );
+
+        let idx = match self.body.type_of(v).numel() {
+            1 => "0",
+            _ => "row",
+        };
+
+        let name = self.element(v, idx.into());
+        let hoisted = std::mem::replace(&mut self.lines, lines);
+        self.hoisted.push_str(&hoisted);
+        (self.values, self.indices) = caches;
+        self.row_locals.insert(v, name.clone());
         name
     }
 }
