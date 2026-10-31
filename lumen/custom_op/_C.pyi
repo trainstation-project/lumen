@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Optional, Sequence, final
 
-from lumen.tensor._C import Tensor
+from lumen.device._C import DeviceLike
+from lumen.tensor._C import Scalar, Tensor
 
 @final
 class MetalKernel:
@@ -20,3 +21,8 @@ class MetalKernel:
         grid: Optional[Sequence[int]] = None,
         threadgroups: Optional[Sequence[int]] = None,
     ) -> None: ...
+
+def _register_kernel(name: str, device: DeviceLike, kernel: Any) -> None: ...
+def _unregister_kernel(name: str, device: DeviceLike) -> bool: ...
+def _registered_ops() -> list[tuple[str, str]]: ...
+def _dummy_op(t: Tensor, value: Scalar) -> None: ...

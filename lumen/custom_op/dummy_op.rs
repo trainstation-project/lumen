@@ -11,13 +11,13 @@ pub static DUMMY_OP: Op<DummyOpKernel> = Op::new(op_name!("dummy_op"), |_| None)
 
 /// Python kernel handles registered for `dummy_op`, kept apart from native kernels since their type differs.
 #[cfg(feature = "python")]
-pub static DUMMY_OP_PY: Op<crate::kernels::python::KernelHandle> =
+pub static DUMMY_OP_PY: Op<crate::custom_op::register::KernelHandle> =
     Op::new(op_name!("dummy_op__python"), |_| None);
 
 /// Runs `dummy_op` on `t` with `value`, preferring a registered Python kernel and falling back to a native one.
 pub fn dummy_op(t: &Tensor, value: Scalar) {
     #[cfg(feature = "python")]
-    if let Some(handle) = crate::kernels::python::handle_for(
+    if let Some(handle) = crate::custom_op::register::handle_for(
         DUMMY_OP.name(),
         crate::runtime::dispatch::DispatchKey::of(t.device()),
     ) && handle.launch(

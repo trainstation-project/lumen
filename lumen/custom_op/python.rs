@@ -83,7 +83,8 @@ impl PyMetalKernel {
     }
 }
 
-/// Adds `MetalKernel` to the Python module.
+/// Adds `MetalKernel` and the kernel registration functions to the Python module.
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PyMetalKernel>()
+    m.add_class::<PyMetalKernel>()?;
+    super::register::register(m)
 }
