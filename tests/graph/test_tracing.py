@@ -23,6 +23,88 @@ def test_graph_text():
     )
 
 
+def test_a_compiled_function_prints_its_program():
+    """``lumen.compile`` returns a ``Compiled`` named after the function; it
+    prints the traced program of its latest call's signature, as
+    ``dump_code``'s ``program.py``, and says when nothing is traced yet."""
+
+    def scaled(x):
+        """Doubles `x`."""
+        return x * 2.0
+
+    f = lumen.compile(scaled)
+    assert isinstance(f, lumen.graph.tracer.Compiled) and f.__name__ == "scaled" and f.__doc__ == "Doubles `x`."
+    assert str(f) == "<lumen.compile of scaled: not called yet, so nothing is traced>"
+    f(lumen.ones([3]))
+    assert str(f) == lumen.viz.program_source(lumen.make_graph(scaled)(lumen.ones([3])))
+
+
+def test_deallocate_memory_frees_the_current_plans_workspace():
+    """``deallocate_memory`` frees the workspace of the latest call's
+    signature's plan only: the memory the function holds is 0 before its
+    first call and 0 again once every plan's is freed; other signatures keep
+    running, a freed one raises until ``allocate_memory``, and nothing
+    retraces."""
+    from lumen.profiler import ProfilerActivity, profile, record_function
+
+    traces = []
+
+    def f(x):
+        """Records each trace and sums `x`'s rows."""
+        traces.append(x.shape)
+        return F.sum(x * x, -1)
+
+    f = lumen.compile(f)
+    small, large = lumen.ones([2, 3]), lumen.ones([4, 3])
+    phases = []
+
+    def phase(name, action):
+        """Runs `action` in a profiler range named `name`."""
+        with record_function(name):
+            action()
+        phases.append(name)
+
+    def raises(x):
+        """Checks a call with `x` raises, its plan's memory freed."""
+        with pytest.raises(RuntimeError, match="allocate_memory"):
+            f(x)
+
+    with profile(activities=[ProfilerActivity.CPU], profile_memory=True) as prof:
+        phase("before", lambda: None)
+        phase("small", lambda: f(small))
+        phase("large", lambda: f(large))
+        phase("large freed", f.deallocate_memory)
+        phase("small runs", lambda: f(small))
+        phase("large raises", lambda: raises(large))
+        phase("large allocated", f.allocate_memory)
+        phase("allocated twice", f.allocate_memory)
+        phase("large runs", lambda: f(large))
+        phase("large freed again", f.deallocate_memory)
+        phase("small current", lambda: f(small))
+        phase("after", f.deallocate_memory)
+    events = prof.events()
+    ends = {e["name"]: e["end_us"] for e in events if e["kind"] == "user_range"}
+    memory = [e for e in events if e["kind"] == "memory"]
+    # The bytes allocated and not yet freed at the end of each phase.
+    held = {p: sum(m["bytes"] for m in memory if m["start_us"] <= ends[p]) for p in phases}
+    small_bytes, large_bytes = (plan.workspace_bytes for *_, entries in f._plans.values() for plan, _ in entries)
+    assert held == {
+        "before": 0,
+        "small": small_bytes,
+        "large": small_bytes + large_bytes,
+        "large freed": small_bytes,
+        "small runs": small_bytes,
+        "large raises": small_bytes,
+        "large allocated": small_bytes + large_bytes,
+        "allocated twice": small_bytes + large_bytes,
+        "large runs": small_bytes + large_bytes,
+        "large freed again": small_bytes,
+        "small current": small_bytes,
+        "after": 0,
+    }
+    assert len(traces) == 2
+
+
 def test_traces_once_per_signature():
     """A compiled function retraces only for new shapes, dtypes or Python scalar values."""
     traces = []
