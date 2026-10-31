@@ -276,13 +276,17 @@ class _Host:
     correction), recorded into ``graph`` to run on the CPU each call, before
     the device plan. A device op reading one of its values reads it as a
     scalar input of the device graph, passed by value (``imported``): the
-    scalars' own inputs, or values it computes (``hoisted``)."""
+    scalars' own inputs, or values it computes (``hoisted``). When calls
+    replay as CUDA graphs (``mirrored``), each host op is also recorded in
+    the device graph, on the scalars' inputs there: device ops read those
+    copies, computed inside the graph, and nothing is hoisted."""
 
     def __init__(self, device_graph, device):
         """A host trace feeding ``device_graph`` on ``device``."""
         self.graph = Graph()
         self.device_graph, self.device = device_graph, device
         self.imports, self.hoisted, self.constants = {}, [], {}
+        self.mirrored = _graphed(device)
 
     def owns(self, x):
         """Whether ``x`` is a value of the host graph."""
@@ -328,6 +332,11 @@ class _Host:
         var = self.graph.apply(name, [self.value(x) for x in operands], params)
         if self.graph.type_of(var)[1]:
             return None
+        if self.mirrored:
+            mirror = self.device_graph.apply(
+                name, [self.imports[x.var].var if self.owns(x) else x.var for x in operands], params
+            )
+            self.imports[var] = TracedTensor(self.device_graph, mirror, self.device)
         return TracedTensor(self.graph, var, self.device)
 
 
@@ -557,6 +566,18 @@ def _settled(fn, args, device, dynamic, pinned, proven, portable=False, split=Tr
 _flags = [None, None]
 
 
+# The kinds of plan inputs that are runtime scalars: an int or float argument, a value the host computes
+# from them, and the random state.
+_SCALARS = ("scalar", "hoisted", "rng")
+
+
+def _graphed(target):
+    """Whether calls on ``target`` replay as CUDA graphs: ``config.compiler.cuda.cuda_graphs`` on CUDA with
+    the Triton backend (without it, CUDA plans run on the CPU)."""
+    cuda = config.compiler.cuda
+    return _device_type(target) == "cuda" and cuda.cuda_graphs and cuda.use_triton_backend
+
+
 def _compiler_flags():
     """``repr(config.compiler)``, the flags plans are compiled with."""
     version = config.compiler._version
@@ -657,6 +678,9 @@ class Compiled:
         self._baked = {}
         self._hosts, self._pending = {}, []
         self._fast = {}
+        # CUDA graphs by plan (``config.compiler.cuda.cuda_graphs``): each plan's graph, its staged
+        # arguments, the addresses it was captured at and its outputs, or None once it cannot capture.
+        self._graphs, self._warm = {}, set()
         # The signatures whose plans' workspaces `deallocate_memory` freed: their calls wait for `allocate_memory`.
         self._freed = set()
 
@@ -708,7 +732,8 @@ class Compiled:
                 entries.append((Plan(graph, "meta"), None))
             return graph, entries[0][0], None, out, logical
         params = [i for i, (kind, _) in enumerate(layout) if kind == "weight"]
-        scalars = [i for i, (kind, _) in enumerate(layout) if kind in ("scalar", "hoisted", "rng")]
+        # Under CUDA graphs, runtime scalars are device inputs the kernels read, so a replay reads each call's.
+        scalars = [] if _graphed(target) else [i for i, (kind, _) in enumerate(layout) if kind in _SCALARS]
 
         def inputs_for(plan):
             """The plan's inputs for this call, or None if a packed weight block cannot be read in place."""
@@ -749,8 +774,8 @@ class Compiled:
                 plan, workspace, out, to_host, key = hit
                 self._latest[:] = [key]
                 if to_host is None:
-                    return plan.run_in(workspace, list(args))[0]
-                outputs = iter(zip(plan.run_in(workspace, list(args)), to_host))
+                    return self._run(key, plan, workspace, list(args))[0]
+                outputs = iter(zip(self._run(key, plan, workspace, list(args)), to_host))
 
                 def returned(_):
                     """The next plan output, copied to the host if its traced tensor was on the CPU."""
@@ -776,7 +801,7 @@ class Compiled:
                 Tensor.empty(list(shape), dtype, "meta") for dtype, shape in map(graph.type_of, graph.outputs())
             ]
         else:
-            outputs = plan.run_in(workspace, inputs)
+            outputs = self._run(self._latest[0], plan, workspace, inputs)
         outputs = iter(outputs)
 
         to_host = []
@@ -831,6 +856,98 @@ class Compiled:
                 random._advance(drawn)
         return result
 
+    def _run(self, key, plan, workspace, inputs):
+        """``plan.run_in(workspace, inputs)`` for signature ``key``; on CUDA with
+        ``config.compiler.cuda.cuda_graphs``, a plan a graph can capture
+        (``_capturable``) runs as usual on its first call, is captured on its
+        second, its arguments copied into device buffers of its own and its
+        runtime scalars into a device vector per dtype, and from then on
+        replays: each call copies them in (a copy a vector) and launches the
+        graph, then writes back as usual. Weights and the
+        workspace are read where they were captured; when one moves, the plan
+        is captured again. While the profiler times CUDA, a replay runs in a
+        ``CUDA graph`` range, each kernel timed under the step that launched
+        it; while it records the host alone, calls run uncaptured, so its
+        trace has their steps."""
+        record = self._graphs.get(id(plan), ())
+        if record is None or not self._capturable(key, plan):
+            return plan.run_in(workspace, inputs)
+        from lumen.profiler import _C as profiler
+
+        if profiler._profiler_enabled() and not profiler._profiler_cuda_enabled():
+            return plan.run_in(workspace, inputs)
+        from lumen.tensor import tensor
+
+        layout = self._plans[key][5]
+        args = [i for i, (kind, _) in enumerate(layout) if kind == "arg"]
+        scalars = [i for i, (kind, _) in enumerate(layout) if kind in _SCALARS]
+        staged = set(args + scalars)
+        fixed = [workspace.data_ptr()] + [t.data_ptr() for i, t in enumerate(inputs) if i not in staged]
+
+        def stage(buffers, vectors, graph=None):
+            """Copies this call's arguments into ``buffers`` and its runtime scalars into ``vectors``
+            (``(positions, vector)`` per dtype), one copy a vector: on ``graph``'s stream when given,
+            so the host doesn't wait for its last replay."""
+            copy = (lambda dst, src: dst.copy_(src)) if graph is None else graph.stage
+            for i, buffer in zip(args, buffers):
+                copy(buffer, inputs[i] if inputs[i].is_contiguous() else inputs[i].contiguous())
+            for positions, vector in vectors:
+                copy(vector, tensor([inputs[i].item() for i in positions], dtype=vector.dtype))
+
+        if record and record[3] == fixed:
+            graph, buffers, vectors, _, outputs = record
+            stage(buffers, vectors, graph)
+            if profiler._profiler_enabled():
+                from lumen.profiler import record_function
+
+                with record_function("CUDA graph"):
+                    graph.replay()
+            else:
+                graph.replay()
+            return outputs
+        if id(plan) not in self._warm:
+            # The first call compiles the plan's kernels, which capturing cannot.
+            self._warm.add(id(plan))
+            return plan.run_in(workspace, inputs)
+        from lumen.codegen.utils import triton
+        from lumen.stream._C import CudaGraph
+
+        self._graphs.pop(id(plan), None)
+        buffers = [Tensor.empty(list(inputs[i].shape), inputs[i].dtype, key[1]) for i in args]
+        by_dtype = {}
+        for i in scalars:
+            by_dtype.setdefault(inputs[i].dtype, []).append(i)
+        vectors = [(positions, Tensor.empty([len(positions)], dtype, key[1])) for dtype, positions in by_dtype.items()]
+        stage(buffers, vectors)
+        captured = list(inputs)
+        for i, buffer in zip(args, buffers):
+            captured[i] = buffer
+        for positions, vector in vectors:
+            for j, i in enumerate(positions):
+                captured[i] = vector.select(0, j)
+        graph = CudaGraph(key[1])
+        try:
+            with triton.on_stream(graph.stream):
+                outputs = plan.run_in(workspace, captured)
+            graph.end()
+        except BaseException as e:
+            # Dropping the graph ends its capture, so lumen launches on its own stream again.
+            del graph
+            if isinstance(e, (KeyboardInterrupt, SystemExit)):
+                raise
+            self._graphs[id(plan)] = None
+            warnings.warn(f"{self._fn.__name__}: a CUDA graph could not capture its plan, which runs uncaptured: {e}")
+            return plan.run_in(workspace, inputs)
+        graph.replay()
+        self._graphs[id(plan)] = graph, buffers, vectors, fixed, outputs
+        return outputs
+
+    def _capturable(self, key, plan):
+        """Whether a CUDA graph may capture ``plan``, signature ``key``'s:
+        its calls replay as graphs (``_graphed``, which compiled its runtime
+        scalars as device inputs) and ``plan.capturable``."""
+        return _graphed(key[1]) and plan.capturable
+
     def dump_graph(self, path, *args, device=None, runs=5, json_path=None, fragment=False):
         """Write the graph and plan for ``args``' signature (default: the
         latest call's; meta tensors trace it without data) to ``path`` as an
@@ -882,6 +999,8 @@ class Compiled:
             return
         key = self._latest[0]
         entries = self._plans[key][6]
+        for plan, _ in entries:
+            self._graphs.pop(id(plan), None)
         entries[:] = [(plan, None) for plan, _ in entries]
         self._fast = {k: v for k, v in self._fast.items() if v[4] != key}
         self._freed.add(key)

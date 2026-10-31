@@ -42,13 +42,16 @@ def test_the_stream_is_the_only_api():
 def test_events_time_the_work_between_them(device, triton_on_cuda):
     """Two events with ``enable_timing`` around a compiled program:
     ``elapsed_time`` is the device time between them in milliseconds,
-    longer for more work, and ``query`` holds once the later is done."""
+    longer for more work, and ``query`` holds once the later is done. The
+    first calls compile the program and, on CUDA, capture it as a graph,
+    so they run before the timing."""
     try:
         x = lumen.ones([1024, 4096], device=device)
     except RuntimeError as e:
         pytest.skip(str(e))
     f = lumen.compile(lambda x: x * 2.0 + 1.0)
-    f(x)
+    for _ in range(2):
+        f(x)
     lumen.Stream(device).synchronize()
 
     def timed(reps):

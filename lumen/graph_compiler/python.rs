@@ -23,7 +23,7 @@ struct PyPlan {
 #[pymethods]
 impl PyPlan {
     /// Compiles `graph` for `device`; `donate`, `parameters`, `packable` and `scalars` are input
-    /// positions, `donate_into` `(input, output)` pairs, and `fuse` overrides MPS fusion.
+    /// positions, `donate_into` `(input, output)` pairs, and `fuse` overrides MPS and CUDA fusion.
     #[new]
     #[pyo3(signature = (graph, device = None, fuse = None, donate = Vec::new(), parameters = None, packable = Vec::new(), scalars = Vec::new(), donate_into = Vec::new()))]
     #[allow(clippy::too_many_arguments)]
@@ -56,6 +56,7 @@ impl PyPlan {
         let mask = |positions: &[usize]| (0..n).map(|i| positions.contains(&i)).collect();
         let mut config = crate::graph_compiler::config::configs();
         config.mps.fuse = fuse.unwrap_or(config.mps.fuse);
+        config.cuda.fuse = fuse.unwrap_or(config.cuda.fuse);
 
         let options = crate::graph_compiler::Options {
             config,
@@ -107,6 +108,28 @@ impl PyPlan {
         self.inner.steps().iter().any(|s| {
             matches!(&s.primitive, Primitive::Fusion { name, .. } if name.starts_with(crate::graph::NEURAL_ENGINE))
         })
+    }
+
+    /// Whether a CUDA graph can capture this plan's steps: it runs as steps (not host and device
+    /// stages), and none moves values to or from the host, waits on the host or another stream,
+    /// calls out to a custom op or a Pallas kernel, or runs a collective.
+    #[getter]
+    fn capturable(&self) -> bool {
+        self.inner.staged.is_none()
+            && !self.inner.steps().iter().any(|s| {
+                matches!(
+                    s.primitive,
+                    Primitive::HostWait
+                        | Primitive::DeviceWait
+                        | Primitive::ToHost
+                        | Primitive::ToDevice
+                        | Primitive::CustomCall { .. }
+                        | Primitive::PallasCall { .. }
+                        | Primitive::AllReduce { .. }
+                        | Primitive::AllGather { .. }
+                        | Primitive::ReduceScatter { .. }
+                )
+            })
     }
 
     /// Drops the cached Neural Engine models of this plan's steps (MPS builds only).

@@ -22,6 +22,7 @@ class CudaConfig(CompilerConfig):
     """The CUDA compiler's settings (``lumen.config.compiler.cuda``)."""
 
     use_triton_backend: bool = False
+    fuse: bool = True
     autotune: bool = True
     safe_kernels: bool = False
     horizontal_fusion: bool = True
@@ -30,6 +31,7 @@ class CudaConfig(CompilerConfig):
     deterministic: bool = False
     normalization_diamonds: bool = True
     fused_linear_cross_entropy: bool = True
+    cuda_graphs: bool = True
 
 class MpsConfig(CompilerConfig):
     """The MPS compiler's settings (``lumen.config.compiler.mps``)."""

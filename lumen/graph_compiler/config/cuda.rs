@@ -5,6 +5,7 @@ use super::{CompilerConfig, device_config};
 device_config! {
     CudaConfig, PyCudaConfig, "CudaConfig", cuda, crate::Device::Cuda(0), {
         use_triton_backend, set_use_triton_backend: bool = false;
+        fuse, set_fuse: bool = true;
         autotune, set_autotune: bool = true;
         safe_kernels, set_safe_kernels: bool = false;
         horizontal_fusion, set_horizontal_fusion: bool = true;
@@ -13,6 +14,7 @@ device_config! {
         normalization_diamonds, set_normalization_diamonds: bool = true;
         fused_linear_cross_entropy, set_fused_linear_cross_entropy: bool = true;
         deterministic, set_deterministic: bool = false;
+        cuda_graphs, set_cuda_graphs: bool = true;
     }
 }
 

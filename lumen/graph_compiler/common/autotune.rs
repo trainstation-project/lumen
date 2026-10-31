@@ -152,6 +152,15 @@ impl<T: Timer> Autotuner<T> {
                 continue;
             };
 
+            eprintln!(
+                "{}: autotuning {} ({}) on {}: {} candidates",
+                crate::LIBRARY_NAME,
+                trial.label,
+                key(&trial),
+                self.timer.device(),
+                candidates.len()
+            );
+
             let mut reps = vec![0; candidates.len()];
             let mut seconds = vec![f64::INFINITY; candidates.len()];
             let mut runs = vec![true; candidates.len()];
@@ -180,8 +189,23 @@ impl<T: Timer> Autotuner<T> {
             let fastest = (0..seconds.len()).min_by(|&a, &b| seconds[a].total_cmp(&seconds[b]));
 
             let Some(k) = fastest.filter(|&k| seconds[k].is_finite()) else {
+                eprintln!(
+                    "{}: autotuning {}: no candidate ran",
+                    crate::LIBRARY_NAME,
+                    trial.label
+                );
+
                 continue;
             };
+
+            eprintln!(
+                "{}: autotuned {}: candidate {} of {}, {:.1} us",
+                crate::LIBRARY_NAME,
+                trial.label,
+                k + 1,
+                candidates.len(),
+                seconds[k] * 1e6
+            );
 
             picks().insert(picked, k);
 
