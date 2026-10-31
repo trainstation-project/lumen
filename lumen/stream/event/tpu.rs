@@ -60,7 +60,7 @@ impl Event for TpuEvent {
     /// event completes immediately.
     fn record(&mut self) -> Result<(), String> {
         self.release();
-        crate::kernels::tpu::flush(self.index)?;
+        crate::runtime::tpu::flush(self.index)?;
 
         let Some(ready) = crate::allocator::tpu::ready_event(self.index)? else {
             self.marks = Some(Recorded::now());

@@ -20,7 +20,7 @@ use crate::graph::{Graph, Node, Primitive, TensorType};
 #[cfg(lumen_tpu_linked)]
 use crate::graph_compiler::plan::Step;
 #[cfg(lumen_tpu_linked)]
-use crate::kernels::tpu::{Launch, launch};
+use crate::runtime::tpu::{Launch, launch};
 
 /// How a reduction's operand is viewed as `lead` matrices of `m` rows by `n` columns.
 #[derive(Clone, Copy, Debug, PartialEq)]

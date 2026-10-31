@@ -11,7 +11,7 @@ from lumen.graph._C import FUSION_SEPARATOR
 from lumen.graph_compiler._C import Plan
 from lumen.profiler import ProfilerActivity, profile
 
-from .common import KERNELS, LUMEN, prelude, source_of, type_text
+from .common import LUMEN, prelude, source_of, type_text
 
 
 def profile_steps(plan, run, runs, device):

@@ -2,7 +2,7 @@
 use crate::Tensor;
 use crate::graph::Primitive::*;
 use crate::graph_compiler::plan::Step;
-use crate::kernels::mps::{Grid, element_arg, elementwise_grid, launch_step, u32_arg};
+use crate::runtime::mps::{Grid, element_arg, elementwise_grid, launch_step, u32_arg};
 
 /// Encodes one factory `step` writing into `output`, keeping `keep` alive until the command buffer finishes.
 pub(crate) fn encode(

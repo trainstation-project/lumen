@@ -6,7 +6,7 @@ use crate::Tensor;
 use crate::codegen::utils::mps::Mps;
 use crate::graph::Primitive;
 use crate::graph_compiler::plan::Step;
-use crate::kernels::mps::{elementwise_grid, launch_step, u32_arg, u64_arg};
+use crate::runtime::mps::{elementwise_grid, launch_step, u32_arg, u64_arg};
 
 /// Metal random bits: a call to the prelude's `philox_bits`.
 impl RandomCodegen for Mps {

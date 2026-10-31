@@ -9,7 +9,7 @@ description: Use whenever adding, moving or changing tests. Tests mirror the lum
 
 1. **Mirror `lumen/`.** A test file lives in the `tests/` folder of the
    `lumen/` package it tests: `lumen/graph_compiler/` →
-   `tests/graph_compiler/`, `lumen/kernels/` → `tests/kernels/`,
+   `tests/graph_compiler/`, `lumen/custom_op/` → `tests/custom_op/`,
    `lumen/profiler/` → `tests/profiler/`. A top-level module
    (`lumen/nn.py`, `lumen/random.py`) is tested in `tests/test_<module>.py`.
    Name the file after the module or the topic it covers

@@ -1,7 +1,7 @@
 """Pallas reshapes for TPU that split or merge the last dimension of a TPU-tiled tensor."""
 
 from lumen import pallas as pl
-from lumen.kernels.tpu import pallas
+from lumen.codegen.utils.tpu import pallas
 
 
 def program(spec):

@@ -26,7 +26,7 @@ const GROUP: usize = 256;
 /// Most elements one thread may handle, from the per-thread byte budget and output dtype size.
 fn most_per_thread(body: &Graph) -> usize {
     let dtype = body.type_of(body.outputs()[0]).dtype;
-    (crate::kernels::mps::BYTES_PER_THREAD / dtype.size_of()).max(1)
+    (crate::runtime::mps::BYTES_PER_THREAD / dtype.size_of()).max(1)
 }
 
 /// Default tuning: enough elements per thread to cap the grid near `GRID_THREADS`.

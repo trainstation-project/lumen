@@ -9,7 +9,7 @@ use std::sync::OnceLock;
 
 pub use crate::graph::View;
 use crate::graph::{Graph, NEURAL_ENGINE, Node, Primitive, Scope, TensorType, UPDATES, Var};
-use crate::kernels::reference;
+use crate::reference;
 use crate::tensor::contiguous_strides;
 use crate::tensor::dtype::dispatch_dtype;
 use crate::{DType, Device, Tensor, TensorOptions};
@@ -288,7 +288,7 @@ pub struct Plan {
 
 /// Per step, the prepared MPS launch once captured (`None` when it can't be replayed).
 #[cfg(lumen_mps_linked)]
-type Launches = OnceLock<Vec<OnceLock<Option<crate::kernels::mps::Prepared>>>>;
+type Launches = OnceLock<Vec<OnceLock<Option<crate::runtime::mps::Prepared>>>>;
 
 /// Whether an MPS step's launch can be captured once and replayed with new pointers:
 /// host-side work, custom calls and runtime scalar reads cannot.
@@ -1388,12 +1388,12 @@ impl Plan {
 
         #[cfg(lumen_tpu_linked)]
         let batch = match executor {
-            Device::Tpu(index) => Some(crate::kernels::tpu::Batch::new(index)),
+            Device::Tpu(index) => Some(crate::runtime::tpu::Batch::new(index)),
             _ => None,
         };
 
         for (at, step) in self.steps.iter().enumerate() {
-            crate::kernels::launched::step(at, step.label);
+            crate::profiler::launched::step(at, step.label);
 
             if let Some(scopes) = &mut scopes {
                 scopes.enter(step.scope);
@@ -1483,7 +1483,7 @@ impl Plan {
                         keep.push(workspace.holding());
                     }
 
-                    use crate::kernels::mps::{
+                    use crate::runtime::mps::{
                         Pointers, Unprepared, capture, encode, prepare, replay,
                     };
 
@@ -1543,7 +1543,7 @@ impl Plan {
                 #[cfg(lumen_tpu_linked)]
                 Device::Tpu(index) => {
                     let _ = scratch;
-                    crate::kernels::tpu::encode(index, step, &args, out)?;
+                    crate::runtime::tpu::encode(index, step, &args, out)?;
                 }
                 Device::Cuda(_) => {
                     let _ = scratch;
@@ -1604,7 +1604,7 @@ impl Plan {
                     let _ = scratch;
                     let types: Vec<&TensorType> = step.inputs.iter().map(|(_, ty)| ty).collect();
                     let _kernel = crate::profiler::record_host_kernel(step.label);
-                    crate::kernels::launched::launched(step.label, || None);
+                    crate::profiler::launched::launched(step.label, || None);
 
                     unsafe {
                         reference::eval_raw(&step.primitive, &args, &types, out, &step.output.1)

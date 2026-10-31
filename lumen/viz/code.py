@@ -6,7 +6,7 @@ import re
 
 import lumen
 
-from .common import KERNELS, LUMEN, _traced_at, prelude, source_of, type_text
+from .common import LUMEN, _traced_at, prelude, source_of, type_text
 
 
 def _slug(text):

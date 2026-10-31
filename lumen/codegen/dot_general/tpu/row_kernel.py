@@ -1,8 +1,7 @@
 """Pallas program for a TPU dot whose epilogue reduces along rows, so a block spans all ``n`` columns."""
 
 from lumen import pallas as pl
-from lumen.codegen.utils.tpu import per_row
-from lumen.kernels.tpu import pallas
+from lumen.codegen.utils.tpu import pallas, per_row
 
 
 def program(spec):

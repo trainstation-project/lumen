@@ -6,7 +6,7 @@ use pyo3::prelude::*;
 type Register = fn(&Bound<'_, PyModule>) -> PyResult<()>;
 
 /// Each package name paired with the function that fills `lumen.<package>._C`.
-const PACKAGES: [(&str, Register); 12] = [
+const PACKAGES: [(&str, Register); 11] = [
     ("device", crate::device::python::register),
     ("distributed", crate::distributed::python::register),
     ("tensor", crate::tensor::python::register),
@@ -14,7 +14,6 @@ const PACKAGES: [(&str, Register); 12] = [
     ("graph_compiler", crate::graph_compiler::python::register),
     ("profiler", crate::profiler::python::register),
     ("stream", crate::stream::python::register),
-    ("kernels", crate::kernels::python::register),
     ("custom_op", crate::custom_op::python::register),
     ("graph", crate::graph::python::register),
     ("pallas", crate::pallas::python::register),

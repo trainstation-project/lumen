@@ -24,7 +24,7 @@ use crate::graph_compiler::plan_tests::mps::{
     available, check, check_within, exact_values, values,
 };
 use crate::graph_compiler::plan_tests::{data, mlp};
-use crate::kernels::reference;
+use crate::reference;
 use crate::{DType, Device, Scalar, Tensor};
 
 /// Shorthand for a tensor type.

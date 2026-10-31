@@ -14,7 +14,7 @@ use crate::graph::{Primitive, TensorType, View};
 use crate::graph_compiler::MpsConfig;
 use crate::graph_compiler::common::autotune::{Kernels, Timer};
 use crate::graph_compiler::plan::{Buffer, Step, Tuned};
-use crate::kernels::mps::Encode;
+use crate::runtime::mps::Encode;
 
 /// What a tunable elementwise fusion needs to regenerate its kernel under another tuning.
 pub(super) struct Tunable {
@@ -322,7 +322,7 @@ impl Timer for Mps {
     /// Encodes one launch, rotating through input copies so repeats read cold memory.
     fn run(&self, buffers: &Buffers, step: &Step, rep: usize) -> Result<(), String> {
         let inputs = &buffers.copies[rep % buffers.copies.len()];
-        crate::kernels::mps::encode(step, inputs, buffers.output, buffers.scratch, Vec::new())
+        crate::runtime::mps::encode(step, inputs, buffers.output, buffers.scratch, Vec::new())
     }
 }
 

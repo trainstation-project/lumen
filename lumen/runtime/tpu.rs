@@ -12,13 +12,13 @@ use crate::device::tpu::{error, ffi};
 use crate::graph::Primitive;
 use crate::graph_compiler::plan::Step;
 
-/// Mosaic source of `module`'s kernel for JSON `spec`, lowered by `lumen.kernels.tpu.pallas`.
+/// Mosaic source of `module`'s kernel for JSON `spec`, lowered by `lumen.codegen.utils.tpu.pallas`.
 #[cfg(feature = "python")]
 fn lower(module: &str, spec: &str) -> Result<String, String> {
     use pyo3::prelude::*;
 
     Python::attach(|py| {
-        py.import("lumen.kernels.tpu.pallas")?
+        py.import("lumen.codegen.utils.tpu.pallas")?
             .call_method1("lower", (module, spec))?
             .extract::<String>()
     })
@@ -26,7 +26,7 @@ fn lower(module: &str, spec: &str) -> Result<String, String> {
 }
 
 /// Mosaic source of the generated program `source` (defining `program(device)`), traced on a device with
-/// `scalars` scalars, `host_rows` host rows and `rows` memory rows by `lumen.kernels.tpu.pallas`.
+/// `scalars` scalars, `host_rows` host rows and `rows` memory rows by `lumen.codegen.utils.tpu.pallas`.
 #[cfg(feature = "python")]
 fn lower_source(
     source: &str,
@@ -37,7 +37,7 @@ fn lower_source(
     use pyo3::prelude::*;
 
     Python::attach(|py| {
-        py.import("lumen.kernels.tpu.pallas")?
+        py.import("lumen.codegen.utils.tpu.pallas")?
             .call_method1("lower_source", (source, scalars, host_rows, rows))?
             .extract::<String>()
     })
@@ -763,7 +763,7 @@ pub(crate) fn launch(index: usize, launch: Launch) -> Result<(), String> {
 
     crate::profiler::tpu::launched(index, &launch.kernel);
 
-    crate::kernels::launched::templated(&launch.kernel, || {
+    crate::profiler::launched::templated(&launch.kernel, || {
         // A generated program's script is its source, run on this device's memory.
         let template = match launch.module {
             GENERATED => {

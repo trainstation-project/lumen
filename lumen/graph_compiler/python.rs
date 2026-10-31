@@ -190,7 +190,7 @@ impl PyPlan {
 /// Starts recording kernel launches.
 #[pyfunction]
 fn _capture_launches() {
-    crate::kernels::launched::capture();
+    crate::profiler::launched::capture();
 }
 
 /// A captured launch: step index, step label, kernel name, generated code, and Pallas
@@ -206,7 +206,7 @@ type Captured = (
 /// Launches recorded since `_capture_launches`.
 #[pyfunction]
 fn _captured_launches() -> Vec<Captured> {
-    crate::kernels::launched::captured()
+    crate::profiler::launched::captured()
         .into_iter()
         .map(|l| (l.step, l.label, l.kernel, l.code, l.template))
         .collect()
@@ -388,7 +388,7 @@ fn triton_gemm(
     launches: &super::triton::Launches,
     epilogue: &super::triton::Epilogue,
 ) -> Result<(), String> {
-    crate::kernels::launched::launched("dot_general", || {
+    crate::profiler::launched::launched("dot_general", || {
         let template = format!(
             "# @triton.jit: lumen/codegen/dot_general/triton/gemm_kernel.py's kernel, BLOCK_SIZE_M={} BLOCK_SIZE_N={} BLOCK_SIZE_K={} GROUP_SIZE_M={} stages={} warps={}\n",
             config.block_m,
@@ -521,7 +521,7 @@ fn triton_loop(
     n: usize,
     programs: usize,
 ) -> Result<(), String> {
-    crate::kernels::launched::launched(&kernel.name, || {
+    crate::profiler::launched::launched(&kernel.name, || {
         let source = match kernel.template {
             Some(template) => {
                 let (module, name) = template.kernel();
@@ -671,7 +671,7 @@ fn triton_loop(
 fn triton_attention(launch: &super::triton::Launch) -> Result<(), String> {
     let config = launch.config;
 
-    crate::kernels::launched::launched("flash_attention", || {
+    crate::profiler::launched::launched("flash_attention", || {
         let template = format!(
             "# @triton.jit: lumen/codegen/attention/triton's {} kernel, BLOCK_SIZE_M={} BLOCK_SIZE_N={} stages={} warps={}\n",
             launch.kernel, config.block_m, config.block_n, config.stages, config.warps

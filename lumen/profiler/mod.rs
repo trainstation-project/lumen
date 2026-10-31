@@ -3,6 +3,7 @@
 mod chrome;
 #[cfg(lumen_cupti_linked)]
 pub(crate) mod cupti;
+pub(crate) mod launched;
 #[cfg(feature = "python")]
 pub(crate) mod python;
 mod summary;

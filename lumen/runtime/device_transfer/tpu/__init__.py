@@ -1,7 +1,7 @@
 """Pallas program that DMAs host-staged rows into a TPU tensor."""
 
 from lumen import pallas as pl
-from lumen.kernels.tpu import pallas
+from lumen.codegen.utils.tpu import pallas
 
 
 def program(spec):

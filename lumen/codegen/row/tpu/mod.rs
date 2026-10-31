@@ -18,7 +18,7 @@ use crate::graph::{Graph, Node, Primitive, TensorType};
 #[cfg(lumen_tpu_linked)]
 use crate::graph_compiler::plan::Step;
 #[cfg(lumen_tpu_linked)]
-use crate::kernels::tpu::{Launch, launch};
+use crate::runtime::tpu::{Launch, launch};
 
 /// Most bytes a minimal float32 block of rows (16 rows of `n`) may take.
 pub(crate) const ROW_BYTES: usize = 1 << 21;

@@ -1,4 +1,4 @@
-//! Tests of op dispatch between built-in and registered kernels, and of `vector_size`.
+//! Tests of op dispatch between built-in and registered kernels.
 use super::*;
 
 /// Test kernel type returning which registry it came from.
@@ -81,21 +81,4 @@ fn dynamic_kernels_are_per_op() {
 fn a_missing_kernel_panics_with_the_op_and_key() {
     static OP: Op<Kernel> = Op::new("test::missing", cpu_only);
     OP.dispatch(Device::Cuda(1));
-}
-
-/// The vector width shrinks until the size, strides and address all align to it.
-#[test]
-fn the_vector_size_is_the_widest_aligned_store() {
-    assert_eq!(vector_size(&[1024], &[1], 4, 256), 4);
-    assert_eq!(vector_size(&[1024], &[1], 2, 256), 8);
-    assert_eq!(vector_size(&[1024], &[1], 1, 256), 16);
-    assert_eq!(vector_size(&[1024], &[1], 8, 256), 2);
-    assert_eq!(vector_size(&[1024], &[1], 4, 256 + 8), 2);
-    assert_eq!(vector_size(&[1024], &[1], 4, 256 + 4), 1);
-    assert_eq!(vector_size(&[6], &[1], 4, 256), 2);
-    assert_eq!(vector_size(&[1001], &[1], 4, 256), 1);
-    assert_eq!(vector_size(&[1024], &[2], 4, 256), 1);
-    assert_eq!(vector_size(&[4, 16], &[1, 8], 4, 256), 4);
-    assert_eq!(vector_size(&[4, 16], &[1, 6], 4, 256), 2);
-    assert_eq!(vector_size(&[], &[], 4, 256), 1);
 }

@@ -143,7 +143,7 @@ pub(crate) fn submit(
     name: &'static str,
     kernel: &str,
 ) -> (*mut c_void, Completion, bool) {
-    crate::kernels::launched::launched(kernel, || None);
+    crate::profiler::launched::launched(kernel, || None);
 
     let profile = crate::profiler::gpu_context(Device::Mps(0)).map(|context| Profiled {
         context,

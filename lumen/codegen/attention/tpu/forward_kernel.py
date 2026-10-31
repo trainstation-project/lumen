@@ -25,8 +25,7 @@ from lumen.codegen.attention.tpu.utils import (
     views,
     zeros,
 )
-from lumen.codegen.utils.tpu import computed
-from lumen.kernels.tpu import pallas
+from lumen.codegen.utils.tpu import computed, pallas
 
 
 def program(spec):

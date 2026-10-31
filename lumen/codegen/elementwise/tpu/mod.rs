@@ -793,7 +793,7 @@ fn program(specs: &[String], kernel: &[String]) -> String {
         "
         from lumen import pallas as pl
         from lumen.graph import prims
-        from lumen.kernels.tpu import pallas
+        from lumen.codegen.utils.tpu import pallas
 
 
         def program(device):

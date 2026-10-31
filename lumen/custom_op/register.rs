@@ -9,7 +9,7 @@ use pyo3::types::PyTuple;
 
 use crate as core;
 use crate::device::python::resolve_device;
-use crate::kernels::{DispatchKey, Op};
+use crate::runtime::dispatch::{DispatchKey, Op};
 use crate::tensor::dtype::{DType, Element, dispatch_dtype};
 use crate::tensor::python::{PyTensor, dtype_name};
 use crate::tensor::scalar::Scalar;
@@ -82,7 +82,9 @@ const STREAM: usize = 0;
 /// Returns the Python-kernel op table backing op `name`.
 fn python_op(name: &str) -> &'static Op<KernelHandle> {
     match name {
-        n if n == core::kernels::dummy_op::DUMMY_OP.name() => &core::kernels::dummy_op::DUMMY_OP_PY,
+        n if n == core::custom_op::dummy_op::DUMMY_OP.name() => {
+            &core::custom_op::dummy_op::DUMMY_OP_PY
+        }
         _ => unreachable!("{name} is not in OP_SIGNATURES"),
     }
 }
@@ -118,7 +120,7 @@ impl KernelHandle {
         value: Scalar,
     ) -> bool {
         let value = dispatch_dtype!(dtype, T => T::from_scalar(value).to_scalar());
-        let vector_size = core::kernels::vector_size(shape, strides, dtype.size_of(), address);
+        let vector_size = core::custom_op::vector_size(shape, strides, dtype.size_of(), address);
 
         // fast path: a cached TVM FFI launcher runs without attaching to Python
         let run = || {
@@ -321,11 +323,11 @@ fn _registered_ops(py: Python<'_>) -> Vec<(String, String)> {
 /// Runs `dummy_op` on `t` with `value`, for testing registered kernels.
 #[pyfunction]
 fn _dummy_op(t: &PyTensor, value: &Bound<'_, PyAny>) -> PyResult<()> {
-    core::kernels::dummy_op::dummy_op(&t.inner, core::tensor::python::to_scalar(value)?);
+    core::custom_op::dummy_op::dummy_op(&t.inner, core::tensor::python::to_scalar(value)?);
     Ok(())
 }
 
-/// Adds the kernel registration functions to the `lumen.kernels._C` module.
+/// Adds the kernel registration functions to the `lumen.custom_op._C` module.
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_dummy_op, m)?)?;
     m.add_function(wrap_pyfunction!(_register_kernel, m)?)?;

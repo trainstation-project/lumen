@@ -4,7 +4,7 @@ use super::float_tiles;
 use crate::Tensor;
 use crate::graph::TensorType;
 use crate::graph_compiler::plan::Step;
-use crate::kernels::mps::{Grid, dims_arg, launch};
+use crate::runtime::mps::{Grid, dims_arg, launch};
 use crate::tensor::contiguous_strides;
 
 /// Bytes of scratch for the per-row, per-column-tile maxima and exp-sums.

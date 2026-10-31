@@ -29,7 +29,7 @@ from lumen.codegen.attention.tpu.utils import (
     when,
     zeros,
 )
-from lumen.kernels.tpu import pallas
+from lumen.codegen.utils.tpu import pallas
 
 
 def program(spec):

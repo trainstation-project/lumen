@@ -1,7 +1,7 @@
 //! Tests for the TPU graph compiler passes.
 use crate::graph::Primitive::*;
 use crate::graph::{Graph, Primitive, TensorType, Var};
-use crate::kernels::reference;
+use crate::reference;
 use crate::{DType, Device, Scalar, Tensor};
 
 /// Applies `p` to `inputs`, panicking on a type error.

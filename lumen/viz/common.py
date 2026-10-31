@@ -6,12 +6,11 @@ import re
 import lumen
 
 LUMEN = pathlib.Path(lumen.__file__).parent
-KERNELS = LUMEN / "kernels"
 
 
 def prelude():
     """The Metal prelude every generated kernel is compiled with: the shared one, then Philox."""
-    return (KERNELS / "mps" / "kernels.metal").read_text() + (LUMEN / "codegen/random/mps/philox.metal").read_text()
+    return (LUMEN / "runtime/mps/kernels.metal").read_text() + (LUMEN / "codegen/random/mps/philox.metal").read_text()
 
 
 # Short dtype names used in visualizations, mapped to lumen dtype names.
@@ -71,8 +70,8 @@ _SOURCES = [
     (r"^reduce_\w+_cols_", "codegen/reduction/mps/kernel.metal", "inline void reduce_cols"),
     (r"^reduce_\w+_grouped_", "codegen/reduction/mps/kernel.metal", "inline void reduce_grouped"),
     (r"^reduce_", "codegen/reduction/mps/kernel.metal", "inline void reduce("),
-    (r"^fill_\d$", "kernels/factory/mps/kernels.metal", "#define FULL"),
-    (r"^iota_", "kernels/factory/mps/kernels.metal", "#define IOTA"),
+    (r"^fill_\d$", "codegen/factory/mps/kernel.metal", "#define FULL"),
+    (r"^iota_", "codegen/factory/mps/kernel.metal", "#define IOTA"),
 ]
 
 
