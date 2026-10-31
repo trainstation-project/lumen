@@ -18,13 +18,13 @@ const MPS: Target = Target {
 };
 use super::fusion;
 use crate::graph::Primitive::*;
-use crate::graph::reference;
 use crate::graph::{Graph, Primitive, TensorType, Var};
 use crate::graph_compiler::MpsConfig;
 use crate::graph_compiler::plan_tests::mps::{
     available, check, check_within, exact_values, values,
 };
 use crate::graph_compiler::plan_tests::{data, mlp};
+use crate::reference;
 use crate::{DType, Device, Scalar, Tensor};
 
 /// Shorthand for a tensor type.

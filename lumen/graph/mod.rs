@@ -5,7 +5,6 @@ pub(crate) mod custom;
 pub mod primitive;
 #[cfg(feature = "python")]
 pub(crate) mod python;
-pub mod reference;
 #[cfg(test)]
 pub(crate) mod tests;
 

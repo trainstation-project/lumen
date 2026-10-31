@@ -3,8 +3,8 @@
 use super::Plan;
 use super::plan::Buffer;
 use crate::graph::Primitive::*;
-use crate::graph::reference;
 use crate::graph::{Graph, Primitive, TensorType};
+use crate::reference;
 use crate::{DType, Scalar, Tensor};
 
 /// Shorthand for `TensorType::new`.
@@ -222,7 +222,7 @@ fn plan_rematerializes_under_a_memory_limit() {
 /// Philox-4x32-10 matches the Random123 known-answer tests.
 #[test]
 fn philox_matches_random123() {
-    use crate::graph::reference::philox4x32;
+    use crate::reference::philox4x32;
 
     let kat: [([u32; 2], [u32; 4], [u32; 4]); 3] = [
         (
@@ -250,7 +250,7 @@ fn philox_matches_random123() {
 /// `RandomBits` draws from one counter stream, so offsets select overlapping windows.
 #[test]
 fn random_bits_are_a_counter_stream() {
-    use crate::graph::reference::philox_bits;
+    use crate::reference::philox_bits;
 
     let draw = |offset: u64, shape: &[usize]| {
         let mut g = Graph::new();
@@ -823,9 +823,9 @@ fn plans_run_on_meta_tensors_compute_nothing() {
 pub(crate) mod mps {
     use super::Primitive::*;
     use super::{data, mlp};
-    use crate::graph::reference;
     use crate::graph::{Graph, Primitive, TensorType};
     use crate::graph_compiler::Plan;
+    use crate::reference;
     use crate::tensor::dtype::dispatch_dtype;
     use crate::{DType, Device, Element, Scalar, Tensor, TensorOptions};
 
