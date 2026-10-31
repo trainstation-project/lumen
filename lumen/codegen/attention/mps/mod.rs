@@ -1,6 +1,10 @@
 //! Metal flash attention: the forward and backward kernel templates (`forward.metal`, `backward.metal`
 //! beside this file, in the Metal prelude) and the source generated per fusion to call them.
 
+mod config;
+
+pub(crate) use config::*;
+
 use std::fmt::Write;
 
 use indoc::formatdoc;

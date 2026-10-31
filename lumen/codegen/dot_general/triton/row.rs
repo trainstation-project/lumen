@@ -6,11 +6,11 @@ use std::fmt::Write;
 
 use indoc::formatdoc;
 
+use super::config::MOST_GEMM_ROW;
 use crate::DType;
 use crate::codegen::kinds::{row_partials, row_reductions};
 use crate::codegen::reduction::triton::reduce_along;
 use crate::codegen::row::triton::*;
-use crate::codegen::triton::config::MOST_GEMM_ROW;
 use crate::codegen::triton::*;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::elementwise;
