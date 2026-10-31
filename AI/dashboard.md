@@ -17,7 +17,7 @@ same change.
 | A primitive runs (or stops running) on a device | Its row in `data/primitives.json`: the device's status, and its `<device>_kernel` / `<device>_note` if the row has them |
 | A new primitive | A new row in `data/primitives.json`, its `category` one of those already used |
 | A pass that fuses something new on a device | Its row in `data/fusions.json` (`fusion`, `category`, a status per device, `what`, `pass`), or the device's status in an existing row |
-| A new device or backend | `DEVICES` in `index.html`, and that device's key in every row of both files |
+| A new device or backend | `STATUS` in `index.html` (a Triton GPU: `GPUS`), and that device's key in every row of both files |
 | An elementwise op on MPS, new or with a new kernel | Its entry in `bench.py`'s `OPS`, then re-run its benchmark |
 
 ## Statuses

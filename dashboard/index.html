@@ -81,12 +81,16 @@
   .lx-tip table { width: auto; border-collapse: collapse; font-size: 12px; }
   .lx-tip th { position: static; background: none; border: 0; padding: 1px 12px 1px 0; color: var(--muted); font-weight: 400; }
   .lx-tip td { border: 0; padding: 1px 0; text-align: right; font-variant-numeric: tabular-nums; }
-  .lx-back { font-size: 13px; text-decoration: none; }
-  .lx-op-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px; }
-  .lx-op-title h2 { font: 400 28px/1.1 var(--mono); margin: 0; }
-  .lx-op-title span { color: var(--muted); font-size: 16px; }
-  .lx-chart-title { margin: 12px 0 0; font-size: 13px; font-weight: 500; font-family: var(--mono); color: var(--muted); }
-  .lx-subtabs .lx-tab { font-size: 12px; padding: 6px 10px; }
+  .lx-devices { position: sticky; top: 0; z-index: 3; background: var(--bg); flex-wrap: wrap; }
+  .lx-op { scroll-margin-top: 56px; gap: 12px; }
+  .lx-op-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px; }
+  .lx-op-head h2 { font: 400 20px/1.2 var(--mono); }
+  .lx-op-head h2 a { color: inherit; text-decoration: none; }
+  .lx-op-head span { color: var(--muted); }
+  .lx-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: 8px 24px; }
+  .lx-chart-title { margin: 4px 0 0; font-size: 13px; font-weight: 500; font-family: var(--mono); color: var(--muted); }
+  .lx-sub { margin: 4px 0 0; font-size: 13px; font-weight: 500; color: var(--muted); }
+  .lx-section-title { margin: 8px 0 0; font: 400 22px/1.2 var(--serif); }
   .lx-device { display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px; color: var(--muted); font-size: 13px; }
   .lx-run { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; font-size: 12px; color: var(--muted); }
   .lx-run button { font: inherit; font-size: 13px; color: var(--bg); background: var(--fg); border: 0; border-radius: 6px; padding: 6px 14px; cursor: pointer; }
@@ -122,82 +126,42 @@
     </button></div>
     <p class="lx-take" id="lx-take"></p>
   </header>
-  <nav class="lx-tabs" role="tablist" id="lx-tabs">
-    <a class="lx-tab" role="tab" id="tab-support" href="#support">Ops</a>
-    <a class="lx-tab" role="tab" id="tab-fusion" href="#fusion">Compiler Fusion</a>
-  </nav>
+  <nav class="lx-tabs lx-devices" role="tablist" id="lx-devices" aria-label="Device"></nav>
+  <div class="lx-device" id="lx-device"></div>
+  <div class="lx-run" id="all-box">
+    <select id="all-mode" aria-label="What to benchmark">
+      <option value="all">All ops</option>
+      <option value="missing">Ops not measured yet</option>
+    </select>
+    <button id="all-run" type="button">Run benchmarks</button>
+    <span id="all-status" class="lx-run-status" role="status"></span>
+  </div>
 
-  <section id="support" role="tabpanel" class="lx-panel">
-    <div class="lx-run">
-      <select id="all-mode" aria-label="What to benchmark">
-        <option value="mps all">MPS (all ops)</option>
-        <option value="mps missing">MPS (missing ops)</option>
+  <section class="lx-card" id="ops">
+    <h2>Ops</h2>
+    <div class="lx-legend">
+      <span><i class="lx-chip" data-v="runs">runs</i> runs and matches CPU</span>
+      <span><i class="lx-chip" data-v="partial">partial</i> some shapes only</span>
+      <span><i class="lx-chip" data-v="missing">missing</i> no kernel</span>
+    </div>
+    <div class="lx-controls">
+      <input type="search" id="prim-search" placeholder="Search ops" aria-label="Search ops">
+      <select id="prim-kind" aria-label="Kind"><option value="">All kinds</option></select>
+      <select id="prim-gaps" aria-label="Which ops">
+        <option value="">Every op</option>
+        <option value="missing">Not running on this device</option>
+        <option value="benched">Benchmarked on this device</option>
       </select>
-      <button id="all-run" type="button">Run benchmarks</button>
-      <span id="all-status" class="lx-run-status" role="status"></span>
+      <span class="lx-count" id="prim-count"></span>
     </div>
-    <div class="lx-card">
-      <div class="lx-legend">
-        <span><i class="lx-chip" data-v="runs">runs</i> runs and matches CPU</span>
-        <span><i class="lx-chip" data-v="partial">partial</i> some shapes only</span>
-        <span><i class="lx-chip" data-v="missing">missing</i> no kernel</span>
-      </div>
-      <div class="lx-controls">
-        <input type="search" id="prim-search" placeholder="Search primitives" aria-label="Search primitives">
-        <select id="prim-kind" aria-label="Kind"><option value="">All kinds</option></select>
-        <select id="prim-gaps" aria-label="Gaps on">
-          <option value="">Every row</option>
-          <option value="mps">Missing on MPS</option>
-          <option value="tpu">Missing on TPU</option>
-          <option value="either">Missing on MPS or TPU</option>
-        </select>
-        <span class="lx-count" id="prim-count"></span>
-      </div>
-      <div class="lx-scroll"><table id="prim-table"><thead><tr></tr></thead><tbody></tbody></table></div>
-    </div>
+    <div class="lx-scroll"><table id="prim-table"><thead><tr></tr></thead><tbody></tbody></table></div>
   </section>
 
+  <div class="lx-panel" id="op-sections"></div>
 
-  <section id="fusion" role="tabpanel" class="lx-panel" hidden>
-    <div class="lx-card">
-      <div class="lx-scroll"><table id="fusion-table"><thead><tr></tr></thead><tbody></tbody></table></div>
-    </div>
-  </section>
-
-  <section id="op" class="lx-panel" hidden>
-    <a class="lx-back" href="#support">‹ Ops</a>
-    <div class="lx-op-title"><h2 id="op-name"></h2><span id="op-formula"></span></div>
-    <nav class="lx-tabs" role="tablist" id="op-devices"></nav>
-    <nav class="lx-tabs lx-subtabs" role="tablist" id="op-gpus" hidden></nav>
-    <div class="lx-device" id="op-device"></div>
-    <p class="lx-note" id="op-none" hidden></p>
-    <div id="op-bench" class="lx-panel">
-    <div class="lx-run">
-      <button id="op-run" type="button">Run benchmark</button>
-      <span id="op-measured"></span>
-      <span id="op-status" class="lx-run-status" role="status"></span>
-    </div>
-    <div class="lx-card">
-      <h2 id="op-bw-title">Bandwidth</h2>
-      <div class="lx-legend" id="op-bw-legend"></div>
-      <div id="op-bw"></div>
-    </div>
-    <div class="lx-card">
-      <h2>Codegen</h2>
-      <div class="lx-tabs" role="tablist" id="code-tabs">
-        <button class="lx-tab" role="tab" type="button" aria-selected="true" aria-controls="op-kernel" id="code-tab-kernel">Code</button>
-        <button class="lx-tab" role="tab" type="button" aria-selected="false" aria-controls="op-graph" id="code-tab-graph">Graph</button>
-        <button class="lx-tab" role="tab" type="button" aria-selected="false" aria-controls="op-plan" id="code-tab-plan">Plan</button>
-      </div>
-      <pre id="op-kernel" role="tabpanel" aria-labelledby="code-tab-kernel"></pre>
-      <pre id="op-graph" role="tabpanel" aria-labelledby="code-tab-graph" hidden></pre>
-      <pre id="op-plan" role="tabpanel" aria-labelledby="code-tab-plan" hidden></pre>
-    </div>
-    <div class="lx-card">
-      <h2>Measurements</h2>
-      <div class="lx-scroll"><table id="op-table"><thead><tr></tr></thead><tbody></tbody></table></div>
-    </div>
-    </div>
+  <h2 class="lx-section-title">Compiler fusion</h2>
+  <section class="lx-card" id="fusion">
+    <div class="lx-scroll"><table id="fusion-table"><thead><tr></tr></thead><tbody></tbody></table></div>
   </section>
 </div>
 <div class="lx-tip" id="lx-tip" hidden></div>
@@ -233,16 +197,6 @@ function highlighted(source) {
   return out;
 }
 
-for (const tab of document.querySelectorAll("#code-tabs .lx-tab")) {
-  tab.addEventListener("click", () => {
-    for (const other of document.querySelectorAll("#code-tabs .lx-tab")) {
-      const selected = other === tab;
-      other.setAttribute("aria-selected", String(selected));
-      document.getElementById(other.getAttribute("aria-controls")).hidden = !selected;
-    }
-  });
-}
-
 const themeButton = document.getElementById("lx-theme");
 function setTheme(theme) {
   document.documentElement.dataset.theme = theme;
@@ -268,34 +222,53 @@ async function loadPerf(dir) {
   }
   return perf;
 }
-let PRIMITIVES, FUSIONS, PERF;
+let PRIMITIVES, FUSIONS;
 try {
-  [PRIMITIVES, FUSIONS, PERF] = await Promise.all([load("primitives"), load("fusions"), loadPerf("elementwise_mps")]);
-  PRIMITIVES.sort((a, b) => a.primitive.localeCompare(b.primitive));
-  if (!PERF) throw new Error("data/elementwise_mps/meta.json: not found");
+  [PRIMITIVES, FUSIONS] = await Promise.all([load("primitives"), load("fusions")]);
 } catch (e) {
   const take = document.getElementById("lx-take");
   take.textContent = `Could not load the data files (${e.message}). Serve this folder, for example with python3 -m http.server in dashboard/, then open http://localhost:8000.`;
   take.style.color = "var(--bad)";
   return;
 }
-const DEVICES = [["cpu", "CPU"], ["mps", "MPS"], ["tpu", "TPU"], ["cuda", "CUDA"], ["triton", "Triton"]];
+PRIMITIVES.sort((a, b) => a.primitive.localeCompare(b.primitive));
+const PRIMITIVE = Object.fromEntries(PRIMITIVES.map((r) => [r.primitive, r]));
+
+// Each tab is a device: a status column of the data files, and the benchmarks measured on it, if any.
+const STATUS = [["cpu", "CPU"], ["mps", "MPS"], ["tpu", "TPU"], ["cuda", "CUDA"]];
 const GPUS = [["a100", "A100"], ["h100", "H100"], ["h200", "H200"], ["b200", "B200"], ["b300", "B300"], ["r200", "R200"]];
+const DEVICES = [
+  ...STATUS.map(([key, label]) => ({ key, label, status: key, perf: key === "mps" ? "elementwise_mps" : null, runnable: key === "mps" })),
+  ...GPUS.map(([gpu, label]) => ({ key: `triton-${gpu}`, label: `Triton · ${label}`, status: "triton", perf: `elementwise_triton/${gpu}`, runnable: false })),
+];
+const deviceOf = (key) => DEVICES.find((d) => d.key === key);
 const PERFS = {};
-const ORDER = { runs: 0, partial: 1, wrong: 2, missing: 3 };
-let DEVICE_BW, BENCHED, OK_ROWS, SIZE_TICKS, measuring = null;
 const KNOWN = {};
-const SEEN_SIZES = new Set();
-function derive() {
-  OK_ROWS = PERF.rows.filter((r) => !r.error);
-  for (const [op, o] of Object.entries(PERF.ops || {})) KNOWN[op] = o;
-  for (const r of PERF.rows) if (r.formula) KNOWN[r.op] = { formula: r.formula, kind: r.kind };
-  DEVICE_BW = PERF.spec_memory_gbs;
-  BENCHED = [...new Set([...PERF.rows.map((r) => r.op), ...Object.keys(PERF.measured_at || {}), ...(measuring ? [measuring] : [])])];
-  SIZE_TICKS = [...new Set(OK_ROWS.map((r) => r.n))].sort((a, b) => a - b);
-  for (const n of SIZE_TICKS) SEEN_SIZES.add(n);
+const ORDER = { runs: 0, partial: 1, wrong: 2, missing: 3 };
+const current = { device: deviceOf("mps") };
+
+/** Loads the benchmarks of `device` once, recording each op's formula and sizes. */
+async function perfOf(device) {
+  if (!device.perf) return null;
+  if (!(device.perf in PERFS)) {
+    PERFS[device.perf] = await loadPerf(device.perf).catch(() => null);
+    remember(PERFS[device.perf]);
+  }
+  return PERFS[device.perf];
 }
-derive();
+
+/** Records the ops `perf` describes in `KNOWN`. */
+function remember(perf) {
+  if (!perf) return;
+  for (const [op, o] of Object.entries(perf.ops || {})) KNOWN[op] = { ...KNOWN[op], ...o };
+  for (const r of perf.rows) if (r.formula) KNOWN[r.op] = { ...KNOWN[r.op], formula: r.formula, kind: r.kind };
+}
+
+/** What the charts of `perf` need: its measured rows, its device's bandwidth and the sizes measured. */
+function view(perf) {
+  const ok = perf.rows.filter((r) => !r.error);
+  return { perf, ok, bw: perf.spec_memory_gbs, peak: perf.spec_tflops, ticks: [...new Set(ok.map((r) => r.n))].sort((a, b) => a - b) };
+}
 
 const fmt = {
   int: (n) => n.toLocaleString("en"),
@@ -304,12 +277,10 @@ const fmt = {
   tflops: (v) => `${v >= 10 ? v.toFixed(1) : v.toFixed(2)} TFLOP/s`,
   us: (v) => v >= 1000 ? `${(v / 1000).toFixed(2)} ms` : `${v >= 10 ? v.toFixed(0) : v.toFixed(1)} µs`,
   pct: (v) => `${(100 * v).toFixed(0)}%`,
-  num: (v) => v >= 1000 ? `${(v / 1000).toFixed(v >= 10000 ? 0 : 1)}K` : v >= 1 ? v.toFixed(0) : v.toPrecision(1),
 };
 const el = (tag, cls, text) => { const e = document.createElement(tag); if (cls) e.className = cls; if (text != null) e.textContent = text; return e; };
-const rowOf = (op, dtype, n) => OK_ROWS.find((r) => r.op === op && r.dtype === dtype && r.n === n);
 const ITEM = { float32: 4, bfloat16: 2, bool: 1 };
-function detail(r, who, us, timing) {
+function detail(r, who, us, timing, bw) {
   const loaded = r.loaded_bytes ?? r.n * r.inputs * ITEM[r.dtype];
   const stored = r.stored_bytes ?? r.n * ITEM[r.out_dtype];
   const gbs = (loaded + stored) / us / 1e3;
@@ -317,51 +288,43 @@ function detail(r, who, us, timing) {
     ["Bytes loaded", fmt.int(loaded)],
     ["Bytes stored", fmt.int(stored)],
     ["BW", fmt.gbs(gbs)],
-    ["BW %", `${fmt.pct(gbs / DEVICE_BW)} of ${DEVICE_BW} GB/s`],
+    ["BW %", `${fmt.pct(gbs / bw)} of ${bw} GB/s`],
   ];
   if (r.compute_bound) rows.push(["FLOPs", fmt.int(r.flops)], ["FLOP/s", fmt.tflops(r.flops / us / 1e6)]);
   rows.push([`Time (${timing})`, fmt.us(us)]);
   return { title: `${who} · ${r.op} · ${r.dtype} · ${fmt.int(r.n)} elements`, rows };
 }
 const maybe = (v, f) => v == null || Number.isNaN(v) ? "—" : f(v);
+const speedup = (r) => r.torch_us && r.lumen_us ? r.torch_us / r.lumen_us : null;
 
+// Benchmark progress per op on MPS, shown in its status chips while it runs.
 const PROGRESS = {};
 function progressed(c, op) {
   if (PROGRESS[op] == null) return c;
   c.classList.add("lx-progress");
-  c.classList.toggle("lx-pending", PROGRESS[op] < 1);
   c.style.setProperty("--done", `${(100 * PROGRESS[op]).toFixed(1)}%`);
   c.title = PROGRESS[op] < 1 ? `benchmarking: ${(100 * PROGRESS[op]).toFixed(0)}%` : "benchmarked";
   return c;
 }
 
-function advance(op, done) {
-  PROGRESS[op] = done;
-  for (const c of document.querySelectorAll(`#prim-table .lx-chip[data-device="mps"][data-op="${CSS.escape(op)}"]`)) progressed(c, op);
-}
-
-function opChip(r, device) {
-  const c = chip(r[device]);
-  c.dataset.device = device;
-  c.dataset.op = r.primitive;
-  return device === "mps" ? progressed(c, r.primitive) : c;
-}
-
-function opLink(op) {
-  const a = el("a", "lx-op", op);
-  a.href = `#op-${op}`;
-  return a;
-}
-
-function chip(value, href) {
-  const c = el(href ? "a" : "span", "lx-chip", value);
+function chip(value) {
+  const c = el("span", "lx-chip", value);
   c.dataset.v = value;
-  if (href) c.href = href;
   return c;
 }
 
-function table(id, columns, rows, sort) {
-  const t = document.getElementById(id);
+/** The chip of `op`'s status on the current device. */
+function statusChip(op) {
+  const value = PRIMITIVE[op]?.[current.device.status];
+  if (!value) return el("span", null, "—");
+  const c = chip(value);
+  return current.device.runnable ? progressed(c, op) : c;
+}
+
+const hrefOf = (op) => `#${current.device.key}/${op}`;
+
+/** Fills table `t` with `rows` under `columns`, sorted as `sort` says; returns how many rows it shows. */
+function table(t, columns, rows, sort) {
   const head = t.querySelector("thead tr");
   if (!head.children.length) {
     for (const col of columns) {
@@ -417,7 +380,7 @@ function showTip(evt, info) {
   }
   tip.replaceChildren(el("div", "lx-tip-title", info.title), t);
   tip.hidden = false;
-  const pad = 12, w = tip.offsetWidth, h = tip.offsetHeight;
+  const pad = 12, w = tip.offsetWidth;
   let x = evt.pageX + pad, y = evt.pageY + pad;
   if (x + w > document.documentElement.clientWidth - 8) x = evt.pageX - w - pad;
   tip.style.left = x + "px";
@@ -438,12 +401,8 @@ function throughputAxis(values, label) {
   return { domain: [0, top], ticks, fmt: (v) => String(v), label, linear: true };
 }
 
-function bandwidthAxis(values) {
-  return throughputAxis([DEVICE_BW, ...values], "GB/s");
-}
-
-function chart(id, spec) {
-  const box = document.getElementById(id);
+/** Draws line chart `spec` into `box`, sized to its width. */
+function chart(box, spec) {
   box.replaceChildren();
   const W = Math.max(280, box.clientWidth), H = 280;
   const m = { l: 56, r: 16, t: 12, b: 40 };
@@ -471,7 +430,7 @@ function chart(id, spec) {
   for (const line of spec.lines || []) {
     const pts = line.points.map(([x, y]) => `${sx(x)},${sy(clip(y, spec.y.domain))}`).join(" ");
     svg.append(svgEl("polyline", { points: pts, fill: "none", stroke: line.color, "stroke-width": line.width || 2,
-      "stroke-dasharray": line.dot ? "0.1 5" : line.dash ? "5 4" : "none", "stroke-linecap": "round", "stroke-linejoin": "round", opacity: line.opacity ?? 1 }));
+      "stroke-dasharray": line.dash ? "5 4" : "none", "stroke-linecap": "round", "stroke-linejoin": "round" }));
     if (line.label) {
       const [x, y] = line.labelAt;
       const t = svgEl("text", { x: sx(x), y: sy(y) - 6, "text-anchor": line.anchor || "end" });
@@ -482,67 +441,249 @@ function chart(id, spec) {
   }
   for (const p of spec.points || []) {
     const cx = sx(p.x), cy = sy(clip(p.y, spec.y.domain));
-    const c = svgEl("circle", { cx, cy, r: p.r || 4, fill: p.hollow ? "var(--panel)" : p.color, stroke: p.hollow ? p.color : "var(--panel)",
-      "stroke-width": p.hollow ? 1.5 : 1, opacity: p.opacity ?? 1, "pointer-events": "none" });
+    const c = svgEl("circle", { cx, cy, r: p.r || 4, fill: p.color, stroke: "var(--panel)", "stroke-width": 1, "pointer-events": "none" });
     const hit = svgEl("circle", { cx, cy, r: 9, fill: "transparent" });
     hit.addEventListener("mousemove", (e) => { showTip(e, p.tip); c.setAttribute("r", (p.r || 4) + 2); });
     hit.addEventListener("mouseleave", () => { hideTip(); c.setAttribute("r", p.r || 4); });
-    if (p.href) { hit.style.cursor = "pointer"; hit.addEventListener("click", () => { location.hash = p.href; }); }
     svg.append(c, hit);
   }
   box.append(svg);
 }
 
-function legend(id, items) {
-  const box = document.getElementById(id);
-  box.replaceChildren();
-  for (const [label, color, style] of items) {
+/** A legend of `[label, color, dashed]` items. */
+function legend(items) {
+  const box = el("div", "lx-legend");
+  for (const [label, color, dashed] of items) {
     const s = el("span");
-    const w = el("i", "lx-swatch" + (style === "dot" ? " dot" : style ? " dash" : ""));
+    const w = el("i", "lx-swatch" + (dashed ? " dash" : ""));
     w.style.background = color;
     w.style.color = color;
     s.append(w, label);
     box.append(s);
   }
+  return box;
 }
 
+const IMPLS = [[(r) => r.lumen_us, "lumen", "var(--s1)"], [(r) => r.torch_us, "PyTorch", "var(--s2)"]];
 
+/** The charts of `op`'s throughput per dtype on the device `v` describes: bandwidth, or a roofline when compute bound. */
+function charts(op, v) {
+  const rows = v.ok.filter((r) => r.op === op);
+  const compute = rows.some((r) => r.compute_bound);
+  const value = (r, us) => compute ? r.flops / us / 1e6 : r.bytes / us / 1e3;
+  const intensity = (r) => r.flops / r.bytes;
+  const grid = el("div", "lx-charts");
+  const drawn = [];
+  for (const dtype of [...new Set(rows.map((r) => r.dtype))]) {
+    const box = el("div", "lx-chart");
+    const cell = el("div");
+    cell.append(el("h3", "lx-chart-title", dtype), box);
+    grid.append(cell);
+    drawn.push(() => {
+      const lines = [], points = [];
+      for (const [us, who, color] of IMPLS) {
+        const rs = rows.filter((r) => r.dtype === dtype && us(r) != null);
+        if (!rs.length) continue;
+        const at = (r) => compute ? intensity(r) : r.n;
+        lines.push({ points: rs.map((r) => [at(r), value(r, us(r))]).sort((a, b) => a[0] - b[0]), color, width: 2 });
+        for (const r of rs) points.push({ x: at(r), y: value(r, us(r)), r: 3, color, tip: detail(r, who, us(r), "per call", v.bw) });
+      }
+      const values = points.map((p) => p.y);
+      if (!compute) {
+        lines.push({ points: [[v.ticks[0], v.bw], [v.ticks.at(-1), v.bw]], color: "var(--roof)", width: 1.5, dash: true, label: `${v.bw} GB/s device`, labelAt: [v.ticks[0], v.bw], anchor: "start" });
+        chart(box, { label: `${op} ${dtype} bandwidth`, x: { domain: [v.ticks[0], v.ticks.at(-1)], ticks: v.ticks, fmt: fmt.n, label: "elements" },
+          y: throughputAxis([v.bw, ...values], "GB/s"), lines, points });
+        return;
+      }
+      const xs = points.map((p) => p.x);
+      const lo = 2 ** Math.floor(Math.log2(Math.min(...xs) / 1.5)), hi = 2 ** Math.ceil(Math.log2(Math.max(...xs) * 1.5));
+      const ticks = [];
+      for (let t = lo; t <= hi; t *= 4) ticks.push(t);
+      if (v.peak) {
+        const ridge = v.peak * 1e3 / v.bw;
+        const roof = [[lo, lo * v.bw / 1e3], ...(ridge > lo && ridge < hi ? [[ridge, v.peak]] : []), [hi, Math.min(v.peak, hi * v.bw / 1e3)]];
+        lines.push({ points: roof, color: "var(--roof)", width: 1.5, dash: true, label: `${v.peak} TFLOP/s, ${v.bw} GB/s`, labelAt: [hi, Math.min(v.peak, hi * v.bw / 1e3)], anchor: "end" });
+      }
+      chart(box, { label: `${op} ${dtype} roofline`, x: { domain: [lo, hi], ticks, fmt: (t) => String(t), label: "FLOPs per byte" },
+        y: throughputAxis([...values, v.peak || 0], "TFLOP/s"), lines, points });
+    });
+  }
+  const key = legend([...IMPLS.map(([, who, color]) => [who, color]), [compute ? "roofline" : "device bandwidth", "var(--roof)", true]]);
+  return { nodes: [el("h3", "lx-sub", compute ? "Roofline" : "Bandwidth"), key, grid], draw: () => drawn.forEach((d) => d()) };
+}
 
+/** Code, Graph and Plan tabs of the kernel captured for `op`. */
+function codeTabs(op, perf) {
+  const code = perf.code[op];
+  const [graph, kernel] = code ? graphAndKernel(code.kernel) : ["", "Not captured for this op."];
+  const panes = [["Code", el("pre")], ["Graph", el("pre", null, graph)], ["Plan", el("pre", null, code ? code.plan : "")]];
+  panes[0][1].replaceChildren(...highlighted(kernel));
+  const tabs = el("div", "lx-tabs");
+  tabs.setAttribute("role", "tablist");
+  for (const [i, [label, pane]] of panes.entries()) {
+    const b = el("button", "lx-tab", label);
+    b.type = "button";
+    b.setAttribute("role", "tab");
+    b.setAttribute("aria-selected", String(i === 0));
+    pane.hidden = i !== 0;
+    b.addEventListener("click", () => {
+      for (const [j, [, other]] of panes.entries()) {
+        other.hidden = j !== i;
+        tabs.children[j].setAttribute("aria-selected", String(j === i));
+      }
+    });
+    tabs.append(b);
+  }
+  return [el("h3", "lx-sub", "Codegen"), tabs, ...panes.map(([, pane]) => pane)];
+}
 
-const PRIM_COLUMNS = [
-  { key: "primitive", label: "Primitive", kind: "name", render: (r) => opLink(r.primitive) }, { key: "category", label: "Kind" },
-  ...DEVICES.map(([k, d]) => ({ key: k, label: d, kind: "dev", render: (r) => opChip(r, k) })),
+const MEASURE_COLUMNS = [
+  { key: "dtype", label: "dtype" }, { key: "n", label: "Elements", kind: "num", render: (r) => fmt.int(r.n) },
+  { key: "gbs", label: "Throughput", kind: "num", sort: (r) => r.compute_bound ? r.flops / r.lumen_us : r.gbs,
+    render: (r) => r.error ? "" : r.compute_bound ? fmt.tflops(r.flops / r.lumen_us / 1e6) : fmt.gbs(r.gbs) },
+  { key: "speedup", label: "Speedup over PyTorch", kind: "num", sort: speedup,
+    render: (r) => r.error ? "" : maybe(speedup(r), (v) => `${v.toFixed(2)}×`) },
 ];
-const FUS_COLUMNS = [
-  { key: "fusion", label: "Fusion" }, { key: "category", label: "Kind" },
-  ...DEVICES.map(([k, d]) => ({ key: k, label: d, kind: "dev", render: (r) => chip(r[k]) })),
-  { key: "what", label: "What it does", kind: "why" }, { key: "pass", label: "Pass", wide: true },
-];
+const measureSorts = {};
+
+/** A table of `op`'s measurements in `perf`. */
+function measurements(op, perf) {
+  const t = el("table");
+  t.append(el("thead"), el("tbody"));
+  t.tHead.append(el("tr"));
+  const rows = perf.rows.filter((r) => r.op === op);
+  const sort = measureSorts[op] ??= { key: null, dir: 1 };
+  sort.draw = () => table(t, MEASURE_COLUMNS, rows, sort);
+  sort.draw();
+  const scroll = el("div", "lx-scroll");
+  scroll.append(t);
+  return [el("h3", "lx-sub", "Measurements"), scroll];
+}
+
+// One section per op, in name order; each shows the current device's status, benchmarks and code.
+const OPS = PRIMITIVES.map((r) => r.primitive);
+const SECTIONS = new Map();
+const sectionsBox = document.getElementById("op-sections");
+for (const op of OPS) {
+  const s = el("section", "lx-card lx-op");
+  s.id = `op-${op}`;
+  SECTIONS.set(op, s);
+  sectionsBox.append(s);
+}
+
+let benchmarking = false;
+
+/** Fills `op`'s section for the current device. */
+function drawSection(op) {
+  const s = SECTIONS.get(op);
+  const device = current.device;
+  const known = KNOWN[op] || {};
+  const head = el("div", "lx-op-head");
+  const name = el("h2");
+  const anchor = el("a", null, op);
+  anchor.href = hrefOf(op);
+  name.append(anchor);
+  head.append(name);
+  if (known.formula) head.append(el("span", null, `${known.formula} · ${known.kind}`));
+  const row = PRIMITIVE[op];
+  const facts = el("div", "lx-device");
+  facts.append(statusChip(op), ...[row?.[`${device.status}_kernel`], row?.[`${device.status}_note`]].filter(Boolean).map((t) => el("span", null, t)));
+  const nodes = [head, facts];
+  const perf = device.perf ? PERFS[device.perf] : null;
+  const measured = perf?.rows.some((r) => r.op === op);
+  if (device.runnable && KNOWN[op]) {
+    const run = el("div", "lx-run");
+    const button = el("button", null, "Run benchmark");
+    button.type = "button";
+    button.disabled = benchmarking;
+    button.addEventListener("click", () => runOps([op]));
+    const at = perf?.measured_at?.[op];
+    run.append(button, el("span", null, at ? `Measured ${new Date(at).toLocaleString()} on ${perf.device}.`
+      : measured ? `Measured on ${perf.device}, in the first snapshot.` : "Not measured yet: Run benchmark measures it on this machine."));
+    nodes.push(run);
+  } else if (measured) {
+    const at = perf.measured_at?.[op];
+    nodes.push(el("p", "lx-note", at ? `Measured ${new Date(at).toLocaleString()} on ${perf.device}.` : `Measured on ${perf.device}.`));
+  }
+  let draw = null;
+  if (!device.perf) nodes.push(el("p", "lx-note", `No benchmarks run on ${device.label}.`));
+  else if (!(device.perf in PERFS)) nodes.push(el("p", "lx-note", "Loading…"));
+  else if (!measured) { if (!device.runnable) nodes.push(el("p", "lx-note", `Not benchmarked on ${device.label} yet.`)); }
+  else {
+    const c = charts(op, view(perf));
+    nodes.push(...c.nodes, ...codeTabs(op, perf), ...measurements(op, perf));
+    draw = c.draw;
+  }
+  s.replaceChildren(...nodes);
+  if (draw && !s.hidden) draw();
+}
+
+// The index of ops: filters choose which ops (and sections) show.
 const search = document.getElementById("prim-search");
 const kindSel = document.getElementById("prim-kind");
 const gaps = document.getElementById("prim-gaps");
 for (const k of [...new Set(PRIMITIVES.map((r) => r.category))]) { const o = el("option", null, k); o.value = k; kindSel.append(o); }
-const primSort = { key: null, dir: 1, draw: drawPrimitives };
-const fusSort = { key: null, dir: 1, draw: () => table("fusion-table", FUS_COLUMNS, FUSIONS, fusSort) };
-function drawPrimitives() {
+function shows(op) {
   const q = search.value.trim().toLowerCase();
-  const missing = (v) => v !== "runs";
-  const rows = PRIMITIVES.filter((r) => (!q || r.primitive.toLowerCase().includes(q)) && (!kindSel.value || r.category === kindSel.value) &&
-    (!gaps.value || (gaps.value === "either" ? missing(r.mps) || missing(r.tpu) : missing(r[gaps.value]))));
-  document.getElementById("prim-count").textContent = `${table("prim-table", PRIM_COLUMNS, rows, primSort)} of ${PRIMITIVES.length}`;
+  const row = PRIMITIVE[op];
+  const perf = current.device.perf ? PERFS[current.device.perf] : null;
+  return (!q || op.toLowerCase().includes(q)) && (!kindSel.value || row?.category === kindSel.value) &&
+    (gaps.value !== "missing" || row?.[current.device.status] !== "runs") &&
+    (gaps.value !== "benched" || !!perf?.rows.some((r) => r.op === op));
 }
-search.addEventListener("input", drawPrimitives);
-kindSel.addEventListener("change", drawPrimitives);
-gaps.addEventListener("change", drawPrimitives);
+const PRIM_COLUMNS = [
+  { key: "primitive", label: "Op", kind: "name", render: (r) => { const a = el("a", "lx-op", r.primitive); a.href = hrefOf(r.primitive); return a; } },
+  { key: "category", label: "Kind" },
+  { key: "status", label: "Status", kind: "dev", sort: (r) => r[current.device.status], render: (r) => statusChip(r.primitive) },
+  { key: "kernel", label: "Kernel", kind: "why", sort: (r) => r[`${current.device.status}_kernel`], render: (r) => r[`${current.device.status}_kernel`] ?? "" },
+  { key: "note", label: "Note", kind: "why", wide: true, sort: (r) => r[`${current.device.status}_note`], render: (r) => r[`${current.device.status}_note`] ?? "" },
+];
+const primSort = { key: null, dir: 1, draw: drawIndex };
+function drawIndex() {
+  const rows = PRIMITIVES.filter((r) => shows(r.primitive));
+  document.getElementById("prim-count").textContent = `${table(document.getElementById("prim-table"), PRIM_COLUMNS, rows, primSort)} of ${PRIMITIVES.length}`;
+}
+function drawSections() {
+  for (const op of OPS) SECTIONS.get(op).hidden = !shows(op);
+  for (const op of OPS) if (!SECTIONS.get(op).hidden) drawSection(op);
+}
+for (const input of [search, kindSel, gaps]) input.addEventListener(input === search ? "input" : "change", () => { drawIndex(); drawSections(); });
 
+const FUS_COLUMNS = [
+  { key: "fusion", label: "Fusion" }, { key: "category", label: "Kind" },
+  { key: "status", label: "Status", kind: "dev", sort: (r) => r[current.device.status], render: (r) => chip(r[current.device.status]) },
+  { key: "what", label: "What it does", kind: "why" }, { key: "pass", label: "Pass", wide: true },
+];
+const fusSort = { key: null, dir: 1, draw: () => table(document.getElementById("fusion-table"), FUS_COLUMNS, FUSIONS, fusSort) };
 
+/** The device tabs, and the line naming the current device's hardware and coverage. */
+function drawDevice() {
+  const device = current.device;
+  document.getElementById("lx-devices").replaceChildren(...DEVICES.map((d) => {
+    const a = el("a", "lx-tab", d.label);
+    a.href = `#${d.key}`;
+    a.setAttribute("role", "tab");
+    a.setAttribute("aria-selected", String(d === device));
+    return a;
+  }));
+  const perf = device.perf ? PERFS[device.perf] : null;
+  const runs = PRIMITIVES.filter((r) => r[device.status] === "runs").length;
+  const facts = [`${runs} of ${PRIMITIVES.length} ops run on ${device.label}`];
+  if (perf) facts.push(`benchmarked on ${perf.device}: ${perf.spec_memory_gbs} GB/s${perf.spec_tflops ? `, ${perf.spec_tflops} TFLOP/s` : ""}`);
+  else if (device.perf && device.perf in PERFS) facts.push("no benchmarks yet");
+  document.getElementById("lx-device").replaceChildren(...facts.map((t) => el("span", null, t)));
+  document.getElementById("all-box").hidden = !device.runnable;
+}
 
-const runButton = document.getElementById("op-run");
-const runStatus = document.getElementById("op-status");
-const allButton = document.getElementById("all-run");
-const allStatus = document.getElementById("all-status");
-const allMode = document.getElementById("all-mode");
+function draw() {
+  hideTip();
+  drawDevice();
+  drawIndex();
+  drawSections();
+  fusSort.draw();
+}
 
+// Benchmarks run on this machine through serve.py, MPS only.
 async function runBenchmark(op, device, measured) {
   const url = new URL(`api/benchmark/${encodeURIComponent(op)}?device=${encodeURIComponent(device)}`, location.href);
   const r = await fetch(url, { method: "POST" }).catch((e) => {
@@ -574,273 +715,94 @@ async function runBenchmark(op, device, measured) {
   return final;
 }
 
-const expectedRows = (op) => (KNOWN[op]?.dtypes?.length || 2) * (KNOWN[op]?.sizes?.length || PERF.sizes?.length || SEEN_SIZES.size);
-
-function measuringOp(op) {
-  measuring = op;
-  advance(op, 0);
-  PERF = { ...PERF, rows: PERF.rows.filter((r) => r.op !== op) };
-  derive();
-  draw();
-}
-
 const globalBar = document.getElementById("lx-global");
 function overall(done, text) {
   globalBar.hidden = false;
   document.getElementById("lx-global-fill").style.width = `${(100 * Math.min(done, 1)).toFixed(1)}%`;
   document.getElementById("lx-global-text").textContent = text;
 }
+const allButton = document.getElementById("all-run");
+const allStatus = document.getElementById("all-status");
 
-let benchmarking = false;
-function busy(running) {
-  benchmarking = running;
-  runButton.disabled = allButton.disabled = running;
-  if (!running && current.op) runButton.disabled = !KNOWN[current.op] || current.device !== "mps";
-}
-
-runButton.addEventListener("click", async () => {
-  const op = current.op;
-  const started = performance.now();
-  const previous = PERF;
-  const expected = expectedRows(op);
-  let got = 0;
-  busy(true);
-  runStatus.className = "lx-run-status";
-  runStatus.textContent = `Running ${op} on this machine's GPU: ${expected} measurements, about a minute.`;
-  overall(0, `${op}: starting`);
-  measuringOp(op);
-  try {
-    PERF = await runBenchmark(op, "mps", (row) => {
-      got += 1;
-      advance(op, Math.min(got / expected, 1));
-      overall(got / expected, `${op}: ${got} of ${expected} measured`);
-      PERF.rows.push(row);
-      runStatus.textContent = `Measured ${got} of ${expected}: ${row.dtype} at ${fmt.n(row.n)} elements.`;
-      derive();
-      draw();
-    });
-    advance(op, 1);
-    runStatus.textContent = `Done in ${((performance.now() - started) / 1000).toFixed(0)} s; the charts and tables show the new run.`;
-  } catch (e) {
-    PERF = previous;
-    delete PROGRESS[op];
-    runStatus.textContent = e.message;
-    runStatus.classList.add("lx-bad");
-  } finally {
-    measuring = null;
-    globalBar.hidden = true;
-    busy(false);
-    derive();
-    draw();
-  }
-});
-
-allButton.addEventListener("click", async () => {
-  const [device, which] = allMode.value.split(" ");
-  const measured = (op) => PERF.rows.some((r) => r.op === op);
-  const ops = Object.keys(KNOWN).filter((op) => which === "all" || !measured(op));
-  if (!ops.length) {
-    allStatus.className = "lx-run-status";
-    allStatus.textContent = "Every op is measured already; choose MPS (all ops) to measure them again.";
-    return;
-  }
+/** Benchmarks `ops` on MPS one after another, redrawing each op's section as its rows arrive. */
+async function runOps(ops) {
+  const dir = deviceOf("mps").perf;
   const started = performance.now();
   const failed = [];
-  const before = PERF;
-  const pending = new Set(ops);
-  const hidePending = () => { PERF = { ...PERF, rows: PERF.rows.filter((r) => !pending.has(r.op)) }; };
-  busy(true);
+  benchmarking = allButton.disabled = true;
   allStatus.className = "lx-run-status";
   for (const op of ops) PROGRESS[op] = 0;
-  hidePending();
-  derive();
-  draw();
+  const redraw = (op) => { if (current.device.runnable) { drawIndex(); if (!SECTIONS.get(op).hidden) drawSection(op); } };
   for (const [k, op] of ops.entries()) {
-    const expected = expectedRows(op);
+    const expected = (KNOWN[op]?.dtypes?.length || 2) * (KNOWN[op]?.sizes?.length || 8);
+    const before = PERFS[dir].rows.filter((r) => r.op === op);
     let got = 0;
-    allStatus.textContent = `Running ${op} (${k + 1} of ${ops.length}) on ${device.toUpperCase()}…`;
+    PERFS[dir] = { ...PERFS[dir], rows: PERFS[dir].rows.filter((r) => r.op !== op) };
+    allStatus.textContent = `Running ${op} (${k + 1} of ${ops.length}) on MPS…`;
     overall(k / ops.length, `${k} of ${ops.length} ops · running ${op}`);
-    measuringOp(op);
+    redraw(op);
     try {
-      PERF = await runBenchmark(op, device, (row) => {
+      PERFS[dir] = await runBenchmark(op, "mps", (row) => {
         got += 1;
-        advance(op, Math.min(got / expected, 1));
-        overall((k + Math.min(got / expected, 1)) / ops.length, `${k} of ${ops.length} ops · running ${op}`);
-        PERF.rows.push(row);
-        allStatus.textContent = `Running ${op} (${k + 1} of ${ops.length}) on ${device.toUpperCase()}: ${got} of ${expected} measured.`;
-        derive();
-        if (current.view !== "support") draw();
+        PROGRESS[op] = Math.min(got / expected, 1);
+        overall((k + PROGRESS[op]) / ops.length, `${k} of ${ops.length} ops · running ${op}: ${got} of ${expected} measured`);
+        PERFS[dir].rows.push(row);
+        redraw(op);
       });
-      advance(op, 1);
-      pending.delete(op);
-      hidePending();
+      PROGRESS[op] = 1;
+      remember(PERFS[dir]);
     } catch (e) {
-      pending.delete(op);
-      PERF = { ...PERF, rows: [...PERF.rows.filter((r) => r.op !== op), ...before.rows.filter((r) => r.op === op)] };
+      PERFS[dir] = { ...PERFS[dir], rows: [...PERFS[dir].rows, ...before] };
       delete PROGRESS[op];
       failed.push(`${op} (${e.message})`);
     }
-    measuring = null;
-    derive();
-    draw();
+    redraw(op);
   }
   globalBar.hidden = true;
-  busy(false);
+  benchmarking = allButton.disabled = false;
   const took = `${((performance.now() - started) / 60000).toFixed(1)} min`;
   allStatus.textContent = failed.length
     ? `Ran ${ops.length - failed.length} of ${ops.length} ops in ${took}; failed: ${failed.join("; ")}`
-    : `Ran ${ops.length} ops in ${took}; their pages show the new numbers.`;
+    : `Ran ${ops.length} op${ops.length > 1 ? "s" : ""} in ${took}; their sections show the new numbers.`;
   if (failed.length) allStatus.classList.add("lx-bad");
+  if (current.device.runnable) drawSections();
+}
+
+allButton.addEventListener("click", () => {
+  const perf = PERFS[deviceOf("mps").perf];
+  const which = document.getElementById("all-mode").value;
+  const ops = Object.keys(KNOWN).filter((op) => which === "all" || !perf?.rows.some((r) => r.op === op));
+  if (!ops.length) {
+    allStatus.className = "lx-run-status";
+    allStatus.textContent = "Every op is measured already; choose All ops to measure them again.";
+    return;
+  }
+  runOps(ops);
 });
 
-function deviceTab(href, label, selected) {
-  const a = el("a", "lx-tab", label);
-  a.href = href;
-  a.setAttribute("role", "tab");
-  a.setAttribute("aria-selected", String(selected));
-  return a;
-}
-
-function drawOp(op) {
-  const { device, gpu } = current;
-  const known = KNOWN[op] || {};
-  document.getElementById("op-name").textContent = op;
-  document.getElementById("op-formula").textContent = known.formula ? `${known.formula} · ${known.kind}` : "";
-  document.getElementById("op-devices").replaceChildren(...DEVICES.map(([k, label]) =>
-    deviceTab(k === "triton" ? `#op-${op}/triton/${gpu}` : `#op-${op}/${k}`, label, k === device)));
-  const gpus = document.getElementById("op-gpus");
-  gpus.hidden = device !== "triton";
-  gpus.replaceChildren(...GPUS.map(([k, label]) => deviceTab(`#op-${op}/triton/${k}`, label, k === gpu)));
-  const row = PRIMITIVES.find((r) => r.primitive === op);
-  const status = row?.[device];
-  const facts = [row?.[`${device}_kernel`], row?.[`${device}_note`]].filter(Boolean).map((t) => el("span", null, t));
-  document.getElementById("op-device").replaceChildren(...(status ? [chip(status)] : []), ...facts);
-  const source = device === "triton" ? `triton/${gpu}` : device;
-  const perf = device === "mps" ? PERF : PERFS[source];
-  const where = device === "triton" ? `Triton · ${GPUS.find(([k]) => k === gpu)[1]}` : DEVICES.find(([k]) => k === device)[1];
-  const none = document.getElementById("op-none");
-  none.hidden = !!perf;
-  none.textContent = device === "triton" && !(source in PERFS) ? "Loading…" : `Not benchmarked on ${where} yet.`;
-  document.getElementById("op-bench").hidden = !perf;
-  if (!perf) return;
-  if (perf === PERF) return drawBench(op, true);
-  const saved = [PERF, OK_ROWS, DEVICE_BW, SIZE_TICKS];
-  PERF = perf;
-  OK_ROWS = perf.rows.filter((r) => !r.error);
-  DEVICE_BW = perf.spec_memory_gbs;
-  SIZE_TICKS = [...new Set(OK_ROWS.map((r) => r.n))].sort((a, b) => a - b);
-  try {
-    drawBench(op, false);
-  } finally {
-    [PERF, OK_ROWS, DEVICE_BW, SIZE_TICKS] = saved;
+/** Shows the device the hash names (`#<device>` or `#<device>/<op>`), then scrolls to the op it names. */
+async function route() {
+  let [key, op] = location.hash.slice(1).split("/");
+  // Older links: #op-<op>[/<device>[/<gpu>]], #support and #fusion.
+  if (key?.startsWith("op-")) [key, op] = [op === "triton" ? `triton-${location.hash.split("/")[2] || "h100"}` : op || "mps", key.slice(3)];
+  const target = key === "fusion" ? "fusion" : op && SECTIONS.has(op) ? `op-${op}` : null;
+  const device = deviceOf(key) || current.device;
+  // Following a link within the page keeps what is drawn; only a new device redraws.
+  if (device !== current.device || !drawn) {
+    current.device = device;
+    drawn = true;
+    draw();
   }
-}
-
-function drawBench(op, runnable) {
-  const at = PERF.measured_at?.[op];
-  document.getElementById("op-measured").textContent = at
-    ? `Measured ${new Date(at).toLocaleString()} on ${PERF.device}.`
-    : PERF.rows.some((r) => r.op === op)
-      ? `Measured on ${PERF.device}, in the first snapshot.`
-      : runnable && KNOWN[op]
-        ? "Not measured yet: Run benchmark measures it on this machine."
-        : "No benchmark for this op yet.";
-  if (!benchmarking) runButton.disabled = !runnable || !KNOWN[op];
-  runButton.hidden = !runnable;
-  if (!runButton.disabled && runStatus.dataset.op !== op) { runStatus.textContent = ""; runStatus.className = "lx-run-status"; }
-  runStatus.dataset.op = op;
-  const dtypes = [...new Set(OK_ROWS.filter((r) => r.op === op).map((r) => r.dtype))].map((dtype) => [dtype]);
-  const compute = OK_ROWS.some((r) => r.op === op && r.compute_bound);
-  const value = (r, us) => compute ? r.flops / us / 1e6 : r.bytes / us / 1e3;
-  document.getElementById("op-bw-title").textContent = compute ? "Roofline" : "Bandwidth";
-  const PEAK = PERF.spec_tflops;
-  const intensity = (r) => r.flops / r.bytes;
-
-  const IMPLS = [[(r) => r.lumen_us, "lumen", "var(--s1)"], [(r) => r.torch_us, "PyTorch", "var(--s2)"]];
-  const bandwidthChart = (id, dtype) => {
-    const lines = [], points = [];
-    for (const [us, who, color] of IMPLS) {
-      const rs = OK_ROWS.filter((r) => r.op === op && r.dtype === dtype && us(r) != null);
-      if (!rs.length) continue;
-      const at = (r) => compute ? intensity(r) : r.n;
-      lines.push({ points: rs.map((r) => [at(r), value(r, us(r))]).sort((a, b) => a[0] - b[0]), color, width: 2 });
-      for (const r of rs) points.push({ x: at(r), y: value(r, us(r)), r: 3, color, tip: detail(r, who, us(r), "per call") });
-    }
-    const values = points.map((p) => p.y);
-    if (!compute) {
-      lines.push({ points: [[SIZE_TICKS[0], DEVICE_BW], [SIZE_TICKS.at(-1), DEVICE_BW]], color: "var(--roof)", width: 1.5, dash: true, label: `${DEVICE_BW} GB/s device`, labelAt: [SIZE_TICKS[0], DEVICE_BW], anchor: "start" });
-      chart(id, { label: `${op} ${dtype} bandwidth`, x: { domain: [SIZE_TICKS[0], SIZE_TICKS.at(-1)], ticks: SIZE_TICKS, fmt: fmt.n, label: "elements" },
-        y: bandwidthAxis(values), lines, points });
-      return;
-    }
-    const xs = points.map((p) => p.x);
-    const lo = 2 ** Math.floor(Math.log2(Math.min(...xs) / 1.5)), hi = 2 ** Math.ceil(Math.log2(Math.max(...xs) * 1.5));
-    const ticks = [];
-    for (let t = lo; t <= hi; t *= 4) ticks.push(t);
-    if (PEAK) {
-      const ridge = PEAK * 1e3 / DEVICE_BW;
-      const roof = [[lo, lo * DEVICE_BW / 1e3], ...(ridge > lo && ridge < hi ? [[ridge, PEAK]] : []), [hi, Math.min(PEAK, hi * DEVICE_BW / 1e3)]];
-      lines.push({ points: roof, color: "var(--roof)", width: 1.5, dash: true, label: `${PEAK} TFLOP/s, ${DEVICE_BW} GB/s`, labelAt: [hi, Math.min(PEAK, hi * DEVICE_BW / 1e3)], anchor: "end" });
-    }
-    chart(id, { label: `${op} ${dtype} roofline`, x: { domain: [lo, hi], ticks, fmt: (v) => String(v), label: "FLOPs per byte" },
-      y: throughputAxis([...values, PEAK || 0], "TFLOP/s"), lines, points });
-  };
-  const charts = dtypes.map(([dtype]) => [dtype, el("div", "lx-chart")]);
-  document.getElementById("op-bw").replaceChildren(...charts.flatMap(([dtype, box]) => {
-    box.id = `op-bw-${dtype}`;
-    return [el("h3", "lx-chart-title", dtype), box];
-  }));
-  for (const [dtype, box] of charts) bandwidthChart(box.id, dtype);
-  legend("op-bw-legend", [...IMPLS.map(([, who, color]) => [who, color]), [compute ? "roofline" : "device bandwidth", "var(--roof)", true]]);
-
-  const code = PERF.code[op];
-  const [graph, kernel] = code ? graphAndKernel(code.kernel) : ["", "Not captured for this op."];
-  document.getElementById("op-graph").textContent = graph;
-  document.getElementById("op-kernel").replaceChildren(...highlighted(kernel));
-  document.getElementById("op-plan").textContent = code ? code.plan : "";
-  const rows = PERF.rows.filter((r) => r.op === op);
-  table("op-table", [
-    { key: "dtype", label: "dtype" }, { key: "n", label: "Elements", kind: "num", render: (r) => fmt.int(r.n) },
-    { key: "gbs", label: "Throughput", kind: "num", sort: (r) => r.compute_bound ? r.flops / r.lumen_us : r.gbs,
-      render: (r) => r.error ? "" : r.compute_bound ? fmt.tflops(r.flops / r.lumen_us / 1e6) : fmt.gbs(r.gbs) },
-    { key: "speedup", label: "Speedup over PyTorch", kind: "num", sort: speedup,
-      render: (r) => r.error ? "" : maybe(speedup(r), (v) => `${v.toFixed(2)}×`) },
-  ], rows, opSort);
-}
-const speedup = (r) => r.torch_us && r.lumen_us ? r.torch_us / r.lumen_us : null;
-const opSort = { key: null, dir: 1, draw: () => drawOp(current.op) };
-
-const current = { view: "support", op: null, device: "mps", gpu: GPUS[0][0] };
-function route() {
-  const h = location.hash.slice(1);
-  const [op, device, gpu] = h.startsWith("op-") ? h.slice(3).split("/") : [null];
-  const listed = PRIMITIVES.some((r) => r.primitive === op);
-  current.view = op && (listed || KNOWN[op] || BENCHED.includes(op)) ? "op" : h === "fusion" ? "fusion" : "support";
-  current.op = current.view === "op" ? op : null;
-  current.device = DEVICES.some(([k]) => k === device) ? device : "mps";
-  current.gpu = GPUS.some(([k]) => k === gpu) ? gpu : GPUS[0][0];
-  const source = `triton/${current.gpu}`;
-  if (current.view === "op" && current.device === "triton" && !(source in PERFS)) {
-    loadPerf(`elementwise_triton/${current.gpu}`).catch(() => null).then((perf) => {
-      PERFS[source] = perf;
-      if (current.view === "op") draw();
-    });
+  if (device.perf && !(device.perf in PERFS)) {
+    await perfOf(device);
+    if (current.device === device) draw();
   }
-  for (const id of ["support", "fusion", "op"]) document.getElementById(id).hidden = id !== current.view;
-  document.getElementById("tab-support").setAttribute("aria-selected", String(current.view !== "fusion"));
-  document.getElementById("tab-fusion").setAttribute("aria-selected", String(current.view === "fusion"));
-  draw();
-  if (current.view === "op") window.scrollTo(0, 0);
+  if (target) document.getElementById(target).scrollIntoView();
 }
-function draw() {
-  hideTip();
-  if (current.view === "support") drawPrimitives();
-  if (current.view === "fusion") fusSort.draw();
-  if (current.view === "op") drawOp(current.op);
-}
-let resizeTimer;
-window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(draw, 150); });
+let drawn = false, resizeTimer;
+window.addEventListener("resize", () => { clearTimeout(resizeTimer); resizeTimer = setTimeout(drawSections, 150); });
 window.addEventListener("hashchange", route);
+await perfOf(deviceOf("mps"));
 route();
 })();
 </script>
