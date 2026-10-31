@@ -40,6 +40,8 @@ _PACKAGE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 _TAPES = []
 _BACKWARD = []
+# Per trace, the values computed for their effect alone (sends' tokens), output after everything else.
+_EFFECTS = []
 
 
 def _record(name, inputs, params, var):
@@ -177,6 +179,7 @@ def tracing(graph, device=None, sources=None, tape=None, leaves=None, host=None)
     _TAPES.append(tape)
     _BACKWARD.append((tape, [] if leaves is None else leaves))
     _HOSTS.append(host)
+    _EFFECTS.append([])
     try:
         yield rng
     finally:
@@ -190,6 +193,13 @@ def tracing(graph, device=None, sources=None, tape=None, leaves=None, host=None)
         _TAPES.pop()
         _BACKWARD.pop()
         _HOSTS.pop()
+        _EFFECTS.pop()
+
+
+def keep(x):
+    """Keeps traced ``x`` (a send's token) computed though nothing reads it: the trace outputs it after
+    every other output, and a compiled function drops it."""
+    _EFFECTS[-1].append(x)
 
 
 def compiler_config():
@@ -415,6 +425,7 @@ def _trace(fn, args, device, runtime=_runtime(()), portable=False, split=False):
                 scalars[k] = now if now.dtype == dtype else now.to(dtype)
         if host is not None:
             out = _tree_map(lambda o: host.imported(o) if host.owns(o) else o, out)
+        effects = [t.var for t in _EFFECTS[-1]]
     if host is not None:
         kinds.update({host.imports[v].var: ("hoisted", j) for j, v in enumerate(host.hoisted)})
     kinds.update({t.var: ("rng", k) for k, t in enumerate(rng["state"] or ())})
@@ -424,7 +435,7 @@ def _trace(fn, args, device, runtime=_runtime(()), portable=False, split=False):
     outputs = _tree_leaves(out)
     if not isinstance(out, (TracedTensor, nn.Module, list, tuple)) or any(o.graph is not graph for o in outputs):
         raise TypeError(f"a compiled function must return tensors computed from its inputs, got {out!r}")
-    # Values reassigned during the trace become extra outputs after the returned ones.
+    # Values reassigned during the trace become extra outputs after the returned ones, then the kept effects.
     written = [k for k, (sid, t) in enumerate(weights.items()) if t.var != assigned[sid]]
     written_scalars = [k for k, t in enumerate(scalars) if (t.graph, t.var) != assigned_scalars[k]]
     on_host = [host is not None and (host.owns(scalars[k]) or scalars[k].recipe is not None) for k in written_scalars]
@@ -437,6 +448,7 @@ def _trace(fn, args, device, runtime=_runtime(()), portable=False, split=False):
         + [list(weights.values())[k].var for k in written]
         + [scalars[k].var for k in written_scalars]
         + [arguments[k].var for k in written_arguments]
+        + effects
     )
     host_part = (None, 0, [])
     if host is not None and (host.hoisted or host_written):
@@ -752,7 +764,7 @@ class Compiled:
                 return graph, plan, workspace, out, inputs
         packable = params if not entries else []
         written, written_scalars, written_arguments, _ = written_all
-        returned = len(graph.outputs()) - len(written) - len(written_scalars) - len(written_arguments)
+        returned = len(_tree_leaves(out))
         donate = [(params[w], returned + j) for j, w in enumerate(written)]
         plan = Plan(graph, target, donate_into=donate, parameters=params, packable=packable, scalars=scalars)
         workspace = Tensor.empty([plan.workspace_bytes], "uint8", target, alignment=plan.workspace_alignment)

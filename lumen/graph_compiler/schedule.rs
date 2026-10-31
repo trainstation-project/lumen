@@ -14,7 +14,8 @@ struct Deps {
 }
 
 /// Dependencies of each node on the producers of its inputs, with custom calls also chained in
-/// their original order since they may have side effects.
+/// their original order since they may have side effects, and collectives in theirs, which every process
+/// must issue in the same order (a process's sends and receives pair with another's in program order).
 fn deps(graph: &Graph) -> Deps {
     let nodes = graph.nodes();
     let mut producer = vec![None; graph.types.len()];
@@ -25,6 +26,7 @@ fn deps(graph: &Graph) -> Deps {
 
     let mut operands: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
     let mut last_custom = None;
+    let mut last_collective = None;
 
     for (i, node) in nodes.iter().enumerate() {
         let mut ops: Vec<usize> = node.inputs.iter().filter_map(|&v| producer[v]).collect();
@@ -32,6 +34,10 @@ fn deps(graph: &Graph) -> Deps {
         if let Primitive::CustomCall { .. } = node.primitive {
             ops.extend(last_custom);
             last_custom = Some(i);
+        }
+        if node.primitive.is_collective() {
+            ops.extend(last_collective);
+            last_collective = Some(i);
         }
         ops.sort_unstable();
 

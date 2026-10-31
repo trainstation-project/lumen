@@ -1610,6 +1610,22 @@ impl Plan {
                     let _kernel = crate::profiler::record_host_kernel(step.label);
                     crate::profiler::launched::launched(step.label, || None);
 
+                    // Host collectives run here, synchronously, through the default group's store.
+                    if let Some(ranks) = crate::distributed::collective::ranks(&step.primitive) {
+                        let comm = crate::distributed::host::Host::new(ranks)?;
+                        let send = args.first().copied().unwrap_or(std::ptr::null());
+                        unsafe {
+                            crate::distributed::collective::run(
+                                &comm,
+                                &step.primitive,
+                                send,
+                                out,
+                                types.first().copied(),
+                                &step.output.1,
+                            )?
+                        };
+                        continue;
+                    }
                     unsafe {
                         reference::eval_raw(&step.primitive, &args, &types, out, &step.output.1)
                     };

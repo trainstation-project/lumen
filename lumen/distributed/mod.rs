@@ -1,5 +1,8 @@
-//! The default process group (rank, world size and shared TCP store), env:// and tcp:// rendezvous, and `DeviceMesh`.
+//! The default process group (rank, world size and shared TCP store), env:// and tcp:// rendezvous, barriers,
+//! and `DeviceMesh`; the collectives a plan runs live in `collective` and its backends, `nccl` and `host`.
 pub mod backend;
+pub(crate) mod collective;
+pub(crate) mod host;
 #[cfg(lumen_cuda_linked)]
 pub(crate) mod nccl;
 #[cfg(feature = "python")]
@@ -169,6 +172,34 @@ pub fn destroy_process_group() -> Result<(), String> {
         .take()
         .map(drop)
         .ok_or_else(|| "the default process group is not initialized".into())
+}
+
+/// Per group of ranks, the barriers this process has passed.
+static BARRIERS: Mutex<Option<std::collections::HashMap<Vec<usize>, u64>>> = Mutex::new(None);
+
+/// Blocks until every process in `ranks` (which holds this one) has reached the same barrier of that group,
+/// through the default group's store. Only the host waits: device work queued before is not waited for.
+pub fn barrier(ranks: &[usize]) -> Result<(), String> {
+    let store = default_store()
+        .ok_or("barrier() needs the default process group: call init_process_group")?;
+    collective::position(ranks, get_rank()?, "rank")?;
+    let generation = {
+        let mut barriers = BARRIERS.lock().unwrap_or_else(|e| e.into_inner());
+        let passed = barriers
+            .get_or_insert_with(Default::default)
+            .entry(ranks.to_vec())
+            .or_insert(0);
+        *passed += 1;
+        *passed
+    };
+    let names: Vec<String> = ranks.iter().map(usize::to_string).collect();
+    let key = format!("lumen/barrier/{}/{generation}", names.join(","));
+    let done = format!("{key}/done");
+    // the last process to arrive releases the others
+    if store.add(&key, 1)? == ranks.len() as i64 {
+        store.set(&done, b"")?;
+    }
+    store.wait(&[done.as_str()], store.timeout())
 }
 
 /// An n-dimensional grid of process ranks on one device type, as seen from `rank`.

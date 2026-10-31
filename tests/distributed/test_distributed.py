@@ -13,6 +13,7 @@ import pytest
 from helpers import CUDA, MPS, TPU, meta
 
 import lumen
+import lumen.distributed as dist
 from lumen.distributed import (
     DeviceMesh,
     TCPStore,
@@ -331,12 +332,23 @@ def test_collectives_of_one_process_are_its_values(device, triton_on_cuda):
 
     def f(t):
         """Every collective of ``t``, over the whole (one-process) world."""
-        return all_reduce(t), all_reduce(t, "max"), all_gather(t, 1), reduce_scatter(t, 2)
+        return (
+            all_reduce(t),
+            all_reduce(t, "max"),
+            all_gather(t, 1),
+            reduce_scatter(t, 2),
+            dist.all_to_all(t, 1, 2),
+            dist.broadcast(t),
+            dist.reduce(t),
+            dist.gather(t, dim=1),
+            dist.scatter(t, dim=2),
+        )
 
     for out in lumen.compile(f)(X):
         np.testing.assert_array_equal(lumen.to_numpy(out.to("cpu")), x)
     labels = [s["label"] for s in lumen.graph_compiler.Plan(lumen.make_graph(f)(X), device).steps()]
-    assert not any(c in label for label in labels for c in ("all_reduce", "all_gather", "reduce_scatter"))
+    names = ("all_reduce", "all_gather", "reduce_scatter", "all_to_all", "broadcast", "reduce", "gather", "scatter")
+    assert not any(c in label for label in labels for c in names)
 
 
 def test_collective_primitives_type_and_print():
@@ -355,6 +367,55 @@ def test_collective_primitives_type_and_print():
     assert "f32[2,3,4] = all_gather" in text and "f32[5] = reduce_scatter" in text
     with pytest.raises(ValueError, match="one row for each of the 2 processes"):
         lumen.make_graph(lambda y: prims.reduce_scatter(y, "sum", [0, 2]))(meta(3, 5))
+
+
+def test_rooted_and_point_to_point_primitives_type_and_print():
+    """``all_to_all`` keeps its operand's type (a row per process), ``gather_to`` stacks a leading axis and
+    ``scatter_from`` takes one off, ``broadcast`` and ``reduce`` keep the type, a ``send`` returns an empty
+    token and a ``recv`` its own dtype and shape; each prints its root or peer, which must be in its group."""
+    graph = lumen.make_graph(
+        lambda x, y: (
+            prims.all_to_all(y, [0, 2]),
+            prims.broadcast(x, 2, [0, 2]),
+            prims.reduce(x, "min", 0, [0, 2]),
+            prims.gather_to(x, 2, [0, 2]),
+            prims.scatter_from(y, 0, [0, 2]),
+            prims.send(x, 2, [0, 2]),
+            prims.recv([7], "int32", 2, [0, 2]),
+        )
+    )(meta(3, 4), meta(2, 5))
+    text = str(graph)
+    assert "f32[2,5] = all_to_all[ranks=(0, 2)]" in text
+    assert "f32[3,4] = broadcast[ranks=(0, 2) root=2]" in text
+    assert "f32[3,4] = reduce[op=min ranks=(0, 2) root=0]" in text
+    assert "f32[2,3,4] = gather_to[ranks=(0, 2) root=2]" in text
+    assert "f32[5] = scatter_from[ranks=(0, 2) root=0]" in text
+    assert "f32[0] = send[peer=2 ranks=(0, 2)]" in text
+    assert "i32[7] = recv[dtype=i32 peer=2 ranks=(0, 2) shape=(7,)]" in text
+    with pytest.raises(ValueError, match="root 1 is not in the group"):
+        lumen.make_graph(lambda x: prims.broadcast(x, 1, [0, 2]))(meta(3))
+    with pytest.raises(ValueError, match="peer 3 is not in the group"):
+        lumen.make_graph(lambda x: prims.send(x, 3, [0, 2]))(meta(3))
+    with pytest.raises(ValueError, match="one row for each of the 2 processes"):
+        lumen.make_graph(lambda y: prims.all_to_all(y, [0, 2]))(meta(3, 5))
+
+
+def test_a_send_runs_though_nothing_reads_it():
+    """``send`` returns nothing, yet the trace keeps it: its token is an output after the returned ones, and
+    two equal sends (or receives) stay two messages."""
+
+    def f(x):
+        """Sends ``x`` twice and receives two tensors like it, returning their sum."""
+        dist.send(x, 1, group=[0, 1])
+        dist.send(x, 1, group=[0, 1])
+        return dist.recv(x, 1, group=[0, 1]) + dist.recv(x, 1, group=[0, 1])
+
+    graph = lumen.make_graph(f)(meta(4))
+    text = str(graph)
+    assert text.count("= send[") == 2 and text.count("= recv[") == 2
+    assert len(graph.outputs()) == 3
+    labels = [s["label"] for s in lumen.graph_compiler.Plan(graph, "cpu").steps()]
+    assert [label for label in labels if label in ("send", "recv")] == ["send", "send", "recv", "recv"]
 
 
 @pytest.mark.parametrize("device", ["cpu", MPS, CUDA])
@@ -379,56 +440,86 @@ def test_collectives_overlap_the_work_independent_of_them(device):
     assert "all_reduce[op=sum ranks=(0, 1)]" in graph and "device_wait" in graph
 
 
-# Run in each process on its own GPU: every collective over the world in three dtypes, their gradients, and,
-# with 8 processes, all-reduces over a 2x4 mesh's slices.
+# Run in each process (on its own GPU for CUDA): every collective over the world in three dtypes, their
+# gradients, a ring of sends and receives, a barrier, and, with 8 processes, collectives over a 2x4 mesh's slices.
 COLLECTIVES_PROGRAM = """
-import json, os
+import json, os, time
 import numpy as np
 import lumen
+import lumen.distributed as dist
 import lumen.functional as F
-from lumen.distributed import all_gather, all_reduce, init_device_mesh, init_process_group, reduce_scatter
 
 lumen.config.compiler.cuda.use_triton_backend = True
-init_process_group()
-rank, n = int(os.environ["RANK"]), int(os.environ["WORLD_SIZE"])
-device = f"cuda:{rank}"
+dist.init_process_group()
+rank, n = dist.get_rank(), dist.get_world_size()
+device = f"cuda:{rank}" if os.environ["LUMEN_TEST_DEVICE"] == "cuda" else "cpu"
 host = lambda t: lumen.to_numpy(t.to(dtype="float32").to("cpu")).tolist()
 x = np.arange(12, dtype=np.float32).reshape(3, 4) + 100 * rank
 y = np.arange(4 * n * n, dtype=np.float32).reshape(2 * n, 2 * n) + rank
+last, c = n - 1, rank + 1
 out = {"rank": rank}
 for dtype in ("float32", "bfloat16", "int32"):
     X, Y = (lumen.from_numpy(v).to(device).to(dtype=dtype) for v in (x, y))
-    f = lambda X, Y: (all_reduce(X), all_reduce(X, "max"), all_reduce(X, "min"), all_gather(X, 0),
-                      all_gather(X, 1), reduce_scatter(Y, 0), reduce_scatter(Y, 1))
+    f = lambda X, Y: (dist.all_reduce(X), dist.all_reduce(X, "max"), dist.all_reduce(X, "min"),
+                      dist.all_gather(X, 0), dist.all_gather(X, 1), dist.reduce_scatter(Y, 0),
+                      dist.reduce_scatter(Y, 1), dist.all_to_all(Y, 0, 1), dist.all_to_all(Y, 1, 0),
+                      dist.broadcast(X, last), dist.reduce(X, last), dist.reduce(X, 0, "max"),
+                      dist.gather(X, last, 1), dist.scatter(Y, last, 1))
     out[dtype] = [host(t) for t in lumen.compile(f)(X, Y)]
 X, Y = lumen.from_numpy(x).to(device), lumen.from_numpy(y).to(device)
-grads = lumen.compile(lumen.grad(lambda X, Y: F.sum(all_reduce(X) * (rank + 1))
-                                 + F.sum(all_gather(X, 1) * (rank + 1))
-                                 + F.sum(reduce_scatter(Y, 0) * (rank + 1)), (0, 1)))(X, Y)
+grads = lumen.compile(lumen.grad(lambda X, Y: F.sum(dist.all_reduce(X) * c) + F.sum(dist.all_gather(X, 1) * c)
+                                 + F.sum(dist.reduce_scatter(Y, 0) * c), (0, 1)))(X, Y)
 out["grads"] = [host(g) for g in grads]
+grads = lumen.compile(lumen.grad(lambda X, Y: F.sum(dist.all_to_all(Y, 0, 1) * c) + F.sum(dist.broadcast(X, last) * c)
+                                 + F.sum(dist.reduce(X, 0) * c) + F.sum(dist.gather(X, last, 1) * c)
+                                 + F.sum(dist.scatter(Y, last, 1) * c), (0, 1)))(X, Y)
+out["rooted_grads"] = [host(g) for g in grads]
+
+def ring(X):
+    \"\"\"Sends X, X and 3 X to the next rank and receives the previous rank's, even ranks sending first.\"\"\"
+    sends = lambda: [dist.send(t, (rank + 1) % n) for t in (X, X, X * 3.0)]
+    recvs = lambda: [dist.recv(X, (rank - 1) % n) for _ in range(3)]
+    if rank % 2 == 0:
+        sends()
+        return recvs()
+    got = recvs()
+    sends()
+    return got
+
+out["ring"] = [host(t) for t in lumen.compile(ring)(X)]
+# Rank 0 arrives late at the barrier: every rank leaves it after rank 0 wrote its file.
+mark = os.path.join(os.environ["LUMEN_TEST_DIR"], "arrived")
+if rank == 0:
+    time.sleep(0.5)
+    open(mark, "w").close()
+dist.barrier()
+out["barrier"] = os.path.exists(mark)
+dist.barrier(list(range(n)))
 if n == 8:
-    mesh = init_device_mesh("cuda", (2, 4), mesh_dim_names=("dp", "tp"))
+    mesh = dist.init_device_mesh(device.split(":")[0], (2, 4), mesh_dim_names=("dp", "tp"))
     r = lumen.from_numpy(np.full((2,), float(rank), np.float32)).to(device)
-    g = lambda r: (all_reduce(r, group=mesh["tp"]), all_reduce(r, group=mesh["dp"]), all_reduce(r, group=mesh))
+    g = lambda r: (dist.all_reduce(r, group=mesh["tp"]), dist.all_reduce(r, group=mesh["dp"]),
+                   dist.all_reduce(r, group=mesh), dist.broadcast(r, mesh["tp"].mesh[0], group=mesh["tp"]))
     out["mesh"] = [host(t) for t in lumen.compile(g)(r)]
 print(json.dumps(out))
 """
 
 
-@pytest.mark.cuda
+@pytest.mark.parametrize("device", ["cpu", CUDA])
 @pytest.mark.parametrize("world_size", [2, 4, 8])
-def test_collectives_across_gpus_match_numpy(world_size):
-    """A process per GPU reduces, gathers and scatters each other's tensors through NCCL, in float32, bfloat16
-    and int32, along any dim; their gradients transpose into one another; with 8 processes, a 2x4 mesh's
-    slices reduce over their own ranks."""
-    gpus = "import lumen; print(lumen.cuda.device_count())"
-    count = int(
-        subprocess.run([sys.executable, "-c", gpus], capture_output=True, text=True, check=True).stdout.split()[-1]
-    )
-    if count < world_size:
-        pytest.skip(f"needs {world_size} GPUs, found {count}")
-    results = launch(COLLECTIVES_PROGRAM, world_size)
-    n = world_size
+def test_collectives_across_processes_match_numpy(device, world_size, tmp_path):
+    """A process per device (each GPU, or CPU processes over the store) reduces, gathers, scatters, exchanges
+    and broadcasts each other's tensors, in float32, bfloat16 and int32, along any dim; their gradients
+    transpose into one another; sends and receives pair in program order around a ring; a barrier holds
+    every process until the last arrives; with 8 processes, a 2x4 mesh's slices reduce over their own ranks."""
+    if device == "cuda":
+        gpus = "import lumen; print(lumen.cuda.device_count())"
+        out = subprocess.run([sys.executable, "-c", gpus], capture_output=True, text=True, check=True).stdout
+        if int(out.split()[-1]) < world_size:
+            pytest.skip(f"needs {world_size} GPUs, found {out.split()[-1]}")
+    env = {"LUMEN_TEST_DEVICE": device, "LUMEN_TEST_DIR": str(tmp_path)}
+    results = launch(COLLECTIVES_PROGRAM, world_size, lambda rank: env)
+    n, last = world_size, world_size - 1
     xs = [np.arange(12, dtype=np.float32).reshape(3, 4) + 100 * r for r in range(n)]
     ys = [np.arange(4 * n * n, dtype=np.float32).reshape(2 * n, 2 * n) + r for r in range(n)]
     total = sum(ys)
@@ -445,14 +536,36 @@ def test_collectives_across_gpus_match_numpy(world_size):
                 np.concatenate(xs, 1),
                 np.split(total, n, 0)[rank],
                 np.split(total, n, 1)[rank],
+                np.concatenate([np.split(ys[j], n, 0)[rank] for j in range(n)], 1),
+                np.concatenate([np.split(ys[j], n, 1)[rank] for j in range(n)], 0),
+                xs[last],
+                sum(xs) if rank == last else np.zeros((3, 4)),
+                np.max(xs, 0) if rank == 0 else np.zeros((3, 4)),
+                np.concatenate(xs, 1) if rank == last else np.zeros((3, 4 * n)),
+                np.split(ys[last], n, 1)[rank],
             ]
-            for g, e in zip(got, expected):
+            for g, e in zip(got, expected, strict=True):
                 np.testing.assert_allclose(g, e, rtol=rtol, atol=0, err_msg=dtype)
         scale = n * (n + 1) / 2
         gx, gy = (np.array(g) for g in r["grads"])
         np.testing.assert_array_equal(gx, np.full((3, 4), 2 * scale))
         rows = np.repeat(np.arange(1, n + 1, dtype=np.float32), 2)
         np.testing.assert_array_equal(gy, np.broadcast_to(rows[:, None], (2 * n, 2 * n)))
+        # broadcast: the root's value reached every rank; reduce: rank 0 weighs every rank's by 1; gather:
+        # the last rank weighs every rank's by n; all_to_all: rank j's row block i reached rank i; scatter:
+        # the last rank's column block j reached rank j.
+        gx, gy = (np.array(g) for g in r["rooted_grads"])
+        np.testing.assert_array_equal(gx, np.full((3, 4), (scale if rank == last else 0) + 1 + n))
+        columns = rows[None, :] if rank == last else 0
+        np.testing.assert_array_equal(gy, rows[:, None] + columns + np.zeros((2 * n, 2 * n)))
+        previous = xs[(rank - 1) % n]
+        assert r["ring"] == [previous.tolist(), previous.tolist(), (3 * previous).tolist()]
+        assert r["barrier"]
         if n == 8:
             dp, tp = divmod(rank, 4)
-            assert r["mesh"] == [[float(sum(range(4 * dp, 4 * dp + 4)))] * 2, [float(tp + tp + 4)] * 2, [28.0] * 2]
+            assert r["mesh"] == [
+                [float(sum(range(4 * dp, 4 * dp + 4)))] * 2,
+                [float(tp + tp + 4)] * 2,
+                [28.0] * 2,
+                [float(4 * dp)] * 2,
+            ]

@@ -285,8 +285,7 @@ pub(crate) fn encode(
     if let Concatenate { .. } = step.primitive {
         return Err("concatenate runs in a fusion on MPS: compile with fuse".into());
     }
-    if let AllReduce { .. } | AllGather { .. } | ReduceScatter { .. } | DeviceWait = step.primitive
-    {
+    if step.primitive.is_collective() || matches!(step.primitive, DeviceWait) {
         return Err(format!(
             "{}: collectives across processes run on CUDA (NCCL); an MPS mesh is one process",
             step.label
@@ -320,7 +319,17 @@ pub(crate) fn encode(
         ReduceSum { .. } | ReduceMax { .. } | Cumsum { .. } | Concatenate { .. } => {
             unreachable!("encoded above")
         }
-        AllReduce { .. } | AllGather { .. } | ReduceScatter { .. } | DeviceWait => {
+        AllReduce { .. }
+        | AllGather { .. }
+        | ReduceScatter { .. }
+        | AllToAll { .. }
+        | Broadcast { .. }
+        | Reduce { .. }
+        | GatherTo { .. }
+        | ScatterFrom { .. }
+        | Send { .. }
+        | Recv { .. }
+        | DeviceWait => {
             unreachable!("rejected above")
         }
         DotGeneral { .. } => crate::codegen::dot_general::mps::encode,

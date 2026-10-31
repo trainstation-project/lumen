@@ -10,7 +10,8 @@ use crate::graph_compiler::pass::{CompilerPass, Module};
 type Seen = HashMap<(&'static str, Vec<Var>), Vec<(Primitive, Var)>>;
 
 /// Rebuilds `graph` with duplicate nodes (same primitive and inputs, commutative inputs in any order)
-/// merged into one. Custom calls are never merged since they have side effects.
+/// merged into one. Custom calls are never merged since they have side effects, nor sends and receives,
+/// each of which is its own message.
 pub(crate) fn cse(graph: &Graph) -> Graph {
     let mut out = Graph::new();
     let mut map: Vec<Var> = vec![0; graph.types.len()];
@@ -25,7 +26,9 @@ pub(crate) fn cse(graph: &Graph) -> Graph {
         out.set_origin(node);
         let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
 
-        if let Primitive::CustomCall { .. } = node.primitive {
+        if matches!(node.primitive, Primitive::CustomCall { .. })
+            || node.primitive.is_point_to_point()
+        {
             map[node.output] = out
                 .apply(node.primitive.clone(), &inputs)
                 .expect("the node's own operands");

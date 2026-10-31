@@ -24,6 +24,13 @@ pub(crate) mod ffi {
         pub fn cudaEventSynchronize(event: *mut c_void) -> i32;
         pub fn cudaEventElapsedTime(ms: *mut f32, start: *mut c_void, end: *mut c_void) -> i32;
 
+        pub fn cudaMemsetAsync(
+            ptr: *mut c_void,
+            value: i32,
+            bytes: usize,
+            stream: *mut c_void,
+        ) -> i32;
+
         pub fn cudaLaunchHostFunc(
             stream: *mut c_void,
             host: extern "C" fn(*mut c_void),

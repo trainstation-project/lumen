@@ -92,6 +92,36 @@ pub(crate) fn primitive(name: &str, params: &Bound<'_, PyDict>) -> PyResult<Prim
             op: reduction(&get("op")?.extract::<String>()?)?,
             ranks: dims("ranks")?,
         },
+        "all_to_all" => AllToAll {
+            ranks: dims("ranks")?,
+        },
+        "broadcast" => Broadcast {
+            root: get("root")?.extract()?,
+            ranks: dims("ranks")?,
+        },
+        "reduce" => Reduce {
+            op: reduction(&get("op")?.extract::<String>()?)?,
+            root: get("root")?.extract()?,
+            ranks: dims("ranks")?,
+        },
+        "gather_to" => GatherTo {
+            root: get("root")?.extract()?,
+            ranks: dims("ranks")?,
+        },
+        "scatter_from" => ScatterFrom {
+            root: get("root")?.extract()?,
+            ranks: dims("ranks")?,
+        },
+        "send" => Send {
+            peer: get("peer")?.extract()?,
+            ranks: dims("ranks")?,
+        },
+        "recv" => Recv {
+            peer: get("peer")?.extract()?,
+            ranks: dims("ranks")?,
+            dtype: dtype("dtype")?,
+            shape: dims("shape")?,
+        },
         "to_host" => ToHost,
         "to_device" => ToDevice,
         "reshape" => Reshape {
@@ -427,7 +457,31 @@ fn params_of<'py>(py: Python<'py>, p: &Primitive) -> PyResult<Bound<'py, PyDict>
             d.set_item("op", op.name())?;
             d.set_item("ranks", ranks.clone())?;
         }
-        AllGather { ranks } => d.set_item("ranks", ranks.clone())?,
+        AllGather { ranks } | AllToAll { ranks } => d.set_item("ranks", ranks.clone())?,
+        Broadcast { root, ranks } | GatherTo { root, ranks } | ScatterFrom { root, ranks } => {
+            d.set_item("root", root)?;
+            d.set_item("ranks", ranks.clone())?;
+        }
+        Reduce { op, root, ranks } => {
+            d.set_item("op", op.name())?;
+            d.set_item("root", root)?;
+            d.set_item("ranks", ranks.clone())?;
+        }
+        Send { peer, ranks } => {
+            d.set_item("peer", peer)?;
+            d.set_item("ranks", ranks.clone())?;
+        }
+        Recv {
+            peer,
+            ranks,
+            dtype: t,
+            shape,
+        } => {
+            d.set_item("peer", peer)?;
+            d.set_item("ranks", ranks.clone())?;
+            d.set_item("dtype", dtype(t))?;
+            d.set_item("shape", shape.clone())?;
+        }
         CustomCall {
             label,
             kernel,

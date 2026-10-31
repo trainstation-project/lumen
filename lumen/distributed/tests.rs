@@ -1,4 +1,4 @@
-//! Unit tests for `DeviceMesh`, mesh backends, TPU slice env and the TCP store.
+//! Unit tests for `DeviceMesh`, mesh backends, TPU slice env, the TCP store and the provided collectives.
 use super::DeviceMesh;
 
 /// Converts string slices to owned dimension names.
@@ -196,6 +196,21 @@ mod store {
         assert_eq!(master.get("key").unwrap(), b"");
     }
 
+    /// `delete_key` removes a key for every client and reports whether it existed.
+    #[test]
+    #[cfg_attr(miri, ignore = "sockets, which Miri isolates")]
+    fn delete_key_removes_the_key() {
+        let master = master();
+        let client = client(&master);
+        master.set("key", b"value").unwrap();
+        assert_eq!(client.delete_key("key"), Ok(true));
+        assert_eq!(master.delete_key("key"), Ok(false));
+        let err = client
+            .wait(&["key"], Duration::from_millis(20))
+            .unwrap_err();
+        assert!(err.contains("timed out"), "{err}");
+    }
+
     /// `get` blocks until another client sets the key.
     #[test]
     #[cfg_attr(miri, ignore = "sockets, which Miri isolates")]
@@ -270,5 +285,194 @@ mod store {
 
         let err = TcpStore::new("127.0.0.1", port, false, Duration::from_millis(50)).err();
         assert!(err.unwrap().contains("connecting to the store"));
+    }
+}
+
+/// Tests of the collectives `Communicator` provides from sends and receives, over threads.
+mod collective {
+    use std::collections::{HashMap, VecDeque};
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::thread;
+
+    use super::super::collective::Communicator;
+    use crate::DType;
+    use crate::graph::Reduction;
+
+    /// Per (sender, receiver) position, the messages in flight in the order sent.
+    type Queues = HashMap<(usize, usize), VecDeque<Vec<u8>>>;
+
+    /// Messages in flight between the threads of a group.
+    #[derive(Default)]
+    struct Mailbox {
+        queues: Mutex<Queues>,
+        posted: Condvar,
+    }
+
+    /// A process of a group whose processes are threads sharing a `Mailbox`; sends never wait.
+    struct Thread {
+        rank: usize,
+        size: usize,
+        mailbox: Arc<Mailbox>,
+    }
+
+    impl Communicator for Thread {
+        /// This thread's position.
+        fn rank(&self) -> usize {
+            self.rank
+        }
+
+        /// The number of threads.
+        fn size(&self) -> usize {
+            self.size
+        }
+
+        /// Queues the bytes for `peer`.
+        unsafe fn send(
+            &self,
+            send: *const u8,
+            count: usize,
+            dtype: DType,
+            peer: usize,
+        ) -> Result<(), String> {
+            let bytes =
+                unsafe { std::slice::from_raw_parts(send, count * dtype.size_of()) }.to_vec();
+            let mut queues = self.mailbox.queues.lock().unwrap();
+            queues
+                .entry((self.rank, peer))
+                .or_default()
+                .push_back(bytes);
+            self.mailbox.posted.notify_all();
+            Ok(())
+        }
+
+        /// Waits for the next message from `peer` and copies it into `recv`.
+        unsafe fn recv(
+            &self,
+            recv: *mut u8,
+            count: usize,
+            dtype: DType,
+            peer: usize,
+        ) -> Result<(), String> {
+            let mut queues = self.mailbox.queues.lock().unwrap();
+            loop {
+                if let Some(bytes) = queues
+                    .get_mut(&(peer, self.rank))
+                    .and_then(VecDeque::pop_front)
+                {
+                    assert_eq!(bytes.len(), count * dtype.size_of());
+                    unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), recv, bytes.len()) };
+                    return Ok(());
+                }
+                queues = self.mailbox.posted.wait(queues).unwrap();
+            }
+        }
+
+        /// Writes zero bytes.
+        unsafe fn zero(&self, recv: *mut u8, count: usize, dtype: DType) -> Result<(), String> {
+            unsafe { std::ptr::write_bytes(recv, 0, count * dtype.size_of()) };
+            Ok(())
+        }
+
+        /// Not exercised: only the provided collectives are tested.
+        unsafe fn all_reduce(
+            &self,
+            _: *const u8,
+            _: *mut u8,
+            _: usize,
+            _: DType,
+            _: Reduction,
+        ) -> Result<(), String> {
+            unreachable!()
+        }
+
+        /// Not exercised: only the provided collectives are tested.
+        unsafe fn reduce(
+            &self,
+            _: *const u8,
+            _: *mut u8,
+            _: usize,
+            _: DType,
+            _: Reduction,
+            _: usize,
+        ) -> Result<(), String> {
+            unreachable!()
+        }
+
+        /// Not exercised: only the provided collectives are tested.
+        unsafe fn reduce_scatter(
+            &self,
+            _: *const u8,
+            _: *mut u8,
+            _: usize,
+            _: DType,
+            _: Reduction,
+        ) -> Result<(), String> {
+            unreachable!()
+        }
+    }
+
+    /// Runs `body` on a thread per process of a group of `size`, each holding the values `10 * rank + i` for
+    /// `i` in `0..6`, and returns each one's 6 result values.
+    fn on_threads(size: usize, body: fn(&Thread, &[i32], &mut [i32])) -> Vec<Vec<i32>> {
+        let mailbox = Arc::new(Mailbox::default());
+        let threads: Vec<_> = (0..size)
+            .map(|rank| {
+                let mailbox = mailbox.clone();
+                thread::spawn(move || {
+                    let comm = Thread {
+                        rank,
+                        size,
+                        mailbox,
+                    };
+                    let send: Vec<i32> = (0..6).map(|i| 10 * rank as i32 + i).collect();
+                    let mut recv = vec![-1; 6];
+                    body(&comm, &send, &mut recv);
+                    recv
+                })
+            })
+            .collect();
+        threads.into_iter().map(|t| t.join().unwrap()).collect()
+    }
+
+    /// Pointers to `send` and `recv` as the communicator takes them.
+    fn raw(send: &[i32], recv: &mut [i32]) -> (*const u8, *mut u8) {
+        (send.as_ptr().cast(), recv.as_mut_ptr().cast())
+    }
+
+    /// Gathers, all-to-alls, broadcasts and scatters built from sends and receives place each block where
+    /// its definition says, over three processes of 2-element blocks.
+    #[test]
+    fn provided_collectives_move_blocks_where_they_belong() {
+        let gathered = on_threads(3, |c, s, r| unsafe {
+            let (s, r) = raw(s, r);
+            c.all_gather(s, r, 2, DType::I32).unwrap()
+        });
+        assert!(gathered.iter().all(|r| r == &[0, 1, 10, 11, 20, 21]));
+        let exchanged = on_threads(3, |c, s, r| unsafe {
+            let (s, r) = raw(s, r);
+            c.all_to_all(s, r, 2, DType::I32).unwrap()
+        });
+        assert_eq!(exchanged[1], [2, 3, 12, 13, 22, 23]);
+        let broadcast = on_threads(3, |c, s, r| unsafe {
+            let (s, r) = raw(s, r);
+            c.broadcast(s, r, 6, DType::I32, 2).unwrap()
+        });
+        assert!(broadcast.iter().all(|r| r == &[20, 21, 22, 23, 24, 25]));
+        let gathered = on_threads(3, |c, s, r| unsafe {
+            let (s, r) = raw(s, r);
+            c.gather(s, r, 2, DType::I32, 1).unwrap()
+        });
+        assert_eq!(
+            gathered,
+            [vec![0; 6], vec![0, 1, 10, 11, 20, 21], vec![0; 6]]
+        );
+        let scattered = on_threads(3, |c, s, r| unsafe {
+            let (s, r) = raw(s, r);
+            c.scatter(s, r, 2, DType::I32, 0).unwrap()
+        });
+        assert_eq!(
+            scattered.iter().map(|r| &r[..2]).collect::<Vec<_>>(),
+            [[0, 1], [2, 3], [4, 5]]
+        );
     }
 }

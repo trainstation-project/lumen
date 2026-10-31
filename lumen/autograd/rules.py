@@ -120,11 +120,49 @@ def _reduce_scatter_transpose(ct, x, op, ranks):
     return [prims.device_wait(prims.all_gather(ct, ranks))]
 
 
+def _all_to_all_transpose(ct, x, ranks):
+    """The cotangent's rows sent back to the processes they came from: an all-to-all is its own inverse."""
+    return [prims.device_wait(prims.all_to_all(ct, ranks))]
+
+
+def _broadcast_transpose(ct, x, root, ranks):
+    """Every process's cotangent summed into ``root``'s, whose value reached them all; zeros elsewhere."""
+    return [prims.device_wait(prims.reduce(ct, "sum", root, ranks))]
+
+
+def _reduce_jvp(primals, tangents, out, op, root, ranks):
+    """The tangents summed into ``root``, as the values are."""
+    _summed("reduce", op)
+    return None if tangents[0] is None else prims.device_wait(prims.reduce(tangents[0], op, root, ranks))
+
+
+def _reduce_transpose(ct, x, op, root, ranks):
+    """``root``'s cotangent, given to every process, whose value reached ``root``'s sum."""
+    _summed("reduce", op)
+    return [prims.device_wait(prims.broadcast(ct, root, ranks))]
+
+
+def _gather_to_transpose(ct, x, root, ranks):
+    """Row ``r`` of ``root``'s cotangent for the process at position ``r``, whose value it gathered."""
+    return [prims.device_wait(prims.scatter_from(ct, root, ranks))]
+
+
+def _scatter_from_transpose(ct, x, root, ranks):
+    """Every process's cotangent stacked on ``root``, whose rows they received; zeros elsewhere."""
+    return [prims.device_wait(prims.gather_to(ct, root, ranks))]
+
+
 primitive_jvps[prims.all_reduce] = _all_reduce_jvp
 primitive_transposes[prims.all_reduce] = _all_reduce_transpose
 deflinear(prims.all_gather, _all_gather_transpose)
 primitive_jvps[prims.reduce_scatter] = _reduce_scatter_jvp
 primitive_transposes[prims.reduce_scatter] = _reduce_scatter_transpose
+deflinear(prims.all_to_all, _all_to_all_transpose)
+deflinear(prims.broadcast, _broadcast_transpose)
+primitive_jvps[prims.reduce] = _reduce_jvp
+primitive_transposes[prims.reduce] = _reduce_transpose
+deflinear(prims.gather_to, _gather_to_transpose)
+deflinear(prims.scatter_from, _scatter_from_transpose)
 
 
 def _cumsum_transpose(ct, x, axis, reverse, accum_dtype):
