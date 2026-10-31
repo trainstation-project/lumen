@@ -7,7 +7,7 @@ use crate::graph_compiler::pass::CompilerPass;
 /// Whether every input of `concat` can be produced in place in its output buffer.
 ///
 /// Requires concatenation on the last axis, lane-aligned input widths, inputs used only once by the
-/// concat and made by a dot, loop fusion, fill, scalar broadcast or elementwise op.
+/// concat and made by a dot, elementwise fusion, fill, scalar broadcast or elementwise op.
 pub(super) fn placeable(
     graph: &Graph,
     producer: &[Option<usize>],
@@ -23,7 +23,7 @@ pub(super) fn placeable(
     // Producers whose kernels can write a strided slice of the shared buffer.
     let writes = |p: &Primitive| match p {
         Primitive::DotGeneral { .. } | Primitive::Full { .. } => true,
-        Primitive::Fusion { name, .. } => name == "dot_general" || name == "loop",
+        Primitive::Fusion { name, .. } => name == "dot_general" || name == "elementwise",
         Primitive::BroadcastInDim {
             broadcast_dimensions,
             ..

@@ -1,4 +1,4 @@
-"""Triton tiled transpose kernel: the fixed tile grid of a loop computed from transposes, its work a
+"""Triton tiled transpose kernel: the fixed tile grid of an elementwise fusion computed from transposes, its work a
 generated ``BODY``.
 
 ``BODY(EXTRA, BLOCK_ID_Z, BLOCK_A, BLOCK_B, MASK)`` computes and stores the outputs on the tile of rows
@@ -21,7 +21,7 @@ def transpose_kernel(
     BLOCK_SIZE: tl.constexpr,
 ):
     """One ``TILE`` x ``TILE`` tile of an ``A`` x ``B`` output a program, the tiles of a batch
-    consecutive, along ``B`` first; ``BLOCK_SIZE`` (a loop launch's) goes unread."""
+    consecutive, along ``B`` first; ``BLOCK_SIZE`` (an elementwise launch's) goes unread."""
     NUM_BLOCKS_A = (A + TILE - 1) // TILE
     NUM_BLOCKS_B = (B + TILE - 1) // TILE
 

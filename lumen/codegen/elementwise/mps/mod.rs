@@ -1,4 +1,4 @@
-//! Metal loop kernels: every output of a loop fusion computed elementwise, by a generated body functor the
+//! Metal elementwise kernels: every output of an elementwise fusion, by a generated body functor the
 //! fixed `elementwise` loop (`elementwise.metal`) runs.
 
 mod config;
@@ -15,7 +15,7 @@ use crate::codegen::mps::*;
 use crate::graph::Graph;
 use crate::graph_compiler::common::horizontal::segments;
 
-/// Metal loops: one kernel a fusion running the fixed `elementwise` loop (`elementwise.metal`) over a
+/// Metal elementwise fusions: one kernel a fusion running the fixed `elementwise` loop (`elementwise.metal`) over a
 /// generated body functor a grid segment, its outputs stored through their views and its elements split
 /// across threads by `Tuning`.
 impl ElementwiseCodegen for Mps {
@@ -23,7 +23,7 @@ impl ElementwiseCodegen for Mps {
     type Code = (String, String);
     type Schedule = Tuning;
 
-    /// Generates a loop kernel computing every body output elementwise under `tuning`: a functor
+    /// Generates an elementwise kernel computing every body output elementwise under `tuning`: a functor
     /// `NAME_body{s}` per grid segment holds the kernel's buffers and computes and stores the segment's
     /// outputs at element `j`, and the fixed `elementwise` template runs it on thread `THREAD_ID`'s
     /// `ELEMENTS_PER_THREAD` (`per_thread`) elements, contiguous or `NUM_THREADS` apart. Outputs of
@@ -35,7 +35,7 @@ impl ElementwiseCodegen for Mps {
         views: &HashMap<usize, (usize, Vec<usize>)>,
         tuning: &Tuning,
     ) -> Result<(String, String), String> {
-        let Tuning::Loop {
+        let Tuning::Elementwise {
             per_thread,
             group,
             contiguous,

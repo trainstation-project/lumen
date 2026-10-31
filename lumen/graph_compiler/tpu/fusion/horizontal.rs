@@ -1,21 +1,21 @@
-//! Horizontal fusion of independent same-shape `loop` fusions into one kernel launch.
+//! Horizontal fusion of independent same-shape `elementwise` fusions into one kernel launch.
 use super::super::TpuModule;
 use crate::codegen::utils::tpu::fusible;
 use crate::graph::{Graph, Node, Primitive};
 use crate::graph_compiler::common::horizontal::{Target, fuse};
 use crate::graph_compiler::pass::CompilerPass;
 
-/// Largest output, in elements, of a loop fusion eligible for horizontal fusion.
+/// Largest output, in elements, of an elementwise fusion eligible for horizontal fusion.
 const MAX_ELEMENTS: usize = 1 << 20;
 
 /// Most buffers one horizontally fused kernel may read and write.
 const MAX_STREAMS: usize = 32;
 
-/// Horizontal fusion target that merges small TPU `loop` fusions sharing an output shape.
-struct Loops;
+/// Horizontal fusion target that merges small TPU `elementwise` fusions sharing an output shape.
+struct Elementwise;
 
-impl Target for Loops {
-    /// Accepts non-scalar, small, fully fusible `loop` fusions not written in place into a concat.
+impl Target for Elementwise {
+    /// Accepts non-scalar, small, fully fusible `elementwise` fusions not written in place into a concat.
     fn candidate(&self, graph: &Graph, node: &Node) -> bool {
         let ty = graph.type_of(node.output);
 
@@ -28,7 +28,7 @@ impl Target for Loops {
                 && n.inputs.contains(&node.output)
         });
 
-        name == "loop"
+        name == "elementwise"
             && !ty.shape.is_empty()
             && ty.numel() <= MAX_ELEMENTS
             && body.nodes().iter().all(|n| fusible(&n.primitive))
@@ -50,13 +50,13 @@ impl Target for Loops {
         true
     }
 
-    /// Names the merged kernel `loop`.
+    /// Names the merged kernel `elementwise`.
     fn kernel(&mut self, _: &Graph, _: &[bool]) -> String {
-        "loop".into()
+        "elementwise".into()
     }
 }
 
-/// Merges independent small `loop` fusions with the same output shape.
+/// Merges independent small `elementwise` fusions with the same output shape.
 pub(in crate::graph_compiler::tpu) struct HorizontalFusion;
 
 impl CompilerPass<TpuModule<'_>> for HorizontalFusion {
@@ -65,7 +65,7 @@ impl CompilerPass<TpuModule<'_>> for HorizontalFusion {
     }
 
     fn apply(&mut self, m: &mut TpuModule<'_>) -> Result<(), String> {
-        m.graph = fuse(&m.graph, &[], &mut Loops);
+        m.graph = fuse(&m.graph, &[], &mut Elementwise);
         Ok(())
     }
 }

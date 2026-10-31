@@ -732,7 +732,7 @@ impl<'a> Emit<'a> for Emitter<'a> {
                             None => constant(ty.dtype, Scalar::Int(0)),
                         }
                     }
-                    p => unreachable!("{p} is not loop-fusible"),
+                    p => unreachable!("{p} is not fusible"),
                 }
             }
         };

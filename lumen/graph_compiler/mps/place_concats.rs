@@ -106,7 +106,7 @@ pub(super) fn in_place_concats(
 
                         writes.then_some(true)
                     }
-                    (Some(Kernel::Loop(_)), Primitive::Fusion { body, .. }) => {
+                    (Some(Kernel::Fusion(_)), Primitive::Fusion { body, .. }) => {
                         codegen::writes_views(body).then_some(false)
                     }
                     (None, p) if before_fusion => {

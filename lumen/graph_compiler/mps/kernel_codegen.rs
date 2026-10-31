@@ -24,7 +24,7 @@ impl<'a> CompilerPass<MpsModule<'a>> for Codegen {
     /// with the strided output views it writes into.
     fn apply(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
         let config = &m.options.config.mps;
-        // Concatenations no longer valid in place get copied by their own loop kernel.
+        // Concatenations no longer valid in place get copied by their own elementwise kernel.
         let valid = in_place_concats(&m.graph, &m.kernels, false);
         let mut unmarked = false;
 
@@ -52,7 +52,7 @@ impl<'a> CompilerPass<MpsModule<'a>> for Codegen {
             };
 
             m.graph = wrapped(&m.graph, &[], concatenate, |_, _| {
-                request(kernels, Kernel::Loop(Vec::new()))
+                request(kernels, Kernel::Fusion(Vec::new()))
             });
         }
 
@@ -97,7 +97,7 @@ impl<'a> CompilerPass<MpsModule<'a>> for Codegen {
             let k: usize = k.parse().expect("a requested kernel's index");
 
             let (kernel, source) = match &m.kernels[k] {
-                Kernel::Loop(by_value) => {
+                Kernel::Fusion(by_value) => {
                     let views = views.remove(&output).unwrap_or_default();
                     let (kernel, source) = codegen::kernel(body, by_value, config, &views, None);
 

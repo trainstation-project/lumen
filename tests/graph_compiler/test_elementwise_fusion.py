@@ -1,4 +1,4 @@
-"""Tests of loop and reduction fusion on every device: loops, reductions and their prologues and epilogues against the CPU."""
+"""Tests of elementwise and reduction fusion on every device: elementwise fusions, reductions and their prologues and epilogues against the CPU."""
 
 import numpy as np
 import pytest
@@ -12,8 +12,8 @@ from lumen.profiler import ProfilerActivity, profile
 
 @pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
-def test_loops_match_the_cpu(device, dtype, triton_on_cuda):
-    """Each loop fusion (elementwise ops, broadcasts, transposes, slices,
+def test_elementwise_fusions_match_the_cpu(device, dtype, triton_on_cuda):
+    """Each elementwise fusion (elementwise ops, broadcasts, transposes, slices,
     iota and constants) is one generated kernel computing what the CPU
     does; bfloat16's functions are float32's, cast as the program asks."""
     a, b = rand(48, 80), rand(80, 48, seed=1)
@@ -82,7 +82,7 @@ def agrees(device, f, arrays, tol):
     ],
 )
 def test_transposes_tiled_with_their_elementwise_ops_match_the_cpu(device, f, shapes, triton_on_cuda):
-    """A loop computing elementwise ops of transposes runs one tile of the
+    """An elementwise fusion of transposes runs one tile of the
     output a program, reading each transposed input along its contiguous
     dims and writing along the output's; it computes what the CPU does."""
     arrays = [rand(*s, seed=k) for k, s in enumerate(shapes)]
@@ -139,7 +139,7 @@ def test_long_reductions_split_and_match_the_cpu(device, shape, axes, triton_on_
 def test_reductions_fuse_their_prologue_and_epilogue(device, triton_on_cuda):
     """The elementwise ops feeding a reduction and those applied to its
     result run in the reduction's kernel: one step, the CPU's value. An
-    epilogue reads only the reduction and constants (MPS's loop fusion,
+    epilogue reads only the reduction and constants (MPS's fusion,
     Triton's too), so one adding another tensor runs as a step of its own."""
     a, b = rand(64, 96), rand(96, seed=1)
     fns = [
@@ -157,7 +157,7 @@ def test_reductions_fuse_their_prologue_and_epilogue(device, triton_on_cuda):
 
 @pytest.mark.parametrize("device", [MPS, CUDA])
 def test_softmax_and_rms_norm_match_the_cpu(device, triton_on_cuda):
-    """Softmax, log-softmax and RMS norm, traced as reductions and loops,
+    """Softmax, log-softmax and RMS norm, traced as reductions and elementwise fusions,
     run as the CPU computes them."""
     x, w = rand(33, 1000), rand(1000, seed=1)
     agrees(device, lambda v: F.softmax(v, -1), [x], 1e-6)
@@ -205,12 +205,12 @@ def test_split_reduction_converts_its_input_once():
 
 
 @pytest.mark.parametrize("device", [MPS, CUDA])
-def test_values_read_outside_a_loop_are_its_extra_outputs(device, triton_on_cuda):
-    """A loop's value that is also returned is written by the loop reading
+def test_values_read_outside_an_elementwise_fusion_are_its_extra_outputs(device, triton_on_cuda):
+    """A fusion's value that is also returned is written by the fusion reading
     it, as an extra output (``multi_output_fusion``): one step, each value
-    as with the flag off, where it is a step of its own. A value two loops
+    as with the flag off, where it is a step of its own. A value two fusions
     read is recomputed in each and both run as one horizontal kernel (MPS's
-    loop fusion, Triton's too)."""
+    fusion, Triton's too)."""
     compiler = getattr(lumen.config.compiler, device)
     a, b = rand(64, 32), rand(32, seed=1)
     try:
@@ -219,12 +219,12 @@ def test_values_read_outside_a_loop_are_its_extra_outputs(device, triton_on_cuda
         pytest.skip(str(e))
 
     def returned(x, y):
-        """`exp(x) * 3`, returned and read by a loop."""
+        """`exp(x) * 3`, returned and read by an elementwise fusion."""
         v = F.exp(x) * 3.0
         return v, v * 2.0 + 1.0
 
     def shared(x, y):
-        """`exp(x) * 3` read by two loops."""
+        """`exp(x) * 3` read by two elementwise fusions."""
         v = F.exp(x) * 3.0
         return v * 2.0, F.tanh(v) + y
 

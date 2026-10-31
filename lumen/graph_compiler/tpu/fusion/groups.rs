@@ -1,9 +1,9 @@
-//! Plans which nodes fuse together into TPU `loop` and `reduction` kernels.
+//! Plans which nodes fuse together into TPU `elementwise` and `reduction` kernels.
 use crate::codegen::elementwise::tpu::grid::{layout, plan};
 use crate::codegen::reduction::tpu::reducible;
 use crate::codegen::utils::tpu::fusible;
 use crate::graph::{Graph, Primitive};
-use crate::graph_compiler::common::loops::{body, members};
+use crate::graph_compiler::common::elementwise::{body, members};
 
 /// How a node may join the fusion group of its readers.
 #[derive(Clone, Copy, PartialEq)]
@@ -93,7 +93,7 @@ fn groups(graph: &Graph, join: &[Join]) -> Groups {
     Groups { group, reduces }
 }
 
-/// Groups nodes, splitting off layout ops until every loop group's indexing can be planned.
+/// Groups nodes, splitting off layout ops until every elementwise group's indexing can be planned.
 pub(super) fn planned(graph: &Graph) -> Groups {
     let mut join = vec![Join::Any; graph.nodes().len()];
 

@@ -1,4 +1,4 @@
-//! Triton loop launch configs: the autotuning candidates and default of the elementwise loops, which the
+//! Triton loop launch configs: the autotuning candidates and default of the elementwise kernels, which the
 //! other kernels looping over a flat range or a row (row, reduction, scan and the in-place updates) launch
 //! with too.
 

@@ -1,4 +1,4 @@
-//! Triton loop fusion: the shared loop fusion (`common::fusion`, as MPS runs it) with the Triton
+//! Triton fusion: the shared fusion (`common::fusion`, as MPS runs it) with the Triton
 //! kernels' limits and shapes, and which nodes left outside any fusion need one-node kernels.
 
 use super::TritonModule;
@@ -17,10 +17,16 @@ const DOT_ROW: &str = "dot_row";
 /// Name of a normalization row fusion.
 const ROW: &str = "row";
 
-/// Name of every other fusion: an elementwise loop, a reduction and its epilogue, a GEMM and its epilogue.
-const LOOP: &str = "loop";
+/// Name of a GEMM fusion with its epilogue.
+const DOT_GENERAL: &str = "dot_general";
 
-/// The shared loop fusion's view of Triton: kernels take any number of tensors, a GEMM epilogue
+/// Name of a reduction fusion with its prologue and epilogue.
+const REDUCTION: &str = "reduction";
+
+/// Name of an elementwise fusion.
+const ELEMENTWISE: &str = "elementwise";
+
+/// The shared fusion's view of Triton: kernels take any number of tensors, a GEMM epilogue
 /// writes at most 4 extra outputs and its two results into a concatenation's slots (as on MPS), and
 /// a GEMM joins the row reading it when one tile holds whole rows (`dot_row_fits`).
 fn backend(m: &TritonModule<'_>) -> Backend {
@@ -38,27 +44,29 @@ fn backend(m: &TritonModule<'_>) -> Backend {
     }
 }
 
-/// The name Triton's runner dispatches a fused `body` on, by its kind as MPS's codegen reads it
-/// (`codegen::kinds`): a GEMM and the row reading it, a normalization row, or a loop (an elementwise
-/// loop, a reduction with its epilogue, a GEMM with its epilogue).
+/// The name of a fused `body`, by its kind as MPS's codegen reads it (`codegen::kinds`): a GEMM and the
+/// row reading it, a normalization row, a GEMM with its epilogue, a reduction with its prologue and
+/// epilogue, or an elementwise fusion.
 fn named(body: &Graph) -> String {
     let row = !row_reductions(body).is_empty();
 
     match (codegen::gemm_dot(body).is_some(), row) {
         (true, true) => DOT_ROW,
         (false, true) => ROW,
-        _ => LOOP,
+        (true, false) => DOT_GENERAL,
+        _ if codegen::reduction_root(body).is_some() => REDUCTION,
+        _ => ELEMENTWISE,
     }
     .into()
 }
 
-/// Compiler pass running the shared loop fusion for Triton.
-pub(super) struct LoopFusion;
+/// Compiler pass running the shared fusion for Triton.
+pub(super) struct Fusion;
 
-impl CompilerPass<TritonModule<'_>> for LoopFusion {
+impl CompilerPass<TritonModule<'_>> for Fusion {
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
-        "loop_fusion"
+        "fusion"
     }
 
     /// Fuses the graph around the normalization rows the diamonds pass found.

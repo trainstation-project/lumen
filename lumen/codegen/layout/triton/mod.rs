@@ -1,13 +1,13 @@
 //! Triton layout: transposes fused with elementwise ops, a tile of the output a program so both the reads
 //! and the writes are coalesced, as the `BODY` of the fixed `transpose_kernel` (`__init__.py`); reshapes
-//! are views the elementwise loops read through.
+//! are views the elementwise kernels read through.
 
 use super::{LayoutCodegen, transpose_tiling};
 use crate::codegen::triton::{Emit, Emitter, Tensors, Triton, body_function, gather_index};
 use crate::graph::{Graph, Primitive, TensorType};
 use crate::tensor::contiguous_strides;
 
-/// Triton layout: a tiled transpose kernel; reshapes are views folded into the elementwise loops.
+/// Triton layout: a tiled transpose kernel; reshapes are views folded into the elementwise kernels.
 impl LayoutCodegen for Triton {
     /// The `BODY` function's name and Python source.
     type Code = (String, String);
@@ -92,10 +92,10 @@ impl LayoutCodegen for Triton {
         ))
     }
 
-    /// None: a reshape is a view the elementwise loops read through.
+    /// None: a reshape is a view the elementwise kernels read through.
     fn reshape(from: &TensorType, to: &TensorType) -> Result<(String, String), String> {
         Err(format!(
-            "a reshape of {from} to {to} on Triton is a view the elementwise loops read through"
+            "a reshape of {from} to {to} on Triton is a view the elementwise kernels read through"
         ))
     }
 }

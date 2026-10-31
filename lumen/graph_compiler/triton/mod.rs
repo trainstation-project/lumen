@@ -23,7 +23,7 @@ use attention::Tiles;
 #[cfg(feature = "python")]
 pub(crate) use attention::{Launch, set_attention};
 use diamonds::Diamonds;
-use fusion::{LoopFusion, PlaceViews};
+use fusion::{Fusion, PlaceViews};
 #[cfg(feature = "python")]
 pub(crate) use gemm::{Epilogue, set_gemm};
 use horizontal::HorizontalFusion;
@@ -234,7 +234,7 @@ struct TritonModule<'a> {
     packed: Packs,
     /// Interleaved region sizes of each packed block.
     interleaved: Vec<Vec<usize>>,
-    /// Normalization rows the diamonds pass found, consumed by loop fusion.
+    /// Normalization rows the diamonds pass found, consumed by fusion.
     rows: Vec<Row>,
 }
 
@@ -306,14 +306,14 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
         pipeline.add(ClampIndices);
     }
 
-    // Batched inner products (attention backward's delta, read through transposes) run as loops.
+    // Batched inner products (attention backward's delta, read through transposes) run as elementwise fusions.
     pipeline.add(Simplify { matched: true }).add(DotStrength);
 
     if config.split_k {
         pipeline.add(SplitK);
     }
 
-    // As on MPS: update chains, normalization rows, in-place concatenations, then loop fusion.
+    // As on MPS: update chains, normalization rows, in-place concatenations, then fusion.
     pipeline.add(Updates {
         least: 2,
         most: usize::MAX,
@@ -324,7 +324,7 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
     }
 
     pipeline.add(PlaceConcats);
-    pipeline.add(LoopFusion);
+    pipeline.add(Fusion);
 
     // Rows too wide for one GEMM tile: the GEMM feeding them writes their reductions' partials too.
     if config.normalization_diamonds {
@@ -408,7 +408,7 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
 
                 (r.name, r.source, r.lanes, r.splits)
             }
-            // A loop runs in a template kernel, its `BODY` generated with its tensors' layouts at launch.
+            // An elementwise fusion runs in a template kernel, its `BODY` generated with its tensors' layouts at launch.
             None => (
                 templated("elementwise", &body.to_string()),
                 String::new(),
@@ -449,7 +449,7 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
         _ => return None,
     };
 
-    // Only a plain loop's outputs (a horizontal fusion's) split the grid; a row's are one row each.
+    // Only an elementwise fusion's outputs (a horizontal fusion's) split the grid; a row's are one row each.
     let segments = match &step.primitive {
         Primitive::Fusion { name, body, .. }
             if name != ROW && codegen::reduction_root(body).is_none() =>
@@ -464,7 +464,7 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
         _ => segments.into_iter().map(|(numel, _)| numel).collect(),
     };
 
-    // A loop computed from transposes it can tile runs a tile of the output a program.
+    // An elementwise fusion computed from transposes it can tile runs a tile of the output a program.
     let template = match &step.primitive {
         Primitive::Fusion { name, .. } if name == UPDATES => Some(Template::DynamicUpdateSlice),
         Primitive::DynamicUpdateSlice => Some(Template::DynamicUpdateSlice),
@@ -887,7 +887,7 @@ fn loop_helpers(
         let generated = match (template, &step.primitive) {
             (Template::Elementwise, Primitive::Fusion { body, .. }) => {
                 codegen::Triton::elementwise(body, &kernel.by_value, &HashMap::new(), &layouts)
-                    .expect("a Triton loop of every elementwise body")
+                    .expect("a Triton kernel of every elementwise body")
             }
             (Template::Transpose { .. }, Primitive::Fusion { body, .. }) => {
                 codegen::Triton::transpose(body, &kernel.by_value, &layouts)
@@ -904,7 +904,7 @@ fn loop_helpers(
                 &layouts,
             )
             .expect("a Triton kernel of every dynamic_update_slice"),
-            _ => unreachable!("a templated loop's fusion"),
+            _ => unreachable!("a templated kernel's fusion"),
         };
 
         return Helpers {

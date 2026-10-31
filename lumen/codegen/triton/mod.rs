@@ -61,7 +61,7 @@ pub(crate) fn triton_type(dtype: DType) -> Option<&'static str> {
     })
 }
 
-/// Whether `node` can be emitted inside a Triton loop-fusion kernel: a supported primitive whose
+/// Whether `node` can be emitted inside a Triton fusion kernel: a supported primitive whose
 /// inputs and output all have Triton dtypes.
 pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
     use Primitive::*;

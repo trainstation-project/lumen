@@ -1,27 +1,27 @@
-//! Metal elementwise loop launch tunings: the candidates, the default, and the sizes worth autotuning.
+//! Metal elementwise kernel launch tunings: the candidates, the default, and the sizes worth autotuning.
 
 use crate::graph::Graph;
 
 /// Launch shape for a generated kernel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) enum Tuning {
-    /// Elementwise loop: each thread handles `per_thread` elements in threadgroups of `group`;
+    /// Elementwise kernel: each thread handles `per_thread` elements in threadgroups of `group`;
     /// `contiguous` gives each thread a contiguous run instead of a grid-strided one.
-    Loop {
+    Elementwise {
         per_thread: usize,
         group: usize,
         contiguous: bool,
     },
 }
 
-/// Output sizes, in elements, for which loop fusions are worth tuning.
+/// Output sizes, in elements, for which elementwise fusions are worth tuning.
 pub(crate) const TUNED_ELEMENTS: std::ops::RangeInclusive<usize> = (64 << 10)..=(16 << 20);
 /// Thread count the default tuning aims to launch.
 const GRID_THREADS: usize = 32 << 10;
 /// Threadgroup sizes tried when autotuning.
-const LOOP_GROUPS: [usize; 5] = [64, 128, 256, 512, 1024];
+const GROUPS: [usize; 5] = [64, 128, 256, 512, 1024];
 /// Default threadgroup size.
-const LOOP_GROUP: usize = 256;
+const GROUP: usize = 256;
 
 /// Most elements one thread may handle, from the per-thread byte budget and output dtype size.
 fn most_per_thread(body: &Graph) -> usize {
@@ -30,19 +30,19 @@ fn most_per_thread(body: &Graph) -> usize {
 }
 
 /// Default tuning: enough elements per thread to cap the grid near `GRID_THREADS`.
-pub(crate) fn loop_tuning(body: &Graph) -> Tuning {
+pub(crate) fn elementwise_tuning(body: &Graph) -> Tuning {
     let n = body.type_of(body.outputs()[0]).numel();
 
-    Tuning::Loop {
+    Tuning::Elementwise {
         per_thread: (n / GRID_THREADS).clamp(1, most_per_thread(body)),
-        group: LOOP_GROUP,
+        group: GROUP,
         contiguous: false,
     }
 }
 
 /// Every power-of-two per-thread count up to the cap, crossed with threadgroup sizes and
 /// (when more than one element per thread) both access orders.
-pub(crate) fn loop_tunings(body: &Graph) -> Vec<Tuning> {
+pub(crate) fn elementwise_tunings(body: &Graph) -> Vec<Tuning> {
     let most = most_per_thread(body);
     let per_threads = (0..).map(|k| 1 << k).take_while(|&p| p <= most);
 
@@ -54,7 +54,7 @@ pub(crate) fn loop_tunings(body: &Graph) -> Vec<Tuning> {
             };
 
             contiguous.iter().flat_map(move |&contiguous| {
-                LOOP_GROUPS.map(|group| Tuning::Loop {
+                GROUPS.map(|group| Tuning::Elementwise {
                     per_thread,
                     group,
                     contiguous,

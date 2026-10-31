@@ -1,4 +1,4 @@
-//! Tests of the MPS passes: loop fusion, dot merging and canonicalization, reduction and GEMM codegen,
+//! Tests of the MPS passes: fusion, dot merging and canonicalization, reduction and GEMM codegen,
 //! checked against the reference interpreter and, when a GPU is present, on device.
 
 use super::codegen::metal_type;
@@ -27,7 +27,7 @@ fn ty(dtype: DType, shape: &[usize]) -> TensorType {
     TensorType::new(dtype, shape)
 }
 
-/// Runs MPS loop fusion with default config and normalization rows on `g`.
+/// Runs MPS fusion with default config and normalization rows on `g`.
 fn fuse(g: &Graph) -> Graph {
     let config = MpsConfig::default();
 

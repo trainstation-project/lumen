@@ -1,4 +1,4 @@
-//! Triton loop kernels: every output of a loop fusion computed elementwise, as the `BODY` of the fixed
+//! Triton elementwise kernels: every output of an elementwise fusion, as the `BODY` of the fixed
 //! `elementwise_kernel` (`__init__.py`).
 
 mod config;
@@ -13,7 +13,7 @@ use crate::codegen::triton::*;
 use crate::graph::Graph;
 use crate::graph_compiler::common::horizontal::segments;
 
-/// Triton loops: the fixed `elementwise_kernel` (lumen.codegen.elementwise.triton) runs a generated `BODY` over
+/// Triton elementwise fusions: the fixed `elementwise_kernel` (lumen.codegen.elementwise.triton) runs a generated `BODY` over
 /// blocks of each grid segment; the body loads and stores through helpers for its tensors' `layouts` (so
 /// `views` goes unread). Its block size is tuned at launch.
 impl ElementwiseCodegen for Triton {
