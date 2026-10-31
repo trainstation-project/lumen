@@ -4,7 +4,8 @@
 
 use super::gemm::{Epilogue, Gemm};
 use super::{Function, Kernel, Launches, Template};
-use crate::codegen::triton::{self as codegen, Config, LOOP_CONFIGS, UNTUNED_LOOP};
+use crate::codegen::dot_general::triton::{self as codegen, Config};
+use crate::codegen::elementwise::triton::{LOOP_CONFIGS, UNTUNED_LOOP};
 use crate::graph::Primitive;
 use crate::graph_compiler::plan::Step;
 use crate::tensor::contiguous_strides;

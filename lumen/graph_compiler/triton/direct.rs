@@ -25,7 +25,7 @@ impl Value {
         Value::Pointer(t.data_ptr() as u64, t.dtype())
     }
 
-    /// One-element host tensor `t` passed by value as `lumen.codegen.triton.scalar` passes it: a float64
+    /// One-element host tensor `t` passed by value as `lumen.codegen.utils.triton.scalar` passes it: a float64
     /// as its bits, another float as a float, an int or bool as itself.
     pub(crate) fn scalar(t: &Tensor) -> Self {
         /// The element at `t`'s address, read where it sits in host memory.

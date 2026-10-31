@@ -4,8 +4,9 @@ use std::collections::HashMap;
 use std::fmt::Write;
 
 use super::Emit;
-use crate::codegen::mps::*;
 use crate::codegen::random::RandomCodegen;
+use crate::codegen::store::mps::{gather_index, load};
+use crate::codegen::utils::mps::*;
 use crate::graph::{Graph, Node, Primitive, UnaryOp, Var};
 use crate::tensor::contiguous_strides;
 

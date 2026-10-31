@@ -8,10 +8,13 @@ use indoc::formatdoc;
 
 use super::config::MOST_GEMM_ROW;
 use crate::DType;
-use crate::codegen::kinds::{row_partials, row_reductions};
+use crate::codegen::emitter::Emit;
+use crate::codegen::emitter::triton::Emitter;
+use crate::codegen::kinds::{gemm_dot, row_partials, row_reductions};
 use crate::codegen::reduction::triton::reduce_along;
 use crate::codegen::row::triton::*;
-use crate::codegen::triton::*;
+use crate::codegen::store::triton::{load, stored_at};
+use crate::codegen::utils::triton::*;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::elementwise;
 

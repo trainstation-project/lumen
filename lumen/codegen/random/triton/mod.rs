@@ -2,7 +2,7 @@
 //! call.
 
 use super::RandomCodegen;
-use crate::codegen::triton::Triton;
+use crate::codegen::utils::triton::Triton;
 
 /// Triton random bits: a call to `philox_bits` on 64-bit counters.
 impl RandomCodegen for Triton {

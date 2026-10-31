@@ -7,8 +7,10 @@ use indoc::formatdoc;
 
 use super::ReductionCodegen;
 use crate::DType;
-use crate::codegen::triton::*;
-use crate::codegen::utils::triton::indented;
+use crate::codegen::emitter::Emit;
+use crate::codegen::emitter::triton::Emitter;
+use crate::codegen::store::triton::gather_index;
+use crate::codegen::utils::triton::*;
 use crate::graph::{Graph, Node, Primitive, TensorType};
 use crate::tensor::contiguous_strides;
 

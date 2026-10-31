@@ -1,7 +1,7 @@
 //! Triton in-place concatenation: operands written straight into their slot of the result by the
 //! kernels producing them, so the concatenate copies nothing.
 
-use crate::codegen::triton::fusible;
+use super::fusion::fusible;
 use crate::graph::{Graph, Primitive};
 use crate::graph_compiler::elementwise;
 use crate::graph_compiler::pass::{CompilerPass, Module};

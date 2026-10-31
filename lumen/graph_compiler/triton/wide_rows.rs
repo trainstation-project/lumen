@@ -4,7 +4,8 @@
 //! reduced and the row reads them instead of reducing its rows again, so the product is read once less.
 
 use super::TritonModule;
-use crate::codegen::triton::{gemm_dot, partial_tile};
+use crate::codegen::dot_general::triton::partial_tile;
+use crate::codegen::kinds::gemm_dot;
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
 use crate::graph_compiler::common::diamonds::tile_reductions;
 use crate::graph_compiler::elementwise;

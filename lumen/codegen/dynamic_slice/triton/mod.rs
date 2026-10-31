@@ -4,7 +4,7 @@
 use std::fmt::Write;
 
 use super::DynamicSliceCodegen;
-use crate::codegen::triton::*;
+use crate::codegen::utils::triton::*;
 use crate::graph::{Graph, TensorType};
 use crate::tensor::contiguous_strides;
 

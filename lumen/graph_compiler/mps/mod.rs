@@ -31,9 +31,16 @@ use super::common::take_along_axis::TakeAlongAxis;
 use super::pass::{Module, Pipeline};
 use super::{CompilerConfig, MpsConfig, Options};
 use crate::codegen::attention::AttentionCodegen;
+use crate::codegen::attention::mps::{backward_block_with_dq, decodes};
+use crate::codegen::dot_general::mps as gemm;
 use crate::codegen::dot_general::mps::GemmConfig;
-use crate::codegen::mps as codegen;
-use crate::codegen::mps::Tuning;
+use crate::codegen::elementwise::mps::Tuning;
+use crate::codegen::kinds::{gemm_dot, reduction_root, row_reductions};
+use crate::codegen::layout::transpose_tiling;
+use crate::codegen::reduction::mps::{has_epilogue, split_launches};
+use crate::codegen::row::mps::row_groups;
+use crate::codegen::store::mps::strided_load;
+use crate::codegen::utils::mps::Mps;
 use crate::graph::{Graph, Node, Primitive, TensorType, Var, View};
 use crate::graph_compiler::common::attention::{self, Backward};
 use crate::graph_compiler::common::flash_attention::{
@@ -130,7 +137,7 @@ impl AttentionBackwards for MpsModule<'_> {
     /// Backwards whose dQ fits the dK/dV kernel, unless deterministic mode forbids its atomic dQ accumulation.
     fn together(&self) -> impl Fn(&Backward) -> bool + 'static {
         let deterministic = self.options.config.mps.deterministic;
-        move |b| !deterministic && codegen::backward_block_with_dq(b).is_some()
+        move |b| !deterministic && backward_block_with_dq(b).is_some()
     }
 
     /// Requests an attention backward kernel, returning its pending name.
@@ -243,7 +250,7 @@ fn pipeline<'a>(config: &MpsConfig) -> Pipeline<MpsModule<'a>> {
                 reads: fusion::fusible,
                 views: true,
                 lanes: 1,
-                columns: crate::codegen::mps::ROW_COLUMNS,
+                columns: crate::codegen::regions::ROW_COLUMNS,
             },
         });
     }
@@ -397,7 +404,8 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
             .collect();
 
         derived.retain(|(d, _)| !outputs.contains(d));
-        let gemm = matches!(&step.primitive, Primitive::Fusion { body, .. } if codegen::gemm_dot(body).is_some());
+        let gemm =
+            matches!(&step.primitive, Primitive::Fusion { body, .. } if gemm_dot(body).is_some());
 
         if matches!(step.primitive, Primitive::DotGeneral { .. }) || gemm {
             if let Some((k, rest)) = block.zip(step.label.strip_prefix("dot_general")) {
@@ -570,13 +578,13 @@ fn launch_of(body: &Graph) -> Launch {
         Launch::AttentionBackward
     } else if split_k::atomic_dot(body).is_some() {
         Launch::AtomicDot
-    } else if codegen::gemm_dot(body).is_some() {
+    } else if gemm_dot(body).is_some() {
         Launch::Gemm
-    } else if !codegen::row_reductions(body).is_empty() {
+    } else if !row_reductions(body).is_empty() {
         Launch::Rows
-    } else if codegen::reduction_root(body).is_some() {
+    } else if reduction_root(body).is_some() {
         Launch::Reduction
-    } else if codegen::transpose_tiling(body).is_some() {
+    } else if transpose_tiling(body).is_some() {
         Launch::Transpose
     } else {
         Launch::Elementwise
@@ -599,7 +607,7 @@ fn launch_kind(name: &str, body: &Graph) -> (Launch, Option<Tuning>) {
     }
 
     let launch = launch_of(body);
-    let tuning = codegen::tuning_of(body);
+    let tuning = kernel_codegen::tuning_of(body);
     launches.insert(name.to_owned(), (launch, tuning));
     (launch, tuning)
 }
@@ -647,7 +655,7 @@ pub(crate) fn fill(dst: &Tensor, value: Scalar) -> Result<(), String> {
 
     let v = body.apply(broadcast, &[x])?;
     body.set_outputs(&[v]).expect("the filled value");
-    let bits = crate::codegen::triton::bits(dst.dtype(), value);
+    let bits = crate::codegen::utils::triton::bits(dst.dtype(), value);
 
     let scalar = match ty.dtype {
         DType::U8 => Tensor::from_slice(&[bits as u8], ty.dtype),
@@ -674,7 +682,7 @@ fn run_loop(
     };
 
     let config = super::config::configs().mps;
-    let (name, source) = codegen::kernel(&body, &[by_value], &config, &views, None);
+    let (name, source) = kernel_codegen::kernel(&body, &[by_value], &config, &views, None);
 
     let compiled = SOURCES
         .lock()
@@ -683,7 +691,7 @@ fn run_loop(
 
     if !compiled {
         compile_kernels(BTreeMap::from([(name.clone(), source)]))?;
-        record_launch(&name, &body, codegen::tuning_of(&body));
+        record_launch(&name, &body, kernel_codegen::tuning_of(&body));
     }
 
     let strided = !by_value && !src.is_contiguous();
@@ -766,7 +774,7 @@ fn strided_variant(step: &Step, name: &str, body: &Graph) -> Result<Option<Strin
     for &(k, strides) in &strided {
         let shape = &step.inputs[k].1.shape;
 
-        if let Some(rewritten) = codegen::strided_load(&source, name, k, shape, strides) {
+        if let Some(rewritten) = strided_load(&source, name, k, shape, strides) {
             source = rewritten;
         }
     }
@@ -833,11 +841,11 @@ fn attention_variant(
     let (variant, source) = match launch {
         Launch::Attention => {
             let a = attention::of_body_strided(body, &strides).ok_or_else(unmatched)?;
-            codegen::Mps::forward(body, &a, &strides)?
+            Mps::forward(body, &a, &strides)?
         }
         _ => {
             let b = attention::backward_of_body_strided(body, &strides).ok_or_else(unmatched)?;
-            codegen::Mps::backward(body, &b, &strides)?
+            Mps::backward(body, &b, &strides)?
         }
     };
 
@@ -959,7 +967,7 @@ pub(super) fn encode_with(
         let (outer, heads) = attention::grid_batch(&a.batch);
 
         // Decode attention runs one threadgroup per query, otherwise one per 64 queries.
-        let queries = match codegen::decodes(&a) {
+        let queries = match decodes(&a) {
             true => a.sq,
             false => a.sq.div_ceil(64),
         };
@@ -1047,7 +1055,7 @@ pub(super) fn encode_with(
     }
 
     if kind == Launch::Gemm {
-        let dot = codegen::gemm_dot(body).expect("a matmul");
+        let dot = gemm_dot(body).expect("a matmul");
         let ty = |v: Var| body.type_of(v);
         let (lhs, rhs) = (ty(dot.inputs[0]), ty(dot.inputs[1]));
 
@@ -1066,7 +1074,7 @@ pub(super) fn encode_with(
         let config = tuned
             .as_ref()
             .map(|&(_, c)| c)
-            .or_else(|| codegen::gemv_config(body));
+            .or_else(|| gemm::gemv_config(body));
 
         let plan = crate::codegen::dot_general::mps::plan_matmul(
             &dot.primitive,
@@ -1093,7 +1101,7 @@ pub(super) fn encode_with(
         let args: Vec<Vec<u8>> = scalars.iter().cloned().chain([dims_arg(plan.p)]).collect();
 
         // Row-tile epilogues run as two launches: the GEMM writes tiles to scratch, then a row kernel finishes.
-        if let Some((offsets, _)) = codegen::tile_scratch(body) {
+        if let Some((offsets, _)) = gemm::tile_scratch(body) {
             let at = |o: usize| scratch.wrapping_add(o).cast_const();
 
             let (dotv, tiles): (*const u8, Vec<*const u8>) = (
@@ -1114,11 +1122,7 @@ pub(super) fn encode_with(
                         threads: c.threads,
                     }
                 }
-                _ => Grid::Groups([
-                    n.div_ceil(codegen::ROW_TILE),
-                    m.div_ceil(codegen::ROW_TILE),
-                    1,
-                ]),
+                _ => Grid::Groups([n.div_ceil(gemm::ROW_TILE), m.div_ceil(gemm::ROW_TILE), 1]),
             };
 
             launch(
@@ -1135,14 +1139,14 @@ pub(super) fn encode_with(
             rows.push(output.cast_const());
             rows.extend(extra);
             rows.extend(&tiles);
-            let grid = Grid::Groups([codegen::row_groups(body), 1, 1]);
+            let grid = Grid::Groups([row_groups(body), 1, 1]);
             return launch(name, &rows, &scalars, grid, keep, step.label);
         }
 
-        let (kernel, grid) = match codegen::row_dot(body) {
+        let (kernel, grid) = match gemm::row_dot(body) {
             Some(_) => (
                 name.to_owned(),
-                Grid::Groups([1, plan.p[0].div_ceil(codegen::ROW_TILE), 1]),
+                Grid::Groups([1, plan.p[0].div_ceil(gemm::ROW_TILE), 1]),
             ),
             None => match (config, plan.grid) {
                 (Some(c), Grid::Groups(groups)) => (
@@ -1168,17 +1172,17 @@ pub(super) fn encode_with(
             name,
             &buffers,
             &scalars,
-            Grid::Groups([codegen::row_groups(body), 1, 1]),
+            Grid::Groups([row_groups(body), 1, 1]),
             keep,
             step.label,
         );
     }
 
     if kind == Launch::Reduction {
-        let root = codegen::reduction_root(body).expect("a reduction");
+        let root = reduction_root(body).expect("a reduction");
         let x = body.type_of(root.inputs[0]);
         let label = step.label;
-        let last = codegen::has_epilogue(body).then(|| format!("{name}_final"));
+        let last = has_epilogue(body).then(|| format!("{name}_final"));
 
         return crate::codegen::reduction::mps::encode_reduction(
             step,
@@ -1186,7 +1190,7 @@ pub(super) fn encode_with(
             x,
             Some(name),
             last.as_deref(),
-            codegen::split_launches(body),
+            split_launches(body),
             label,
             inputs,
             output,
@@ -1198,7 +1202,7 @@ pub(super) fn encode_with(
     }
 
     if kind == Launch::Transpose {
-        let tiling = codegen::transpose_tiling(body).expect("a tiled transpose");
+        let tiling = transpose_tiling(body).expect("a tiled transpose");
         let mut buffers = inputs.to_vec();
         buffers.push(output.cast_const());
         buffers.extend(extra);
@@ -1236,7 +1240,7 @@ pub(super) fn encode_with(
 
 /// Scratch bytes a fusion kernel needs: tile buffers for row-tile GEMMs or partials for reductions.
 pub(crate) fn fusion_scratch_bytes(body: &Graph) -> usize {
-    if let Some((_, bytes)) = codegen::tile_scratch(body) {
+    if let Some((_, bytes)) = gemm::tile_scratch(body) {
         return bytes;
     }
 
@@ -1244,7 +1248,7 @@ pub(crate) fn fusion_scratch_bytes(body: &Graph) -> usize {
         return 0;
     }
 
-    match codegen::reduction_root(body).filter(|r| {
+    match reduction_root(body).filter(|r| {
         matches!(
             r.primitive,
             Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. }

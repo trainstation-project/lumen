@@ -1,34 +1,15 @@
-//! Metal source generation for fused graph bodies: picks a kernel shape (GEMV row, GEMM, row
-//! reduction, reduction, transpose or elementwise kernel) and emits its source.
-pub(crate) mod ane;
+//! What the Metal code generators share: the backend type, thread arguments, source formatting and
+//! naming, buffer parameters, types, functors and constants.
 
-use std::collections::HashMap;
 use std::fmt::Write;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
-use indoc::{formatdoc, indoc};
+use indoc::indoc;
 
-use crate::codegen::elementwise::ElementwiseCodegen;
-use crate::codegen::layout::LayoutCodegen;
-use crate::codegen::reduction::ReductionCodegen;
-use crate::codegen::row::RowCodegen;
+use crate::codegen::store::mps::loads;
 use crate::graph::{Graph, Primitive};
-use crate::graph_compiler::MpsConfig;
 use crate::kernels::mps::element_arg;
 use crate::{DType, Scalar};
-
-pub(crate) use crate::codegen::attention::mps::{backward_block_with_dq, decodes};
-pub(crate) use crate::codegen::dot_general::mps::*;
-pub(crate) use crate::codegen::elementwise::mps::{
-    TUNED_ELEMENTS, Tuning, elementwise_tuning, elementwise_tunings,
-};
-pub(crate) use crate::codegen::emitter::Emit;
-pub(crate) use crate::codegen::emitter::mps::Emitter;
-pub(crate) use crate::codegen::kinds::reduction_root;
-pub(crate) use crate::codegen::layout::mps::transpose::*;
-pub(crate) use crate::codegen::reduction::mps::{has_epilogue, split_launches};
-pub(crate) use crate::codegen::row::mps::*;
-pub(crate) use crate::codegen::store::mps::{gather_index, written};
 
 /// The Metal code generator.
 pub(crate) struct Mps;
@@ -39,71 +20,6 @@ pub(crate) const THREAD_ARGS: &str = indoc! {"
     uint3 tid [[thread_position_in_threadgroup]],
     uint sg [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]"};
-
-/// Default launch tuning when `body` lowers to the elementwise kernel, else `None`.
-pub(crate) fn tuning_of(body: &Graph) -> Option<Tuning> {
-    is_elementwise(body).then(|| elementwise_tuning(body))
-}
-
-/// Candidate launch tunings to autotune when `body` lowers to the elementwise kernel.
-pub(crate) fn tunings_of(body: &Graph) -> Vec<Tuning> {
-    match is_elementwise(body) {
-        true => elementwise_tunings(body),
-        false => Vec::new(),
-    }
-}
-
-/// Whether `body` matches no specialized kernel shape and lowers to the elementwise kernel.
-fn is_elementwise(body: &Graph) -> bool {
-    row_dot(body).is_none()
-        && gemm_dot(body).is_none()
-        && row_reductions(body).is_empty()
-        && reduction_root(body).is_none()
-        && transpose_tiling(body).is_none()
-}
-
-/// Generates the kernel for a fused `body`, returning its name and Metal source.
-/// `by_value[k]` passes input `k` as a constant scalar; `views` maps output index to the
-/// (element offset, strides) it writes through.
-pub(crate) fn kernel(
-    body: &Graph,
-    by_value: &[bool],
-    config: &MpsConfig,
-    views: &HashMap<usize, (usize, Vec<usize>)>,
-    tuning: Option<Tuning>,
-) -> (String, String) {
-    if let Some(dot) = row_dot(body) {
-        return gemm_row_kernel(body, by_value, dot, config, gemv_config(body));
-    }
-
-    if let Some(dot) = gemm_dot(body) {
-        return gemm_kernel(body, by_value, dot);
-    }
-
-    if !row_reductions(body).is_empty() {
-        return Mps::row(body, by_value, config).expect("a Metal row kernel of every row body");
-    }
-
-    if let Some(root) = reduction_root(body) {
-        return Mps::reduction(body, by_value, root)
-            .expect("a Metal reduction of every reduction body");
-    }
-
-    if transpose_tiling(body).is_some() {
-        return Mps::transpose(body, by_value, views)
-            .expect("a Metal kernel of every tiled transpose");
-    }
-
-    let tuning = tuning.unwrap_or_else(|| elementwise_tuning(body));
-
-    Mps::elementwise(body, by_value, views, &tuning)
-        .expect("a Metal kernel of every elementwise body")
-}
-
-/// Whether the kernel chosen for `body` can write its outputs through strided views.
-pub(crate) fn writes_views(body: &Graph) -> bool {
-    gemm_dot(body).is_none() && row_reductions(body).is_empty() && reduction_root(body).is_none()
-}
 
 /// Re-indents generated Metal source by bracket nesting so emitted kernels read cleanly.
 pub(crate) fn formatted(source: &str) -> String {
@@ -172,63 +88,9 @@ pub(crate) fn formatted(source: &str) -> String {
     out
 }
 
-/// Opening of a call to input `k`'s load helper, to be followed by the index and `)`.
-pub(super) fn load(k: usize) -> String {
-    format!("NAME_load{k}(in{k}, ")
-}
-
-/// Load helpers for every `NAME_load{k}` that `source` calls, each indexing contiguously.
-fn loads(source: &str) -> String {
-    let mut ks: Vec<usize> = source
-        .match_indices("NAME_load")
-        .filter_map(|(at, _)| {
-            let digits: String = source[at + "NAME_load".len()..]
-                .chars()
-                .take_while(char::is_ascii_digit)
-                .collect();
-
-            digits.parse().ok()
-        })
-        .collect();
-
-    ks.sort_unstable();
-    ks.dedup();
-    ks.iter().map(|&k| load_helper("NAME", k, "i")).collect()
-}
-
-/// Metal helper `{name}_load{k}` that reads `p` at `index` (an expression in `i`).
-fn load_helper(name: &str, k: usize, index: &str) -> String {
-    formatdoc!(
-        "
-        template <typename T, typename I>
-        inline T {name}_load{k}(device const T *p, I i) {{
-            return p[{index}];
-        }}
-        "
-    )
-}
-
-/// Rewrites input `k`'s contiguous load helper in `source` to read through `strides`, or `None`
-/// if `source` has no such helper.
-pub(crate) fn strided_load(
-    source: &str,
-    name: &str,
-    k: usize,
-    shape: &[usize],
-    strides: &[usize],
-) -> Option<String> {
-    let index = gather_index("i", shape, strides);
-    let plain = load_helper(name, k, "i");
-    let strided = load_helper(name, k, &index);
-
-    source
-        .contains(&plain)
-        .then(|| source.replace(&plain, &strided))
-}
-
 /// Prepends load helpers, names the kernel by a hash of its source and substitutes the name for
 /// `NAME`; returns `(name, formatted source)`.
-pub(super) fn named(source: String) -> (String, String) {
+pub(crate) fn named(source: String) -> (String, String) {
     let source = format!("{}{source}", loads(&source));
     let mut hasher = DefaultHasher::new();
     source.hash(&mut hasher);
@@ -238,7 +100,7 @@ pub(super) fn named(source: String) -> (String, String) {
 
 /// Kernel buffer parameters: device inputs, `out` of type `out`, extra outputs, `extra`
 /// declarations, then by-value scalar inputs; returns them with the next free buffer index.
-pub(super) fn io_params(
+pub(crate) fn io_params(
     body: &Graph,
     by_value: &[bool],
     out: &str,
@@ -305,7 +167,7 @@ pub(crate) fn metal_type(dtype: DType) -> &'static str {
 }
 
 /// Metal functor struct name implementing an elementwise primitive.
-pub(super) fn functor(p: &Primitive) -> &'static str {
+pub(crate) fn functor(p: &Primitive) -> &'static str {
     use Primitive::*;
 
     match p {
@@ -326,7 +188,7 @@ pub(super) fn functor(p: &Primitive) -> &'static str {
 }
 
 /// Metal expression that reproduces `value` in `dtype` bit-exactly via `as_type`.
-pub(super) fn constant(dtype: DType, value: Scalar) -> String {
+pub(crate) fn constant(dtype: DType, value: Scalar) -> String {
     let bytes = element_arg(dtype, value);
 
     let bits = bytes

@@ -513,7 +513,7 @@ fn triton_gemm(
 #[allow(clippy::too_many_arguments)]
 fn triton_loop(
     kernel: &super::triton::Kernel,
-    config: &crate::codegen::triton::LoopConfig,
+    config: &crate::codegen::elementwise::triton::LoopConfig,
     functions: &[super::triton::Function],
     launches: &super::triton::Launches,
     inputs: &[crate::Tensor],
@@ -578,7 +578,7 @@ fn triton_loop(
             }
 
             return py
-                .import("lumen.codegen.triton")?
+                .import("lumen.codegen.utils.triton")?
                 .getattr("template")?
                 .call(
                     (
@@ -597,7 +597,7 @@ fn triton_loop(
                 .map(Bound::unbind);
         }
 
-        py.import("lumen.codegen.triton")?
+        py.import("lumen.codegen.utils.triton")?
             .getattr("launch")?
             .call(
                 (

@@ -5,9 +5,12 @@ use std::fmt::Write;
 
 use indoc::formatdoc;
 
+use crate::codegen::emitter::Emit;
+use crate::codegen::emitter::mps::Emitter;
 use crate::codegen::layout::{LayoutCodegen, TILE};
 pub(crate) use crate::codegen::layout::{TransposeTiling, transpose_tiling};
-use crate::codegen::mps::*;
+use crate::codegen::store::mps::{gather_index, written};
+use crate::codegen::utils::mps::*;
 use crate::graph::{Graph, TensorType, Var};
 
 impl TransposeTiling {

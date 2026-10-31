@@ -1,6 +1,7 @@
 //! MPS target for horizontal fusion: merges independent small elementwise kernels into one launch.
 
-use super::{codegen, fusion, split_k};
+use super::{fusion, split_k};
+use crate::codegen::kinds::gemm_dot;
 use crate::graph::{Graph, Node, Primitive};
 use crate::graph_compiler::common::attention;
 use crate::graph_compiler::common::horizontal::{Target, heroes_fit, keeps_tiling, tiling_key};
@@ -40,7 +41,7 @@ impl Target for Horizontal<'_> {
                     && attention::of_body(body).is_none()
                     && attention::backward_of_body(body).is_none()
                     && split_k::atomic_dot(body).is_none()
-                    && codegen::gemm_dot(body).is_none()
+                    && gemm_dot(body).is_none()
             }
             p => fusion::elementwise(p) && fusion::fusible(graph, node),
         }

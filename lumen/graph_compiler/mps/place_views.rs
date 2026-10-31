@@ -1,7 +1,8 @@
 //! Pass that turns slices read only by GEMMs into strided views instead of copies.
 
-use super::{MpsModule, codegen};
+use super::MpsModule;
 use crate::codegen::dot_general::mps::reads_strided;
+use crate::codegen::kinds::gemm_dot;
 use crate::graph::{Graph, Primitive};
 use crate::graph_compiler::common::attention;
 use crate::graph_compiler::common::place_views::{self, place_views};
@@ -17,7 +18,7 @@ impl<'a> CompilerPass<MpsModule<'a>> for PlaceViews {
 
     /// Marks each slice read only by GEMMs that stride through it a view (`common::place_views`).
     fn apply(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
-        place_views(&mut m.graph, reads_strided, codegen::gemm_dot);
+        place_views(&mut m.graph, reads_strided, gemm_dot);
         Ok(())
     }
 }
@@ -50,5 +51,5 @@ pub(crate) fn attention_reads_strided(body: &Graph, strides: &[usize]) -> bool {
 pub(crate) fn fusion_reads_strided(body: &Graph, k: usize, strides: &[usize]) -> bool {
     attention::of_body(body).is_none()
         && attention::backward_of_body(body).is_none()
-        && place_views::fusion_reads_strided(body, k, strides, reads_strided, codegen::gemm_dot)
+        && place_views::fusion_reads_strided(body, k, strides, reads_strided, gemm_dot)
 }

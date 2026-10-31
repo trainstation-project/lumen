@@ -11,7 +11,10 @@ use std::fmt::Write;
 use indoc::{formatdoc, writedoc};
 
 use super::ElementwiseCodegen;
-use crate::codegen::mps::*;
+use crate::codegen::emitter::Emit;
+use crate::codegen::emitter::mps::Emitter;
+use crate::codegen::store::mps::written;
+use crate::codegen::utils::mps::*;
 use crate::graph::Graph;
 use crate::graph_compiler::common::horizontal::segments;
 

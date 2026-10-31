@@ -1,10 +1,10 @@
 //! Metal loads' and stores' addressing, shared by the generated kernels: the strided offset of a flat index,
-//! and each output's store through its view.
+//! each input's load helper and each output's store through its view.
 
 use std::collections::HashMap;
 use std::fmt::Write;
 
-use indoc::writedoc;
+use indoc::{formatdoc, writedoc};
 
 use crate::graph::Graph;
 use crate::tensor::contiguous_strides;
@@ -135,4 +135,58 @@ pub(crate) fn gather_index(idx: &str, shape: &[usize], strides: &[usize]) -> Str
     } else {
         terms.join(" + ")
     }
+}
+
+/// Opening of a call to input `k`'s load helper, to be followed by the index and `)`.
+pub(crate) fn load(k: usize) -> String {
+    format!("NAME_load{k}(in{k}, ")
+}
+
+/// Load helpers for every `NAME_load{k}` that `source` calls, each indexing contiguously.
+pub(crate) fn loads(source: &str) -> String {
+    let mut ks: Vec<usize> = source
+        .match_indices("NAME_load")
+        .filter_map(|(at, _)| {
+            let digits: String = source[at + "NAME_load".len()..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+
+            digits.parse().ok()
+        })
+        .collect();
+
+    ks.sort_unstable();
+    ks.dedup();
+    ks.iter().map(|&k| load_helper("NAME", k, "i")).collect()
+}
+
+/// Metal helper `{name}_load{k}` that reads `p` at `index` (an expression in `i`).
+fn load_helper(name: &str, k: usize, index: &str) -> String {
+    formatdoc!(
+        "
+        template <typename T, typename I>
+        inline T {name}_load{k}(device const T *p, I i) {{
+            return p[{index}];
+        }}
+        "
+    )
+}
+
+/// Rewrites input `k`'s contiguous load helper in `source` to read through `strides`, or `None`
+/// if `source` has no such helper.
+pub(crate) fn strided_load(
+    source: &str,
+    name: &str,
+    k: usize,
+    shape: &[usize],
+    strides: &[usize],
+) -> Option<String> {
+    let index = gather_index("i", shape, strides);
+    let plain = load_helper(name, k, "i");
+    let strided = load_helper(name, k, &index);
+
+    source
+        .contains(&plain)
+        .then(|| source.replace(&plain, &strided))
 }

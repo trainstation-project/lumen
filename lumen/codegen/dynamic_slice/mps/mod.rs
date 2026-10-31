@@ -7,7 +7,7 @@ use indoc::formatdoc;
 
 use super::DynamicSliceCodegen;
 use crate::Tensor;
-use crate::codegen::mps::*;
+use crate::codegen::utils::mps::*;
 use crate::graph::Primitive;
 use crate::graph::{Graph, TensorType, UPDATES};
 use crate::graph_compiler::common::updates::{overlaps, starts};

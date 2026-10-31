@@ -11,8 +11,10 @@ use std::fmt::Write;
 use indoc::formatdoc;
 
 use super::AttentionCodegen;
-use crate::codegen::triton::{Emit, Emitter, Triton, constant, load, named, triton_type};
-use crate::codegen::utils::triton::indented;
+use crate::codegen::emitter::Emit;
+use crate::codegen::emitter::triton::Emitter;
+use crate::codegen::store::triton::load;
+use crate::codegen::utils::triton::{Triton, constant, indented, named, triton_type};
 use crate::graph::Graph;
 use crate::graph_compiler::common::attention::{
     Access, Attention, Backward, Dropout, Score, Strides, Term,

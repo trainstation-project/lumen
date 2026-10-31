@@ -3,7 +3,7 @@
 
 use super::RandomCodegen;
 use crate::Tensor;
-use crate::codegen::mps::Mps;
+use crate::codegen::utils::mps::Mps;
 use crate::graph::Primitive;
 use crate::graph_compiler::plan::Step;
 use crate::kernels::mps::{elementwise_grid, launch_step, u32_arg, u64_arg};

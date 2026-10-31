@@ -10,8 +10,10 @@ use std::fmt::Write;
 use indoc::formatdoc;
 
 use super::AttentionCodegen;
-use crate::codegen::mps::*;
+use crate::codegen::emitter::Emit;
+use crate::codegen::emitter::mps::Emitter;
 use crate::codegen::random::RandomCodegen;
+use crate::codegen::utils::mps::*;
 use crate::graph::{Graph, Var};
 use crate::graph_compiler::common::attention::{
     Access, Attention, Backward, Dropout, Score, Strides, Term, grid_batch,
