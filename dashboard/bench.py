@@ -23,6 +23,11 @@ try:
 except ImportError:
     torch = None
 
+# Why benchmarks can't run without torch, the baseline every op is timed against.
+NO_TORCH = (
+    "torch is not installed: benchmarks time every op against PyTorch; install it (uv pip install torch) and restart"
+)
+
 # Device benchmarked and where its results are saved; ``use`` switches both.
 DEVICE = "mps"
 DATA = pathlib.Path(__file__).parent / "data" / "elementwise_mps"
@@ -554,14 +559,16 @@ def matches(got, want):
 
 def measure(name, measured=lambda row: None):
     """Times op ``name`` at each dtype and size against torch, calling ``measured`` with each row;
-    returns the rows and its kernel code."""
+    returns the rows and its kernel code. Raises without torch rather than timing lumen alone."""
+    if torch is None:
+        raise RuntimeError(NO_TORCH)
     op = OPS[name]
     rng = np.random.default_rng(0)
     rows, code = [], None
     for dtype in op.dtypes:
         for n in op.sizes:
             lf = op.lumen(n) if op.sized else op.lumen
-            tf = (op.torch(n) if op.sized else op.torch) if torch is not None and op.torch is not None else None
+            tf = (op.torch(n) if op.sized else op.torch) if op.torch is not None else None
             arrays = op.inputs(n, dtype, rng)
             lt = [to_lumen(a, d) for a, d in arrays]
             f = lumen.compile(lf, device=DEVICE)
@@ -650,8 +657,7 @@ def update(data, name, measured=lambda row: None):
         timespec="seconds"
     )
     data["device"] = device_name()
-    if torch is not None:
-        data["torch"] = torch.__version__
+    data["torch"] = torch.__version__
     data["spec_memory_gbs"] = SPEC_MEMORY_GBS.get(data["device"], data.get("spec_memory_gbs"))
     data["spec_tflops"] = peak_tflops(data["device"]) or data.get("spec_tflops")
     return data

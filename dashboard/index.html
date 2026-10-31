@@ -704,7 +704,12 @@ async function runBenchmark(op, device, measured) {
   if (!r.headers.get("Content-Type")?.includes("json")) {
     throw new Error("This page is served without the benchmark server. Start it with python dashboard/serve.py, then open http://127.0.0.1:8000.");
   }
-  if (!r.ok) throw new Error((await r.json()).error || `The server answered ${r.status}.`);
+  if (!r.ok) {
+    const e = new Error((await r.json()).error || `The server answered ${r.status}.`);
+    // 503: the server can't benchmark at all (no torch), so no other op would run either.
+    e.stops = r.status === 503;
+    throw e;
+  }
   const reader = r.body.getReader();
   const decoder = new TextDecoder();
   let buffered = "", final = null;
@@ -744,6 +749,7 @@ async function runOps(ops) {
   const failed = [];
   // The ops still to run; their old rows stay hidden, also in the data the server returns after each op.
   const pending = new Set(ops);
+  let stopped = null;
   const before = Object.fromEntries(ops.map((op) => [op, PERFS[dir].rows.filter((r) => r.op === op)]));
   const hidePending = (perf) => ({ ...perf, rows: perf.rows.filter((r) => !pending.has(r.op)) });
   benchmarking = allButton.disabled = true;
@@ -773,6 +779,13 @@ async function runOps(ops) {
     } catch (e) {
       PERFS[dir] = { ...PERFS[dir], rows: [...PERFS[dir].rows.filter((r) => r.op !== op), ...before[op]] };
       delete PROGRESS[op];
+      if (e.stops) {
+        // Nothing else runs: the ops still to run get their saved rows back.
+        for (const later of pending) { PERFS[dir].rows.push(...before[later]); delete PROGRESS[later]; }
+        pending.clear();
+        stopped = e.message;
+        break;
+      }
       failed.push(`${op} (${e.message})`);
     }
     redraw(op);
@@ -780,10 +793,12 @@ async function runOps(ops) {
   globalBar.hidden = true;
   benchmarking = allButton.disabled = false;
   const took = `${((performance.now() - started) / 60000).toFixed(1)} min`;
-  allStatus.textContent = failed.length
-    ? `Ran ${ops.length - failed.length} of ${ops.length} ops in ${took}; failed: ${failed.join("; ")}`
-    : `Ran ${ops.length} op${ops.length > 1 ? "s" : ""} in ${took}; their sections show the new numbers.`;
-  if (failed.length) allStatus.classList.add("lx-bad");
+  allStatus.textContent = stopped
+    ? `Stopped: ${stopped}`
+    : failed.length
+      ? `Ran ${ops.length - failed.length} of ${ops.length} ops in ${took}; failed: ${failed.join("; ")}`
+      : `Ran ${ops.length} op${ops.length > 1 ? "s" : ""} in ${took}; their sections show the new numbers.`;
+  if (stopped || failed.length) allStatus.classList.add("lx-bad");
   if (current.device.runnable) drawSections();
 }
 
