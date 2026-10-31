@@ -1,5 +1,5 @@
 //! Metal elementwise kernels: every output of an elementwise fusion, by a generated body functor the
-//! fixed `elementwise` loop (`elementwise.metal`) runs.
+//! fixed `elementwise` loop (`kernel.metal`) runs.
 
 mod config;
 
@@ -15,7 +15,7 @@ use crate::codegen::mps::*;
 use crate::graph::Graph;
 use crate::graph_compiler::common::horizontal::segments;
 
-/// Metal elementwise fusions: one kernel a fusion running the fixed `elementwise` loop (`elementwise.metal`) over a
+/// Metal elementwise fusions: one kernel a fusion running the fixed `elementwise` loop (`kernel.metal`) over a
 /// generated body functor a grid segment, its outputs stored through their views and its elements split
 /// across threads by `Tuning`.
 impl ElementwiseCodegen for Mps {

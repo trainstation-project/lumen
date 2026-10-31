@@ -82,14 +82,14 @@ pub struct Kernel {
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(not(feature = "python"), allow(dead_code))]
 pub enum Template {
-    /// `elementwise_kernel` (lumen.codegen.elementwise.triton): blocks of each grid segment's elements.
+    /// `elementwise_kernel` (lumen.codegen.elementwise.triton.kernel): blocks of each grid segment's elements.
     Elementwise,
-    /// `transpose_kernel` (lumen.codegen.layout.triton): `TILE` x `TILE` tiles of an `a` x `b` output, per
+    /// `transpose_kernel` (lumen.codegen.layout.triton.kernel): `TILE` x `TILE` tiles of an `a` x `b` output, per
     /// batch.
     Transpose { a: usize, b: usize },
-    /// `dynamic_update_slice_kernel` (lumen.codegen.dynamic_slice.triton): blocks of the update's elements.
+    /// `dynamic_update_slice_kernel` (lumen.codegen.dynamic_slice.triton.kernel): blocks of the update's elements.
     DynamicUpdateSlice,
-    /// `cross_entropy_combine_kernel` (lumen.codegen.dot_general.triton.linear_cross_entropy): one row a
+    /// `cross_entropy_combine_kernel` (lumen.codegen.dot_general.triton.linear_cross_entropy_kernel): one row a
     /// program, its `tiles` partials `BLOCK_SIZE` at a time.
     CrossEntropyCombine { tiles: usize },
     /// `scatter_add_kernel` (lumen.codegen.scatter_add.triton): blocks of the positions off the `length`-long
@@ -106,14 +106,19 @@ impl Template {
     /// The Python module and name of the kernel.
     pub fn kernel(self) -> (&'static str, &'static str) {
         match self {
-            Template::Elementwise => ("lumen.codegen.elementwise.triton", "elementwise_kernel"),
-            Template::Transpose { .. } => ("lumen.codegen.layout.triton", "transpose_kernel"),
+            Template::Elementwise => (
+                "lumen.codegen.elementwise.triton.kernel",
+                "elementwise_kernel",
+            ),
+            Template::Transpose { .. } => {
+                ("lumen.codegen.layout.triton.kernel", "transpose_kernel")
+            }
             Template::DynamicUpdateSlice => (
-                "lumen.codegen.dynamic_slice.triton",
+                "lumen.codegen.dynamic_slice.triton.kernel",
                 "dynamic_update_slice_kernel",
             ),
             Template::CrossEntropyCombine { .. } => (
-                "lumen.codegen.dot_general.triton.linear_cross_entropy",
+                "lumen.codegen.dot_general.triton.linear_cross_entropy_kernel",
                 "cross_entropy_combine_kernel",
             ),
             Template::ScatterAdd { .. } => {

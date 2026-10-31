@@ -211,7 +211,7 @@ pub(crate) fn encode_reduction(
     launch(&kernel, &buffers, &args, grid, keep, name)
 }
 
-/// Threads per threadgroup; must match REDUCE_THREADS in kernels.metal.
+/// Threads per threadgroup; must match REDUCE_THREADS in kernel.metal.
 pub(crate) const REDUCE_THREADS: usize = 256;
 /// Bytes each lane of a grouped reduction should read.
 const LANE_BYTES: usize = 32;

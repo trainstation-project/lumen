@@ -1,5 +1,5 @@
 //! TPU GEMMs: a dot's form and VMEM-sized blocks, and a fused GEMM's epilogue (the dot's output pieces and
-//! the elementwise nodes after it), encoded as a spec for `lumen.codegen.dot_general.tpu`.
+//! the elementwise nodes after it), encoded as a spec for `lumen.codegen.dot_general.tpu.gemm_kernel`.
 
 use std::collections::HashMap;
 

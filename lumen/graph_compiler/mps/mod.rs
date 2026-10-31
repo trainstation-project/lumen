@@ -71,17 +71,17 @@ const PRELUDE: &str = concat!(
         #define TEMPLATES_ONLY
         "
     ),
-    include_str!("../../codegen/elementwise/mps/elementwise.metal"),
-    include_str!("../../codegen/reduction/mps/kernels.metal"),
-    include_str!("../../codegen/dot_general/mps/integer/matmul.metal"),
-    include_str!("../../codegen/dot_general/mps/integer/matmul_wide.metal"),
-    include_str!("../../codegen/dot_general/mps/tiled/matmul_sg.metal"),
-    include_str!("../../codegen/dot_general/mps/tiled/matmul_atomic.metal"),
-    include_str!("../../codegen/dot_general/mps/skinny/matmul_skinny.metal"),
-    include_str!("../../codegen/dot_general/mps/gemv/matmul_gemv.metal"),
-    include_str!("../../codegen/dot_general/mps/linear_cross_entropy/linear_cross_entropy.metal"),
-    include_str!("../../codegen/attention/mps/forward.metal"),
-    include_str!("../../codegen/attention/mps/backward.metal"),
+    include_str!("../../codegen/elementwise/mps/kernel.metal"),
+    include_str!("../../codegen/reduction/mps/kernel.metal"),
+    include_str!("../../codegen/dot_general/mps/integer/matmul_kernel.metal"),
+    include_str!("../../codegen/dot_general/mps/integer/matmul_wide_kernel.metal"),
+    include_str!("../../codegen/dot_general/mps/tiled/matmul_sg_kernel.metal"),
+    include_str!("../../codegen/dot_general/mps/tiled/matmul_atomic_kernel.metal"),
+    include_str!("../../codegen/dot_general/mps/skinny/kernel.metal"),
+    include_str!("../../codegen/dot_general/mps/gemv/kernel.metal"),
+    include_str!("../../codegen/dot_general/mps/linear_cross_entropy/kernel.metal"),
+    include_str!("../../codegen/attention/mps/forward_kernel.metal"),
+    include_str!("../../codegen/attention/mps/backward_kernel.metal"),
 );
 
 /// Graph and side tables threaded through the MPS passes.
@@ -471,7 +471,7 @@ fn feeding(primitive: &Primitive, p: usize, inputs: usize) -> Vec<usize> {
 }
 
 /// Metal Performance Primitives matmul templates, compiled only into MPP kernels.
-const MPP: &str = include_str!("../../codegen/dot_general/mps/mpp/matmul_mpp.metal");
+const MPP: &str = include_str!("../../codegen/dot_general/mps/mpp/kernel.metal");
 
 /// Compiles `sources` against the standard prelude.
 fn compile_kernels(sources: BTreeMap<String, String>) -> Result<(), String> {

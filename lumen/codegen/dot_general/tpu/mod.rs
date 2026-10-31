@@ -74,7 +74,7 @@ pub(crate) fn encode(
         .collect();
 
     let launched = Launch {
-        module: "lumen.codegen.dot_general.tpu",
+        module: "lumen.codegen.dot_general.tpu.gemm_kernel",
         kernel,
         spec,
         rows: &rows,

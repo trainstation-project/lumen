@@ -204,7 +204,7 @@ pub(crate) fn encode(
         .collect();
 
     let launched = Launch {
-        module: "lumen.codegen.dot_general.tpu.row",
+        module: "lumen.codegen.dot_general.tpu.row_kernel",
         kernel: format!("matmul_row_{}_{height}x{n}x{k}_{bm}x{bk}", lhs.dtype),
         spec,
         rows: &rows_of,

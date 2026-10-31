@@ -390,7 +390,7 @@ fn triton_gemm(
 ) -> Result<(), String> {
     crate::kernels::launched::launched("dot_general", || {
         let template = format!(
-            "# @triton.jit: lumen/codegen/dot_general/triton/__init__.py's kernel, BLOCK_SIZE_M={} BLOCK_SIZE_N={} BLOCK_SIZE_K={} GROUP_SIZE_M={} stages={} warps={}\n",
+            "# @triton.jit: lumen/codegen/dot_general/triton/gemm_kernel.py's kernel, BLOCK_SIZE_M={} BLOCK_SIZE_N={} BLOCK_SIZE_K={} GROUP_SIZE_M={} stages={} warps={}\n",
             config.block_m,
             config.block_n,
             config.block_k,
@@ -414,7 +414,7 @@ fn triton_gemm(
             .iter()
             .map(|t| PyTensor::wrap(t.clone()))
             .collect();
-        py.import("lumen.codegen.dot_general.triton")?
+        py.import("lumen.codegen.dot_general.triton.gemm_kernel")?
             .getattr("dot_general")?
             .call(
                 (
@@ -688,7 +688,7 @@ fn triton_attention(launch: &super::triton::Launch) -> Result<(), String> {
             .iter()
             .map(|t| t.as_ref().map(|t| PyTensor::wrap(t.clone())))
             .collect();
-        py.import("lumen.codegen.attention.triton")?
+        py.import("lumen.codegen.attention.triton.kernel")?
             .getattr("attention")?
             .call(
                 (

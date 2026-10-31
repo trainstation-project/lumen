@@ -1,5 +1,5 @@
 //! Triton dynamic-update-slices, one at runtime starts or a fused chain at constant starts: the `BODY` of
-//! the fixed `dynamic_update_slice_kernel` (`__init__.py`).
+//! the fixed `dynamic_update_slice_kernel` (`kernel.py`).
 
 use std::fmt::Write;
 

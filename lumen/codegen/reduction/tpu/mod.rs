@@ -150,7 +150,7 @@ fn shown(layout: &Layout) -> String {
     }
 }
 
-/// A TPU reduction: its kernel name and the spec `lumen.codegen.reduction.tpu`'s program reads.
+/// A TPU reduction: its kernel name and the spec `lumen.codegen.reduction.tpu.kernel`'s program reads.
 #[cfg(lumen_tpu_linked)]
 pub(crate) struct Spec {
     pub(crate) kernel: String,
@@ -396,7 +396,7 @@ pub(crate) fn encode(
         .collect();
 
     let launched = Launch {
-        module: "lumen.codegen.reduction.tpu",
+        module: "lumen.codegen.reduction.tpu.kernel",
         kernel: code.kernel,
         spec: code.spec,
         rows: &rows,

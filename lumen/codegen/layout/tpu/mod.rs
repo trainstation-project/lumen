@@ -79,7 +79,7 @@ pub(crate) fn encode(
     let rows = [inputs[0], output.cast_const()];
 
     let launched = Launch {
-        module: "lumen.codegen.layout.tpu",
+        module: "lumen.codegen.layout.tpu.kernel",
         kernel,
         spec,
         rows: &rows,

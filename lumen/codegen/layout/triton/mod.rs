@@ -1,5 +1,5 @@
 //! Triton layout: transposes fused with elementwise ops, a tile of the output a program so both the reads
-//! and the writes are coalesced, as the `BODY` of the fixed `transpose_kernel` (`__init__.py`); reshapes
+//! and the writes are coalesced, as the `BODY` of the fixed `transpose_kernel` (`kernel.py`); reshapes
 //! are views the elementwise kernels read through.
 
 use super::{LayoutCodegen, transpose_tiling};

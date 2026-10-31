@@ -99,7 +99,7 @@ pub(crate) fn encode(
     let rows = [inputs[0], inputs[1], output.cast_const()];
 
     let launched = Launch {
-        module: "lumen.codegen.gather.tpu",
+        module: "lumen.codegen.gather.tpu.kernel",
         kernel: format!("gather_{}_{bm}x{bn}", table.dtype),
         spec,
         rows: &rows,
@@ -185,7 +185,7 @@ fn sparse_core(
     let operands = [inputs[1], inputs[0], output.cast_const()];
 
     let launched = Launch {
-        module: "lumen.codegen.gather.tpu",
+        module: "lumen.codegen.gather.tpu.kernel",
         kernel: format!("gather_sparse_core_{}_{k}x{words}", table.dtype),
         spec,
         rows: &operands,

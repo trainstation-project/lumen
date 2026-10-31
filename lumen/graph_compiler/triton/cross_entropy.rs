@@ -10,7 +10,7 @@ use crate::graph_compiler::plan::Step;
 use crate::tensor::contiguous_strides;
 use crate::{DType, Device, Tensor, TensorOptions};
 
-/// The fixed GEMM epilogue (lumen.codegen.dot_general.triton.linear_cross_entropy), bound by the source
+/// The fixed GEMM epilogue (lumen.codegen.dot_general.triton.linear_cross_entropy_kernel), bound by the source
 /// importing it.
 const EPILOGUE: &str = "cross_entropy_epilogue";
 
@@ -47,8 +47,9 @@ fn prepare(h: &Tensor, w: &Tensor, target: &Tensor) -> Prepared {
         (&logits, &contiguous_strides(&logits)),
     );
 
-    let import =
-        format!("from lumen.codegen.dot_general.triton.linear_cross_entropy import {EPILOGUE}\n");
+    let import = format!(
+        "from lumen.codegen.dot_general.triton.linear_cross_entropy_kernel import {EPILOGUE}\n"
+    );
     let scalar =
         |v: usize| Tensor::full(&[], v as i64, TensorOptions::new().device(Device::Cpu(0)));
 

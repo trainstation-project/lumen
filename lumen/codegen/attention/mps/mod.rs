@@ -1,4 +1,4 @@
-//! Metal flash attention: the forward and backward kernel templates (`forward.metal`, `backward.metal`
+//! Metal flash attention: the forward and backward kernel templates (`forward_kernel.metal`, `backward_kernel.metal`
 //! beside this file, in the Metal prelude) and the source generated per fusion to call them.
 
 mod config;
