@@ -736,35 +736,42 @@ function overall(done, text) {
 const allButton = document.getElementById("all-run");
 const allStatus = document.getElementById("all-status");
 
-/** Benchmarks `ops` on MPS one after another, redrawing each op's section as its rows arrive. */
+/** Benchmarks `ops` on MPS one after another: clears all their charts first, then redraws each op's section
+ * as its rows arrive. */
 async function runOps(ops) {
   const dir = deviceOf("mps").perf;
   const started = performance.now();
   const failed = [];
+  // The ops still to run; their old rows stay hidden, also in the data the server returns after each op.
+  const pending = new Set(ops);
+  const before = Object.fromEntries(ops.map((op) => [op, PERFS[dir].rows.filter((r) => r.op === op)]));
+  const hidePending = (perf) => ({ ...perf, rows: perf.rows.filter((r) => !pending.has(r.op)) });
   benchmarking = allButton.disabled = true;
   allStatus.className = "lx-run-status";
   for (const op of ops) PROGRESS[op] = 0;
+  PERFS[dir] = hidePending(PERFS[dir]);
+  if (current.device.runnable) { drawIndex(); drawSections(); }
   const redraw = (op) => { if (current.device.runnable) { drawIndex(); if (!SECTIONS.get(op).hidden) drawSection(op); } };
   for (const [k, op] of ops.entries()) {
     const expected = (KNOWN[op]?.dtypes?.length || 2) * (KNOWN[op]?.sizes?.length || 8);
-    const before = PERFS[dir].rows.filter((r) => r.op === op);
     let got = 0;
-    PERFS[dir] = { ...PERFS[dir], rows: PERFS[dir].rows.filter((r) => r.op !== op) };
+    pending.delete(op);
     allStatus.textContent = `Running ${op} (${k + 1} of ${ops.length}) on MPS…`;
     overall(k / ops.length, `${k} of ${ops.length} ops · running ${op}`);
     redraw(op);
     try {
-      PERFS[dir] = await runBenchmark(op, "mps", (row) => {
+      const data = await runBenchmark(op, "mps", (row) => {
         got += 1;
         PROGRESS[op] = Math.min(got / expected, 1);
         overall((k + PROGRESS[op]) / ops.length, `${k} of ${ops.length} ops · running ${op}: ${got} of ${expected} measured`);
         PERFS[dir].rows.push(row);
         redraw(op);
       });
+      PERFS[dir] = hidePending(data);
       PROGRESS[op] = 1;
       remember(PERFS[dir]);
     } catch (e) {
-      PERFS[dir] = { ...PERFS[dir], rows: [...PERFS[dir].rows, ...before] };
+      PERFS[dir] = { ...PERFS[dir], rows: [...PERFS[dir].rows.filter((r) => r.op !== op), ...before[op]] };
       delete PROGRESS[op];
       failed.push(`${op} (${e.message})`);
     }
@@ -783,7 +790,8 @@ async function runOps(ops) {
 allButton.addEventListener("click", () => {
   const perf = PERFS[deviceOf("mps").perf];
   const which = document.getElementById("all-mode").value;
-  const ops = Object.keys(KNOWN).filter((op) => which === "all" || !perf?.rows.some((r) => r.op === op));
+  // In the order the page lists them.
+  const ops = OPS.filter((op) => KNOWN[op] && (which === "all" || !perf?.rows.some((r) => r.op === op)));
   if (!ops.length) {
     allStatus.className = "lx-run-status";
     allStatus.textContent = "Every op is measured already; choose All ops to measure them again.";
