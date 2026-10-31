@@ -12,24 +12,23 @@ use crate::codegen::elementwise::ElementwiseCodegen;
 use crate::codegen::layout::LayoutCodegen;
 use crate::codegen::reduction::ReductionCodegen;
 use crate::codegen::row::RowCodegen;
-use crate::graph::{Graph, Node, Primitive, UnaryOp, Var};
+use crate::graph::{Graph, Primitive};
 use crate::graph_compiler::MpsConfig;
 use crate::graph_compiler::common::attention::{Attention, Backward};
 use crate::kernels::mps::element_arg;
-use crate::tensor::contiguous_strides;
 use crate::{DType, Scalar};
 
 mod config;
-mod emitter;
 
 pub(crate) use crate::codegen::dot_general::mps::*;
+pub(crate) use crate::codegen::emitter::Emit;
+pub(crate) use crate::codegen::emitter::mps::Emitter;
 pub(crate) use crate::codegen::kinds::reduction_root;
 pub(crate) use crate::codegen::layout::mps::transpose::*;
 pub(crate) use crate::codegen::reduction::mps::{has_epilogue, split_launches};
 pub(crate) use crate::codegen::row::mps::*;
 pub(crate) use crate::codegen::store::mps::{gather_index, written};
 pub(crate) use config::*;
-pub(crate) use emitter::Emitter;
 
 /// The Metal code generator.
 pub(crate) struct Mps;

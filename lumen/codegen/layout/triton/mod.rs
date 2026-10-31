@@ -3,7 +3,7 @@
 //! are views the elementwise loops read through.
 
 use super::{LayoutCodegen, transpose_tiling};
-use crate::codegen::triton::{Emitter, Tensors, Triton, body_function, gather_index};
+use crate::codegen::triton::{Emit, Emitter, Tensors, Triton, body_function, gather_index};
 use crate::graph::{Graph, Primitive, TensorType};
 use crate::tensor::contiguous_strides;
 
