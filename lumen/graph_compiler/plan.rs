@@ -1393,7 +1393,7 @@ impl Plan {
         };
 
         for (at, step) in self.steps.iter().enumerate() {
-            crate::kernels::launched::step(at, step.label);
+            crate::profiler::launched::step(at, step.label);
 
             if let Some(scopes) = &mut scopes {
                 scopes.enter(step.scope);
@@ -1604,7 +1604,7 @@ impl Plan {
                     let _ = scratch;
                     let types: Vec<&TensorType> = step.inputs.iter().map(|(_, ty)| ty).collect();
                     let _kernel = crate::profiler::record_host_kernel(step.label);
-                    crate::kernels::launched::launched(step.label, || None);
+                    crate::profiler::launched::launched(step.label, || None);
 
                     unsafe {
                         reference::eval_raw(&step.primitive, &args, &types, out, &step.output.1)

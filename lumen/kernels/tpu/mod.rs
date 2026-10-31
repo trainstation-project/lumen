@@ -763,7 +763,7 @@ pub(crate) fn launch(index: usize, launch: Launch) -> Result<(), String> {
 
     crate::profiler::tpu::launched(index, &launch.kernel);
 
-    crate::kernels::launched::templated(&launch.kernel, || {
+    crate::profiler::launched::templated(&launch.kernel, || {
         // A generated program's script is its source, run on this device's memory.
         let template = match launch.module {
             GENERATED => {
