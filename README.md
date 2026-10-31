@@ -40,7 +40,7 @@ Plan                   graph_compiler/plan.rs: every value placed in one
       v
 Kernels                lumen/kernels/reference.rs (CPU reference: what each
                        primitive computes), lumen/kernels/*/mps + generated
-                       Metal (lumen/codegen/mps), Core ML on the Neural
+                       Metal (lumen/codegen/*/mps), Core ML on the Neural
                        Engine (opt-in), CUDA (allocator, streams, fill_)
 ```
 

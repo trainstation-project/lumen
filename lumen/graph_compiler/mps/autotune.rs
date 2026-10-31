@@ -3,9 +3,12 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::PoisonError;
 
-use super::{SOURCES, Tuning, codegen, compile_kernels, compile_mpp_kernels, record_launch};
+use super::kernel_codegen;
+use super::{SOURCES, Tuning, compile_kernels, compile_mpp_kernels, record_launch};
 use crate::allocator::Scratch;
 use crate::codegen::dot_general::mps::{self as gemm, GemmConfig};
+use crate::codegen::elementwise::mps::TUNED_ELEMENTS;
+use crate::codegen::kinds::gemm_dot;
 use crate::device::Device;
 use crate::graph::{Primitive, TensorType, View};
 use crate::graph_compiler::MpsConfig;
@@ -50,10 +53,8 @@ impl Kernels for Elementwise<'_> {
             return Vec::new();
         };
 
-        match self.tunable.contains_key(name)
-            && codegen::TUNED_ELEMENTS.contains(&step.output.1.numel())
-        {
-            true => codegen::tunings_of(body),
+        match self.tunable.contains_key(name) && TUNED_ELEMENTS.contains(&step.output.1.numel()) {
+            true => kernel_codegen::tunings_of(body),
             false => Vec::new(),
         }
     }
@@ -67,7 +68,7 @@ impl Kernels for Elementwise<'_> {
         let t = &self.tunable[name];
 
         let (kernel, source) =
-            codegen::kernel(body, &t.by_value, self.config, &t.views, Some(tuning));
+            kernel_codegen::kernel(body, &t.by_value, self.config, &t.views, Some(tuning));
 
         record_launch(&kernel, body, Some(tuning));
         self.sources.insert(kernel.clone(), source);
@@ -105,8 +106,8 @@ impl Gemms {
 
 /// Config used for GEMMs whose epilogue writes row tiles to scratch.
 const ROW_TILES: GemmConfig = GemmConfig {
-    bm: codegen::ROW_TILE,
-    bn: codegen::ROW_TILE,
+    bm: gemm::ROW_TILE,
+    bn: gemm::ROW_TILE,
     bk: 32,
     threads: 256,
     cols: 1,
@@ -125,7 +126,7 @@ pub(super) fn matmul_of(
         return None;
     };
 
-    let dot = codegen::gemm_dot(body)?;
+    let dot = gemm_dot(body)?;
     let ty = |v| body.type_of(v);
 
     Some((
@@ -145,7 +146,7 @@ fn tiled_gemm(step: &Step) -> bool {
         Primitive::Fusion { name, body, .. } => {
             !name.starts_with(crate::graph::NEURAL_ENGINE)
                 && super::launch_of(body) == super::Launch::Gemm
-                && (codegen::row_dot(body).is_none() || codegen::tile_scratch(body).is_some())
+                && (gemm::row_dot(body).is_none() || gemm::tile_scratch(body).is_some())
         }
         _ => false,
     };
@@ -166,24 +167,22 @@ impl Kernels for Gemms {
             return Vec::new();
         };
 
-        let Some(d) = codegen::gemm_dot(body) else {
+        let Some(d) = gemm_dot(body) else {
             return Vec::new();
         };
 
-        let epilogue = codegen::gemm_flags(body, d);
-        let group = codegen::gemm_group(body, d);
-        let dual = codegen::gemm_mpp_pair(body, d);
+        let epilogue = gemm::gemm_flags(body, d);
+        let group = gemm::gemm_group(body, d);
+        let dual = gemm::gemm_mpp_pair(body, d);
         let staged = !epilogue.plain() && !dual;
 
-        if tiled_gemm(step) && codegen::gemv_config(body).is_some() {
-            let (vector_lhs, _) = codegen::gemv_of(body, d).expect("a matrix-vector dot");
-            let tiles = codegen::tile_scratch(body).is_some();
+        if tiled_gemm(step) && gemm::gemv_config(body).is_some() {
+            let (vector_lhs, _) = gemm::gemv_of(body, d).expect("a matrix-vector dot");
+            let tiles = gemm::tile_scratch(body).is_some();
 
             return gemm::gemv_configs(vector_lhs)
                 .iter()
-                .filter(|c| {
-                    !tiles || gemm::gemv_rows(c, vector_lhs).is_multiple_of(codegen::ROW_TILE)
-                })
+                .filter(|c| !tiles || gemm::gemv_rows(c, vector_lhs).is_multiple_of(gemm::ROW_TILE))
                 .filter(|c| group.is_none_or(|(g, rows)| (if rows { c.bm } else { c.bn }) % g == 0))
                 .copied()
                 .collect();
@@ -232,8 +231,8 @@ impl Kernels for Gemms {
         };
 
         // Row-tile epilogues only tune between the row-tile config and wide MPP tiles.
-        if codegen::tile_scratch(body).is_some() {
-            let wide = mpp.iter().filter(|c| c.bn % codegen::ROW_TILE == 0);
+        if gemm::tile_scratch(body).is_some() {
+            let wide = mpp.iter().filter(|c| c.bn % gemm::ROW_TILE == 0);
 
             return match mpp.is_empty() {
                 true => Vec::new(),
@@ -271,7 +270,7 @@ impl Kernels for Gemms {
             .map(|(b, _)| matches!(b, Buffer::Scalar(_)))
             .collect();
 
-        let (kernel, source) = codegen::gemm_variant(body, &by_value, config, &self.config);
+        let (kernel, source) = gemm::gemm_variant(body, &by_value, config, &self.config);
         self.sources.insert(kernel.clone(), source);
         let name = kernel.clone();
 

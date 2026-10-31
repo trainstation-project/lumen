@@ -6,7 +6,7 @@ import re
 
 import lumen
 
-from .common import KERNELS, LUMEN, _traced_at, source_of, type_text
+from .common import KERNELS, LUMEN, _traced_at, prelude, source_of, type_text
 
 
 def _slug(text):
@@ -135,7 +135,7 @@ def dump_code(graph, plan, run, device, directory):
         (directory / "pallas" / f"{module}.py").write_text(source.read_text())
         index.append(f"pallas/{module}.py  the template {module}")
     if str(device).startswith("mps"):
-        (directory / "prelude.metal").write_text((KERNELS / "mps" / "kernels.metal").read_text())
+        (directory / "prelude.metal").write_text(prelude())
         index.append("prelude.metal  the Metal prelude every kernel above is compiled with")
     (directory / "graph.txt").write_text(str(graph) + "\n")
     (directory / "program.py").write_text(program_source(graph))

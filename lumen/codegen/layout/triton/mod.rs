@@ -3,7 +3,10 @@
 //! are views the elementwise kernels read through.
 
 use super::{LayoutCodegen, transpose_tiling};
-use crate::codegen::triton::{Emit, Emitter, Tensors, Triton, body_function, gather_index};
+use crate::codegen::emitter::Emit;
+use crate::codegen::emitter::triton::Emitter;
+use crate::codegen::store::triton::gather_index;
+use crate::codegen::utils::triton::{Tensors, Triton, body_function};
 use crate::graph::{Graph, Primitive, TensorType};
 use crate::tensor::contiguous_strides;
 

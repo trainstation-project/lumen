@@ -2,7 +2,8 @@
 //! fusion to fuse into Triton row kernels, as MPS does.
 
 use super::TritonModule;
-use crate::codegen::triton::{ROW_PARTIALS, fusible};
+use super::fusion::fusible;
+use crate::codegen::row::triton::ROW_PARTIALS;
 use crate::graph_compiler::common::diamonds::{diamonds, partials};
 use crate::graph_compiler::pass::CompilerPass;
 

@@ -66,7 +66,7 @@ def test_reads_strided_inputs_in_place(device, triton_on_cuda):
     assert not [e for e in prof.events() if e["name"] == "lumen::contiguous"]
     dot = lumen.compile(lambda u, v: F.matmul(u, v, "float32", "float32"))
     if device == "cuda":
-        import lumen.codegen.triton as triton
+        import lumen.codegen.utils.triton as triton
 
         before = set(triton.kernels)
     np.testing.assert_allclose(lumen.to_numpy(dot(x.transpose(0, 1), x)), a.T @ a, rtol=1e-4, atol=1e-4)

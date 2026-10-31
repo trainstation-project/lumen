@@ -8,9 +8,12 @@ use indoc::{formatdoc, writedoc};
 
 use crate::DType;
 use crate::codegen::dot_general::mps::GemmConfig;
+use crate::codegen::dot_general::mps::{ROW_TILE, gemm_rows, gemm_tiles, read_staged};
+use crate::codegen::emitter::Emit;
+use crate::codegen::emitter::mps::Emitter;
 pub(crate) use crate::codegen::kinds::{row_partials, row_reductions};
-use crate::codegen::mps::*;
 use crate::codegen::reduction::mps as reduce;
+use crate::codegen::utils::mps::*;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::MpsConfig;
 use crate::graph_compiler::common::diamonds::{depends_on, softmax_pair};

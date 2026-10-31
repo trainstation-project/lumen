@@ -3,7 +3,7 @@
 
 use indoc::formatdoc;
 
-use crate::codegen::triton::named;
+use crate::codegen::utils::triton::named;
 use crate::tensor::contiguous_strides;
 
 /// Generates a jit helper loading flat logical index `i` from a tensor with the given strides; a tensor

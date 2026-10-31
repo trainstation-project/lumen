@@ -1,37 +1,15 @@
-//! Triton code generation: the pieces every op's `@triton.jit` source shares (types, constants, the fill
-//! kernel, template `BODY` functions), re-exporting the emitter and the load/store helpers.
+//! What the Triton code generators share: the backend type, element types, constants, the fill kernel,
+//! template `BODY` functions and text helpers.
 
 use std::fmt::Write;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 use indoc::formatdoc;
 
-use crate::graph::{Graph, Node, Primitive, Var};
+use crate::codegen::store::triton::{load, store};
 use crate::tensor::dtype::dispatch_dtype;
 use crate::tensor::storage::as_bytes;
 use crate::{DType, Element, Scalar};
-
-pub(crate) use crate::codegen::attention::triton::{
-    ATTENTION_CONFIGS, AttentionConfig, untuned_attention,
-};
-pub(crate) use crate::codegen::dot_general::triton::row::{
-    dot_row_fits, partials_epilogue, row_epilogue,
-};
-pub(crate) use crate::codegen::dot_general::triton::{
-    CONFIGS, Config, UNTUNED, partial_tile, row_gemm_configs, untuned_row_gemm,
-};
-pub(crate) use crate::codegen::dot_general::triton::{
-    EpilogueFlags, Layouts, gemm, gemm_dot, gemm_flags,
-};
-pub(crate) use crate::codegen::elementwise::triton::{
-    LOOP_CONFIGS, LoopConfig, UNTUNED_LOOP, loop_configs, untuned_loop,
-};
-pub(crate) use crate::codegen::emitter::Emit;
-pub(crate) use crate::codegen::emitter::triton::Emitter;
-pub(crate) use crate::codegen::kinds::reduction_root;
-pub(crate) use crate::codegen::reduction::triton::scan;
-pub(crate) use crate::codegen::row::triton::{ROW_PARTIALS, row_count, row_groups, row_looped};
-pub(crate) use crate::codegen::store::triton::{gather_index, load, store, stored_at};
 
 /// The Triton code generator.
 pub(crate) struct Triton;
@@ -56,47 +34,6 @@ pub(crate) fn triton_type(dtype: DType) -> Option<&'static str> {
         F64 => "tl.float64",
         _ => return None,
     })
-}
-
-/// Whether `node` can be emitted inside a Triton fusion kernel: a supported primitive whose
-/// inputs and output all have Triton dtypes.
-pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
-    use Primitive::*;
-
-    let op = matches!(
-        node.primitive,
-        Add | Sub
-            | Mul
-            | Div
-            | Max
-            | Eq
-            | Lt
-            | Neg
-            | Exp
-            | Log
-            | Sqrt
-            | Tanh
-            | Logistic
-            | Cast { .. }
-            | Select
-            | Unary(_)
-            | Binary(_)
-            | Reshape { .. }
-            | BroadcastInDim { .. }
-            | Transpose { .. }
-            | Slice { .. }
-            | Full { .. }
-            | Iota { .. }
-            | RandomBits { .. }
-            | ReduceSum { .. }
-            | ReduceMax { .. }
-            | DynamicSlice { .. }
-            | Gather { .. }
-            | Concatenate { .. }
-    );
-
-    let typed = |v: &Var| triton_type(graph.type_of(*v).dtype).is_some();
-    op && node.inputs.iter().chain([&node.output]).all(typed)
 }
 
 /// Kernel parameter list: inputs (`in{k}`), optional `extra`, `out`, `n`, a `LOAD{k}` helper per
@@ -245,4 +182,9 @@ pub(crate) fn constant(dtype: DType, value: Scalar) -> String {
             triton_type(dtype).expect("a Triton dtype")
         ),
     }
+}
+
+/// Indents every line of `lines` by four spaces.
+pub(crate) fn indented(lines: &str) -> String {
+    lines.lines().map(|l| format!("    {l}\n")).collect()
 }

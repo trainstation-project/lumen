@@ -2,7 +2,7 @@
 //! members of one element count share a grid range, others get their own.
 
 use super::TritonModule;
-use crate::codegen::triton as codegen;
+use crate::codegen::kinds::{gemm_dot, reduction_root};
 use crate::graph::{Graph, Node, Primitive};
 use crate::graph_compiler::common::horizontal::{
     Target, fuse, heroes_fit, keeps_tiling, tiling_key,
@@ -38,8 +38,8 @@ impl Target for Elementwise {
             && elements > 0
             && elements <= MAX_ELEMENTS
             && !alone
-            && codegen::reduction_root(body).is_none()
-            && codegen::gemm_dot(body).is_none()
+            && reduction_root(body).is_none()
+            && gemm_dot(body).is_none()
     }
 
     /// Groups elementwise fusions of any size together (they split the grid), and tiled transposes by exact shape, as

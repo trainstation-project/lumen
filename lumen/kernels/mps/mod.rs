@@ -332,7 +332,8 @@ pub(crate) fn encode(
         ToHost | ToDevice => {
             unreachable!("a stage's transfers are between its plans (compiler::stages)")
         }
-        Full { .. } | Iota { .. } | RandomBits { .. } => super::factory::mps::encode,
+        Full { .. } | Iota { .. } => super::factory::mps::encode,
+        RandomBits { .. } => crate::codegen::random::mps::encode,
         Fusion { .. } | LinearCrossEntropy => unreachable!("encoded above"),
         FusionOutput { .. } => unreachable!("a fusion's kernel writes it: no step"),
         CustomCall { .. } => unreachable!("the plan calls a custom op's function itself"),

@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 #[cfg(feature = "python")]
-pub(crate) use crate::codegen::triton::Config;
+pub(crate) use crate::codegen::dot_general::triton::Config;
 use attention::Tiles;
 #[cfg(feature = "python")]
 pub(crate) use attention::{Launch, set_attention};
@@ -48,10 +48,17 @@ use super::plan::{Buffer, Step, Tuned};
 use super::{CompilerConfig, Options, Plan, plan_options, positions};
 use crate::codegen::dynamic_slice::DynamicSliceCodegen;
 use crate::codegen::elementwise::ElementwiseCodegen;
+use crate::codegen::elementwise::triton::{
+    LOOP_CONFIGS, LoopConfig, UNTUNED_LOOP, loop_configs, untuned_loop,
+};
+use crate::codegen::kinds::{gemm_dot, reduction_root};
 use crate::codegen::layout::{LayoutCodegen, TILE, transpose_tiling};
 use crate::codegen::reduction::ReductionCodegen;
+use crate::codegen::reduction::triton::scan;
 use crate::codegen::row::RowCodegen;
-use crate::codegen::triton::{self as codegen, LOOP_CONFIGS, LoopConfig, UNTUNED_LOOP};
+use crate::codegen::row::triton::{row_count, row_groups, row_looped};
+use crate::codegen::store::triton::{load, store};
+use crate::codegen::utils::triton as codegen;
 use crate::graph::{Graph, Primitive, TensorType, UPDATES};
 use crate::graph_compiler::common::diamonds::Row;
 use crate::graph_compiler::common::horizontal::segments;
@@ -301,7 +308,7 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
     if config.merge_dots {
         pipeline.add(MergeDotsBackward).add(MergeDots {
             target: Target {
-                reads: codegen::fusible,
+                reads: fusion::fusible,
                 views: true,
                 lanes: 1,
                 columns: 8,
@@ -409,14 +416,14 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
             1,
             1,
         ),
-        Primitive::Fusion { body, .. } if codegen::gemm_dot(body).is_some() => return None,
+        Primitive::Fusion { body, .. } if gemm_dot(body).is_some() => return None,
         Primitive::Fusion { name, body, .. } if name == ROW => {
             let r = codegen::Triton::row(body, &by_value, &())
                 .expect("a Triton row kernel of every row body");
 
             (r.name, r.source, r.lanes, r.splits)
         }
-        Primitive::Fusion { body, .. } => match codegen::reduction_root(body) {
+        Primitive::Fusion { body, .. } => match reduction_root(body) {
             Some(root) => {
                 let r = codegen::Triton::reduction(body, &by_value, root)
                     .expect("a Triton reduction of every reduction body");
@@ -436,8 +443,7 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
             reverse,
             accum_dtype,
         } => {
-            let (name, source, lanes) =
-                codegen::scan(&step.inputs[0].1, *axis, *reverse, *accum_dtype);
+            let (name, source, lanes) = scan(&step.inputs[0].1, *axis, *reverse, *accum_dtype);
 
             (name, source, lanes, 1)
         }
@@ -466,9 +472,7 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
 
     // Only an elementwise fusion's outputs (a horizontal fusion's) split the grid; a row's are one row each.
     let segments = match &step.primitive {
-        Primitive::Fusion { name, body, .. }
-            if name != ROW && codegen::reduction_root(body).is_none() =>
-        {
+        Primitive::Fusion { name, body, .. } if name != ROW && reduction_root(body).is_none() => {
             segments(body)
         }
         _ => Vec::new(),
@@ -493,7 +497,7 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
             })
         }
         Primitive::Fusion { name, body, .. }
-            if name != UPDATES && name != ROW && codegen::reduction_root(body).is_none() =>
+            if name != UPDATES && name != ROW && reduction_root(body).is_none() =>
         {
             match transpose_tiling(body) {
                 Some(tiling) => Some(Template::Transpose {
@@ -529,7 +533,7 @@ impl Kernels for Loops {
             return Vec::new();
         };
 
-        codegen::loop_configs(kernel.lanes.max(kernel.splits.next_power_of_two()))
+        loop_configs(kernel.lanes.max(kernel.splits.next_power_of_two()))
     }
 
     /// The step launched with `config`.
@@ -658,7 +662,7 @@ pub(crate) fn run(
 
             let (functions, launches) = (&helpers.functions, &helpers.launches);
             let inputs: &[Tensor] = &[inputs, outs].concat();
-            let untuned = codegen::untuned_loop(kernel.lanes);
+            let untuned = untuned_loop(kernel.lanes);
             let config = step.launch::<LoopConfig>().unwrap_or(&untuned);
             // A looped row kernel walks one row a program, a block of it at a time; one with column
             // partials one group of rows a program; a tiled transpose one tile a program.
@@ -666,8 +670,7 @@ pub(crate) fn run(
 
             let kernel = match &step.primitive {
                 Primitive::Fusion { name, body, .. }
-                    if name == ROW
-                        && (codegen::row_looped(body) || codegen::row_groups(body).is_some())
+                    if name == ROW && (row_looped(body) || row_groups(body).is_some())
                         || name != ROW && transpose_tiling(body).is_some() =>
                 {
                     looped = Kernel {
@@ -684,7 +687,7 @@ pub(crate) fn run(
             // transpose's tiles, or lines for a scan, or picks for a scatter.
             let n = match &step.primitive {
                 Primitive::Fusion { name, body, .. } if name == ROW => {
-                    Some(codegen::row_groups(body).unwrap_or(codegen::row_count(body)))
+                    Some(row_groups(body).unwrap_or(row_count(body)))
                 }
                 Primitive::Fusion { body, .. } if transpose_tiling(body).is_some() => {
                     transpose_tiling(body).map(|tiling| tiling.tiles())
@@ -721,7 +724,7 @@ pub(crate) fn run(
                 unreachable!("a split reduction")
             };
 
-            let reduced = codegen::reduction_root(body).expect("a reduction").output;
+            let reduced = reduction_root(body).expect("a reduction").output;
 
             let options = TensorOptions::new()
                 .dtype(body.type_of(reduced).dtype)
@@ -805,7 +808,7 @@ pub(crate) fn fill(t: &Tensor, value: Scalar) -> Result<(), String> {
             template: None,
         };
 
-        let store = Function::new("STORE", codegen::store(t.shape(), t.strides()));
+        let store = Function::new("STORE", store(t.shape(), t.strides()));
         (kernel, vec![store])
     });
 
@@ -932,18 +935,15 @@ fn loop_helpers(
         .iter()
         .enumerate()
         .filter(|&(k, _)| !kernel.by_value[k])
-        .map(|(k, t)| Function::new(format!("LOAD{k}"), codegen::load(t.shape(), t.strides())))
+        .map(|(k, t)| Function::new(format!("LOAD{k}"), load(t.shape(), t.strides())))
         .collect();
 
-    functions.push(Function::new(
-        "STORE",
-        codegen::store(out.shape(), out.strides()),
-    ));
+    functions.push(Function::new("STORE", store(out.shape(), out.strides())));
 
     for (k, t) in outs.iter().enumerate() {
         functions.push(Function::new(
             format!("STORE{}", k + 1),
-            codegen::store(t.shape(), t.strides()),
+            store(t.shape(), t.strides()),
         ));
     }
 
@@ -989,7 +989,7 @@ fn launch(
     n: usize,
 ) -> Result<(), String> {
     let launch = LOOP.get().ok_or(
-        "the Triton backend's loops launch from Python (lumen.codegen.triton): none is installed",
+        "the Triton backend's loops launch from Python (lumen.codegen.utils.triton): none is installed",
     )?;
 
     let programs = match kernel.segments.as_slice() {

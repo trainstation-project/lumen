@@ -11,11 +11,11 @@ use std::fmt::Write;
 use indoc::formatdoc;
 
 use crate::codegen::dot_general::GemmCodegen;
+use crate::codegen::emitter::Emit;
+use crate::codegen::emitter::triton::Emitter;
 use crate::codegen::regions::{Columns, Region, gemm_expanded, gemm_regions};
-use crate::codegen::triton::{
-    Emit, Emitter, Triton, gather_index, load, named, stored_at, triton_type,
-};
-use crate::codegen::utils::triton::indented;
+use crate::codegen::store::triton::{gather_index, load, stored_at};
+use crate::codegen::utils::triton::{Triton, indented, named, triton_type};
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::tensor::contiguous_strides;
 

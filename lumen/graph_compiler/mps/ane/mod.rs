@@ -8,7 +8,7 @@ use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use super::MpsModule;
-use crate::codegen::mps::ane::mil;
+use crate::codegen::ane::mil;
 use crate::graph::{FUSION_SEPARATOR, Graph, NEURAL_ENGINE, Primitive, TensorType, Var, intern};
 use crate::graph_compiler::pass::CompilerPass;
 use crate::graph_compiler::plan::Step;

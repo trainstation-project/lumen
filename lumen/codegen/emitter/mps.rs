@@ -4,7 +4,9 @@ use std::collections::HashMap;
 use std::fmt::Write;
 
 use super::Emit;
-use crate::codegen::mps::*;
+use crate::codegen::random::RandomCodegen;
+use crate::codegen::store::mps::{gather_index, load};
+use crate::codegen::utils::mps::*;
 use crate::graph::{Graph, Node, Primitive, UnaryOp, Var};
 use crate::tensor::contiguous_strides;
 
@@ -285,7 +287,7 @@ impl<'a> Emitter<'a> {
                     RandomBits { offset, .. } => {
                         let seed = self.value(node.inputs[0], "0".into());
                         let start = self.value(node.inputs[1], "0".into());
-                        format!("philox_bits({seed}, {start} + {offset}ul + ulong({idx}))")
+                        Mps::bits(&seed, &start, *offset, &idx)
                     }
                     Iota { dimension, .. } => {
                         let mut strides = vec![0; ty.shape.len()];

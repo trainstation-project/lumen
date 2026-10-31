@@ -16,14 +16,5 @@ FOR_BYTES(FULL)
 
 FOR_NUMERIC(IOTA)
 
-/// Writes Philox random 32-bit words for counters `*start + offset + j` under `*seed`.
-kernel void random_bits(device const ulong *seed [[buffer(0)]],
-                        device const ulong *start [[buffer(1)]],
-                        device uint *out [[buffer(2)]],
-                        constant ulong &offset [[buffer(3)]],
-                        ELEMENTWISE_ARGS(4)) {
-    FOR_EACH_ELEMENT(j, uint) { out[j] = philox_bits(*seed, *start + offset + j); }
-}
-
 /// Empty kernel dispatched to mark a point in the command stream for profiling.
 kernel void event_marker() {}

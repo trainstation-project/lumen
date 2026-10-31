@@ -5,9 +5,8 @@ use std::sync::OnceLock;
 
 use super::{Function, Launches, TritonModule, copy, fill};
 use crate::codegen::attention::AttentionCodegen;
-use crate::codegen::triton::{
-    self as codegen, ATTENTION_CONFIGS, AttentionConfig, untuned_attention,
-};
+use crate::codegen::attention::triton::{ATTENTION_CONFIGS, AttentionConfig, untuned_attention};
+use crate::codegen::utils::triton as codegen;
 use crate::graph::{Primitive, Var};
 use crate::graph_compiler::common::attention::{self, Backward, Strides};
 use crate::graph_compiler::common::autotune::Kernels;

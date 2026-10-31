@@ -9,7 +9,9 @@ use std::collections::HashMap;
 use std::fmt::Write;
 
 use super::ElementwiseCodegen;
-use crate::codegen::triton::*;
+use crate::codegen::emitter::Emit;
+use crate::codegen::emitter::triton::Emitter;
+use crate::codegen::utils::triton::*;
 use crate::graph::Graph;
 use crate::graph_compiler::common::horizontal::segments;
 

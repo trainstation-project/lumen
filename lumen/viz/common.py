@@ -8,6 +8,12 @@ import lumen
 LUMEN = pathlib.Path(lumen.__file__).parent
 KERNELS = LUMEN / "kernels"
 
+
+def prelude():
+    """The Metal prelude every generated kernel is compiled with: the shared one, then Philox."""
+    return (KERNELS / "mps" / "kernels.metal").read_text() + (LUMEN / "codegen/random/mps/philox.metal").read_text()
+
+
 # Short dtype names used in visualizations, mapped to lumen dtype names.
 DTYPES = {
     "f32": "float32",
@@ -50,7 +56,7 @@ _SOURCES = [
     (r"^dynamic_slice_", "codegen/dynamic_slice/mps/kernel.metal", "#define DYNAMIC_SLICE"),
     (r"^scatter_add_scan_", "codegen/scatter_add/mps/kernel.metal", "#define SCATTER_ADD_SCAN"),
     (r"^scatter_add_", "codegen/scatter_add/mps/kernel.metal", "#define SCATTER_ADD("),
-    (r"^random_bits", "kernels/factory/mps/kernels.metal", "kernel void random_bits"),
+    (r"^random_bits", "codegen/random/mps/kernel.metal", "kernel void random_bits"),
     (
         r"^matmul_(u64|i64)$",
         "codegen/dot_general/mps/integer/matmul_wide_kernel.metal",

@@ -6,9 +6,11 @@ use std::fmt::Write;
 
 use indoc::{formatdoc, indoc};
 
+use crate::codegen::emitter::Emit;
+use crate::codegen::emitter::mps::Emitter;
 use crate::codegen::kinds::reduction_root;
-use crate::codegen::mps::*;
 use crate::codegen::reduction::ReductionCodegen;
+use crate::codegen::utils::mps::*;
 use crate::graph::Primitive::{self, *};
 use crate::graph::TensorType;
 use crate::graph::primitive::free_dims;

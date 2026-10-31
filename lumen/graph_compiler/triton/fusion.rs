@@ -2,14 +2,56 @@
 //! kernels' limits and shapes, and which nodes left outside any fusion need one-node kernels.
 
 use super::TritonModule;
-use crate::codegen::kinds::row_reductions;
+use crate::codegen::dot_general::triton::row::dot_row_fits;
+use crate::codegen::kinds::{gemm_dot, reduction_root, row_reductions};
 use crate::codegen::regions::expansion;
-use crate::codegen::triton::{self as codegen, dot_row_fits, fusible};
+use crate::codegen::utils::triton::triton_type;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::common::alone::Lone;
 use crate::graph_compiler::common::fusion::{Backend, fuse};
 use crate::graph_compiler::common::place_views::place_views;
 use crate::graph_compiler::pass::CompilerPass;
+
+/// Whether `node` can be emitted inside a Triton fusion kernel: a supported primitive whose
+/// inputs and output all have Triton dtypes.
+pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
+    use Primitive::*;
+
+    let op = matches!(
+        node.primitive,
+        Add | Sub
+            | Mul
+            | Div
+            | Max
+            | Eq
+            | Lt
+            | Neg
+            | Exp
+            | Log
+            | Sqrt
+            | Tanh
+            | Logistic
+            | Cast { .. }
+            | Select
+            | Unary(_)
+            | Binary(_)
+            | Reshape { .. }
+            | BroadcastInDim { .. }
+            | Transpose { .. }
+            | Slice { .. }
+            | Full { .. }
+            | Iota { .. }
+            | RandomBits { .. }
+            | ReduceSum { .. }
+            | ReduceMax { .. }
+            | DynamicSlice { .. }
+            | Gather { .. }
+            | Concatenate { .. }
+    );
+
+    let typed = |v: &Var| triton_type(graph.type_of(*v).dtype).is_some();
+    op && node.inputs.iter().chain([&node.output]).all(typed)
+}
 
 /// Name of a fusion of a GEMM and the normalization row reading its product.
 const DOT_ROW: &str = "dot_row";
@@ -50,11 +92,11 @@ fn backend(m: &TritonModule<'_>) -> Backend {
 fn named(body: &Graph) -> String {
     let row = !row_reductions(body).is_empty();
 
-    match (codegen::gemm_dot(body).is_some(), row) {
+    match (gemm_dot(body).is_some(), row) {
         (true, true) => DOT_ROW,
         (false, true) => ROW,
         (true, false) => DOT_GENERAL,
-        _ if codegen::reduction_root(body).is_some() => REDUCTION,
+        _ if reduction_root(body).is_some() => REDUCTION,
         _ => ELEMENTWISE,
     }
     .into()
@@ -95,7 +137,7 @@ impl CompilerPass<TritonModule<'_>> for PlaceViews {
 
     /// Marks each slice read only by GEMMs a view (`common::place_views`).
     fn apply(&mut self, m: &mut TritonModule<'_>) -> Result<(), String> {
-        place_views(&mut m.graph, |_, _, _, _| true, codegen::gemm_dot);
+        place_views(&mut m.graph, |_, _, _, _| true, gemm_dot);
         Ok(())
     }
 }

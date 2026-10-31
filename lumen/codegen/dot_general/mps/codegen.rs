@@ -5,12 +5,15 @@ use std::fmt::Write;
 
 use indoc::{formatdoc, writedoc};
 
+use super::row::{gemm_row_kernel, row_dot, tile_scratch};
 use crate::codegen::dot_general::GemmCodegen;
 use crate::codegen::dot_general::mps::{
     Algorithm, DEFAULT_CONFIGS, GemmConfig, gemv, gemv_default, gemv_rows, gemv_tiles_default,
     mpp_transposes, plan_matmul,
 };
-use crate::codegen::mps::*;
+use crate::codegen::emitter::Emit;
+use crate::codegen::emitter::mps::Emitter;
+use crate::codegen::utils::mps::*;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::MpsConfig;
 use crate::tensor::contiguous_strides;
@@ -18,7 +21,7 @@ use crate::tensor::contiguous_strides;
 pub(crate) use crate::codegen::kinds::gemm_dot;
 
 pub(crate) use crate::codegen::regions::{
-    Columns, Expansion, ROW_COLUMNS, Region, expansion, gemm_expanded, gemm_pair, gemm_regions,
+    Columns, Expansion, ROW_COLUMNS, Region, gemm_expanded, gemm_pair, gemm_regions,
 };
 
 /// Number of dot columns one epilogue call consumes, and whether the regions run along rows

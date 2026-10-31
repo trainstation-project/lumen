@@ -4,7 +4,9 @@ use std::collections::HashMap;
 use std::fmt::Write;
 
 use super::Emit;
-use crate::codegen::triton::*;
+use crate::codegen::random::RandomCodegen;
+use crate::codegen::store::triton::gather_index;
+use crate::codegen::utils::triton::*;
 use crate::graph::{BinaryOp, Graph, Node, Primitive, UnaryOp, Var};
 use crate::graph_compiler::elementwise;
 use crate::tensor::contiguous_strides;
@@ -619,14 +621,7 @@ impl<'a> Emit<'a> for Emitter<'a> {
                         let seed = self.value(node.inputs[0], "0".into());
                         let start = self.value(node.inputs[1], "0".into());
 
-                        let i = match idx.parse::<u64>() {
-                            Ok(_) => format!("tl.full([], {idx}, tl.int64)"),
-                            Err(_) => idx.clone(),
-                        };
-
-                        format!(
-                            "philox_bits({seed}, {start} + tl.full([], {offset}, tl.uint64) + {i}.to(tl.uint64))"
-                        )
+                        Triton::bits(&seed, &start, *offset, &idx)
                     }
                     DynamicSlice { slice_sizes } => {
                         let x = body.type_of(node.inputs[0]);

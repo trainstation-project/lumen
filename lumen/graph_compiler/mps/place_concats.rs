@@ -2,7 +2,8 @@
 
 use std::collections::HashMap;
 
-use super::{Kernel, MpsModule, PENDING, codegen, fusion};
+use super::kernel_codegen;
+use super::{Kernel, MpsModule, PENDING, fusion};
 use crate::graph::{Graph, Node, Primitive};
 use crate::graph_compiler::common::attention;
 use crate::graph_compiler::pass::CompilerPass;
@@ -107,7 +108,7 @@ pub(super) fn in_place_concats(
                         writes.then_some(true)
                     }
                     (Some(Kernel::Fusion(_)), Primitive::Fusion { body, .. }) => {
-                        codegen::writes_views(body).then_some(false)
+                        kernel_codegen::writes_views(body).then_some(false)
                     }
                     (None, p) if before_fusion => {
                         let layout = matches!(

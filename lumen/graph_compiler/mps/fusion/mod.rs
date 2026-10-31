@@ -68,9 +68,9 @@ fn backend(config: &MpsConfig) -> Backend {
         reduction_epilogues: config.reduction_epilogues,
         contraction_epilogues: config.contraction_epilogues,
         expansion: |graph, dot, concat| {
-            crate::codegen::mps::expansion(graph, dot, concat).is_some()
+            crate::codegen::regions::expansion(graph, dot, concat).is_some()
         },
-        row_dot: |body| crate::codegen::mps::row_dot(body).is_some(),
+        row_dot: |body| crate::codegen::dot_general::mps::row_dot(body).is_some(),
     }
 }
 

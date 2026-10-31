@@ -5,10 +5,15 @@ use std::fmt::Write;
 
 use indoc::{formatdoc, writedoc};
 
+use super::codegen::gemv_of;
 use crate::DType;
 use crate::codegen::dot_general::mps::{Algorithm, GemmConfig, mpp_transposes};
-use crate::codegen::mps::*;
+use crate::codegen::emitter::Emit;
+use crate::codegen::emitter::mps::Emitter;
+use crate::codegen::kinds::gemm_dot;
 use crate::codegen::row::mps::*;
+use crate::codegen::store::mps::load;
+use crate::codegen::utils::mps::*;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::MpsConfig;
 

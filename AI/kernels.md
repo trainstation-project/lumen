@@ -55,8 +55,8 @@ Everything per element is generated from the fusion's body.
 3. **Hand-written kernels stay fusion-agnostic.** Fused work reaches them
    through the spec or a generated functor, so a new epilogue never means
    editing the kernel.
-4. **Same split on every device.** A device's `codegen/<device>` mirrors
-   `codegen/mps` (loop, row, reduction, transpose kinds), and its
+4. **Same split on every device.** A device's `codegen/<op>/<device>` mirrors
+   `codegen/<op>/mps` (elementwise, row, reduction, transpose kinds), and its
    hand-written kernels mirror `kernels/*/mps`, so a fusion that runs on one
    device runs on the others.
 5. **Layout.** Hand-written kernels for a device go in a `<device>/` folder

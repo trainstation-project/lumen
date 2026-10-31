@@ -1,8 +1,8 @@
-//! Metal encoding of factory primitives: fill, iota and Philox random bits.
+//! Metal encoding of factory primitives: fill and iota (random bits are codegen/random's).
 use crate::Tensor;
 use crate::graph::Primitive::*;
 use crate::graph_compiler::plan::Step;
-use crate::kernels::mps::{Grid, element_arg, elementwise_grid, launch_step, u32_arg, u64_arg};
+use crate::kernels::mps::{Grid, element_arg, elementwise_grid, launch_step, u32_arg};
 
 /// Encodes one factory `step` writing into `output`, keeping `keep` alive until the command buffer finishes.
 pub(crate) fn encode(
@@ -40,12 +40,6 @@ pub(crate) fn encode(
                 grid,
                 keep,
             )
-        }
-        RandomBits { offset, .. } => {
-            let n = out.numel();
-            let args = [u64_arg(*offset as usize), u32_arg(n as u32)];
-            let grid = elementwise_grid(n, out.dtype);
-            launch_step(step, "random_bits", inputs, output, &args, grid, keep)
         }
         _ => unreachable!("a factory primitive"),
     }

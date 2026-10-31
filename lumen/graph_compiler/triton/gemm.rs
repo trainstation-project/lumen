@@ -4,7 +4,8 @@ use std::sync::OnceLock;
 
 use super::{Function, Launches};
 use crate::codegen::dot_general::GemmCodegen;
-use crate::codegen::triton::{self as codegen, CONFIGS, Config, UNTUNED};
+use crate::codegen::dot_general::triton::{self as codegen, CONFIGS, Config, UNTUNED};
+use crate::codegen::utils::triton::Triton;
 use crate::graph::{Graph, Node, Primitive};
 use crate::graph_compiler::common::autotune::Kernels;
 use crate::graph_compiler::plan::Buffer;
@@ -127,7 +128,7 @@ fn prepare(step: &Step, inputs: &[Tensor], out: &Tensor, outs: &[Tensor]) -> Pre
                 DOT_PARTIALS => {
                     let width = codegen::partial_tile(cols).expect("a partial tile width");
 
-                    codegen::partials_epilogue(
+                    codegen::row::partials_epilogue(
                         body,
                         &by_value,
                         dot,
@@ -137,7 +138,14 @@ fn prepare(step: &Step, inputs: &[Tensor], out: &Tensor, outs: &[Tensor]) -> Pre
                         width,
                     )
                 }
-                _ => codegen::row_epilogue(body, &by_value, dot, &layouts, &outputs, [rows, cols]),
+                _ => codegen::row::row_epilogue(
+                    body,
+                    &by_value,
+                    dot,
+                    &layouts,
+                    &outputs,
+                    [rows, cols],
+                ),
             };
 
             code
@@ -152,8 +160,7 @@ fn prepare(step: &Step, inputs: &[Tensor], out: &Tensor, outs: &[Tensor]) -> Pre
                 outputs: std::iter::once(out).chain(outs).map(owned).collect(),
             };
 
-            codegen::Triton::gemm(body, dot, &by_value, &layouts)
-                .expect("a Triton GEMM of every GEMM body")
+            Triton::gemm(body, dot, &by_value, &layouts).expect("a Triton GEMM of every GEMM body")
         }
     };
 
