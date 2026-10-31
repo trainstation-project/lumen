@@ -180,8 +180,8 @@ def test_custom_op_encodes_into_the_command_buffer():
 
 
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
-def test_autotuned_loops_match_untuned_and_dump_their_launch(tmp_path, dtype):
-    """A loop the compiler autotunes computes what the untuned loop does, at
+def test_autotuned_elementwise_fusions_match_untuned_and_dump_their_launch(tmp_path, dtype):
+    """An elementwise fusion the compiler autotunes computes what the untuned one does, at
     lengths that fill no thread evenly, and its dumped source carries the
     elements per thread and threadgroup size it picked."""
     if not lumen.mps.is_available():
@@ -204,7 +204,7 @@ def test_autotuned_loops_match_untuned_and_dump_their_launch(tmp_path, dtype):
         lumen.compile(lambda x: -x * 2).dump_code(str(tmp_path), x)
         source = "".join(p.read_text() for p in tmp_path.glob("*fusion_*.metal"))
         assert "[[max_total_threads_per_threadgroup(" in source
-        assert "for (uint j = i" in source and "; k < " in source
+        assert "constexpr uint ELEMENTS_PER_THREAD = " in source and "elementwise<ELEMENTS_PER_THREAD, " in source
     finally:
         compiler.autotune = True
 

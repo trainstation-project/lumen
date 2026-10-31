@@ -21,5 +21,6 @@ pub(crate) fn call(kernel: usize, args: &[Tensor]) -> Result<(), String> {
     let hook = HOOK
         .get()
         .ok_or("a custom op's function is Python's: none is installed")?;
+
     hook(kernel, args)
 }

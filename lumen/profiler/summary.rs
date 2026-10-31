@@ -149,13 +149,17 @@ impl Profile {
             })
             .map(|e| (e.id, e))
             .collect();
+
         let mut totals: HashMap<u64, Totals> =
             ranges.keys().map(|&id| (id, Totals::default())).collect();
+
         for event in &self.events {
             let Some(parent) = event.parent.filter(|p| ranges.contains_key(p)) else {
                 continue;
             };
+
             let direct = totals.get_mut(&parent).unwrap();
+
             match event.kind {
                 EventKind::Op | EventKind::UserRange | EventKind::HostKernel => {
                     direct.child_cpu += event.duration_ns()
@@ -166,14 +170,17 @@ impl Profile {
                 }
                 EventKind::Memory => direct.self_device_mem += event.bytes,
             }
+
             let (device, cpu_mem, device_mem) = match event.kind {
                 EventKind::Gpu => (event.duration_ns(), 0, 0),
                 EventKind::Memory if event.device == Device::Cpu(0) => (0, event.bytes, 0),
                 EventKind::Memory => (0, 0, event.bytes),
                 _ => continue,
             };
+
             // Inclusive device time and memory go to every enclosing range.
             let mut ancestor = Some(parent);
+
             while let Some(id) = ancestor {
                 let t = totals.get_mut(&id).unwrap();
                 t.device += device;
@@ -182,29 +189,36 @@ impl Profile {
                 ancestor = ranges[&id].parent.filter(|p| ranges.contains_key(p));
             }
         }
+
         totals
     }
 
     /// Per-name totals in first-seen order; with `group_by_input_shape`, per name, input types and strides.
     pub fn key_averages(&self, group_by_input_shape: bool) -> Vec<EventAvg> {
         let totals = self.totals();
+
         let names: HashMap<u64, &str> = self
             .events
             .iter()
             .filter(|e| e.kind == EventKind::Op)
             .map(|e| (e.id, e.name.as_str()))
             .collect();
+
         let mut order: Vec<String> = Vec::new();
         let mut rows: HashMap<String, EventAvg> = HashMap::new();
+
         for event in &self.events {
             if event.kind == EventKind::Memory {
                 continue;
             }
+
             // A kernel named like its own op is already counted in that op's device time.
             let op = event.parent.and_then(|p| names.get(&p));
+
             if event.kind == EventKind::Gpu && op == Some(&event.name.as_str()) {
                 continue;
             }
+
             let (input_shapes, input_strides) = match group_by_input_shape {
                 true => (
                     event
@@ -222,9 +236,12 @@ impl Profile {
                 ),
                 false => (String::new(), String::new()),
             };
+
             let key = format!("{}\0{input_shapes}\0{input_strides}", event.name);
+
             let row = rows.entry(key.clone()).or_insert_with(|| {
                 order.push(key);
+
                 EventAvg {
                     name: event.name.clone(),
                     input_shapes,
@@ -232,13 +249,16 @@ impl Profile {
                     ..EventAvg::default()
                 }
             });
+
             row.count += 1;
+
             if event.kind == EventKind::Gpu {
                 row.is_device_event = true;
                 row.device_time_total += event.duration_ns();
                 row.self_device_time_total += event.duration_ns();
                 continue;
             }
+
             let t = totals[&event.id];
             row.cpu_time_total += event.duration_ns();
             row.self_cpu_time_total += event.duration_ns().saturating_sub(t.child_cpu);
@@ -249,6 +269,7 @@ impl Profile {
             row.device_memory_usage += t.device_mem;
             row.self_device_memory_usage += t.self_device_mem;
         }
+
         order
             .into_iter()
             .map(|key| rows.remove(&key).unwrap())
@@ -258,6 +279,7 @@ impl Profile {
     /// Device column label: the one device kind seen, `CUDA` when none, `DEVICE` when mixed.
     fn device_name(&self) -> &'static str {
         let (mut cuda, mut mps, mut tpu) = (false, false, false);
+
         for e in &self.events {
             if matches!(e.kind, EventKind::Gpu | EventKind::Memory) {
                 match e.device {
@@ -268,6 +290,7 @@ impl Profile {
                 }
             }
         }
+
         match (cuda, mps, tpu) {
             (false, true, false) => "MPS",
             (false, false, true) => "TPU",
@@ -284,26 +307,33 @@ impl Profile {
         group_by_input_shape: bool,
     ) -> String {
         let mut rows = self.key_averages(group_by_input_shape);
+
         if let Some(sort_by) = sort_by {
             rows.sort_by_key(|r| std::cmp::Reverse(sort_by.key(r)));
         }
+
         let total_self_cpu: u64 = rows.iter().map(|r| r.self_cpu_time_total).sum();
+
         let total_self_device: u64 = self
             .events
             .iter()
             .filter(|e| e.kind == EventKind::Gpu)
             .map(Event::duration_ns)
             .sum();
+
         if let Some(limit) = row_limit {
             rows.truncate(limit);
         }
+
         let has_device_time = total_self_device > 0;
         let has_memory = self.config.profile_memory;
+
         let has_device_memory = has_memory
             && self
                 .events
                 .iter()
                 .any(|e| e.kind == EventKind::Memory && e.device != Device::Cpu(0));
+
         let dev = self.device_name();
 
         let mut headers: Vec<String> = [
@@ -316,6 +346,7 @@ impl Profile {
         ]
         .map(String::from)
         .to_vec();
+
         if has_device_time {
             headers.extend([
                 format!("Self {dev}"),
@@ -324,13 +355,17 @@ impl Profile {
                 format!("{dev} time avg"),
             ]);
         }
+
         if has_memory {
             headers.extend(["CPU Mem".to_owned(), "Self CPU Mem".to_owned()]);
         }
+
         if has_device_memory {
             headers.extend([format!("{dev} Mem"), format!("Self {dev} Mem")]);
         }
+
         headers.push("# of Calls".to_owned());
+
         if group_by_input_shape {
             headers.extend(["Input Shapes".to_owned(), "Input Strides".to_owned()]);
         }
@@ -346,6 +381,7 @@ impl Profile {
                     format_time(r.cpu_time_total),
                     format_time(r.cpu_time_avg()),
                 ];
+
                 if has_device_time {
                     cells.extend([
                         format_time(r.self_device_time_total),
@@ -354,22 +390,27 @@ impl Profile {
                         format_time(r.device_time_avg()),
                     ]);
                 }
+
                 if has_memory {
                     cells.extend([
                         format_memory(r.cpu_memory_usage),
                         format_memory(r.self_cpu_memory_usage),
                     ]);
                 }
+
                 if has_device_memory {
                     cells.extend([
                         format_memory(r.device_memory_usage),
                         format_memory(r.self_device_memory_usage),
                     ]);
                 }
+
                 cells.push(r.count.to_string());
+
                 if group_by_input_shape {
                     cells.extend([r.input_shapes.clone(), r.input_strides.clone()]);
                 }
+
                 cells
             })
             .collect();
@@ -382,14 +423,17 @@ impl Profile {
                     .chain([headers[c].len()])
                     .max()
                     .unwrap();
+
                 if c == 0 { widest.min(55) } else { widest }
             })
             .collect();
+
         let line = widths
             .iter()
             .map(|&w| "-".repeat(w))
             .collect::<Vec<_>>()
             .join("  ");
+
         let render = |cells: &[String]| {
             cells
                 .iter()
@@ -397,6 +441,7 @@ impl Profile {
                 .enumerate()
                 .map(|(c, (cell, &w))| {
                     let cell = truncate(cell, w);
+
                     if c == 0 {
                         format!("{cell:<w$}")
                     } else {
@@ -414,22 +459,27 @@ impl Profile {
         out.push('\n');
         out.push_str(&line);
         out.push('\n');
+
         for row in &body {
             out.push_str(&render(row));
             out.push('\n');
         }
+
         out.push_str(&line);
         out.push('\n');
+
         out.push_str(&format!(
             "Self CPU time total: {}\n",
             format_time(total_self_cpu)
         ));
+
         if has_device_time {
             out.push_str(&format!(
                 "Self {dev} time total: {}\n",
                 format_time(total_self_device)
             ));
         }
+
         out
     }
 
@@ -466,6 +516,7 @@ fn percent(part: u64, whole: u64) -> String {
 /// Nanoseconds as seconds, milliseconds or microseconds, three decimals.
 pub(crate) fn format_time(ns: u64) -> String {
     let us = ns as f64 / 1000.0;
+
     if us >= 1e6 {
         format!("{:.3}s", us / 1e6)
     } else if us >= 1e3 {
@@ -479,6 +530,7 @@ pub(crate) fn format_time(ns: u64) -> String {
 pub(crate) fn format_memory(bytes: i64) -> String {
     const KB: f64 = 1024.0;
     let b = bytes as f64;
+
     if b.abs() >= KB * KB * KB {
         format!("{:.2} Gb", b / (KB * KB * KB))
     } else if b.abs() >= KB * KB {

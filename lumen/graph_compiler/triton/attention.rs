@@ -1,19 +1,17 @@
-//! Flash attention on Triton: the pass fusing attention backward into dK/dV and dQ kernels, and
-//! running the forward and backward fusions through the Python Triton kernels.
+//! Flash attention on Triton: which kernels the attention passes fuse into, and running the forward
+//! and backward fusions through the Python Triton kernels.
 
 use std::sync::OnceLock;
 
 use super::{Function, Launches, TritonModule, copy, fill};
-use crate::codegen::triton::{
-    self as codegen, ATTENTION_CONFIGS, AttentionConfig, untuned_attention,
-};
+use crate::codegen::attention::AttentionCodegen;
+use crate::codegen::attention::triton::{ATTENTION_CONFIGS, AttentionConfig, untuned_attention};
+use crate::codegen::utils::triton as codegen;
 use crate::graph::{Primitive, Var};
-use crate::graph_compiler::common::attention::{self, Access, Epilogues};
+use crate::graph_compiler::common::attention::{self, Backward, Strides};
 use crate::graph_compiler::common::autotune::Kernels;
-use crate::graph_compiler::common::flash_attention::Attentions;
-use crate::graph_compiler::pass::CompilerPass;
+use crate::graph_compiler::common::flash_attention::{AttentionBackwards, Attentions};
 use crate::graph_compiler::plan::{Step, Tuned};
-use crate::tensor::contiguous_strides;
 use crate::{Scalar, Tensor, TensorOptions};
 
 /// Name of a forward flash-attention fusion.
@@ -34,8 +32,9 @@ pub struct Launch<'a> {
     /// The kernels compiled for this step's launches.
     #[cfg_attr(not(lumen_cuda_linked), allow(dead_code))]
     pub launches: &'a Launches,
-    /// Flat batch count, query count, key count, and the head dims of Q/K and of V.
-    pub sizes: [usize; 5],
+    /// The grid's batch (`grid_batch`: outer count, head count), query count, key count, and the head
+    /// dims of Q/K and of V.
+    pub sizes: [usize; 6],
     /// Causal diagonal: key `k` is seen by query `q` when `k <= q + causal` (plus a runtime offset).
     pub causal: Option<i64>,
     /// Scale of dS in the backward kernels.
@@ -55,19 +54,12 @@ pub(crate) fn set_attention(launch: Attention) {
     let _ = ATTENTION.set(launch);
 }
 
-/// Flash-attention matching for Triton: no epilogues yet, runtime causal offsets (decode).
+/// Flash-attention matching for Triton, as on MPS: elementwise epilogues reading any leaf, runtime causal
+/// offsets (decode).
 impl Attentions for TritonModule<'_> {
-    /// Epilogues are not fused into the attention kernels yet.
+    /// Elementwise epilogues are fused into the forward kernel's output store.
     fn contraction_epilogues(&self) -> bool {
-        false
-    }
-
-    /// Unused: epilogues are off.
-    fn epilogues(&self) -> Epilogues {
-        Epilogues {
-            leaves: |_, _| false,
-            reshaped: false,
-        }
+        true
     }
 
     /// Graph values of the by-value scalar inputs.
@@ -82,28 +74,20 @@ impl Attentions for TritonModule<'_> {
     fn kernel(&mut self) -> String {
         FORWARD.into()
     }
-
-    /// The forward kernel reads a causal offset from a buffer at run time.
-    fn runtime_offsets(&self) -> bool {
-        true
-    }
 }
 
-/// Pass replacing each attention backward with one kernel adding dQ atomically as it computes dK and
-/// dV, or, when `cuda.deterministic`, a dK/dV kernel and a dQ kernel.
-pub(super) struct FlashAttentionBackward;
-
-impl CompilerPass<TritonModule<'_>> for FlashAttentionBackward {
-    /// Pass name used in profiler ranges and dumps.
-    fn name(&self) -> &'static str {
-        "flash_attention_backward"
+/// Each attention backward runs as one kernel adding dQ atomically as it computes dK and dV, or, when
+/// `cuda.deterministic`, a dK/dV kernel and a dQ kernel.
+impl AttentionBackwards for TritonModule<'_> {
+    /// Every backward runs as one kernel unless deterministic, so dQ is summed over key blocks in a fixed order.
+    fn together(&self) -> impl Fn(&Backward) -> bool + 'static {
+        let deterministic = self.options.config.cuda.deterministic;
+        move |_| !deterministic
     }
 
-    /// Fuses each backward into one kernel, or two so dQ is summed over key blocks in a fixed order.
-    fn apply(&mut self, m: &mut TritonModule<'_>) -> Result<(), String> {
-        let deterministic = m.options.config.cuda.deterministic;
-        m.graph = attention::fuse_backward(&m.graph, |_| !deterministic, |_| BACKWARD.into());
-        Ok(())
+    /// Every backward fusion runs on the backward kernels.
+    fn backward_kernel(&mut self) -> String {
+        BACKWARD.into()
     }
 }
 
@@ -128,29 +112,21 @@ pub(super) fn run(
     }
 }
 
-/// `t`, or a contiguous copy of it, since the kernels index operands by their contiguous layout.
-fn contiguous(t: &Tensor) -> Result<Tensor, String> {
-    if t.is_contiguous() {
+/// `t`, or a contiguous copy of it when `kept` refuses its layout.
+fn contiguous(t: &Tensor, kept: impl Fn(&Tensor) -> bool) -> Result<Tensor, String> {
+    if t.is_contiguous() || kept(t) {
         return Ok(t.clone());
     }
+
     let options = TensorOptions::new().dtype(t.dtype()).device(t.device());
     let c = unsafe { Tensor::empty(t.shape(), options) };
     copy(&c, t)?;
     Ok(c)
 }
 
-/// Where the forward kernel writes each query row's log-sum-exp: `[batch.., sq]`, contiguous.
-fn per_row(batch: &[usize], sq: usize) -> Access {
-    let mut shape = batch.to_vec();
-    shape.push(sq);
-    let strides = contiguous_strides(&shape);
-    Access {
-        base: 0,
-        offset: 0,
-        batch: strides[..batch.len()].iter().map(|&s| (s, 1)).collect(),
-        row: 1,
-        col: 0,
-    }
+/// Whether the kernels read and write `t` where it is: its last dim contiguous, any other strides.
+fn last_contiguous(t: &Tensor) -> bool {
+    t.strides().last().is_none_or(|&s| s == 1) || t.shape().last() == Some(&1)
 }
 
 /// Where a flash-attention kernel's tensor comes from: the step's input or output at an index.
@@ -160,17 +136,18 @@ enum Source {
     Output(usize),
 }
 
-/// A flash-attention step's kernel, its generated helpers and launch parameters, prepared once: they
-/// depend on the fusion's body alone (its operands are read contiguous).
+/// A flash-attention step's kernel, its generated helpers and launch parameters, prepared once for each
+/// layout of its operands: they depend on the fusion's body and those strides alone.
 struct Prepared {
     /// `forward`, `dkdv` or `dq`.
     kernel: &'static str,
-    /// The kernel's tensors in parameter order; `None` for an optional one it doesn't read.
+    /// The kernel's tensors in parameter order; `None` for an optional one it doesn't read. The forward
+    /// kernel's past its sixth are its `EXTRA` tuple.
     tensors: Vec<Option<Source>>,
     /// Outputs the kernel adds into (dQ, atomically), zeroed before each launch.
     zeroed: Vec<usize>,
     functions: Vec<Function>,
-    sizes: [usize; 5],
+    sizes: [usize; 6],
     causal: Option<i64>,
     scale: f64,
     /// The head dims of Q/K and of V and the operands' dtype, choosing the untuned tiles.
@@ -178,110 +155,109 @@ struct Prepared {
     launches: Launches,
 }
 
-/// Analyzes flash-attention `step`'s body into its kernel's tensors, helpers and parameters.
-fn prepare(step: &Step) -> Result<Prepared, String> {
+/// A launch's sizes: the grid's batch for `batch` (outer count, head count), then the query and key
+/// counts and the head dims of Q/K and of V.
+fn sizes(batch: &[usize], [sq, sk, h, hv]: [usize; 4]) -> [usize; 6] {
+    let (outer, heads) = attention::grid_batch(batch);
+    [outer, heads, sq, sk, h, hv]
+}
+
+/// Analyzes flash-attention `step`'s body, its operands laid out as `strides` gives them, into its
+/// kernel's tensors, helpers and parameters.
+fn prepare(step: &Step, strides: &Strides) -> Result<Prepared, String> {
     let Primitive::Fusion { name, body, .. } = &step.primitive else {
         unreachable!("an attention fusion")
     };
+
     let input = |v: Var| {
         let k = body.inputs().iter().position(|&u| u == v);
         Source::Input(k.expect("an input of the attention"))
     };
+
     let output = |v: Var| {
         let k = body.outputs().iter().position(|&u| u == v);
         Source::Output(k.expect("an output of the attention"))
     };
-    let load = |param: &str, acc: &Access, batch: &[usize]| {
-        Function::new(param, codegen::attention_load(acc, batch))
+
+    let functions = |code: Vec<(String, (String, String))>| {
+        let functions = code.into_iter().map(|(param, f)| Function::new(param, f));
+        functions.collect()
     };
-    let store = |param: &str, acc: &Access, batch: &[usize]| {
-        Function::new(param, codegen::attention_store(acc, batch))
-    };
-    let dropout = format!(
-        "{}: dropout in attention has no Triton kernel (random_bits)",
-        step.label
-    );
+
+    let labeled = |e: String| format!("{}: {e}", step.label);
+
     if name == FORWARD {
-        let a = attention::of_body(body).ok_or("a forward flash attention")?;
-        if a.dropout.is_some() {
-            return Err(dropout);
-        }
+        let a = attention::of_body_strided(body, strides).ok_or("a forward flash attention")?;
         let root = body.nodes()[a.root].output;
         let lse = a.lse.map(|n| output(body.nodes()[n].output));
+        // The body's inputs but the offset, which the epilogue may read, then the attention values
+        // when the body outputs them too (`EXTRA`).
+        let raw = body.outputs()[1..].contains(&root);
+
+        let mut tensors = vec![
+            Some(input(a.q.base)),
+            Some(input(a.k.base)),
+            Some(input(a.v.base)),
+            Some(output(body.outputs()[0])),
+            lse,
+            a.offset.map(input),
+        ];
+
+        tensors.extend(
+            body.inputs()
+                .iter()
+                .filter(|&&v| a.offset != Some(v))
+                .map(|&v| Some(input(v))),
+        );
+
+        if raw {
+            tensors.push(Some(output(root)));
+        }
+
         return Ok(Prepared {
             kernel: "forward",
-            tensors: vec![
-                Some(input(a.q.base)),
-                Some(input(a.k.base)),
-                Some(input(a.v.base)),
-                Some(output(root)),
-                lse,
-                a.offset.map(input),
-            ],
+            tensors,
             zeroed: Vec::new(),
-            functions: vec![
-                load("LOAD_Q", &a.q, &a.batch),
-                load("LOAD_K", &a.k, &a.batch),
-                load("LOAD_V", &a.v, &a.batch),
-                store("STORE_O", &a.out, &a.batch),
-                store("STORE_LSE", &per_row(&a.batch, a.sq), &a.batch),
-                Function::new("SCORE", codegen::attention_score(&a.scores)),
-            ],
-            sizes: [a.batch.iter().product(), a.sq, a.sk, a.h, a.hv],
+            functions: functions(codegen::Triton::forward(body, &a, strides).map_err(labeled)?),
+            sizes: sizes(&a.batch, [a.sq, a.sk, a.h, a.hv]),
             causal: a.causal,
             scale: 1.0,
             heads: (a.h, a.hv, a.dtype),
             launches: Launches::default(),
         });
     }
-    let b = attention::backward_of_body(body).ok_or("a backward flash attention")?;
-    if b.dropout.is_some() {
-        return Err(dropout);
+
+    let b =
+        attention::backward_of_body_strided(body, strides).ok_or("a backward flash attention")?;
+
+    let gradients = crate::codegen::attention::triton::gradients(&b);
+
+    if gradients.is_empty() {
+        return Err(format!("{}: computes no gradient", step.label));
     }
-    let operands = [
-        ("Q", &b.q),
-        ("K", &b.k),
-        ("V", &b.v),
-        ("DO", &b.d_o),
-        ("LSE", &b.lse),
-        ("DELTA", &b.delta),
-    ];
-    // With dK and dV, dQ is added atomically into a zeroed float32 buffer as each key block computes it.
-    let gradients = match (&b.dk_out, &b.dv_out, &b.dq_out) {
-        (Some(dk), Some(dv), dq) => [("STORE_DK", dk), ("STORE_DV", dv)]
-            .into_iter()
-            .chain(dq.as_ref().map(|dq| ("ADD_DQ", dq)))
-            .collect(),
-        (_, _, Some(dq)) => vec![("STORE_DQ", dq)],
-        _ => return Err(format!("{}: computes no gradient", step.label)),
-    };
-    let mut tensors: Vec<Option<Source>> = operands
+
+    // The kernels' operands in parameter order: Q, K, V, dO, the log-sum-exp and delta.
+    let mut tensors: Vec<Option<Source>> = [&b.q, &b.k, &b.v, &b.d_o, &b.lse, &b.delta]
         .iter()
-        .map(|(_, acc)| Some(input(acc.base)))
+        .map(|acc| Some(input(acc.base)))
         .collect();
-    let mut functions: Vec<Function> = operands
-        .iter()
-        .map(|(name, acc)| load(&format!("LOAD_{name}"), acc, &b.batch))
-        .collect();
+
     let mut zeroed = Vec::new();
-    for (param, (node, acc)) in &gradients {
-        let code = match *param {
-            "ADD_DQ" => {
-                zeroed.push(tensors.len());
-                codegen::attention_atomic_add(acc, &b.batch)
-            }
-            _ => codegen::attention_store(acc, &b.batch),
-        };
+
+    for (param, (node, _)) in &gradients {
+        if *param == "ADD_DQ" {
+            zeroed.push(tensors.len());
+        }
+
         tensors.push(Some(output(body.nodes()[*node].output)));
-        functions.push(Function::new(*param, code));
     }
-    functions.push(Function::new("SCORE", codegen::attention_score(&b.scores)));
+
     Ok(Prepared {
         kernel: if b.dk_out.is_some() { "dkdv" } else { "dq" },
         tensors,
         zeroed,
-        functions,
-        sizes: [b.batch.iter().product(), b.sq, b.sk, b.h, b.hv],
+        functions: functions(codegen::Triton::backward(body, &b, strides).map_err(labeled)?),
+        sizes: sizes(&b.batch, [b.sq, b.sk, b.h, b.hv]),
         causal: b.causal,
         scale: b.ds_scale,
         heads: (b.h, b.hv, b.dtype),
@@ -299,18 +275,51 @@ fn attention(
     config: Option<&AttentionConfig>,
 ) -> Result<(), String> {
     let launch = ATTENTION.get().ok_or(
-        "the Triton backend's flash attention is Python's (lumen.kernels.attention.triton): none is installed",
+        "the Triton backend's flash attention is Python's (lumen.codegen.attention.triton.kernel): none is installed",
     )?;
-    let prepared = step.memo.get(0, || prepare(step))?;
-    let inputs = inputs
-        .iter()
-        .map(contiguous)
-        .collect::<Result<Vec<_>, _>>()?;
+
     let given: Vec<&Tensor> = std::iter::once(out).chain(outs).collect();
-    let written = given
-        .iter()
-        .map(|t| contiguous(t))
-        .collect::<Result<Vec<_>, _>>()?;
+
+    // Operands are read and written where they are, at any strides but a contiguous last dim (a
+    // layout the kernels can't take, or an output added into, is copied); prepared once per layout.
+    let laid_out = |kept: &dyn Fn(&Tensor) -> bool| -> Result<_, String> {
+        let inputs = inputs
+            .iter()
+            .map(|t| contiguous(t, kept))
+            .collect::<Result<Vec<_>, _>>()?;
+        let written = given
+            .iter()
+            .map(|t| contiguous(t, kept))
+            .collect::<Result<Vec<_>, _>>()?;
+        let Primitive::Fusion { body, .. } = &step.primitive else {
+            unreachable!("an attention fusion")
+        };
+        let strides = Strides::of(
+            body,
+            &inputs
+                .iter()
+                .map(|t| t.strides().to_vec())
+                .collect::<Vec<_>>(),
+            &written
+                .iter()
+                .map(|t| (0, t.strides().to_vec()))
+                .collect::<Vec<_>>(),
+        );
+        let key = super::layouts(inputs.iter().chain(&written));
+        let prepared = step.memo.get(key, || prepare(step, &strides))?;
+        let zeroed = prepared.zeroed.iter().any(|&k| match prepared.tensors[k] {
+            Some(Source::Output(o)) => !written[o].is_contiguous(),
+            _ => false,
+        });
+        match zeroed {
+            true => Err("a strided output the kernel adds into".to_string()),
+            false => Ok((prepared, inputs, written)),
+        }
+    };
+
+    let (prepared, inputs, written) =
+        laid_out(&last_contiguous).or_else(|_| laid_out(&|_| false))?;
+
     let tensors: Vec<Option<Tensor>> = prepared
         .tensors
         .iter()
@@ -320,14 +329,18 @@ fn attention(
             None => None,
         })
         .collect();
+
     for &k in &prepared.zeroed {
         fill(tensors[k].as_ref().expect("an output"), Scalar::Float(0.0))?;
     }
+
     let (h, hv, dtype) = prepared.heads;
+
     let tiles = match config {
         Some(c) => *c,
         None => untuned_attention(h.max(hv) * dtype.size_of()),
     };
+
     launch(&Launch {
         kernel: prepared.kernel,
         tensors: &tensors,
@@ -338,11 +351,13 @@ fn attention(
         scale: prepared.scale,
         config: &tiles,
     })?;
+
     for (t, w) in given.iter().zip(&written) {
         if t.data_ptr() != w.data_ptr() {
             copy(t, w)?;
         }
     }
+
     Ok(())
 }
 
@@ -365,6 +380,7 @@ impl Kernels for Tiles {
         let run: Run = Box::new(move |step, inputs, out, outs| {
             attention(step, inputs, out, outs, Some(&config))
         });
+
         Tuned::new(format!("{config:?}"), run)
     }
 }

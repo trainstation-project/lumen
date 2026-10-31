@@ -6,11 +6,11 @@ build-backend = "maturin"
 name = "lumen"
 version = "0.1.0"
 description = "A minimal tensor library prototype with a Rust core"
-# The CuTe DSL (the `cuda` extra) needs 3.10.
-requires-python = ">=3.10"
+# Pinned to 3.12, the one version every backend is built and tested on.
+requires-python = "==3.12.*"
 
 [project.optional-dependencies]
-# CUDA's fill_ is a CuTe DSL kernel (lumen/kernels/fill/cuda.py), imported
+# CUDA's CuTe DSL kernels (lumen/cute_dsl_utils) are imported
 # with lumen on a machine with a CUDA device. The CuTe DSL ships only for
 # Linux, so elsewhere the extra installs nothing.
 cuda = [
@@ -28,6 +28,9 @@ cuda = [
 tpu = ["libtpu==0.0.48.1; sys_platform == 'linux'"]
 # `make style`: the pre-commit hooks (.pre-commit-config.yaml).
 dev = ["pre-commit"]
+# `make test`: the Python tests' runner and reference values (ml_dtypes for
+# the float8 and other narrow dtypes numpy lacks).
+test = ["pytest", "pytest-xdist", "numpy", "ml_dtypes"]
 
 [tool.maturin]
 # Mixed Rust/Python project in one folder: the crate, built with the

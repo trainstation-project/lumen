@@ -12,10 +12,12 @@ fn duration(timeout: Option<&Bound<'_, PyAny>>) -> PyResult<Duration> {
     let Some(timeout) = timeout.filter(|t| !t.is_none()) else {
         return Ok(super::DEFAULT_TIMEOUT);
     };
+
     let seconds: f64 = match timeout.hasattr("total_seconds")? {
         true => timeout.call_method0("total_seconds")?.extract()?,
         false => timeout.extract()?,
     };
+
     Duration::try_from_secs_f64(seconds).map_err(|_| {
         PyValueError::new_err(format!(
             "timeout must be a non-negative duration, got {seconds}"
@@ -53,9 +55,11 @@ impl PyTcpStore {
         timeout: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
         let timeout = duration(timeout)?;
+
         let store = py
             .detach(|| TcpStore::new(host_name, port, is_master, timeout))
             .map_err(PyRuntimeError::new_err)?;
+
         Ok(PyTcpStore {
             store: Arc::new(store),
         })
@@ -79,6 +83,7 @@ impl PyTcpStore {
             Ok(text) => text.into_bytes(),
             Err(_) => value.extract()?,
         };
+
         py.detach(|| self.store.set(key, &value))
             .map_err(PyRuntimeError::new_err)
     }
@@ -88,6 +93,7 @@ impl PyTcpStore {
         let value = py
             .detach(|| self.store.get(key))
             .map_err(PyRuntimeError::new_err)?;
+
         Ok(PyBytes::new(py, &value))
     }
 
@@ -109,7 +115,9 @@ impl PyTcpStore {
             None => self.store.timeout(),
             Some(t) => duration(Some(t))?,
         };
+
         let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+
         py.detach(|| self.store.wait(&keys, timeout))
             .map_err(PyRuntimeError::new_err)
     }
@@ -128,6 +136,7 @@ fn init_process_group(
 ) -> PyResult<()> {
     let timeout = duration(timeout)?;
     let (rank, world_size) = (index("rank", rank)?, index("world_size", world_size)?);
+
     let (store, rank, world_size) = match (store, init_method) {
         (Some(_), Some(_)) => {
             return Err(PyValueError::new_err(
@@ -136,6 +145,7 @@ fn init_process_group(
         }
         (Some(store), None) => {
             let required = |name| PyValueError::new_err(format!("a store needs {name}"));
+
             (
                 store.get().store.clone(),
                 rank.ok_or_else(|| required("rank"))?,
@@ -148,6 +158,7 @@ fn init_process_group(
             })
             .map_err(PyValueError::new_err)?,
     };
+
     py.detach(|| super::init_process_group(store, rank, world_size))
         .map_err(PyRuntimeError::new_err)
 }
@@ -184,16 +195,20 @@ fn flatten_mesh(
                 "the mesh must be a rectangular array",
             ));
         }
+
         let rank = usize::try_from(rank).map_err(|_| {
             PyValueError::new_err(format!("mesh ranks must not be negative, got {rank}"))
         })?;
+
         ranks.push(rank);
         return Ok(());
     }
+
     let rows: Vec<Bound<'_, PyAny>> = mesh
         .try_iter()
         .map_err(|_| PyTypeError::new_err("the mesh must be a nested sequence of ranks"))?
         .collect::<PyResult<_>>()?;
+
     // the first row at a depth sets that dimension's size; later rows must match it
     match shape.get(depth) {
         None if ranks.is_empty() => shape.push(rows.len()),
@@ -204,9 +219,11 @@ fn flatten_mesh(
             ));
         }
     }
+
     for row in &rows {
         flatten_mesh(row, depth + 1, shape, ranks)?;
     }
+
     Ok(())
 }
 
@@ -216,9 +233,11 @@ fn nested<'py>(py: Python<'py>, shape: &[usize], ranks: &[usize]) -> PyResult<Bo
         [] => Ok(ranks[0].into_pyobject(py)?.into_any()),
         [size, rest @ ..] => {
             let step = ranks.len() / size;
+
             let rows = (0..*size)
                 .map(|i| nested(py, rest, &ranks[i * step..(i + 1) * step]))
                 .collect::<PyResult<Vec<_>>>()?;
+
             Ok(PyList::new(py, rows)?.into_any())
         }
     }
@@ -248,11 +267,14 @@ impl PyDeviceMesh {
         mesh_dim_names: Option<Vec<String>>,
     ) -> PyResult<Self> {
         let backend = super::mesh_backend(device_type).map_err(PyValueError::new_err)?;
+
         let (rank, world_size) = py
             .detach(|| backend.world(ranks.len()))
             .map_err(PyRuntimeError::new_err)?;
+
         let mesh = DeviceMesh::new(device_type, shape, ranks, mesh_dim_names, rank, world_size)
             .map_err(PyValueError::new_err)?;
+
         Ok(PyDeviceMesh { mesh })
     }
 
@@ -266,13 +288,17 @@ impl PyDeviceMesh {
                 ))),
             };
         };
+
         if let Ok(name) = mesh_dim.extract::<String>() {
             return self.mesh.dim(&name).map_err(PyKeyError::new_err);
         }
+
         let dim: i64 = mesh_dim.extract().map_err(|_| {
             PyTypeError::new_err("mesh_dim must be an int or a mesh dimension name")
         })?;
+
         let ndim = self.mesh.ndim() as i64;
+
         match dim {
             d if (0..ndim).contains(&d) => Ok(d as usize),
             d if (-ndim..0).contains(&d) => Ok((d + ndim) as usize),
@@ -369,6 +395,7 @@ impl PyDeviceMesh {
                 )
             })?,
         };
+
         let mesh = self.mesh.slice(&names).map_err(PyKeyError::new_err)?;
         Ok(PyDeviceMesh { mesh })
     }
@@ -376,6 +403,7 @@ impl PyDeviceMesh {
     /// Formats the mesh like its constructor call.
     fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
         let mesh = self.mesh(py)?.repr()?;
+
         Ok(match self.mesh_dim_names(py)? {
             None => format!("DeviceMesh('{}', {mesh})", self.mesh.device_type()),
             Some(names) => format!(
@@ -397,6 +425,7 @@ fn init_device_mesh(
     mesh_dim_names: Option<Vec<String>>,
 ) -> PyResult<PyDeviceMesh> {
     let count = mesh_shape.iter().product();
+
     PyDeviceMesh::build(
         py,
         device_type,

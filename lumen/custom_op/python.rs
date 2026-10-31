@@ -21,6 +21,7 @@ impl PyMetalKernel {
     fn new(source: &str, name: Option<&str>) -> PyResult<Self> {
         let inner =
             core::custom_op::mps::MetalKernel::new(source, name).map_err(PyValueError::new_err)?;
+
         Ok(PyMetalKernel { inner })
     }
 
@@ -41,10 +42,12 @@ impl PyMetalKernel {
         threadgroups: Option<Vec<usize>>,
     ) -> PyResult<()> {
         use core::custom_op::mps::Grid;
+
         let sizes = |mut s: Vec<usize>| {
             s.resize(3, 1);
             [s[0], s[1], s[2]]
         };
+
         let grid = match (grid, threadgroups) {
             (Some(s), None) => Grid::Threads(sizes(s)),
             (None, Some(s)) => Grid::Groups(sizes(s)),
@@ -54,6 +57,7 @@ impl PyMetalKernel {
                 ));
             }
         };
+
         let args = args
             .iter()
             .map(|a| match a.cast::<PyBytes>() {
@@ -61,7 +65,9 @@ impl PyMetalKernel {
                 Err(_) => a.call_method0("tobytes")?.extract::<Vec<u8>>(),
             })
             .collect::<PyResult<Vec<Vec<u8>>>>()?;
+
         let tensors: Vec<core::Tensor> = tensors.iter().map(|t| t.inner.clone()).collect();
+
         self.inner
             .launch(&tensors, &args, grid)
             .map_err(PyValueError::new_err)
@@ -77,7 +83,8 @@ impl PyMetalKernel {
     }
 }
 
-/// Adds `MetalKernel` to the Python module.
+/// Adds `MetalKernel` and the kernel registration functions to the Python module.
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PyMetalKernel>()
+    m.add_class::<PyMetalKernel>()?;
+    super::register::register(m)
 }

@@ -37,6 +37,7 @@ impl PyKernel {
             .iter()
             .map(|(dtype, shape)| Ok(TensorType::new(parse_dtype(dtype)?, shape)))
             .collect::<PyResult<Vec<_>>>()?;
+
         Ok(PyKernel {
             inner: Kernel::sparse_core(&refs, mesh),
         })
@@ -59,6 +60,7 @@ impl PyKernel {
             TensorType::new(parse_dtype(dtype)?, &shape),
             Space::VmemShared,
         );
+
         self.inner.alloc(ty).map_err(err)
     }
 
@@ -80,6 +82,7 @@ impl PyKernel {
             Some(p) => p.clone(),
             None => PyDict::new(py),
         };
+
         let primitive = crate::graph::python::primitive(name, &params)?;
         self.inner.apply(primitive, &inputs).map_err(err)
     }
@@ -104,6 +107,7 @@ impl PyKernel {
             ("roll", ..) => Op::Roll(axis.ok_or_else(|| err("roll takes an axis".to_string()))?),
             _ => return Err(err(format!("no TPU op {name} of these parameters"))),
         };
+
         self.inner.bits(op, &inputs).map_err(err)
     }
 
@@ -126,6 +130,7 @@ impl PyKernel {
                     Space::VmemShared => "vmem_shared",
                     Space::Smem => "smem",
                 };
+
                 Ok((dtype_name(t.dtype), t.shape.clone(), space))
             }
             Type::View(t, _) => Ok((dtype_name(t.dtype), t.shape.clone(), "any")),

@@ -23,6 +23,7 @@ impl PyStream {
         if let (core::Device::Cuda(index), id @ 1..) = (self.device, self.stream_id) {
             return core::stream::cuda::synchronize_external(index, id);
         }
+
         self.inner.synchronize();
     }
 
@@ -49,11 +50,13 @@ impl PyStream {
     fn new(device: Option<&Bound<'_, PyAny>>, stream_id: usize) -> PyResult<Self> {
         let device = crate::device::python::resolve_device(device)?;
         let inner = core::stream::stream_for(device).map_err(PyRuntimeError::new_err)?;
+
         if stream_id != 0 && !matches!(device, core::Device::Cuda(_)) {
             return Err(PyValueError::new_err(format!(
                 "stream_id: {device} has only lumen's stream (an external stream is CUDA's)"
             )));
         }
+
         Ok(PyStream {
             device,
             stream_id,
@@ -86,12 +89,14 @@ impl PyStream {
         if self.device == other.device && self.stream_id == other.stream_id {
             return;
         }
+
         #[cfg(lumen_cuda_linked)]
         if let (core::Device::Cuda(index), 0) = (other.device, other.stream_id)
             && self.device == other.device
         {
             return core::stream::CudaStream { index }.wait(self.stream_id);
         }
+
         let other: &PyStream = &other;
         py.detach(|| other.wait_host());
     }
@@ -120,12 +125,14 @@ impl PyStream {
     /// The `MTLBuffer` holding `tensor`'s data and the byte offset of its data in it (MPS only).
     fn buffer(&self, tensor: PyRef<'_, PyTensor>) -> PyResult<(usize, usize)> {
         self.mps("buffer")?;
+
         if tensor.inner.device() != self.device {
             return Err(PyValueError::new_err(format!(
                 "an MPS tensor has an MTLBuffer, got one on {}",
                 tensor.inner.device()
             )));
         }
+
         buffer_of(&tensor.inner)
     }
 
@@ -165,9 +172,11 @@ fn command_buffer() -> usize {
 fn buffer_of(t: &core::Tensor) -> PyResult<(usize, usize)> {
     let mut offset = 0;
     let buffer = unsafe { lumen_mps_buffer_pointer(t.data_ptr().cast_const(), &mut offset) };
+
     if buffer == 0 {
         return Err(PyRuntimeError::new_err("the tensor is in no MTLBuffer"));
     }
+
     Ok((buffer, offset))
 }
 
@@ -190,8 +199,10 @@ impl PyEvent {
     #[pyo3(signature = (device = None, *, enable_timing = false))]
     fn new(device: Option<&Bound<'_, PyAny>>, enable_timing: bool) -> PyResult<Self> {
         let device = crate::device::python::resolve_device(device)?;
+
         let inner =
             core::stream::event_for(device, enable_timing).map_err(PyRuntimeError::new_err)?;
+
         Ok(PyEvent { inner })
     }
 
@@ -220,6 +231,7 @@ impl PyEvent {
     /// Blocks until the work before the recorded point finishes, releasing the GIL.
     fn synchronize(&self, py: Python<'_>) -> PyResult<()> {
         let inner = &self.inner;
+
         py.detach(|| inner.synchronize())
             .map_err(PyRuntimeError::new_err)
     }
@@ -227,6 +239,7 @@ impl PyEvent {
     /// Milliseconds between this event and `end`; both need timing enabled and must have completed.
     fn elapsed_time(&self, py: Python<'_>, end: PyRef<'_, PyEvent>) -> PyResult<f64> {
         let (start, end) = (&self.inner, &end.inner);
+
         py.detach(|| start.elapsed_time(end.as_ref()))
             .map_err(PyRuntimeError::new_err)
     }
@@ -242,8 +255,60 @@ impl PyEvent {
     }
 }
 
-/// Adds `Stream` and `Event` to the Python module.
+/// Python `CudaGraph`: lumen's kernel launches on a CUDA device captured once and replayed.
+#[cfg(lumen_cuda_linked)]
+#[pyclass(name = "CudaGraph", module = "lumen")]
+pub(crate) struct PyCudaGraph {
+    inner: core::stream::cuda::CudaGraph,
+}
+
+#[cfg(lumen_cuda_linked)]
+#[pymethods]
+impl PyCudaGraph {
+    /// Starts capturing lumen's launches on CUDA device `device` (the default device when `None`).
+    #[new]
+    #[pyo3(signature = (device = None))]
+    fn new(device: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        let core::Device::Cuda(index) = crate::device::python::resolve_device(device)? else {
+            return Err(PyValueError::new_err(
+                "CudaGraph: a CUDA graph captures a CUDA device",
+            ));
+        };
+
+        let inner = core::stream::cuda::CudaGraph::begin(index).map_err(PyRuntimeError::new_err)?;
+
+        Ok(PyCudaGraph { inner })
+    }
+
+    /// The capture stream, as a `cudaStream_t` integer.
+    #[getter]
+    fn stream(&self) -> usize {
+        self.inner.stream()
+    }
+
+    /// Ends the capture and instantiates the graph.
+    fn end(&mut self) -> PyResult<()> {
+        self.inner.end().map_err(PyRuntimeError::new_err)
+    }
+
+    /// Copies `src` into `dst`, an input the graph reads, on its stream, without waiting for its
+    /// replays so far.
+    fn stage(&self, dst: PyRef<'_, PyTensor>, src: PyRef<'_, PyTensor>) -> PyResult<()> {
+        self.inner
+            .stage(&dst.inner, &src.inner)
+            .map_err(PyRuntimeError::new_err)
+    }
+
+    /// Launches the captured graph.
+    fn replay(&self) -> PyResult<()> {
+        self.inner.replay().map_err(PyRuntimeError::new_err)
+    }
+}
+
+/// Adds `Stream`, `Event` and, in a CUDA build, `CudaGraph` to the Python module.
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    #[cfg(lumen_cuda_linked)]
+    m.add_class::<PyCudaGraph>()?;
     m.add_class::<PyStream>()?;
     m.add_class::<PyEvent>()
 }

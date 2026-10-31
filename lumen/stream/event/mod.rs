@@ -49,9 +49,11 @@ pub trait Event: Send + Sync {
         timed(self, end)?;
         self.synchronize()?;
         end.synchronize()?;
+
         let (Some(start), Some(stop)) = (self.marks(), end.marks()) else {
             unreachable!("both recorded")
         };
+
         let ((_, from), (to, _)) = (start.wait()?, stop.wait()?);
         Ok((to - from) * 1e3)
     }
@@ -60,6 +62,7 @@ pub trait Event: Send + Sync {
 /// Creates an unrecorded event on `device`.
 pub fn event_for(device: Device, timing: bool) -> Result<Box<dyn Event>, String> {
     device.check()?;
+
     Ok(match device {
         Device::Cpu(_) => Box::new(cpu::CpuEvent::new(timing)),
         Device::Meta(_) => {
@@ -86,12 +89,15 @@ fn timed(start: &(impl Event + ?Sized), end: &dyn Event) -> Result<(), String> {
             end.device()
         ));
     }
+
     if !(start.timing() && end.timing()) {
         return Err("elapsed_time: both events need enable_timing=True".into());
     }
+
     if !(start.recorded() && end.recorded()) {
         return Err("elapsed_time: record both events first".into());
     }
+
     Ok(())
 }
 
@@ -129,9 +135,11 @@ impl Recorded {
     /// Blocks until completion and returns `(start, end)` seconds, or an error if the work failed.
     fn wait(&self) -> Result<(f64, f64), String> {
         let mut times = self.times.lock().unwrap_or_else(|e| e.into_inner());
+
         while times.is_none() {
             times = self.ready.wait(times).unwrap_or_else(|e| e.into_inner());
         }
+
         match times.expect("set") {
             (start, end, true) => Ok((start, end)),
             _ => Err("the work before the event failed on the device".into()),

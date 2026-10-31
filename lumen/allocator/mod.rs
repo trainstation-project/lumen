@@ -3,7 +3,7 @@
 
 pub mod config;
 mod cpu;
-mod cuda;
+pub(crate) mod cuda;
 mod meta;
 mod mps;
 #[cfg(test)]
@@ -122,6 +122,7 @@ pub fn allocator_for(device: Device) -> Result<Arc<dyn Allocator>, String> {
     device.check()?;
     static CPU: OnceLock<Arc<dyn Allocator>> = OnceLock::new();
     static META: OnceLock<Arc<dyn Allocator>> = OnceLock::new();
+
     Ok(match device {
         Device::Cpu(_) => Arc::clone(CPU.get_or_init(|| Arc::new(CpuAllocator))),
         Device::Meta(_) => Arc::clone(META.get_or_init(|| Arc::new(MetaAllocator))),
@@ -241,8 +242,10 @@ impl Region {
                 synchronize();
                 self.try_take_aligned(nbytes, alignment, &reserve)
             });
+
         data.unwrap_or_else(|| {
             let state = self.lock();
+
             panic!(
                 "{} static allocator out of memory: {nbytes} bytes requested, {} of {} bytes free \
                  (largest block {}); raise {}.config.static_allocator_bytes",
@@ -274,11 +277,14 @@ impl Region {
         reserve: impl Fn(usize) -> NonNull<u8>,
     ) -> Option<NonNull<u8>> {
         let mut state = self.lock();
+
         if state.base.is_none() {
             state.base = Some(Base(reserve(self.capacity)));
         }
+
         let block = self.block(nbytes);
         let alignment = alignment.max(ALIGNMENT);
+
         let (free, start, len) = match nbytes {
             0 => {
                 let (&offset, &len) = state.free.iter().next().unwrap_or((&0, &0));
@@ -290,21 +296,27 @@ impl Region {
                 (start + block <= offset + len).then_some((offset, start, len))
             })?,
         };
+
         let offset = start;
         let base = state.base.as_ref().expect("reserved above").0.as_ptr();
         let ptr = NonNull::new(base.wrapping_add(offset))?;
+
         // Split the free block into the alignment gap before and the tail after.
         if nbytes > 0 {
             state.free.remove(&free);
+
             if start > free {
                 state.free.insert(free, start - free);
             }
+
             if free + len > start + block {
                 state.free.insert(start + block, free + len - start - block);
             }
+
             state.live.insert(offset, nbytes);
             state.live_bytes += nbytes;
         }
+
         let live_bytes = state.live_bytes;
         drop(state);
         let addr = ptr.as_ptr().addr();
@@ -315,31 +327,38 @@ impl Region {
     /// Returns a block from `take`, merging it with adjacent free blocks.
     pub(crate) fn give(&self, ptr: NonNull<u8>, nbytes: usize) {
         let mut state = self.lock();
+
         let base = match &state.base {
             Some(base) => base.0.as_ptr().addr(),
             None => unreachable!("an allocation reserves the range first"),
         };
+
         if nbytes == 0 {
             return;
         }
+
         let addr = ptr.as_ptr().addr();
         let offset = addr - base;
         state.live.remove(&offset);
         state.live_bytes -= nbytes;
         // Coalesce with the free block ending at `start` and the one starting at its end.
         let (mut start, mut len) = (offset, self.block(nbytes));
+
         if let Some((&prev, &prev_len)) = state.free.range(..start).next_back()
             && prev + prev_len == start
         {
             state.free.remove(&prev);
             (start, len) = (prev, prev_len + len);
         }
+
         if let Some(next_len) = state.free.remove(&(start + len)) {
             len += next_len;
         }
+
         state.free.insert(start, len);
         let live_bytes = state.live_bytes;
         drop(state);
+
         crate::profiler::report_memory(
             self.device,
             addr,

@@ -1,444 +1,168 @@
-//! Triton loop fusion: groups elementwise chains, reductions and GEMM epilogues into Triton kernels.
+//! Triton fusion: the shared fusion (`common::fusion`, as MPS runs it) with the Triton
+//! kernels' limits and shapes, and which nodes left outside any fusion need one-node kernels.
 
-use crate::codegen::regions::gemm_regions;
-use crate::codegen::triton::fusible;
-use crate::graph::{Graph, Primitive, Var};
-use crate::graph_compiler::common::loops::fused;
-use crate::graph_compiler::common::multi_output::Readers;
-use crate::graph_compiler::pass::{CompilerPass, Module};
-use crate::graph_compiler::{constant, elementwise};
+use super::TritonModule;
+use crate::codegen::dot_general::triton::row::dot_row_fits;
+use crate::codegen::kinds::{gemm_dot, reduction_root, row_reductions};
+use crate::codegen::regions::expansion;
+use crate::codegen::utils::triton::triton_type;
+use crate::graph::{Graph, Node, Primitive, Var};
+use crate::graph_compiler::common::alone::Lone;
+use crate::graph_compiler::common::fusion::{Backend, fuse};
+use crate::graph_compiler::common::place_views::place_views;
+use crate::graph_compiler::pass::CompilerPass;
 
-/// Compiler pass fusing nodes into Triton loop kernels.
-pub(super) struct LoopFusion {
-    /// Whether a loop's value read outside it too is written by the loop reading it first.
-    pub(super) multi_output: bool,
+/// Whether `node` can be emitted inside a Triton fusion kernel: a supported primitive whose
+/// inputs and output all have Triton dtypes.
+pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
+    use Primitive::*;
+
+    let op = matches!(
+        node.primitive,
+        Add | Sub
+            | Mul
+            | Div
+            | Max
+            | Eq
+            | Lt
+            | Neg
+            | Exp
+            | Log
+            | Sqrt
+            | Tanh
+            | Logistic
+            | Cast { .. }
+            | Select
+            | Unary(_)
+            | Binary(_)
+            | Reshape { .. }
+            | BroadcastInDim { .. }
+            | Transpose { .. }
+            | Slice { .. }
+            | Full { .. }
+            | Iota { .. }
+            | RandomBits { .. }
+            | ReduceSum { .. }
+            | ReduceMax { .. }
+            | DynamicSlice { .. }
+            | Gather { .. }
+            | Concatenate { .. }
+    );
+
+    let typed = |v: &Var| triton_type(graph.type_of(*v).dtype).is_some();
+    op && node.inputs.iter().chain([&node.output]).all(typed)
 }
 
-impl<M: Module> CompilerPass<M> for LoopFusion {
+/// Name of a fusion of a GEMM and the normalization row reading its product.
+const DOT_ROW: &str = "dot_row";
+
+/// Name of a normalization row fusion.
+const ROW: &str = "row";
+
+/// Name of a GEMM fusion with its epilogue.
+const DOT_GENERAL: &str = "dot_general";
+
+/// Name of a reduction fusion with its prologue and epilogue.
+const REDUCTION: &str = "reduction";
+
+/// Name of an elementwise fusion.
+const ELEMENTWISE: &str = "elementwise";
+
+/// The shared fusion's view of Triton: kernels take any number of tensors, a GEMM epilogue
+/// writes at most 4 extra outputs and its two results into a concatenation's slots (as on MPS), and
+/// a GEMM joins the row reading it when one tile holds whole rows (`dot_row_fits`).
+fn backend(m: &TritonModule<'_>) -> Backend {
+    let config = &m.options.config.cuda;
+
+    Backend {
+        fusible,
+        max_inputs: usize::MAX,
+        max_aux: 4,
+        multi_output_fusion: config.multi_output_fusion,
+        reduction_epilogues: true,
+        contraction_epilogues: true,
+        expansion: |graph, dot, concat| expansion(graph, dot, concat).is_some(),
+        row_dot: dot_row_fits,
+    }
+}
+
+/// The name of a fused `body`, by its kind as MPS's codegen reads it (`codegen::kinds`): a GEMM and the
+/// row reading it, a normalization row, a GEMM with its epilogue, a reduction with its prologue and
+/// epilogue, or an elementwise fusion.
+fn named(body: &Graph) -> String {
+    let row = !row_reductions(body).is_empty();
+
+    match (gemm_dot(body).is_some(), row) {
+        (true, true) => DOT_ROW,
+        (false, true) => ROW,
+        (true, false) => DOT_GENERAL,
+        _ if reduction_root(body).is_some() => REDUCTION,
+        _ => ELEMENTWISE,
+    }
+    .into()
+}
+
+/// Compiler pass running the shared fusion for Triton.
+pub(super) struct Fusion;
+
+impl CompilerPass<TritonModule<'_>> for Fusion {
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
-        "loop_fusion"
+        "fusion"
     }
 
-    /// Replaces each group with a `loop` fusion rooted at its last node.
-    fn apply(&mut self, m: &mut M) -> Result<(), String> {
-        let graph = &recomputed_constants(m.graph());
-        let (group, extra) = groups(graph, self.multi_output);
-        *m.graph_mut() = fused(
-            graph,
-            &group,
-            |root, members| {
-                let main = members.iter().find(|&&k| {
-                    let p = &graph.nodes()[k].primitive;
-                    reduction(p) || matches!(p, Primitive::DotGeneral { .. })
-                });
-                ("loop", *main.unwrap_or(&root))
-            },
-            |root| extra[root].clone(),
-        );
+    /// Fuses the graph around the normalization rows the diamonds pass found.
+    fn apply(&mut self, m: &mut TritonModule<'_>) -> Result<(), String> {
+        let scalars: Vec<Var> = super::super::positions(&m.options.scalars)
+            .into_iter()
+            .map(|i| m.graph.inputs()[i])
+            .collect();
+
+        let backend = backend(m);
+        m.graph = fuse(&m.graph, &m.rows, &scalars, &backend, |body, _| named(body));
+        m.rows.clear();
         Ok(())
     }
 }
 
-/// `graph` with each fusible constant (a `full` and the layout or elementwise ops on constants
-/// only) recomputed for every node reading it, so a constant several loops share joins each loop
-/// instead of running as a kernel of its own.
-fn recomputed_constants(graph: &Graph) -> Graph {
-    let nodes = graph.nodes();
-    let mut producer: Vec<Option<usize>> = vec![None; graph.types.len()];
-    for (i, node) in nodes.iter().enumerate() {
-        producer[node.output] = Some(i);
-    }
-    let shared = |v: Var| {
-        constant(graph, &producer, v) && producer[v].is_some_and(|p| fusible(graph, &nodes[p]))
-    };
-    let mut out = Graph::new();
-    let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
-    for &v in graph.inputs() {
-        map[v] = out.input(graph.type_of(v).clone());
-    }
-    // Emits a fresh copy of constant `v`'s chain, or returns the value already mapped.
-    fn read(
-        v: Var,
-        graph: &Graph,
-        producer: &[Option<usize>],
-        shared: &dyn Fn(Var) -> bool,
-        map: &[Var],
-        out: &mut Graph,
-    ) -> Var {
-        if !shared(v) {
-            return map[v];
-        }
-        let node = &graph.nodes()[producer[v].expect("a constant's producer")];
-        let inputs: Vec<Var> = node
-            .inputs
-            .iter()
-            .map(|&u| read(u, graph, producer, shared, map, out))
-            .collect();
-        out.set_origin(node);
-        let copy = out
-            .apply(node.primitive.clone(), &inputs)
-            .expect("a constant typed as the original");
-        out.set_label(copy, node.label);
-        copy
-    }
-    for node in nodes {
-        if shared(node.output) {
-            continue;
-        }
-        let inputs: Vec<Var> = node
-            .inputs
-            .iter()
-            .map(|&u| read(u, graph, &producer, &shared, &map, &mut out))
-            .collect();
-        out.set_origin(node);
-        map[node.output] = out
-            .apply(node.primitive.clone(), &inputs)
-            .expect("a node typed as the original");
-        out.set_label(map[node.output], node.label);
-    }
-    let outputs: Vec<Var> = graph
-        .outputs()
-        .iter()
-        .map(|&v| read(v, graph, &producer, &shared, &map, &mut out))
-        .collect();
-    out.set_outputs(&outputs)
-        .expect("outputs are values of the graph");
-    out
-}
+/// Compiler pass marking slices read only by GEMMs as strided views, as on MPS: Triton's GEMM reads its
+/// operands at any strides.
+pub(super) struct PlaceViews;
 
-/// A GEMM with an epilogue over its output column regions, claimed before ordinary grouping.
-struct Claim {
-    /// The dot, its region chains and constants only they read.
-    members: Vec<usize>,
-    /// Last node whose value leaves the group; the fusion's root.
-    main: usize,
-    /// Other values that leave the group, as extra fusion outputs.
-    extra: Vec<Var>,
-}
+impl CompilerPass<TritonModule<'_>> for PlaceViews {
+    /// Pass name used in profiler ranges and dumps.
+    fn name(&self) -> &'static str {
+        "place_views"
+    }
 
-/// Claims each dot whose output is split into column regions, with the elementwise chains reading
-/// each region, when every value leaving a region has the region's element count.
-fn claims(graph: &Graph) -> Vec<Claim> {
-    let nodes = graph.nodes();
-    let n = graph.types.len();
-    let mut producer: Vec<Option<usize>> = vec![None; n];
-    let mut users: Vec<Vec<usize>> = vec![Vec::new(); n];
-    for (i, node) in nodes.iter().enumerate() {
-        producer[node.output] = Some(i);
-        for &v in &node.inputs {
-            users[v].push(i);
-        }
-    }
-    let output = |v: Var| graph.outputs().contains(&v);
-    let mut claimed = vec![false; nodes.len()];
-    let mut found = Vec::new();
-    for (i, node) in nodes.iter().enumerate() {
-        if !matches!(node.primitive, Primitive::DotGeneral { .. }) || claimed[i] {
-            continue;
-        }
-        let Some(regions) = gemm_regions(graph, node) else {
-            continue;
-        };
-        // Per region: the slice/reshape nodes leading from the dot to each member.
-        let mut sets: Vec<Vec<usize>> = regions
-            .iter()
-            .map(|c| {
-                let mut set = Vec::new();
-                for v in c.members() {
-                    let mut k = producer[v].expect("a slice of the dot");
-                    loop {
-                        if !set.contains(&k) {
-                            set.push(k);
-                        }
-                        match producer[nodes[k].inputs[0]] {
-                            Some(p) if p != i => k = p,
-                            _ => break,
-                        }
-                    }
-                }
-                set
-            })
-            .collect();
-        let mut region_of: Vec<Option<usize>> = vec![None; n];
-        for (r, set) in sets.iter().enumerate() {
-            for &k in set {
-                region_of[nodes[k].output] = Some(r);
-            }
-        }
-        let shape = &graph.type_of(node.output).shape;
-        // The nodes each region set exposes, and the last of them, when that is a valid fusion root.
-        let ends = |sets: &[Vec<usize>]| -> Option<(Vec<usize>, usize)> {
-            let mut ends = Vec::new();
-            for (c, set) in regions.iter().zip(sets) {
-                let size = graph.type_of(node.output).numel() / shape[c.axis] * c.size();
-                let before = ends.len();
-                for &k in set {
-                    let v = nodes[k].output;
-                    if output(v) || users[v].iter().any(|w| !set.contains(w)) {
-                        if graph.type_of(v).numel() != size {
-                            return None;
-                        }
-                        ends.push(k);
-                    }
-                }
-                if ends.len() == before {
-                    return None;
-                }
-            }
-            let main = *ends.iter().max()?;
-            let last = sets.iter().flatten().all(|&k| k <= main);
-            let read_after = ends.iter().all(|&k| {
-                users[nodes[k].output]
-                    .iter()
-                    .all(|&w| w > main || sets.iter().any(|set| set.contains(&w)))
-            });
-            (last && read_after).then_some((ends, main))
-        };
-        let mut best = ends(&sets).map(|e| (sets.clone(), e));
-        let mut depends = vec![false; n];
-        depends[node.output] = true;
-        // Extend regions with later elementwise/reshape nodes reading one region; keep the last valid state.
-        for (u, un) in nodes.iter().enumerate().skip(i + 1) {
-            depends[un.output] = un.inputs.iter().any(|&v| depends[v]);
-            if region_of[un.output].is_some() {
-                continue;
-            }
-            let mut of: Vec<usize> = un.inputs.iter().filter_map(|&v| region_of[v]).collect();
-            of.sort_unstable();
-            of.dedup();
-            let r = match of.as_slice() {
-                [] => continue,
-                [r] => *r,
-                _ => break,
-            };
-            let step =
-                elementwise(&un.primitive) || matches!(un.primitive, Primitive::Reshape { .. });
-            let reads = un
-                .inputs
-                .iter()
-                .all(|&v| region_of[v] == Some(r) || !depends[v]);
-            if !(fusible(graph, un) && step && reads && !claimed[u]) {
-                break;
-            }
-            sets[r].push(u);
-            region_of[un.output] = Some(r);
-            if let Some(e) = ends(&sets) {
-                best = Some((sets.clone(), e));
-            }
-        }
-        let Some((sets, (ends, main))) = best else {
-            continue;
-        };
-        let mut members: Vec<usize> = std::iter::once(i)
-            .chain(sets.into_iter().flatten())
-            .collect();
-        // Pull in constant producers that only the members read.
-        let mut k = 0;
-        while k < members.len() {
-            for &v in &nodes[members[k]].inputs {
-                let Some(p) = producer[v] else {
-                    continue;
-                };
-                let constant = matches!(
-                    nodes[p].primitive,
-                    Primitive::Full { .. }
-                        | Primitive::Iota { .. }
-                        | Primitive::BroadcastInDim { .. }
-                        | Primitive::Reshape { .. }
-                );
-                let only = !output(v) && users[v].iter().all(|w| members.contains(w));
-                if constant && only && !depends[v] && !claimed[p] && !members.contains(&p) {
-                    members.push(p);
-                }
-            }
-            k += 1;
-        }
-        members.sort_unstable();
-        members.iter().for_each(|&k| claimed[k] = true);
-        let extra = ends
-            .iter()
-            .filter(|&&k| k != main)
-            .map(|&k| nodes[k].output)
-            .collect();
-        found.push(Claim {
-            members,
-            main,
-            extra,
-        });
-    }
-    found
-}
-
-/// Assigns each node the root of its loop group (claims first, then joining readers' groups going
-/// backwards), and the extra outputs of each root.
-fn groups(graph: &Graph, multi_output: bool) -> (Vec<Option<usize>>, Vec<Vec<Var>>) {
-    let nodes = graph.nodes();
-    let mut readers: Vec<Vec<usize>> = vec![Vec::new(); graph.types.len()];
-    for (i, node) in nodes.iter().enumerate() {
-        for &v in &node.inputs {
-            if !readers[v].contains(&i) {
-                readers[v].push(i);
-            }
-        }
-    }
-    let mut producer: Vec<Option<usize>> = vec![None; graph.types.len()];
-    for (i, node) in nodes.iter().enumerate() {
-        producer[node.output] = Some(i);
-    }
-    let mut group: Vec<Option<usize>> = vec![None; nodes.len()];
-    let mut extra: Vec<Vec<Var>> = vec![Vec::new(); nodes.len()];
-    let mut closed = vec![false; nodes.len()];
-    for claim in claims(graph) {
-        claim
-            .members
-            .iter()
-            .for_each(|&k| group[k] = Some(claim.main));
-        closed[claim.main] = true;
-        extra[claim.main] = claim.extra;
-    }
-    let mut reduces = vec![false; nodes.len()];
-    let mut dots = vec![false; nodes.len()];
-    for (i, node) in nodes.iter().enumerate().rev() {
-        let dot = matches!(node.primitive, Primitive::DotGeneral { .. });
-        let placed = matches!(
-            node.primitive,
-            Primitive::Concatenate { in_place: true, .. }
-        );
-        if group[i].is_some() || placed || (!fusible(graph, node) && !dot) {
-            continue;
-        }
-        // Join the readers' group when they all share one that isn't a claim and doesn't feed a dot.
-        let mut joined = match readers[node.output].split_first() {
-            Some((&first, rest)) if !graph.outputs().contains(&node.output) => {
-                group[first].filter(|&g| rest.iter().all(|&r| group[r] == Some(g)))
-            }
-            _ => None,
-        };
-        let operand = readers[node.output]
-            .iter()
-            .any(|&r| matches!(nodes[r].primitive, Primitive::DotGeneral { .. }));
-        joined = joined.filter(|&g| !operand && !closed[g]);
-        // A node reading a dot's product starts its own group rather than join one holding another
-        // dot: its dot joins it (`dot → add` a chunk, as an accumulation's), instead of every earlier
-        // dot left out and its product kept until the one group runs.
-        let reads_dot = node.inputs.iter().any(|&v| {
-            producer[v].is_some_and(|k| matches!(nodes[k].primitive, Primitive::DotGeneral { .. }))
-        });
-        joined = joined.filter(|&g| dot || !reads_dot || !dots[g]);
-        // A group holds at most one reduction or dot, whose value must reach the root elementwise.
-        let reduction = reduction(&node.primitive);
-        if reduction || dot {
-            joined = joined.filter(|&g| {
-                !reduces[g] && !dots[g] && epilogue(graph, &readers, &group, node.output, g)
-            });
-        }
-        // A dot or reshape that joins nothing stays unfused.
-        if joined.is_none() && (dot || matches!(node.primitive, Primitive::Reshape { .. })) {
-            continue;
-        }
-        let g = joined.unwrap_or(i);
-        group[i] = Some(g);
-        reduces[g] |= reduction;
-        dots[g] |= dot;
-    }
-    if multi_output {
-        let loops: Vec<bool> = (0..nodes.len())
-            .map(|g| !reduces[g] && !dots[g] && !closed[g])
-            .collect();
-        merge_read_outside(graph, &readers, &mut group, &mut extra, &loops);
-    }
-    (group, extra)
-}
-
-/// Multi-output loop fusion: a loop group whose value is also read outside the loop reading it
-/// first (by other groups, or as a program output) joins that loop, which writes the value as an
-/// extra output instead of a kernel of its own writing it. Both are plain loops (`loops`), and the
-/// choice is the backends' shared one (`Readers::host`).
-fn merge_read_outside(
-    graph: &Graph,
-    readers: &[Vec<usize>],
-    group: &mut [Option<usize>],
-    extra: &mut [Vec<Var>],
-    loops: &[bool],
-) {
-    let nodes = graph.nodes();
-    let mut producer: Vec<Option<usize>> = vec![None; graph.types.len()];
-    for (i, node) in nodes.iter().enumerate() {
-        producer[node.output] = Some(i);
-    }
-    let shared = Readers {
-        graph,
-        producer: &producer,
-        users: readers,
-    };
-    for p in (0..nodes.len()).rev() {
-        if group[p] != Some(p) || !loops[p] || !extra[p].is_empty() {
-            continue;
-        }
-        let value = nodes[p].output;
-        let mut consumers: Vec<usize> = readers[value]
-            .iter()
-            .map(|&r| group[r].unwrap_or(r))
-            .collect();
-        consumers.sort_unstable();
-        consumers.dedup();
-        if consumers.len() < 2 && !graph.outputs().contains(&value) {
-            continue;
-        }
-        let fusion_of = |reader: usize| {
-            let g = group[reader].unwrap_or(reader);
-            (g, g)
-        };
-        let member = |g: usize, k: usize| group[k] == Some(g);
-        let hostable = |g: usize, _: usize| group[g] == Some(g) && loops[g];
-        let Some(g) = shared.host(p, fusion_of, member, hostable) else {
-            continue;
-        };
-        group[..=p]
-            .iter_mut()
-            .filter(|m| **m == Some(p))
-            .for_each(|m| *m = Some(g));
-        extra[g].push(value);
+    /// Marks each slice read only by GEMMs a view (`common::place_views`).
+    fn apply(&mut self, m: &mut TritonModule<'_>) -> Result<(), String> {
+        place_views(&mut m.graph, |_, _, _, _| true, gemm_dot);
+        Ok(())
     }
 }
 
-/// Whether `p` is a sum or max reduction.
-fn reduction(p: &Primitive) -> bool {
-    matches!(p, Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. })
-}
-
-/// Whether every node of group `g` downstream of value `reduced` is elementwise (no broadcast, layout
-/// change or gather), so each output element reads one reduced element.
-fn epilogue(
-    graph: &Graph,
-    readers: &[Vec<usize>],
-    group: &[Option<usize>],
-    reduced: usize,
-    g: usize,
-) -> bool {
-    let nodes = graph.nodes();
-    let mut stack = vec![reduced];
-    while let Some(v) = stack.pop() {
-        for &r in &readers[v] {
-            if group[r] != Some(g) {
-                continue;
-            }
-            let p = &nodes[r].primitive;
-            if matches!(
-                p,
-                Primitive::BroadcastInDim { .. }
-                    | Primitive::Transpose { .. }
-                    | Primitive::Slice { .. }
-                    | Primitive::DynamicSlice { .. }
-                    | Primitive::Gather { .. }
-                    | Primitive::TakeAlongAxis { .. }
-                    | Primitive::Concatenate { .. }
-            ) {
-                return false;
-            }
-            stack.push(nodes[r].output);
-        }
+impl Lone for TritonModule<'_> {
+    /// Whether lone `n` is one a Triton loop kernel computes (Triton has no other kernel for it): every
+    /// fusible node but views of their operand (reshapes, slices placed as views) and in-place
+    /// concatenations.
+    fn alone(graph: &Graph, n: &Node) -> bool {
+        fusible(graph, n)
+            && !matches!(
+                n.primitive,
+                Primitive::Reshape { .. }
+                    | Primitive::Slice { view: true, .. }
+                    | Primitive::Concatenate { in_place: true, .. }
+            )
     }
-    true
+
+    /// Triton passes no inputs by value.
+    fn scalars(&mut self) -> Option<&mut Vec<usize>> {
+        None
+    }
+
+    /// Names the kernel by the body's kind.
+    fn kernel(&mut self, body: &Graph, _: &[bool]) -> String {
+        named(body)
+    }
 }

@@ -16,26 +16,32 @@ pub(crate) fn simplify_with(graph: &Graph, matched: bool) -> Graph {
     let nodes = graph.nodes();
     // Distinct readers of each value, counting graph outputs.
     let mut reads = vec![0usize; graph.types.len()];
+
     for n in nodes {
         for (k, &v) in n.inputs.iter().enumerate() {
             reads[v] += usize::from(!n.inputs[..k].contains(&v));
         }
     }
+
     for &v in graph.outputs() {
         reads[v] += 1;
     }
+
     let mut out = Graph::new();
     let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
     // Producer index (in `out`) of each rewritten value, and whether it is a fresh value read once.
     let mut producer: HashMap<Var, usize> = HashMap::new();
     let mut once: HashMap<Var, bool> = HashMap::new();
+
     for &v in graph.inputs() {
         map[v] = out.input(graph.type_of(v).clone());
     }
+
     for node in nodes {
         out.set_origin(node);
         let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
         let first = out.nodes().len();
+
         let value = match rewrite(&out, &producer, &once, matched, &node.primitive, &inputs) {
             Some(Rewrite::Value(v)) => v,
             Some(Rewrite::Node(p, ins)) => {
@@ -47,6 +53,7 @@ pub(crate) fn simplify_with(graph: &Graph, matched: bool) -> Graph {
                             .filter_map(|v| producer.get(v).map(|&k| out.nodes()[k].clone())),
                     )
                     .collect();
+
                 out.set_origins(&replaced.iter().collect::<Vec<_>>());
                 out.apply(p, &ins).expect("a rewrite is typed as the node")
             }
@@ -61,21 +68,26 @@ pub(crate) fn simplify_with(graph: &Graph, matched: bool) -> Graph {
                 let v = out
                     .apply(node.primitive.clone(), &inputs)
                     .expect("a node of the graph");
+
                 out.set_label(v, node.label);
                 v
             }),
         };
+
         // Intermediate nodes a rewrite created have a single reader by construction.
         for (k, n) in out.nodes().iter().enumerate().skip(first) {
             producer.insert(n.output, k);
+
             if n.output != value {
                 once.insert(n.output, true);
             }
         }
+
         let fresh = !once.contains_key(&value);
         once.insert(value, fresh && reads[node.output] == 1);
         map[node.output] = value;
     }
+
     let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
     out.set_outputs(&outputs).expect("values of the graph");
     cse(&out.prune().0)
@@ -102,6 +114,7 @@ fn rewrite(
     use Primitive::*;
     let node = |v: Var| node_of(out, producer, v);
     let is = |v: Var, c: f64| constant(out, producer, v) == Some(c);
+
     match primitive {
         Mul if is(inputs[1], 1.0) => Some(Rewrite::Value(inputs[0])),
         Mul if is(inputs[0], 1.0) => Some(Rewrite::Value(inputs[1])),
@@ -151,6 +164,7 @@ fn rewrite(
                     accum_dtype: *accum_dtype,
                     output_dtype: *new_dtype,
                 };
+
                 Some(Rewrite::Node(dot, x.clone()))
             }
             _ => None,
@@ -159,6 +173,7 @@ fn rewrite(
             if out.type_of(inputs[0]).shape == *new_sizes {
                 return Some(Rewrite::Value(inputs[0]));
             }
+
             match node(inputs[0]) {
                 Some(Node {
                     primitive: Reshape { .. },
@@ -172,6 +187,7 @@ fn rewrite(
             if permutation.iter().enumerate().all(|(i, &d)| i == d) {
                 return Some(Rewrite::Value(inputs[0]));
             }
+
             match node(inputs[0]) {
                 Some(Node {
                     primitive: Transpose { permutation: inner },
@@ -179,6 +195,7 @@ fn rewrite(
                     ..
                 }) => {
                     let permutation: Vec<usize> = permutation.iter().map(|&d| inner[d]).collect();
+
                     match permutation.iter().enumerate().all(|(i, &d)| i == d) {
                         true => Some(Rewrite::Value(x[0])),
                         false => Some(Rewrite::Node(Transpose { permutation }, vec![x[0]])),
@@ -210,10 +227,12 @@ fn rewrite(
                 ..
             }) => {
                 let broadcast_dimensions: Vec<usize> = inner.iter().map(|&d| outer[d]).collect();
+
                 let composed = BroadcastInDim {
                     shape: shape.clone(),
                     broadcast_dimensions,
                 };
+
                 composed
                     .infer(&[out.type_of(x[0])])
                     .is_ok()
@@ -240,14 +259,17 @@ fn moved(
     inputs: &[Var],
 ) -> Option<Var> {
     use Primitive::*;
+
     let layout = |p: &Primitive| {
         matches!(
             p,
             Reshape { .. } | Transpose { .. } | Slice { .. } | Concatenate { .. }
         )
     };
+
     let read_once = |v: Var| once.get(&v) == Some(&true);
     let mut operands: Vec<(Option<Primitive>, Vec<Var>)> = Vec::new();
+
     let then: Primitive = match primitive {
         p if crate::graph_compiler::elementwise(p) && !matches!(p, Cast { .. }) => {
             let rearranged = |v: Var| {
@@ -259,11 +281,14 @@ fn moved(
                         )
                 })
             };
+
             let r = inputs.iter().find_map(|&v| rearranged(v))?;
             let shape = &out.type_of(r.inputs[0]).shape;
+
             for &v in inputs {
                 let n = node_of(out, producer, v)?;
                 let same = n.primitive == r.primitive && out.type_of(n.inputs[0]).shape == *shape;
+
                 operands.push(match same && read_once(v) {
                     true => (None, vec![n.inputs[0]]),
                     false => (
@@ -272,6 +297,7 @@ fn moved(
                     ),
                 });
             }
+
             r.primitive.clone()
         }
         p if layout(p) => {
@@ -279,11 +305,14 @@ fn moved(
                 node_of(out, producer, v)
                     .filter(|n| matches!(n.primitive, Cast { .. }) && read_once(v))
             };
+
             let c = inputs.iter().find_map(|&v| cast(v))?;
             let (from, to) = (out.type_of(c.inputs[0]).dtype, out.type_of(c.output).dtype);
+
             if from.size_of() >= to.size_of() {
                 return None;
             }
+
             for &v in inputs {
                 match (cast(v), &node_of(out, producer, v)?.primitive) {
                     (Some(n), _) if out.type_of(n.inputs[0]).dtype == from => {
@@ -297,32 +326,40 @@ fn moved(
                     ) => {
                         let value = round(to, *fill_value);
                         let fill_value = round(from, value);
+
                         if round(to, fill_value) != value {
                             return None;
                         }
+
                         let full = Full {
                             shape: shape.clone(),
                             fill_value,
                             dtype: from,
                         };
+
                         operands.push((Some(full), Vec::new()));
                     }
                     _ => return None,
                 }
             }
+
             Cast { new_dtype: to }
         }
         Cast { new_dtype } => {
             let x = inputs[0];
             let n = node_of(out, producer, x).filter(|n| layout(&n.primitive) && read_once(x))?;
+
             if out.type_of(x).dtype.size_of() <= new_dtype.size_of() {
                 return None;
             }
+
             let (p, ins) = (n.primitive.clone(), n.inputs.clone());
+
             let ins: Vec<Var> = ins
                 .iter()
                 .map(|&u| cast_up(out, producer, once, u, *new_dtype))
                 .collect();
+
             return Some(
                 out.apply(p, &ins)
                     .expect("a layout primitive of its operands cast"),
@@ -330,6 +367,7 @@ fn moved(
         }
         _ => return None,
     };
+
     let operands: Vec<Var> = operands
         .into_iter()
         .map(|(p, ins)| match p {
@@ -337,9 +375,11 @@ fn moved(
             None => ins[0],
         })
         .collect();
+
     let x = out
         .apply(primitive.clone(), &operands)
         .expect("the primitive on the operands moved");
+
     Some(out.apply(then, &[x]).expect("the primitive moved past"))
 }
 
@@ -352,6 +392,7 @@ fn cast_up(
     dtype: DType,
 ) -> Var {
     use Primitive::*;
+
     let layout = node_of(out, producer, v)
         .filter(|n| {
             once.get(&v) == Some(&true)
@@ -361,12 +402,14 @@ fn cast_up(
                 )
         })
         .map(|n| (n.primitive.clone(), n.inputs.clone()));
+
     match layout {
         Some((p, ins)) => {
             let ins: Vec<Var> = ins
                 .iter()
                 .map(|&u| cast_up(out, producer, once, u, dtype))
                 .collect();
+
             out.apply(p, &ins)
                 .expect("a layout primitive of its operands cast")
         }
@@ -378,6 +421,7 @@ fn cast_up(
 fn unrearranged(n: &Node, rearrange: &Primitive, shape: &[usize]) -> Option<Primitive> {
     use Primitive::*;
     let shape = shape.to_vec();
+
     match (&n.primitive, rearrange) {
         (
             Full {
@@ -410,6 +454,7 @@ fn unrearranged(n: &Node, rearrange: &Primitive, shape: &[usize]) -> Option<Prim
                 .iter()
                 .map(|&d| permutation[d])
                 .collect();
+
             (broadcast_dimensions.is_sorted() && dims.is_sorted()).then_some(BroadcastInDim {
                 shape,
                 broadcast_dimensions: dims,
@@ -437,14 +482,17 @@ fn swapped(out: &Graph, dot: &Primitive, x: &[Var], permutation: &[usize]) -> Op
     else {
         unreachable!("a dot")
     };
+
     let free = |v: Var, used: usize| out.type_of(v).shape.len() - used;
     let nb = lhs_batch.len();
     let fl = free(x[0], nb + lhs_contracting.len());
     let fr = free(x[1], nb + rhs_contracting.len());
+
     let expected: Vec<usize> = (0..nb)
         .chain(nb + fl..nb + fl + fr)
         .chain(nb..nb + fl)
         .collect();
+
     (permutation == expected.as_slice()).then(|| {
         let swapped = Primitive::DotGeneral {
             lhs_contracting: rhs_contracting.clone(),
@@ -454,6 +502,7 @@ fn swapped(out: &Graph, dot: &Primitive, x: &[Var], permutation: &[usize]) -> Op
             accum_dtype: *accum_dtype,
             output_dtype: *output_dtype,
         };
+
         Rewrite::Node(swapped, vec![x[1], x[0]])
     })
 }
@@ -478,6 +527,7 @@ fn folded(
     else {
         unreachable!("a dot")
     };
+
     let (mut dims, mut operands) = (
         [
             (lhs_contracting.clone(), lhs_batch.clone()),
@@ -485,7 +535,9 @@ fn folded(
         ],
         x.to_vec(),
     );
+
     let mut changed = false;
+
     for side in 0..2 {
         let (cast, transposed) = match node_of(out, producer, x[side]) {
             Some(Node {
@@ -495,6 +547,7 @@ fn folded(
             }) => (Some(cast.clone()), inputs[0]),
             _ => (None, x[side]),
         };
+
         let Some(Node {
             primitive: Primitive::Transpose { permutation },
             inputs,
@@ -503,28 +556,38 @@ fn folded(
         else {
             continue;
         };
+
         let (permutation, input) = (permutation.clone(), inputs[0]);
+
         if !matched && !out.inputs().contains(&input) {
             continue;
         }
+
         let (contracting, batch) = &dims[side];
         let rank = permutation.len();
+
         let free: Vec<usize> = (0..rank)
             .filter(|d| !contracting.contains(d) && !batch.contains(d))
             .map(|d| permutation[d])
             .collect();
+
         if !free.is_sorted() {
             continue;
         }
+
         let map = |ds: &[usize]| ds.iter().map(|&d| permutation[d]).collect::<Vec<_>>();
         dims[side] = (map(contracting), map(batch));
+
         operands[side] = match cast {
             Some(cast) => out.apply(cast, &[input]).expect("a cast of the input"),
             None => input,
         };
+
         changed = true;
     }
+
     let [(lhs_contracting, lhs_batch), (rhs_contracting, rhs_batch)] = dims;
+
     changed.then(|| {
         let dot = Primitive::DotGeneral {
             lhs_contracting,
@@ -534,6 +597,7 @@ fn folded(
             accum_dtype: *accum_dtype,
             output_dtype: *output_dtype,
         };
+
         out.apply(dot, &operands).expect("the dot, folded")
     })
 }
@@ -541,8 +605,10 @@ fn folded(
 /// The constant `v` holds when it is a broadcast, reshape or cast of a `full`.
 fn constant(out: &Graph, producer: &HashMap<Var, usize>, v: Var) -> Option<f64> {
     let mut v = v;
+
     loop {
         let node = &out.nodes()[*producer.get(&v)?];
+
         match &node.primitive {
             Primitive::Full { fill_value, .. } => return Some(fill_value.to_f64()),
             Primitive::BroadcastInDim { .. }

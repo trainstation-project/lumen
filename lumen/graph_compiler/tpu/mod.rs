@@ -9,7 +9,7 @@ mod tests;
 use super::common::updates::Updates;
 use diamonds::Diamonds;
 use flash_attention_backward::FlashAttentionBackward;
-use fusion::{DotRows, FuseDots, HorizontalFusion, LoopFusion};
+use fusion::{DotRows, FuseDots, Fusion, HorizontalFusion};
 use place_concats::PlaceConcats;
 
 use super::common::attention;
@@ -22,7 +22,7 @@ use super::common::merge_dots_backward::MergeDotsBackward;
 use super::common::simplify::Simplify;
 use super::pass::{Module, Pipeline};
 use super::plan::DeviceLayout;
-use super::{CompilerConfig, Options, positions};
+use super::{CompilerConfig, Options, plan_options, positions};
 use crate::graph::{Graph, Var};
 use crate::graph_compiler::{Plan, PlanOptions};
 
@@ -79,6 +79,7 @@ impl Attentions for TpuModule<'_> {
         attention::Epilogues {
             leaves: |graph, v| graph.type_of(v).shape.is_empty(),
             reshaped: true,
+            transposed: false,
         }
     }
 
@@ -110,20 +111,26 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         packed: Vec::new(),
         interleaved: Vec::new(),
     };
+
     let mut pipeline = Pipeline::new("tpu");
+
     if options.config.tpu.merge_dots {
         pipeline.add(MergeDotsBackward);
     }
+
     if options.config.tpu.flash_attention {
         pipeline.add(FlashAttention).add(FlashAttentionBackward);
     }
+
     if options.config.tpu.safe_kernels {
         pipeline.add(ClampIndices);
     }
+
     pipeline
         .add(FoldDotReshapes)
         .add(Simplify { matched: true })
         .add(DotStrength);
+
     if options.config.tpu.merge_dots {
         pipeline.add(MergeDots {
             target: Target {
@@ -134,9 +141,11 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
             },
         });
     }
+
     if options.config.tpu.normalization_diamonds {
         pipeline.add(Diamonds).add(DotRows);
     }
+
     pipeline
         .add(Updates {
             least: 1,
@@ -144,37 +153,34 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         })
         .add(FuseDots)
         .add(PlaceConcats)
-        .add(LoopFusion);
+        .add(Fusion);
+
     if options.config.tpu.horizontal_fusion {
         pipeline.add(HorizontalFusion);
     }
+
     pipeline.run(&mut module)?;
+
     let TpuModule {
         graph,
         packed,
         interleaved,
         ..
     } = module;
-    // Packed weight blocks are extra inputs and count as parameters.
-    let parameters = options.parameters.clone().map(|mut p| {
-        p.resize(graph.inputs().len(), true);
-        p
-    });
+
+    let config = &options.config.tpu;
+
     let plan = PlanOptions {
-        scratch: None,
-        donate: options.donate.clone(),
-        donate_into: options.donate_into.clone(),
-        parameters,
-        scalars: positions(&options.scalars),
-        memory_limit: options.config.tpu.memory_limit(),
-        // Packed blocks were appended as the last graph inputs, in order.
-        blocks: packed
-            .iter()
-            .enumerate()
-            .map(|(k, (members, _))| (graph.inputs().len() - packed.len() + k, members.clone()))
-            .collect(),
         layout: Some(LAYOUT),
+        ..plan_options(
+            &graph,
+            options,
+            config,
+            &packed,
+            positions(&options.scalars),
+        )
     };
+
     let mut plan = Plan::compile_with(&graph, &plan);
     plan.packed = packed;
     plan.interleaved = interleaved;

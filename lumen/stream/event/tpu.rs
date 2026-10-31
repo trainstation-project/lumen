@@ -60,19 +60,25 @@ impl Event for TpuEvent {
     /// event completes immediately.
     fn record(&mut self) -> Result<(), String> {
         self.release();
-        crate::kernels::tpu::flush(self.index)?;
+        crate::runtime::tpu::flush(self.index)?;
+
         let Some(ready) = crate::allocator::tpu::ready_event(self.index)? else {
             self.marks = Some(Recorded::now());
             return Ok(());
         };
+
         let marks = Arc::new(Recorded::default());
         // The callback owns one reference to the marks; reclaim it if registration fails.
         let user = Arc::into_raw(marks.clone()).cast_mut().cast::<c_void>();
+
         if unsafe { ffi::lumen_tpu_on_ready(ready.as_ptr(), finished, user) } != 0 {
             drop(unsafe { Arc::from_raw(user.cast::<Recorded>()) });
+
             unsafe { ffi::lumen_tpu_event_free(ready.as_ptr()) };
+
             return Err(error());
         }
+
         self.ready = Some(ready);
         self.marks = Some(marks);
         Ok(())

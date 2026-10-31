@@ -29,7 +29,9 @@ const RTLD_GLOBAL: c_int = 0x100;
 #[link(name = "dl")]
 unsafe extern "C" {
     fn dlopen(filename: *const c_char, flags: c_int) -> *mut c_void;
+
     fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+
     fn dlerror() -> *const c_char;
 }
 
@@ -100,24 +102,30 @@ unsafe fn function<F: Copy>(f: *mut c_void) -> F {
 /// Loads `libnccl.so.2` (or `LUMEN_NCCL_LIBRARY`) once and resolves the entry points.
 fn nccl() -> Result<&'static Nccl, String> {
     static NCCL: OnceLock<Result<Nccl, String>> = OnceLock::new();
+
     NCCL.get_or_init(|| {
         let path = std::env::var("LUMEN_NCCL_LIBRARY").unwrap_or_else(|_| "libnccl.so.2".into());
         let name = CString::new(path.clone()).map_err(|e| e.to_string())?;
         let handle = unsafe { dlopen(name.as_ptr(), RTLD_NOW | RTLD_GLOBAL) };
+
         if handle.is_null() {
             let reason = unsafe { CStr::from_ptr(dlerror()) }.to_string_lossy();
+
             return Err(format!(
                 "loading NCCL ({path}) failed: {reason}; install nvidia-nccl-cu12 or -cu13, or set LUMEN_NCCL_LIBRARY"
             ));
         }
+
         let symbol = |name: &str| -> Result<*mut c_void, String> {
             let c = CString::new(name).expect("a symbol name has no NUL");
             let f = unsafe { dlsym(handle, c.as_ptr()) };
+
             match f.is_null() {
                 true => Err(format!("{path} has no {name}")),
                 false => Ok(f),
             }
         };
+
         // Each pointer is the named NCCL function, whose C signature the field's type spells out.
         unsafe {
             Ok(Nccl {
@@ -160,34 +168,44 @@ fn communicator(nccl: &Nccl, ranks: &[usize], device: usize) -> Result<Comm, Str
     static COMMS: Mutex<Option<Comms>> = Mutex::new(None);
     let mut comms = COMMS.lock().unwrap_or_else(PoisonError::into_inner);
     let comms = comms.get_or_insert_with(HashMap::new);
+
     if let Some(Handle(comm)) = comms.get(&(ranks.to_vec(), device)) {
         return Ok(*comm);
     }
+
     let me = position(ranks, super::get_rank()?, "rank")?;
+
     let store = super::default_store().ok_or(
         "a collective needs the default process group: call lumen.distributed.init_process_group",
     )?;
+
     let names: Vec<String> = ranks.iter().map(usize::to_string).collect();
     let key = format!("lumen/nccl/{}", names.join(","));
     let mut id = UniqueId([0; 128]);
+
     if me == 0 {
         checked(nccl, "ncclGetUniqueId", unsafe {
             (nccl.get_unique_id)(&mut id)
         })?;
+
         store.set(&key, &id.0)?;
     } else {
         store.wait(&[key.as_str()], super::DEFAULT_TIMEOUT)?;
         let bytes = store.get(&key)?;
+
         id.0 = bytes
             .try_into()
             .map_err(|b: Vec<u8>| format!("{key} holds {} bytes, not an NCCL id's 128", b.len()))?;
     }
+
     CUDA.set_device(device);
     let mut comm: Comm = std::ptr::null_mut();
     let size = ranks.len() as c_int;
+
     checked(nccl, "ncclCommInitRank", unsafe {
         (nccl.comm_init_rank)(&mut comm, size, id, me as c_int)
     })?;
+
     comms.insert((ranks.to_vec(), device), Handle(comm));
     Ok(comm)
 }
@@ -234,13 +252,17 @@ fn stream(device: usize) -> Result<*mut c_void, String> {
     static STREAMS: Mutex<Option<HashMap<usize, Handle>>> = Mutex::new(None);
     let mut streams = STREAMS.lock().unwrap_or_else(PoisonError::into_inner);
     let streams = streams.get_or_insert_with(HashMap::new);
+
     if let Some(Handle(stream)) = streams.get(&device) {
         return Ok(*stream);
     }
+
     let mut stream = std::ptr::null_mut();
+
     cuda_checked("cudaStreamCreateWithFlags", device, unsafe {
         ffi::cudaStreamCreateWithFlags(&mut stream, STREAM_NON_BLOCKING)
     })?;
+
     streams.insert(device, Handle(stream));
     Ok(stream)
 }
@@ -258,19 +280,25 @@ pub(crate) fn device_wait(x: &Tensor) -> Result<(), String> {
     let Device::Cuda(device) = x.device() else {
         return Ok(());
     };
+
     let done = DONE
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .get_or_insert_with(HashMap::new)
         .remove(&(x.data_ptr() as usize))
         .unwrap_or_default();
+
     CUDA.set_device(device);
+
     for Handle(event) in done {
         // CUDA frees the destroyed event once the wait on it completes.
         let waited = unsafe { ffi::cudaStreamWaitEvent(std::ptr::null_mut(), event, 0) };
+
         unsafe { ffi::cudaEventDestroy(event) };
+
         cuda_checked("cudaStreamWaitEvent", device, waited)?;
     }
+
     Ok(())
 }
 
@@ -487,9 +515,11 @@ pub(crate) fn run(primitive: &Primitive, inputs: &[Tensor], out: &Tensor) -> Res
             out.device()
         ));
     };
+
     let nccl = nccl()?;
     let ranks = collective::ranks(primitive)
         .ok_or_else(|| format!("{}: not an NCCL collective", primitive.name()))?;
+
     let group = Group {
         nccl,
         comm: communicator(nccl, ranks, device)?,
@@ -498,11 +528,14 @@ pub(crate) fn run(primitive: &Primitive, inputs: &[Tensor], out: &Tensor) -> Res
         size: ranks.len(),
         device,
     };
+
     crate::stream::cuda::wait(device, group.stream as usize);
+
     let x = inputs.first();
     let x_type = x.map(|x| TensorType::new(x.dtype(), x.shape()));
     let send = x.map_or(std::ptr::null(), |x| x.data_ptr().cast_const());
     let out_type = TensorType::new(out.dtype(), out.shape());
+
     unsafe {
         collective::run(
             &group,
@@ -513,18 +546,23 @@ pub(crate) fn run(primitive: &Primitive, inputs: &[Tensor], out: &Tensor) -> Res
             &out_type,
         )?
     };
+
     let mut event = std::ptr::null_mut();
+
     cuda_checked("cudaEventCreateWithFlags", device, unsafe {
         ffi::cudaEventCreateWithFlags(&mut event, EVENT_DISABLE_TIMING)
     })?;
+
     cuda_checked("cudaEventRecord", device, unsafe {
         ffi::cudaEventRecord(event, group.stream)
     })?;
+
     DONE.lock()
         .unwrap_or_else(PoisonError::into_inner)
         .get_or_insert_with(HashMap::new)
         .entry(out.data_ptr() as usize)
         .or_default()
         .push(Handle(event));
+
     Ok(())
 }

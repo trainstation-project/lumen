@@ -32,6 +32,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self.reply(400, {"error": f"no benchmark on {device!r} yet; there is one on {', '.join(DEVICES)}"})
         if name not in bench.OPS:
             return self.reply(404, {"error": f"no benchmark for {name!r}; there are {', '.join(bench.OPS)}"})
+        if bench.torch is None:
+            return self.reply(503, {"error": bench.NO_TORCH})
         if not running.acquire(blocking=False):
             return self.reply(409, {"error": "a benchmark is already running; try again when it finishes"})
             # Headers go out before running so rows can stream; later failures become an error line.

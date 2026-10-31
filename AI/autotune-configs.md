@@ -18,10 +18,10 @@ the code that uses it, never inline in codegen, kernels or passes:
 
 | Backend | Kernels | File |
 |---|---|---|
-| Triton | GEMM, loops, reductions, flash attention | `lumen/codegen/triton/config.rs` |
-| MPS | loop tunings, tuned sizes, flash-attention blocks | `lumen/codegen/mps/config.rs` |
-| MPS | GEMM tiles, one file per algorithm | `lumen/kernels/dot_general/mps/{tiled,skinny,gemv,mpp}/config.rs` |
-| TPU | flash-attention blocks | `lumen/kernels/attention/tpu/config.rs` |
+| Triton | GEMM, loops, reductions, flash attention | `lumen/codegen/{dot_general,elementwise,attention}/triton/config.rs` |
+| MPS | loop tunings, tuned sizes, flash-attention blocks | `lumen/codegen/{elementwise,attention}/mps/config.rs` |
+| MPS | GEMM tiles, one file per algorithm | `lumen/codegen/dot_general/mps/{tiled,skinny,gemv,mpp}/config.rs` |
+| TPU | flash-attention blocks | `lumen/codegen/attention/tpu/config.rs` |
 
 A kernel family without one gets a `config.rs` in its own module, declared
 with `mod config;` and its items re-exported or imported where used.

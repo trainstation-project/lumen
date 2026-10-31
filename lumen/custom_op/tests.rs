@@ -1,6 +1,7 @@
-//! Tests of user Metal kernels.
+//! Tests of user Metal kernels and of `vector_size`.
 
 use super::mps::*;
+use super::vector_size;
 use crate::{Device, Tensor};
 
 /// Compiles an axpy kernel, rejects CPU tensors and checks the result on MPS; skips without MPS.
@@ -9,21 +10,44 @@ fn a_custom_kernel_launches_into_the_mps_stream() {
     const AXPY: &str =
         "kernel void axpy(device const float *x [[buffer(0)]], device float *y [[buffer(1)]],
         constant float &a [[buffer(2)]], uint i [[thread_position_in_grid]]) { y[i] += a * x[i]; }";
+
     let Ok(kernel) = MetalKernel::new(AXPY, None) else {
         assert!(!cfg!(lumen_mps_linked) || crate::Device::Mps(0).check().is_err());
         return;
     };
+
     assert_eq!(kernel.name(), "axpy");
     let x = Tensor::from_slice(&[1.0f32, 2.0, 3.0], Device::Cpu(0));
     let err = kernel.launch(std::slice::from_ref(&x), &[], Grid::Threads([3, 1, 1]));
     assert!(err.unwrap_err().contains("must be on mps"));
+
     let (x, y) = (
         x.to(Device::Mps(0)),
         Tensor::from_slice(&[1.0f32; 3], Device::Cpu(0)).to(Device::Mps(0)),
     );
+
     let a = 2.0f32.to_ne_bytes().to_vec();
+
     kernel
         .launch(&[x, y.clone()], &[a], Grid::Threads([3, 1, 1]))
         .unwrap();
+
     assert_eq!(y.to_vec::<f32>(), [3.0, 5.0, 7.0]);
+}
+
+/// The vector width shrinks until the size, strides and address all align to it.
+#[test]
+fn the_vector_size_is_the_widest_aligned_store() {
+    assert_eq!(vector_size(&[1024], &[1], 4, 256), 4);
+    assert_eq!(vector_size(&[1024], &[1], 2, 256), 8);
+    assert_eq!(vector_size(&[1024], &[1], 1, 256), 16);
+    assert_eq!(vector_size(&[1024], &[1], 8, 256), 2);
+    assert_eq!(vector_size(&[1024], &[1], 4, 256 + 8), 2);
+    assert_eq!(vector_size(&[1024], &[1], 4, 256 + 4), 1);
+    assert_eq!(vector_size(&[6], &[1], 4, 256), 2);
+    assert_eq!(vector_size(&[1001], &[1], 4, 256), 1);
+    assert_eq!(vector_size(&[1024], &[2], 4, 256), 1);
+    assert_eq!(vector_size(&[4, 16], &[1, 8], 4, 256), 4);
+    assert_eq!(vector_size(&[4, 16], &[1, 6], 4, 256), 2);
+    assert_eq!(vector_size(&[], &[], 4, 256), 1);
 }

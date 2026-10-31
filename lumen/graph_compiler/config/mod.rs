@@ -128,6 +128,7 @@ macro_rules! device_config {
             /// All the device's settings, as Python keyword arguments.
             pub(crate) fn __repr__(&self) -> String {
                 let c = super::configs().$field;
+
                 let flags: Vec<String> = vec![
                     format!("merge_dots={}", super::py_value(&c.merge_dots)),
                     format!("flash_attention={}", super::py_value(&c.flash_attention)),
@@ -139,6 +140,7 @@ macro_rules! device_config {
                     format!("dump_to={}", super::py_value(&c.dump_to)),
                     $(format!("{}={}", stringify!($flag), super::py_value(&c.$flag))),*
                 ];
+
                 format!(
                     "{}.config.compiler.{}({})",
                     crate::LIBRARY_NAME,
@@ -170,6 +172,7 @@ macro_rules! shared_flags {
                 #[getter]
                 fn $flag(&self) -> $ty {
                     let c = configs();
+
                     match self.device {
                         Device::Cpu(_) | Device::Meta(_) => c.cpu.$flag,
                         Device::Cuda(_) => c.cuda.$flag,

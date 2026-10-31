@@ -33,26 +33,33 @@ pub(crate) struct Rules<'a> {
 /// a fusible node reads the result.
 pub(crate) fn split_k(graph: &Graph, rules: &Rules) -> Graph {
     let nodes = graph.nodes();
+
     let sliced = |v: Var| {
         nodes
             .iter()
             .any(|n| n.output == v && matches!(n.primitive, Primitive::Slice { .. }))
     };
+
     let fused = |v: Var| {
         nodes
             .iter()
             .any(|n| n.inputs.contains(&v) && (rules.fusible)(graph, n))
     };
+
     let mut out = Graph::new();
     let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
+
     for &v in graph.inputs() {
         map[v] = out.input(graph.type_of(v).clone());
     }
+
     for node in nodes {
         out.set_origin(node);
         let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
+
         let apply =
             |out: &mut Graph, p: Primitive, ins: &[Var]| out.apply(p, ins).expect("well typed");
+
         let Primitive::DotGeneral {
             lhs_contracting,
             rhs_contracting,
@@ -66,7 +73,9 @@ pub(crate) fn split_k(graph: &Graph, rules: &Rules) -> Graph {
             out.set_label(map[node.output], node.label);
             continue;
         };
+
         let (lhs, rhs) = (graph.type_of(node.inputs[0]), graph.type_of(node.inputs[1]));
+
         let split = match (&lhs_contracting[..], &rhs_contracting[..]) {
             (&[l], &[r])
                 if lhs_batch.is_empty()
@@ -80,11 +89,13 @@ pub(crate) fn split_k(graph: &Graph, rules: &Rules) -> Graph {
             }
             _ => None,
         };
+
         let Some((l, r, s)) = split else {
             map[node.output] = apply(&mut out, node.primitive.clone(), &inputs);
             out.set_label(map[node.output], node.label);
             continue;
         };
+
         // Split contracting dim `d` of `shape` into `[s, k / s]`, the chunk index becoming a batch dim.
         let reshaped = |shape: &[usize], d: usize| {
             let mut shape = shape.to_vec();
@@ -92,8 +103,10 @@ pub(crate) fn split_k(graph: &Graph, rules: &Rules) -> Graph {
             shape.splice(d..=d, [s, k / s]);
             Primitive::Reshape { new_sizes: shape }
         };
+
         let a = apply(&mut out, reshaped(&lhs.shape, l), &[inputs[0]]);
         let b = apply(&mut out, reshaped(&rhs.shape, r), &[inputs[1]]);
+
         let dot = Primitive::DotGeneral {
             lhs_contracting: vec![l + 1],
             rhs_contracting: vec![r + 1],
@@ -102,17 +115,22 @@ pub(crate) fn split_k(graph: &Graph, rules: &Rules) -> Graph {
             accum_dtype: *accum_dtype,
             output_dtype: *accum_dtype,
         };
+
         let sum = Primitive::ReduceSum {
             axes: vec![0],
             accum_dtype: *accum_dtype,
         };
+
         // Bytes of the partial products written and read back, against the operand bytes.
         let partials = 2 * s * lhs.numel() / lhs.shape[l]
             * (rhs.numel() / rhs.shape[r])
             * accum_dtype.size_of();
+
         let operands = (lhs.numel() + rhs.numel()) * lhs.dtype.size_of();
+
         let atomic =
             rules.atomic && *accum_dtype == DType::F32 && !(rules.fuse && fused(node.output));
+
         let mut value = match atomic && partials > operands {
             true => {
                 let mut body = Graph::new();
@@ -120,11 +138,13 @@ pub(crate) fn split_k(graph: &Graph, rules: &Rules) -> Graph {
                 let partials = body.apply(dot, &ins).expect("well typed");
                 let sum = body.apply(sum, &[partials]).expect("well typed");
                 body.set_outputs(&[sum]).expect("its value");
+
                 let fusion = Primitive::Fusion {
                     name: "split_k".into(),
                     label: "dot_general (split-K)",
                     body,
                 };
+
                 out.apply(fusion, &[a, b]).expect("well typed")
             }
             false => {
@@ -135,6 +155,7 @@ pub(crate) fn split_k(graph: &Graph, rules: &Rules) -> Graph {
                 sum
             }
         };
+
         if output_dtype != accum_dtype {
             value = apply(
                 &mut out,
@@ -144,8 +165,10 @@ pub(crate) fn split_k(graph: &Graph, rules: &Rules) -> Graph {
                 &[value],
             );
         }
+
         map[node.output] = value;
     }
+
     let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
     out.set_outputs(&outputs).expect("values of the graph");
     out
@@ -158,9 +181,12 @@ fn chunks(groups: usize, target: usize, k: usize) -> Option<usize> {
     if groups == 0 || 2 * groups >= target || k < MIN_K {
         return None;
     }
+
     let mut s = target.div_ceil(groups).next_power_of_two().min(MAX_SPLIT);
+
     while s >= 2 && (!k.is_multiple_of(s) || k / s < MIN_CHUNK) {
         s /= 2;
     }
+
     (s >= 2).then_some(s)
 }

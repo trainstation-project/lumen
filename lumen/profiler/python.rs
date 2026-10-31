@@ -27,9 +27,11 @@ fn start(activities: Vec<String>, profile_memory: bool, record_shapes: bool) -> 
             ))),
         })
         .collect::<PyResult<Vec<_>>>()?;
+
     if activities.contains(&Activity::Cuda) && !cuda_timing() {
         return Err(PyRuntimeError::new_err(CUDA_TIMING_MISSING));
     }
+
     super::start(ProfilerConfig {
         activities,
         profile_memory,
@@ -62,6 +64,13 @@ fn stop() -> PyResult<PyProfile> {
 #[pyo3(name = "_profiler_enabled")]
 fn enabled() -> bool {
     super::is_enabled()
+}
+
+/// True when a profiler session is timing CUDA kernels.
+#[pyfunction]
+#[pyo3(name = "_profiler_cuda_enabled")]
+fn cuda_enabled() -> bool {
+    super::device_enabled(crate::Device::Cuda(0))
 }
 
 /// An open `record_function` range held by Python until `exit`.
@@ -116,12 +125,14 @@ fn event_dict<'py>(py: Python<'py>, e: &Event) -> PyResult<Bound<'py, PyDict>> {
     d.set_item("thread", e.thread)?;
     d.set_item("parent", e.parent)?;
     d.set_item("device", e.device.to_string())?;
+
     let types = |types: &[crate::graph::TensorType]| -> Vec<(&'static str, Vec<usize>)> {
         types
             .iter()
             .map(|t| (dtype_name(t.dtype), t.shape.clone()))
             .collect()
     };
+
     d.set_item("inputs", types(&e.inputs))?;
     d.set_item("input_strides", &e.input_strides)?;
     d.set_item("outputs", types(&e.outputs))?;
@@ -213,6 +224,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(cuda_timing, m)?)?;
     m.add_function(wrap_pyfunction!(stop, m)?)?;
     m.add_function(wrap_pyfunction!(enabled, m)?)?;
+    m.add_function(wrap_pyfunction!(cuda_enabled, m)?)?;
     m.add_function(wrap_pyfunction!(record_function_enter, m)?)?;
     m.add_class::<PyRecordFunction>()?;
     m.add_class::<PyProfile>()?;

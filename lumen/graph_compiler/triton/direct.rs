@@ -25,7 +25,7 @@ impl Value {
         Value::Pointer(t.data_ptr() as u64, t.dtype())
     }
 
-    /// One-element host tensor `t` passed by value as `lumen.codegen.triton.scalar` passes it: a float64
+    /// One-element host tensor `t` passed by value as `lumen.codegen.utils.triton.scalar` passes it: a float64
     /// as its bits, another float as a float, an int or bool as itself.
     pub(crate) fn scalar(t: &Tensor) -> Self {
         /// The element at `t`'s address, read where it sits in host memory.
@@ -34,8 +34,10 @@ impl Value {
                 matches!(t.device(), crate::Device::Cpu(_)),
                 "a by-value scalar lives on the host"
             );
+
             unsafe { std::ptr::read_unaligned(t.data_ptr().cast::<T>()) }
         }
+
         match t.dtype() {
             DType::F64 => Value::Int(read::<f64>(t).to_bits() as i64 as i128),
             DType::F32 => Value::Float(read::<f32>(t) as f64),
@@ -65,6 +67,7 @@ impl Value {
                     v if i64::try_from(v).is_ok() => Width::I64,
                     _ => Width::U64,
                 };
+
                 Class::Int(width, v % 16 == 0, v == 1)
             }
             Value::Float(_) => Class::Float,
@@ -105,6 +108,7 @@ impl Class {
                     Width::I64 => "i64",
                     Width::U64 => "u64",
                 };
+
                 format!(
                     "{ty}{}{}",
                     if div { "D" } else { "" },
@@ -143,6 +147,7 @@ pub(crate) fn compiled(
     compile: impl FnOnce() -> Result<Compiled, String>,
 ) -> Result<Arc<Compiled>, String> {
     static CACHE: Mutex<Option<HashMap<String, Arc<Compiled>>>> = Mutex::new(None);
+
     if let Some(c) = CACHE
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
@@ -151,12 +156,15 @@ pub(crate) fn compiled(
     {
         return Ok(c.clone());
     }
+
     let c = Arc::new(compile()?);
+
     CACHE
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
         .get_or_insert_with(HashMap::new)
         .insert(key.to_owned(), c.clone());
+
     Ok(c)
 }
 
@@ -166,7 +174,9 @@ const RTLD_NOW: c_int = 2;
 #[link(name = "dl")]
 unsafe extern "C" {
     fn dlopen(filename: *const c_char, flags: c_int) -> *mut c_void;
+
     fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
+
     fn dlerror() -> *const c_char;
 }
 
@@ -188,33 +198,54 @@ type LaunchKernel = unsafe extern "C" fn(
 /// `cuGetErrorString`: a driver error's message.
 type ErrorString = unsafe extern "C" fn(c_int, *mut *const c_char) -> c_int;
 
+/// `cuStreamGetCaptureInfo_v2`: stream, status, capture id, graph, dependencies, their count.
+type CaptureInfo = unsafe extern "C" fn(
+    *mut c_void,
+    *mut c_int,
+    *mut u64,
+    *mut *mut c_void,
+    *mut *const *mut c_void,
+    *mut usize,
+) -> c_int;
+
+/// `cuGraphGetNodes`: graph, nodes (null to count them), their count.
+type GraphNodes = unsafe extern "C" fn(*mut c_void, *mut *mut c_void, *mut usize) -> c_int;
+
 /// The CUDA driver entry points this module calls.
 struct Driver {
     launch: LaunchKernel,
     error: ErrorString,
+    capture_info: CaptureInfo,
+    graph_nodes: GraphNodes,
 }
 
 /// Loads `libcuda.so.1` once and resolves the driver entry points.
 fn driver() -> Result<&'static Driver, String> {
     static DRIVER: OnceLock<Result<Driver, String>> = OnceLock::new();
+
     DRIVER
         .get_or_init(|| {
             let name = CString::new("libcuda.so.1").expect("no NUL");
             let handle = unsafe { dlopen(name.as_ptr(), RTLD_NOW) };
+
             if handle.is_null() {
                 let reason = unsafe { CStr::from_ptr(dlerror()) }.to_string_lossy();
+
                 return Err(format!(
                     "loading the CUDA driver (libcuda.so.1) failed: {reason}"
                 ));
             }
+
             let symbol = |name: &str| -> Result<*mut c_void, String> {
                 let c = CString::new(name).expect("a symbol name has no NUL");
                 let f = unsafe { dlsym(handle, c.as_ptr()) };
+
                 match f.is_null() {
                     true => Err(format!("libcuda.so.1 has no {name}")),
                     false => Ok(f),
                 }
             };
+
             // Each pointer is the named driver function, whose C signature the field's type spells out.
             unsafe {
                 Ok(Driver {
@@ -224,6 +255,12 @@ fn driver() -> Result<&'static Driver, String> {
                     error: std::mem::transmute::<*mut c_void, ErrorString>(symbol(
                         "cuGetErrorString",
                     )?),
+                    capture_info: std::mem::transmute::<*mut c_void, CaptureInfo>(symbol(
+                        "cuStreamGetCaptureInfo_v2",
+                    )?),
+                    graph_nodes: std::mem::transmute::<*mut c_void, GraphNodes>(symbol(
+                        "cuGraphGetNodes",
+                    )?),
                 })
             }
         })
@@ -231,14 +268,58 @@ fn driver() -> Result<&'static Driver, String> {
         .map_err(Clone::clone)
 }
 
+/// Nodes in the graph lumen's capture stream is capturing, or `None` while none captures.
+fn captured_nodes() -> Option<usize> {
+    let stream = crate::stream::cuda::launch_stream();
+
+    if stream.is_null() {
+        return None;
+    }
+
+    let driver = driver().ok()?;
+    let (mut status, mut id, mut graph, mut count) = (0, 0, std::ptr::null_mut(), 0);
+
+    let read = unsafe {
+        (driver.capture_info)(
+            stream,
+            &mut status,
+            &mut id,
+            &mut graph,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+
+    (read == 0
+        && !graph.is_null()
+        && unsafe { (driver.graph_nodes)(graph, std::ptr::null_mut(), &mut count) } == 0)
+        .then_some(count)
+}
+
+/// Runs `step`'s launches; while a CUDA graph captures, records that each node they add to it is the
+/// step labelled `label`'s, so a profiled replay names its kernels.
+pub(crate) fn counted<R>(label: &'static str, step: impl FnOnce() -> R) -> R {
+    let Some(before) = captured_nodes() else {
+        return step();
+    };
+
+    let result = step();
+    let after = captured_nodes().unwrap_or(before);
+
+    crate::stream::cuda::captured(label, before..after);
+    result
+}
+
 /// The bytes Triton type `ty` passes `value` as, or `None` for a parameter specialized away.
 fn bytes(ty: &str, value: Value) -> Result<Option<[u8; 8]>, String> {
     let mut out = [0u8; 8];
+
     let int = |v: Value| match v {
         Value::Int(i) => Ok(i),
         Value::Bool(b) => Ok(b as i128),
         v => Err(format!("a {ty} parameter got {v:?}")),
     };
+
     match ty {
         "constexpr" => return Ok(None),
         t if t.starts_with('*') => match value {
@@ -263,11 +344,13 @@ fn bytes(ty: &str, value: Value) -> Result<Option<[u8; 8]>, String> {
             ));
         }
     }
+
     Ok(Some(out))
 }
 
-/// Launches `kernel` on `grid` with `values` (its runtime parameters in order) on lumen's stream, then
-/// the two scratch pointers Triton appends, null since the kernel needs no scratch.
+/// Launches `kernel` on `grid` with `values` (its runtime parameters in order) on lumen's stream (a
+/// CUDA graph's capture stream while it captures), then the two scratch pointers Triton appends,
+/// null since the kernel needs no scratch.
 pub(crate) fn launch(kernel: &Compiled, grid: [usize; 3], values: &[Value]) -> Result<(), String> {
     if kernel.types.len() != values.len() {
         return Err(format!(
@@ -276,19 +359,25 @@ pub(crate) fn launch(kernel: &Compiled, grid: [usize; 3], values: &[Value]) -> R
             values.len()
         ));
     }
+
     let mut storage: Vec<[u8; 8]> = Vec::with_capacity(values.len() + 2);
+
     for (ty, &value) in kernel.types.iter().zip(values) {
         if let Some(b) = bytes(ty, value)? {
             storage.push(b);
         }
     }
+
     storage.extend([[0u8; 8]; 2]);
     let mut params: Vec<*mut c_void> = storage.iter_mut().map(|b| b.as_mut_ptr().cast()).collect();
-    if grid.iter().any(|&g| g == 0) {
+
+    if grid.contains(&0) {
         return Ok(());
     }
+
     let driver = driver()?;
     let [x, y, z] = grid.map(|g| g as c_uint);
+
     let result = unsafe {
         (driver.launch)(
             kernel.function as *mut c_void,
@@ -299,20 +388,24 @@ pub(crate) fn launch(kernel: &Compiled, grid: [usize; 3], values: &[Value]) -> R
             1,
             1,
             kernel.shared,
-            std::ptr::null_mut(),
+            crate::stream::cuda::launch_stream(),
             params.as_mut_ptr(),
             std::ptr::null_mut(),
         )
     };
+
     match result {
         0 => Ok(()),
         e => {
             let mut message: *const c_char = std::ptr::null();
+
             unsafe { (driver.error)(e, &mut message) };
+
             let message = match message.is_null() {
                 true => "unknown".into(),
                 false => unsafe { CStr::from_ptr(message) }.to_string_lossy(),
             };
+
             Err(format!("cuLaunchKernel failed: {message} (error {e})"))
         }
     }

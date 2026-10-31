@@ -130,7 +130,7 @@ def test_matmul_epilogue_normalizes_its_rows(device, f, m, d, triton_on_cuda):
     product never in memory, its residual stream written too where it is
     read again; exactly the unfused plan's result. On CUDA (Triton) the
     matmul's tiles hold whole rows up to 256 wide: one kernel normalizing
-    them from its accumulators; wider (a multiple of 32), the matmul writes
+    them from its accumulators; wider (a multiple of 8), the matmul writes
     its tiles' partials of the rows' first reductions too, which the row
     kernel then reads; a softmax's (online) and other widths, a matmul then
     a row kernel. Wider rows: the matmul's
@@ -153,7 +153,8 @@ def test_matmul_epilogue_normalizes_its_rows(device, f, m, d, triton_on_cuda):
         rows = [s for s in steps if s["label"].startswith("dot_general") and "reduce" in s["label"]]
         assert len(rows) == (d <= 256), [s["label"] for s in steps]
         partials = [s for s in steps if s["label"].endswith("partials")]
-        wide = d > 256 and d % 32 == 0 and f is not _softmax_block
+        # A power of two of at least 8 divides the row: its partials' width.
+        wide = d > 256 and d & -d >= 8 and f is not _softmax_block
         assert len(partials) == wide, [s["label"] for s in steps]
         got = flatten(lumen.compile(f)(*args))
         want = flatten(lumen.compile(f, device="cpu")(*(lumen.from_numpy(a) for a in arrays)))

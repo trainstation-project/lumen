@@ -40,20 +40,26 @@ impl Readers<'_> {
     fn at_index(&self, main: usize, i: usize, member: impl Fn(usize) -> bool) -> bool {
         let nodes = self.graph.nodes();
         let value = nodes[i].output;
+
         let start = match nodes[main].primitive {
             Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. } => nodes[main].inputs[0],
             _ => nodes[main].output,
         };
+
         let mut stack = vec![start];
+
         while let Some(x) = stack.pop() {
             if x == value {
                 return true;
             }
+
             let Some(p) = self.producer[x] else { continue };
+
             if member(p) && elementwise(&nodes[p].primitive) {
                 stack.extend(&nodes[p].inputs);
             }
         }
+
         false
     }
 }

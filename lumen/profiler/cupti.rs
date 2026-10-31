@@ -21,16 +21,20 @@ mod ffi {
     unsafe extern "C" {
         pub fn cuptiActivityEnable(kind: u32) -> i32;
         pub fn cuptiActivityDisable(kind: u32) -> i32;
+
         pub fn cuptiActivityRegisterCallbacks(
             requested: BufferRequested,
             completed: BufferCompleted,
         ) -> i32;
+
         pub fn cuptiActivityFlushAll(flag: u32) -> i32;
+
         pub fn cuptiActivityGetNextRecord(
             buffer: *mut u8,
             valid: usize,
             record: *mut *mut u8,
         ) -> i32;
+
         pub fn cuptiActivityPushExternalCorrelationId(kind: u32, id: u64) -> i32;
         pub fn cuptiActivityPopExternalCorrelationId(kind: u32, last: *mut u64) -> i32;
         pub fn cuptiGetTimestamp(timestamp: *mut u64) -> i32;
@@ -83,10 +87,12 @@ impl Record {
         let at = |offset: usize| unsafe { record.add(offset) };
         let u32_at = |offset| unsafe { at(offset).cast::<u32>().read_unaligned() };
         let u64_at = |offset| unsafe { at(offset).cast::<u64>().read_unaligned() };
+
         // Field offsets follow the CUPTI activity record structs.
         match u32_at(0) {
             ffi::KIND_CONCURRENT_KERNEL => {
                 let name = unsafe { at(104).cast::<*const c_char>().read_unaligned() };
+
                 Some(Record::Work {
                     name: if name.is_null() {
                         "kernel".to_owned()
@@ -134,6 +140,8 @@ impl Record {
 static RECORDS: Mutex<Vec<Record>> = Mutex::new(Vec::new());
 /// Profiler context of each lumen launch id pushed as an external correlation.
 static CONTEXTS: Mutex<Option<HashMap<u64, GpuContext>>> = Mutex::new(None);
+/// The step labels of each CUDA graph replay's nodes, in order, by its external correlation id.
+static REPLAYS: Mutex<Option<HashMap<u64, Vec<Option<&'static str>>>>> = Mutex::new(None);
 /// Next external correlation id.
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 /// `(CUPTI timestamp, profiler timestamp)` taken together at start, to convert CUPTI times.
@@ -153,11 +161,13 @@ const BUFFER: Layout = match Layout::from_size_align(1 << 20, 8) {
 unsafe extern "C" fn buffer_requested(buffer: *mut *mut u8, size: *mut usize, max: *mut usize) {
     unsafe {
         *buffer = std::alloc::alloc(BUFFER);
+
         *size = if (*buffer).is_null() {
             0
         } else {
             BUFFER.size()
         };
+
         *max = 0;
     }
 }
@@ -177,47 +187,90 @@ unsafe extern "C" fn buffer_completed(
     if buffer.is_null() {
         return;
     }
+
     let mut read = Vec::new();
     let mut record = std::ptr::null_mut();
+
     while unsafe { ffi::cuptiActivityGetNextRecord(buffer, valid, &mut record) } == 0 {
         read.extend(unsafe { Record::read(record) });
     }
+
     RECORDS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .extend(read);
+
     unsafe { std::alloc::dealloc(buffer, BUFFER) };
 }
 
 /// Enables CUPTI activity recording and pairs the CUPTI clock with the profiler's.
 pub(crate) fn start() {
     static REGISTER: Once = Once::new();
+
     REGISTER.call_once(|| unsafe {
         ffi::cuptiActivityRegisterCallbacks(buffer_requested, buffer_completed);
     });
+
     for kind in KINDS {
         unsafe { ffi::cuptiActivityEnable(kind) };
     }
+
     let mut cupti_ns = 0;
+
     unsafe { ffi::cuptiGetTimestamp(&mut cupti_ns) };
+
     *CLOCK.lock().unwrap_or_else(|e| e.into_inner()) = Some((cupti_ns, super::now_ns()));
 }
 
 /// Runs `work`, tagging the CUDA launches it makes with a fresh id tied to the current profiler context.
 pub(crate) fn correlated<R>(device: Device, work: impl FnOnce() -> R) -> R {
+    tagged(device, None, work)
+}
+
+/// Runs `launch`, a CUDA graph's replay, like [`correlated`]: its kernels and copies, which share the
+/// replay's correlation, are timed in order under `labels`, the steps that launched them while it captured
+/// (`None`: a launch outside a step, which keeps its kernel's name).
+pub(crate) fn replayed<R>(
+    device: Device,
+    labels: &[Option<&'static str>],
+    launch: impl FnOnce() -> R,
+) -> R {
+    tagged(device, Some(labels), launch)
+}
+
+/// Body of [`correlated`] and [`replayed`]: `labels`, when given, name the tagged launches' records in order.
+fn tagged<R>(
+    device: Device,
+    labels: Option<&[Option<&'static str>]>,
+    work: impl FnOnce() -> R,
+) -> R {
     let Some(context) = super::gpu_context(device) else {
         return work();
     };
+
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+
     CONTEXTS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .get_or_insert_with(HashMap::new)
         .insert(id, context);
+
+    if let Some(labels) = labels {
+        REPLAYS
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_or_insert_with(HashMap::new)
+            .insert(id, labels.to_vec());
+    }
+
     unsafe { ffi::cuptiActivityPushExternalCorrelationId(ffi::EXTERNAL_CUSTOM0, id) };
+
     let result = work();
     let mut last = 0;
+
     unsafe { ffi::cuptiActivityPopExternalCorrelationId(ffi::EXTERNAL_CUSTOM0, &mut last) };
+
     result
 }
 
@@ -227,19 +280,25 @@ pub(crate) fn stop() {
     else {
         return;
     };
+
     for device_index in 0..crate::device::cuda::CUDA.device_count() {
         crate::stream::cuda::synchronize(device_index);
     }
+
     unsafe { ffi::cuptiActivityFlushAll(ffi::FLUSH_FORCED) };
+
     for kind in KINDS {
         unsafe { ffi::cuptiActivityDisable(kind) };
     }
+
     let records = std::mem::take(&mut *RECORDS.lock().unwrap_or_else(|e| e.into_inner()));
+
     let contexts = CONTEXTS
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .take()
         .unwrap_or_default();
+
     let launches: HashMap<u32, u64> = records
         .iter()
         .filter_map(|r| match *r {
@@ -247,9 +306,57 @@ pub(crate) fn stop() {
             Record::Work { .. } => None,
         })
         .collect();
+
+    // A graph replay's records, in the order they ran, take its steps' labels; unless their count
+    // differs, when they keep the kernels' own names.
+    let replays = REPLAYS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .take()
+        .unwrap_or_default();
+
+    let mut ran: HashMap<u64, Vec<(u64, usize)>> = HashMap::new();
+
+    for (k, record) in records.iter().enumerate() {
+        if let Record::Work {
+            start, correlation, ..
+        } = *record
+            && let Some(&id) = launches.get(&correlation)
+            && replays.contains_key(&id)
+        {
+            ran.entry(id).or_default().push((start, k));
+        }
+    }
+
+    let mut labelled: HashMap<usize, &'static str> = HashMap::new();
+
+    for (id, mut work) in ran {
+        let labels = &replays[&id];
+
+        if work.len() != labels.len() {
+            eprintln!(
+                "{}: a CUDA graph replay ran {} kernels and copies, its capture {} nodes: they keep \
+                 their kernels' names",
+                crate::LIBRARY_NAME,
+                work.len(),
+                labels.len()
+            );
+
+            continue;
+        }
+
+        work.sort_unstable();
+        labelled.extend(
+            work.iter()
+                .zip(labels)
+                .filter_map(|(&(_, k), &label)| label.map(|label| (k, label))),
+        );
+    }
+
     // CUPTI timestamps shifted onto the profiler clock.
     let to_ns = |t: u64| (profiler_ns + t).saturating_sub(cupti_ns);
-    for record in records {
+
+    for (k, record) in records.into_iter().enumerate() {
         let Record::Work {
             name,
             start,
@@ -260,8 +367,14 @@ pub(crate) fn stop() {
         else {
             continue;
         };
+
         let context = launches.get(&correlation).and_then(|id| contexts.get(id));
-        if let Some(context) = context.cloned() {
+        let context = match labelled.get(&k) {
+            Some(label) => context.map(|c| c.launching(label)),
+            None => context.cloned(),
+        };
+
+        if let Some(context) = context {
             let device = Device::Cuda(device as usize);
             // Under a named launch (a plan step's), the kernel that ran keeps its own name too.
             let kernel = context.launch.is_some().then(|| name.clone());

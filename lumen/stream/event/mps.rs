@@ -33,7 +33,7 @@ impl Event for MpsEvent {
 
     fn record(&mut self) -> Result<(), String> {
         let marks = Arc::new(Recorded::default());
-        crate::kernels::mps::mark_event(marks.clone())?;
+        crate::runtime::mps::mark_event(marks.clone())?;
         self.marks = Some(marks);
         Ok(())
     }
@@ -51,6 +51,7 @@ impl Event for MpsEvent {
         let Some(marks) = &self.marks else {
             return Ok(());
         };
+
         crate::stream::mps::flush();
         marks.wait().map(|_| ())
     }

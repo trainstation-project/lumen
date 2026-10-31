@@ -1,7 +1,8 @@
 //! Triton split-K: the shared pass (`common::split_k`) with Triton's tiles, its partials always
 //! summed by a reduction (no atomics), so results stay deterministic.
 
-use crate::codegen::triton::{CONFIGS, UNTUNED, fusible};
+use super::fusion::fusible;
+use crate::codegen::dot_general::triton::{CONFIGS, UNTUNED};
 use crate::graph_compiler::common::split_k::{Rules, split_k};
 use crate::graph_compiler::pass::{CompilerPass, Module};
 
@@ -21,6 +22,7 @@ impl<M: Module> CompilerPass<M> for SplitK {
     /// Splits the module's matmuls, counting tiles of the untuned GEMM config.
     fn apply(&mut self, m: &mut M) -> Result<(), String> {
         let tile = CONFIGS[UNTUNED];
+
         let rules = Rules {
             tiles: &|m, n| m.div_ceil(tile.block_m) * n.div_ceil(tile.block_n),
             target: TARGET,
@@ -29,6 +31,7 @@ impl<M: Module> CompilerPass<M> for SplitK {
             atomic: false,
             fuse: true,
         };
+
         *m.graph_mut() = split_k(m.graph(), &rules);
         Ok(())
     }

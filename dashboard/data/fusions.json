@@ -160,7 +160,7 @@
   "mps": "runs",
   "tpu": "missing",
   "cuda": "missing",
-  "triton": "missing",
+  "triton": "runs",
   "what": "take_along_axis rewritten as a gather of flat positions.",
   "pass": "take_along_axis"
  },

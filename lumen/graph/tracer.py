@@ -286,13 +286,17 @@ class _Host:
     correction), recorded into ``graph`` to run on the CPU each call, before
     the device plan. A device op reading one of its values reads it as a
     scalar input of the device graph, passed by value (``imported``): the
-    scalars' own inputs, or values it computes (``hoisted``)."""
+    scalars' own inputs, or values it computes (``hoisted``). When calls
+    replay as CUDA graphs (``mirrored``), each host op is also recorded in
+    the device graph, on the scalars' inputs there: device ops read those
+    copies, computed inside the graph, and nothing is hoisted."""
 
     def __init__(self, device_graph, device):
         """A host trace feeding ``device_graph`` on ``device``."""
         self.graph = Graph()
         self.device_graph, self.device = device_graph, device
         self.imports, self.hoisted, self.constants = {}, [], {}
+        self.mirrored = _graphed(device)
 
     def owns(self, x):
         """Whether ``x`` is a value of the host graph."""
@@ -338,6 +342,11 @@ class _Host:
         var = self.graph.apply(name, [self.value(x) for x in operands], params)
         if self.graph.type_of(var)[1]:
             return None
+        if self.mirrored:
+            mirror = self.device_graph.apply(
+                name, [self.imports[x.var].var if self.owns(x) else x.var for x in operands], params
+            )
+            self.imports[var] = TracedTensor(self.device_graph, mirror, self.device)
         return TracedTensor(self.graph, var, self.device)
 
 
@@ -569,6 +578,18 @@ def _settled(fn, args, device, dynamic, pinned, proven, portable=False, split=Tr
 _flags = [None, None]
 
 
+# The kinds of plan inputs that are runtime scalars: an int or float argument, a value the host computes
+# from them, and the random state.
+_SCALARS = ("scalar", "hoisted", "rng")
+
+
+def _graphed(target):
+    """Whether calls on ``target`` replay as CUDA graphs: ``config.compiler.cuda.cuda_graphs`` on CUDA with
+    the Triton backend (without it, CUDA plans run on the CPU)."""
+    cuda = config.compiler.cuda
+    return _device_type(target) == "cuda" and cuda.cuda_graphs and cuda.use_triton_backend
+
+
 def _compiler_flags():
     """``repr(config.compiler)``, the flags plans are compiled with."""
     version = config.compiler._version
@@ -629,56 +650,84 @@ def compile(fn, device=None):
     step) is written back into the weight's memory after each call; a
     module's float so assigned (a step count), into the module.
 
-    ``compiled.dump_graph(path)`` writes the graph and plan of the latest
-    call's signature, profiled, as an HTML page (``lumen.viz``);
-    ``compiled.dump_graph(path, *args)``, those of ``args``' signature.
-    ``compiled.dump_code(directory)`` writes the code of every kernel a call
-    of that signature runs, in the order it runs them, a file each
-    (``lumen.viz.dump_code``).
+    It returns a ``Compiled``, called as ``fn`` is. ``print`` it to read
+    the latest call's signature's traced program as Python (the
+    ``program.py`` of ``dump_code``). ``compiled.dump_graph(path)`` writes
+    the graph and plan of the latest call's signature, profiled, as an HTML
+    page (``lumen.viz``); ``compiled.dump_graph(path, *args)``, those of
+    ``args``' signature. ``compiled.dump_code(directory)`` writes the code
+    of every kernel a call of that signature runs, in the order it runs
+    them, a file each (``lumen.viz.dump_code``).
+    ``compiled.deallocate_memory()`` frees the workspace of the current
+    plan (the latest call's signature's) and ``compiled.allocate_memory()``
+    allocates it again; the plan stays compiled.
 
     With ``lumen.config.compiler.mps.neural_engine``, an MPS plan runs the large
     float16 dots of the weights the function does not write (and the
     float16 work after them) on the Apple Neural Engine, their values baked
     into Core ML programs: compiled again once a weight is written
     (``copy_``, or by another compiled function)."""
-    compile_device = device
-    plans = {}
-    latest = []
-    named = None if device is None else _device_name(device)
-    dynamic, pinned, proven, seen = set(), set(), set(), {}
+    return Compiled(fn, device)
 
-    def prepare(args, walked=None):
+
+class Compiled:
+    """A function ``lumen.compile`` compiled: calling it runs the plan for
+    its arguments' signature, compiling one on a new signature (see
+    ``compile``). ``print`` it to read the latest signature's traced
+    program; ``dump_graph`` and ``dump_code`` show its plans, and
+    ``deallocate_memory`` and ``allocate_memory`` free and take back the
+    current plan's workspace."""
+
+    def __init__(self, fn, device=None):
+        """Compiles ``fn`` for ``device`` (default: its tensor arguments') on its calls."""
+        functools.update_wrapper(self, fn)
+        self._fn = fn
+        self._device = device
+        self._named = None if device is None else _device_name(device)
+        self._plans = {}
+        self._latest = []
+        self._dynamic, self._pinned, self._proven, self._seen = set(), set(), set(), {}
+        self._baked = {}
+        self._hosts, self._pending = {}, []
+        self._fast = {}
+        # CUDA graphs by plan (``config.compiler.cuda.cuda_graphs``): each plan's graph, its staged
+        # arguments, the addresses it was captured at and its outputs, or None once it cannot capture.
+        self._graphs, self._warm = {}, set()
+        # The signatures whose plans' workspaces `deallocate_memory` freed: their calls wait for `allocate_memory`.
+        self._freed = set()
+
+    def _prepare(self, args, walked=None):
         """The plan for ``args`` (``walked``: their ``_walk``, when the caller
         has it) and its inputs: the graph, the plan, its workspace, what
         ``fn`` returns (its outputs' structure), and the plan's inputs (the
         arguments, then the weights placed, and their blocks)."""
-        target = named or _device(args, None)
+        target = self._named or _device(args, None)
         structure, slots, weights = walked or _walk(args)
         # An int or bool seen with two values across calls is made runtime instead of recompiling per value.
         for slot, value in slots:
-            if type(value) in (int, bool) and slot not in dynamic and slot not in pinned:
-                if seen.setdefault(slot, (type(value), value)) != (type(value), value):
-                    dynamic.add(slot)
-        key = _keyed(structure, slots, _runtime(dynamic)), target, _compiler_flags()
+            if type(value) in (int, bool) and slot not in self._dynamic and slot not in self._pinned:
+                if self._seen.setdefault(slot, (type(value), value)) != (type(value), value):
+                    self._dynamic.add(slot)
+        key = _keyed(structure, slots, _runtime(self._dynamic)), target, _compiler_flags()
         result = None
-        if key not in plans:
-            result = _settled(fn, args, target, dynamic, pinned, proven)
+        if key not in self._plans:
+            result = _settled(self._fn, args, target, self._dynamic, self._pinned, self._proven)
             structure, slots, weights = _walk(args)
-            key = _keyed(structure, slots, _runtime(dynamic)), target, _compiler_flags()
+            key = _keyed(structure, slots, _runtime(self._dynamic)), target, _compiler_flags()
         if result is not None:
-            plans[key] = (*result, [])
-        graph, out, written_all, drawn, _, layout, entries = plans[key]
+            self._plans[key] = (*result, [])
+        graph, out, written_all, drawn, _, layout, entries = self._plans[key]
         host_graph, n_hoisted, host_slots = written_all[3]
-        runtime = _runtime(dynamic)
+        runtime = _runtime(self._dynamic)
         runtime_slots = [(slot, v) for slot, v in slots if runtime(slot, v)]
         raw = [Tensor.full([], _plain(v), _scalar_dtype(target, v)) for _, v in runtime_slots]
-        pending[:] = []
+        self._pending[:] = []
         hoisted = []
         if host_graph is not None:
-            if key not in hosts:
-                hosts[key] = Plan(host_graph, "cpu")
-            values = hosts[key].run(raw)
-            hoisted, pending[:] = values[:n_hoisted], list(zip(host_slots, values[n_hoisted:]))
+            if key not in self._hosts:
+                self._hosts[key] = Plan(host_graph, "cpu")
+            values = self._hosts[key].run(raw)
+            hoisted, self._pending[:] = values[:n_hoisted], list(zip(host_slots, values[n_hoisted:]))
         from lumen import random
 
         of = {
@@ -689,13 +738,14 @@ def compile(fn, device=None):
             "rng": random._state() if drawn is not None else [],
         }
         logical = [of[kind][k] for kind, k in layout]
-        latest[:] = [key]
+        self._latest[:] = [key]
         if _device_type(target) == "meta":
             if not entries:
                 entries.append((Plan(graph, "meta"), None))
             return graph, entries[0][0], None, out, logical
         params = [i for i, (kind, _) in enumerate(layout) if kind == "weight"]
-        scalars = [i for i, (kind, _) in enumerate(layout) if kind in ("scalar", "hoisted", "rng")]
+        # Under CUDA graphs, runtime scalars are device inputs the kernels read, so a replay reads each call's.
+        scalars = [] if _graphed(target) else [i for i, (kind, _) in enumerate(layout) if kind in _SCALARS]
 
         def inputs_for(plan):
             """The plan's inputs for this call, or None if a packed weight block cannot be read in place."""
@@ -727,24 +777,17 @@ def compile(fn, device=None):
             inputs = inputs_for(plan)
         return graph, plan, workspace, out, inputs
 
-    baked = {}
-
-    hosts, pending = {}, []
-
-    fast = {}
-
-    @functools.wraps(fn)
-    def compiled(*args):
+    def __call__(self, *args):
         """Run ``fn``'s plan for ``args``, compiling one for a new signature; see ``compile``."""
         # Fast path: plain tensor arguments whose signature already has a plan with nothing to write back.
         if all(type(a) is Tensor for a in args):
-            hit = fast.get((tuple([a._signature for a in args]), _compiler_flags()))
+            hit = self._fast.get((tuple([a._signature for a in args]), _compiler_flags()))
             if hit is not None:
                 plan, workspace, out, to_host, key = hit
-                latest[:] = [key]
+                self._latest[:] = [key]
                 if to_host is None:
-                    return plan.run_in(workspace, list(args))[0]
-                outputs = iter(zip(plan.run_in(workspace, list(args)), to_host))
+                    return self._run(key, plan, workspace, list(args))[0]
+                outputs = iter(zip(self._run(key, plan, workspace, list(args)), to_host))
 
                 def returned(_):
                     """The next plan output, copied to the host if its traced tensor was on the CPU."""
@@ -753,19 +796,24 @@ def compile(fn, device=None):
 
                 return _tree_map(returned, out)
         walked = _walk(args)
-        graph, plan, workspace, out, inputs = prepare(args, walked)
+        graph, plan, workspace, out, inputs = self._prepare(args, walked)
+        if self._latest[0] in self._freed:
+            raise RuntimeError(
+                f"{self._fn.__name__}: the plan for these arguments has its memory freed (deallocate_memory); "
+                "call allocate_memory() first"
+            )
         ran = not (workspace is None or any(isinstance(a, Tensor) and _device_type(a.device) == "meta" for a in args))
         if ran and plan.neural_engine:
             versions = [w._version for w in walked[2]]
-            if baked.get(id(plan)) != versions:
+            if self._baked.get(id(plan)) != versions:
                 plan._invalidate_neural_engine()
-                baked[id(plan)] = versions
+                self._baked[id(plan)] = versions
         if not ran:
             outputs = [
                 Tensor.empty(list(shape), dtype, "meta") for dtype, shape in map(graph.type_of, graph.outputs())
             ]
         else:
-            outputs = plan.run_in(workspace, inputs)
+            outputs = self._run(self._latest[0], plan, workspace, inputs)
         outputs = iter(outputs)
 
         to_host = []
@@ -779,18 +827,24 @@ def compile(fn, device=None):
 
         result = _tree_map(result_of, out)
         if ran and all(type(a) is Tensor for a in args):
-            written, written_scalars, written_arguments, host = plans[latest[0]][2]
-            drawn = plans[latest[0]][3]
+            written, written_scalars, written_arguments, host = self._plans[self._latest[0]][2]
+            drawn = self._plans[self._latest[0]][3]
             plain = host[0] is None and not (written or written_scalars or written_arguments or drawn is not None)
             if plain and not plan.neural_engine and len(inputs) == len(args):
                 signature = tuple([a._signature for a in args])
                 lone = isinstance(out, TracedTensor) and to_host == [False]
-                fast[signature, _compiler_flags()] = (plan, workspace, out, None if lone else to_host, latest[0])
+                self._fast[signature, _compiler_flags()] = (
+                    plan,
+                    workspace,
+                    out,
+                    None if lone else to_host,
+                    self._latest[0],
+                )
         # Write assigned weights, scalars and arguments back, and advance the random stream.
         if ran:
             weights = walked[2]
-            written, written_scalars, written_arguments, _ = plans[latest[0]][2]
-            target = latest[0][1]
+            written, written_scalars, written_arguments, _ = self._plans[self._latest[0]][2]
+            target = self._latest[0][1]
             for k, value in zip(written, outputs):
                 w = weights[k]
                 memory = w._placed(target) if w._is_parameter else w
@@ -800,21 +854,113 @@ def compile(fn, device=None):
                     w._mark_written()
             for (i, path), value in zip(written_scalars, outputs):
                 nn.assign(args[i], path, _python(value, nn.at(args[i], path)))
-            for (i, path), value in plans[latest[0]][4]:
+            for (i, path), value in self._plans[self._latest[0]][4]:
                 nn.assign(args[i], path, value)
-            for (i, path), value in pending:
+            for (i, path), value in self._pending:
                 nn.assign(args[i], path, _python(value, nn.at(args[i], path)))
             arguments = [a for a in args if isinstance(a, Tensor)]
             for k, value in zip(written_arguments, outputs):
                 arguments[k].copy_(value)
-            drawn = plans[latest[0]][3]
+            drawn = self._plans[self._latest[0]][3]
             if drawn is not None:
                 from lumen import random
 
                 random._advance(drawn)
         return result
 
-    def dump_graph(path, *args, device=None, runs=5, json_path=None, fragment=False):
+    def _run(self, key, plan, workspace, inputs):
+        """``plan.run_in(workspace, inputs)`` for signature ``key``; on CUDA with
+        ``config.compiler.cuda.cuda_graphs``, a plan a graph can capture
+        (``_capturable``) runs as usual on its first call, is captured on its
+        second, its arguments copied into device buffers of its own and its
+        runtime scalars into a device vector per dtype, and from then on
+        replays: each call copies them in (a copy a vector) and launches the
+        graph, then writes back as usual. Weights and the
+        workspace are read where they were captured; when one moves, the plan
+        is captured again. While the profiler times CUDA, a replay runs in a
+        ``CUDA graph`` range, each kernel timed under the step that launched
+        it; while it records the host alone, calls run uncaptured, so its
+        trace has their steps."""
+        record = self._graphs.get(id(plan), ())
+        if record is None or not self._capturable(key, plan):
+            return plan.run_in(workspace, inputs)
+        from lumen.profiler import _C as profiler
+
+        if profiler._profiler_enabled() and not profiler._profiler_cuda_enabled():
+            return plan.run_in(workspace, inputs)
+        from lumen.tensor import tensor
+
+        layout = self._plans[key][5]
+        args = [i for i, (kind, _) in enumerate(layout) if kind == "arg"]
+        scalars = [i for i, (kind, _) in enumerate(layout) if kind in _SCALARS]
+        staged = set(args + scalars)
+        fixed = [workspace.data_ptr()] + [t.data_ptr() for i, t in enumerate(inputs) if i not in staged]
+
+        def stage(buffers, vectors, graph=None):
+            """Copies this call's arguments into ``buffers`` and its runtime scalars into ``vectors``
+            (``(positions, vector)`` per dtype), one copy a vector: on ``graph``'s stream when given,
+            so the host doesn't wait for its last replay."""
+            copy = (lambda dst, src: dst.copy_(src)) if graph is None else graph.stage
+            for i, buffer in zip(args, buffers):
+                copy(buffer, inputs[i] if inputs[i].is_contiguous() else inputs[i].contiguous())
+            for positions, vector in vectors:
+                copy(vector, tensor([inputs[i].item() for i in positions], dtype=vector.dtype))
+
+        if record and record[3] == fixed:
+            graph, buffers, vectors, _, outputs = record
+            stage(buffers, vectors, graph)
+            if profiler._profiler_enabled():
+                from lumen.profiler import record_function
+
+                with record_function("CUDA graph"):
+                    graph.replay()
+            else:
+                graph.replay()
+            return outputs
+        if id(plan) not in self._warm:
+            # The first call compiles the plan's kernels, which capturing cannot.
+            self._warm.add(id(plan))
+            return plan.run_in(workspace, inputs)
+        from lumen.codegen.utils import triton
+        from lumen.stream._C import CudaGraph
+
+        self._graphs.pop(id(plan), None)
+        buffers = [Tensor.empty(list(inputs[i].shape), inputs[i].dtype, key[1]) for i in args]
+        by_dtype = {}
+        for i in scalars:
+            by_dtype.setdefault(inputs[i].dtype, []).append(i)
+        vectors = [(positions, Tensor.empty([len(positions)], dtype, key[1])) for dtype, positions in by_dtype.items()]
+        stage(buffers, vectors)
+        captured = list(inputs)
+        for i, buffer in zip(args, buffers):
+            captured[i] = buffer
+        for positions, vector in vectors:
+            for j, i in enumerate(positions):
+                captured[i] = vector.select(0, j)
+        graph = CudaGraph(key[1])
+        try:
+            with triton.on_stream(graph.stream):
+                outputs = plan.run_in(workspace, captured)
+            graph.end()
+        except BaseException as e:
+            # Dropping the graph ends its capture, so lumen launches on its own stream again.
+            del graph
+            if isinstance(e, (KeyboardInterrupt, SystemExit)):
+                raise
+            self._graphs[id(plan)] = None
+            warnings.warn(f"{self._fn.__name__}: a CUDA graph could not capture its plan, which runs uncaptured: {e}")
+            return plan.run_in(workspace, inputs)
+        graph.replay()
+        self._graphs[id(plan)] = graph, buffers, vectors, fixed, outputs
+        return outputs
+
+    def _capturable(self, key, plan):
+        """Whether a CUDA graph may capture ``plan``, signature ``key``'s:
+        its calls replay as graphs (``_graphed``, which compiled its runtime
+        scalars as device inputs) and ``plan.capturable``."""
+        return _graphed(key[1]) and plan.capturable
+
+    def dump_graph(self, path, *args, device=None, runs=5, json_path=None, fragment=False):
         """Write the graph and plan for ``args``' signature (default: the
         latest call's; meta tensors trace it without data) to ``path`` as an
         HTML page, compiled for and profiled on ``device`` (default: the
@@ -822,14 +968,14 @@ def compile(fn, device=None):
         types; ``json_path`` also gets the page's data, which is returned.
         ``fragment`` leaves out the doctype, for a host that wraps the page
         (a published artifact)."""
-        graph, plan, target, inputs, workspace, scalars = planned("dump_graph", args, device)
+        graph, plan, target, inputs, workspace, scalars = self._planned("dump_graph", args, device)
         from lumen import viz
 
         data = viz.collect(
             graph,
             plan,
             inputs,
-            title=fn.__name__,
+            title=self._fn.__name__,
             runs=runs,
             device=target,
             run=lambda: plan.run_in(workspace, inputs),
@@ -838,22 +984,61 @@ def compile(fn, device=None):
         viz.write(data, path, json_path=json_path, fragment=fragment)
         return data
 
-    def dump_code(directory, *args, device=None):
+    def dump_code(self, directory, *args, device=None):
         """Write the code of every kernel the plan for ``args`` (default: the latest call's) runs to ``directory``."""
-        graph, plan, target, inputs, workspace, _ = planned("dump_code", args, device)
+        graph, plan, target, inputs, workspace, _ = self._planned("dump_code", args, device)
         from lumen import viz
 
         return viz.dump_code(graph, plan, lambda: plan.run_in(workspace, inputs), target, directory)
 
-    def planned(name, args, device):
+    def __repr__(self):
+        """The latest call's signature's traced program as Python: the ``program.py`` of ``dump_code``."""
+        if not self._latest:
+            return f"<lumen.compile of {self._fn.__name__}: not called yet, so nothing is traced>"
+        from lumen import viz
+
+        return viz.program_source(self._plans[self._latest[0]][0])
+
+    def deallocate_memory(self):
+        """Frees the workspace of the current plan, the latest call's
+        signature's, back to its device's allocator. The plan stays
+        compiled and the plans of other signatures keep theirs; the
+        weights, shared with their modules and other compiled functions,
+        stay placed. Results of earlier calls are views of the workspace
+        and keep it until they go. Calls with that signature raise until
+        ``allocate_memory``."""
+        if not self._latest or _device_type(self._latest[0][1]) == "meta":
+            return
+        key = self._latest[0]
+        entries = self._plans[key][6]
+        for plan, _ in entries:
+            self._graphs.pop(id(plan), None)
+        entries[:] = [(plan, None) for plan, _ in entries]
+        self._fast = {k: v for k, v in self._fast.items() if v[4] != key}
+        self._freed.add(key)
+
+    def allocate_memory(self):
+        """Allocates the current plan's workspace again, after ``deallocate_memory`` freed it."""
+        if not self._latest or self._latest[0] not in self._freed:
+            return
+        key = self._latest[0]
+        target = key[1]
+        entries = self._plans[key][6]
+        entries[:] = [
+            (plan, Tensor.empty([plan.workspace_bytes], "uint8", target, alignment=plan.workspace_alignment))
+            for plan, _ in entries
+        ]
+        self._freed.discard(key)
+
+    def _planned(self, name, args, device):
         """Graph, a fresh plan on ``device``, ones-filled inputs and a workspace for ``args``' signature, for ``name``."""
         if args:
-            prepare(args)
-        elif not latest:
-            raise RuntimeError(f"{name}: call {fn.__name__} first, or pass it arguments to trace")
-        ((_, target, _),) = latest
-        graph, _, _, _, _, layout, _ = plans[latest[0]]
-        target = _device_name(device or compile_device or (target if _device_type(target) != "meta" else "cpu"))
+            self._prepare(args)
+        elif not self._latest:
+            raise RuntimeError(f"{name}: call {self._fn.__name__} first, or pass it arguments to trace")
+        ((_, target, _),) = self._latest
+        graph, _, _, _, _, layout, _ = self._plans[self._latest[0]]
+        target = _device_name(device or self._device or (target if _device_type(target) != "meta" else "cpu"))
         types = [graph.type_of(v) for v in graph.inputs()]
         params = [i for i, (kind, _) in enumerate(layout) if kind == "weight"]
         scalars = [i for i, (kind, _) in enumerate(layout) if kind in ("scalar", "hoisted", "rng")]
@@ -866,10 +1051,6 @@ def compile(fn, device=None):
             inputs.append(Tensor.ones(shape, dtype, target))
         workspace = Tensor.empty([plan.workspace_bytes], "uint8", target, alignment=plan.workspace_alignment)
         return graph, plan, target, inputs, workspace, scalars
-
-    compiled.dump_graph = dump_graph
-    compiled.dump_code = dump_code
-    return compiled
 
 
 def make_graph(fn):

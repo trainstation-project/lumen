@@ -41,6 +41,7 @@ impl DeviceBackend for Cuda {
                 _ => 0,
             }
         }
+
         #[cfg(not(lumen_cuda_linked))]
         {
             0
@@ -50,13 +51,16 @@ impl DeviceBackend for Cuda {
     /// Like the default check, but mentions when lumen was built without CUDA.
     fn check(&self, index: usize) -> Result<(), String> {
         let count = self.device_count();
+
         if index < count {
             return Ok(());
         }
+
         let missing = match cfg!(lumen_cuda_linked) {
             true => "",
             false => "; lumen was built without CUDA",
         };
+
         Err(format!(
             "CUDA device {index} is not available ({count} device(s) found{missing})"
         ))
@@ -67,6 +71,7 @@ impl DeviceBackend for Cuda {
     fn set_device(&self, index: usize) {
         let mut current = -1;
         let mut context = std::ptr::null_mut();
+
         unsafe {
             if ffi::cudaGetDevice(&mut current) != 0
                 || current != index as i32

@@ -48,14 +48,17 @@ impl Table {
     fn wait_for(&self, keys: &[String], timeout: Duration) -> Option<MutexGuard<'_, Values>> {
         let deadline = Instant::now() + timeout;
         let mut values = self.lock();
+
         while !keys.iter().all(|k| values.contains_key(k)) {
             let left = deadline.checked_duration_since(Instant::now())?;
+
             values = self
                 .changed
                 .wait_timeout(values, left)
                 .unwrap_or_else(|e| e.into_inner())
                 .0;
         }
+
         Some(values)
     }
 
@@ -68,10 +71,12 @@ impl Table {
     /// Adds `amount` to the decimal integer at `key` (0 if absent or unparsable) and returns the sum.
     fn add(&self, key: String, amount: i64) -> i64 {
         let mut values = self.lock();
+
         let current = values
             .get(&key)
             .and_then(|v| std::str::from_utf8(v).ok()?.parse::<i64>().ok())
             .unwrap_or(0);
+
         let sum = current + amount;
         values.insert(key, sum.to_string().into_bytes());
         drop(values);
@@ -139,9 +144,11 @@ fn answer(stream: &mut TcpStream, table: &Table) -> std::io::Result<()> {
         GET => {
             let key = read_key(stream)?;
             let timeout = read_timeout(stream)?;
+
             let value = table
                 .wait_for(std::slice::from_ref(&key), timeout)
                 .map(|values| values[&key].clone());
+
             match value {
                 Some(value) => {
                     write_u8(stream, FOUND)?;
@@ -159,6 +166,7 @@ fn answer(stream: &mut TcpStream, table: &Table) -> std::io::Result<()> {
             let keys = (0..read_u64(stream)?)
                 .map(|_| read_key(stream))
                 .collect::<std::io::Result<Vec<_>>>()?;
+
             let timeout = read_timeout(stream)?;
             let found = table.wait_for(&keys, timeout).is_some();
             write_u8(stream, if found { FOUND } else { TIMED_OUT })
@@ -186,20 +194,24 @@ impl Server {
     fn start(port: u16) -> Result<Self, String> {
         let listener = TcpListener::bind(("0.0.0.0", port))
             .map_err(|e| format!("the store cannot listen on port {port}: {e}"))?;
+
         let address = listener.local_addr().map_err(|e| e.to_string())?;
         let stopped = Arc::new(AtomicBool::new(false));
         let table = Arc::new(Table::default());
         let stop = stopped.clone();
+
         thread::spawn(move || {
             for stream in listener.incoming() {
                 if stop.load(Ordering::Acquire) {
                     break;
                 }
+
                 let Ok(mut stream) = stream else { continue };
                 let table = table.clone();
                 thread::spawn(move || while answer(&mut stream, &table).is_ok() {});
             }
         });
+
         Ok(Server { address, stopped })
     }
 }
@@ -230,6 +242,7 @@ impl TcpStore {
         let server = is_master.then(|| Server::start(port)).transpose()?;
         let port = server.as_ref().map_or(port, |s| s.address.port());
         let stream = Self::connect(host, port, timeout)?;
+
         Ok(TcpStore {
             host: host.to_owned(),
             port,
@@ -242,11 +255,13 @@ impl TcpStore {
     /// Connects to `host:port`, retrying every `CONNECT_RETRY` until `timeout` so workers may start before the master.
     fn connect(host: &str, port: u16, timeout: Duration) -> Result<TcpStream, String> {
         let deadline = Instant::now() + timeout;
+
         loop {
             let error = match (host, port).to_socket_addrs() {
                 Err(e) => e,
                 Ok(addresses) => {
                     let mut error = None;
+
                     for address in addresses {
                         match TcpStream::connect(address) {
                             Ok(stream) => {
@@ -256,15 +271,18 @@ impl TcpStore {
                             Err(e) => error = Some(e),
                         }
                     }
+
                     error.unwrap_or_else(|| std::io::ErrorKind::AddrNotAvailable.into())
                 }
             };
+
             if Instant::now() >= deadline {
                 return Err(format!(
                     "timed out after {:?} connecting to the store at {host}:{port}: {error}",
                     timeout
                 ));
             }
+
             thread::sleep(CONNECT_RETRY);
         }
     }
@@ -311,15 +329,18 @@ impl TcpStore {
     /// Returns the value under `key`, waiting up to the store's timeout for it to be set.
     pub fn get(&self, key: &str) -> Result<Vec<u8>, String> {
         let timeout = self.timeout;
+
         let value = self.request(|s| {
             write_u8(s, GET)?;
             write_bytes(s, key.as_bytes())?;
             write_u64(s, timeout.as_millis() as u64)?;
+
             match read_u8(s)? {
                 FOUND => read_bytes(s).map(Some),
                 _ => Ok(None),
             }
         })?;
+
         value.ok_or_else(|| self.timed_out(&[key], timeout))
     }
 
@@ -347,12 +368,15 @@ impl TcpStore {
         let found = self.request(|s| {
             write_u8(s, WAIT)?;
             write_u64(s, keys.len() as u64)?;
+
             for key in keys {
                 write_bytes(s, key.as_bytes())?;
             }
+
             write_u64(s, timeout.as_millis() as u64)?;
             Ok(read_u8(s)? == FOUND)
         })?;
+
         match found {
             true => Ok(()),
             false => Err(self.timed_out(keys, timeout)),

@@ -14,10 +14,11 @@ from lumen.profiler import ProfilerActivity, profile
 
 @pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
-def test_autotuned_loops_match_untuned(device, dtype, tmp_path, triton_on_cuda):
-    """A loop the compiler autotunes computes what the untuned loop does, at
-    lengths no block size divides. A Triton loop's dumped source carries
-    the ``BLOCK_SIZE`` and warps it picked."""
+def test_autotuned_elementwise_fusions_match_untuned(device, dtype, tmp_path, triton_on_cuda):
+    """An elementwise fusion the compiler autotunes computes what the untuned
+    one does, at lengths no block size divides. A Triton one's dumped source names its
+    template kernel and the ``BLOCK_SIZE`` and warps it picked, then its
+    generated ``BODY``."""
     compiler = getattr(lumen.config.compiler, device)
     try:
         for n in ((1 << 16) + 7, 1 << 20, (3 << 20) + 1):
@@ -34,9 +35,9 @@ def test_autotuned_loops_match_untuned(device, dtype, tmp_path, triton_on_cuda):
         if device != "cuda":
             return
         lumen.compile(lambda x: -x * 2).dump_code(str(tmp_path), x)
-        source = "".join(p.read_text() for p in tmp_path.glob("*fusion_*.py"))
-        assert re.search(r"# BLOCK_SIZE=\d+ warps=\d+", source)
-        assert "BLOCK_SIZE: tl.constexpr" in source
+        source = "".join(p.read_text() for p in tmp_path.glob("*elementwise_*.py"))
+        assert re.search(r"elementwise_kernel, BLOCK_SIZE=\d+ warps=\d+", source)
+        assert re.search(r"def elementwise_[0-9a-f]+\(EXTRA, BLOCK, MASK, SEGMENT: tl.constexpr\)", source)
     finally:
         compiler.autotune = True
 
@@ -48,7 +49,7 @@ def test_reads_strided_inputs_in_place(device, triton_on_cuda):
     prologue through its strides, once a layout. A matmul reads transposed
     and permuted operands too (on Triton through the GEMM's
     ``PROLOGUE_A``/``PROLOGUE_B``). ``contiguous``, ``copy_`` and ``fill_``
-    of strided views are loops on the GPU, not host copies."""
+    of strided views are elementwise kernels on the GPU, not host copies."""
     a, b, c = rand(64, 96), rand(96, 64, seed=1), rand(2, 3, 96, seed=2)
     x, w, z = (lumen.from_numpy(v).to(device) for v in (a, b, c))
     loop = lumen.compile(lambda u, v: F.exp(u) * 2.0 + v)
@@ -65,7 +66,7 @@ def test_reads_strided_inputs_in_place(device, triton_on_cuda):
     assert not [e for e in prof.events() if e["name"] == "lumen::contiguous"]
     dot = lumen.compile(lambda u, v: F.matmul(u, v, "float32", "float32"))
     if device == "cuda":
-        import lumen.codegen.triton as triton
+        import lumen.codegen.utils.triton as triton
 
         before = set(triton.kernels)
     np.testing.assert_allclose(lumen.to_numpy(dot(x.transpose(0, 1), x)), a.T @ a, rtol=1e-4, atol=1e-4)

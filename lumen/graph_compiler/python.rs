@@ -23,7 +23,7 @@ struct PyPlan {
 #[pymethods]
 impl PyPlan {
     /// Compiles `graph` for `device`; `donate`, `parameters`, `packable` and `scalars` are input
-    /// positions, `donate_into` `(input, output)` pairs, and `fuse` overrides MPS fusion.
+    /// positions, `donate_into` `(input, output)` pairs, and `fuse` overrides MPS and CUDA fusion.
     #[new]
     #[pyo3(signature = (graph, device = None, fuse = None, donate = Vec::new(), parameters = None, packable = Vec::new(), scalars = Vec::new(), donate_into = Vec::new()))]
     #[allow(clippy::too_many_arguments)]
@@ -38,21 +38,26 @@ impl PyPlan {
         donate_into: Vec<(usize, usize)>,
     ) -> PyResult<Self> {
         let n = graph.inner.inputs().len();
+
         let all = donate
             .iter()
             .chain(donate_into.iter().map(|(i, _)| i))
             .chain(parameters.iter().flatten())
             .chain(&packable)
             .chain(&scalars);
+
         if let Some(&i) = all.into_iter().find(|&&i| i >= n) {
             return Err(PyValueError::new_err(format!(
                 "the graph has {n} inputs, got input {i}"
             )));
         }
+
         // Position lists become per-input masks for the compiler options.
         let mask = |positions: &[usize]| (0..n).map(|i| positions.contains(&i)).collect();
         let mut config = crate::graph_compiler::config::configs();
         config.mps.fuse = fuse.unwrap_or(config.mps.fuse);
+        config.cuda.fuse = fuse.unwrap_or(config.cuda.fuse);
+
         let options = crate::graph_compiler::Options {
             config,
             donate,
@@ -61,9 +66,11 @@ impl PyPlan {
             packable: mask(&packable),
             scalars: mask(&scalars),
         };
+
         let inner =
             crate::graph_compiler::compile_with(&graph.inner, resolve_device(device)?, &options)
                 .map_err(PyRuntimeError::new_err)?;
+
         Ok(PyPlan { inner })
     }
 
@@ -86,10 +93,12 @@ impl PyPlan {
         inputs: Vec<PyRef<'_, PyTensor>>,
     ) -> PyResult<Vec<PyTensor>> {
         let inputs: Vec<_> = inputs.iter().map(|t| t.inner.clone()).collect();
+
         let outputs = self
             .inner
             .run_in(&workspace.inner, &inputs)
             .map_err(PyValueError::new_err)?;
+
         Ok(outputs.into_iter().map(PyTensor::wrap).collect())
     }
 
@@ -99,6 +108,28 @@ impl PyPlan {
         self.inner.steps().iter().any(|s| {
             matches!(&s.primitive, Primitive::Fusion { name, .. } if name.starts_with(crate::graph::NEURAL_ENGINE))
         })
+    }
+
+    /// Whether a CUDA graph can capture this plan's steps: it runs as steps (not host and device
+    /// stages), and none moves values to or from the host, waits on the host or another stream,
+    /// calls out to a custom op or a Pallas kernel, or runs a collective.
+    #[getter]
+    fn capturable(&self) -> bool {
+        self.inner.staged.is_none()
+            && !self.inner.steps().iter().any(|s| {
+                matches!(
+                    s.primitive,
+                    Primitive::HostWait
+                        | Primitive::DeviceWait
+                        | Primitive::ToHost
+                        | Primitive::ToDevice
+                        | Primitive::CustomCall { .. }
+                        | Primitive::PallasCall { .. }
+                        | Primitive::AllReduce { .. }
+                        | Primitive::AllGather { .. }
+                        | Primitive::ReduceScatter { .. }
+                )
+            })
     }
 
     /// Drops the cached Neural Engine models of this plan's steps (MPS builds only).
@@ -124,6 +155,7 @@ impl PyPlan {
         let typed = |(buffer, ty): &(Buffer, TensorType)| {
             (buffer.to_string(), dtype_name(ty.dtype), ty.shape.clone())
         };
+
         self.inner
             .steps()
             .iter()
@@ -134,10 +166,12 @@ impl PyPlan {
                 let extra: Vec<_> = step.extra_outputs.iter().map(typed).collect();
                 d.set_item("extra_outputs", extra)?;
                 d.set_item("label", step.label)?;
+
                 let views = step
                     .views
                     .iter()
                     .map(|v| v.as_ref().map(|v| (v.offset, v.strides.clone())));
+
                 d.set_item("views", views.collect::<Vec<_>>())?;
                 d.set_item("scratch", step.scratch)?;
                 d.set_item("scope", scope_names(step.scope))?;
@@ -155,11 +189,13 @@ impl PyPlan {
         device: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Vec<PyTensor>> {
         let inputs: Vec<_> = inputs.iter().map(|t| t.inner.clone()).collect();
+
         let outputs = match device {
             Some(d) if !d.is_none() => self.inner.run_on(&inputs, resolve_device(Some(d))?),
             _ => self.inner.run(&inputs),
         }
         .map_err(PyValueError::new_err)?;
+
         Ok(outputs.into_iter().map(PyTensor::wrap).collect())
     }
 
@@ -177,7 +213,7 @@ impl PyPlan {
 /// Starts recording kernel launches.
 #[pyfunction]
 fn _capture_launches() {
-    crate::kernels::launched::capture();
+    crate::profiler::launched::capture();
 }
 
 /// A captured launch: step index, step label, kernel name, generated code, and Pallas
@@ -193,7 +229,7 @@ type Captured = (
 /// Launches recorded since `_capture_launches`.
 #[pyfunction]
 fn _captured_launches() -> Vec<Captured> {
-    crate::kernels::launched::captured()
+    crate::profiler::launched::captured()
         .into_iter()
         .map(|l| (l.step, l.label, l.kernel, l.code, l.template))
         .collect()
@@ -204,6 +240,7 @@ fn _captured_launches() -> Vec<Captured> {
 fn _kernel_source(name: &str) -> Option<String> {
     #[cfg(lumen_mps_linked)]
     return super::mps::fusion_source(name);
+
     #[cfg(not(lumen_mps_linked))]
     return {
         let _ = name;
@@ -225,6 +262,7 @@ fn triton_code(kernel: &str, functions: &[super::triton::Function]) -> String {
         .iter()
         .map(|f| format!("# {} = {}\n{}", f.param, f.name, f.source))
         .collect();
+
     [passed.join("\n"), kernel.to_owned()].join("\n")
 }
 
@@ -258,9 +296,11 @@ fn direct(
 ) -> Result<bool, String> {
     use super::triton::direct;
     use std::sync::PoisonError;
+
     let Device::Cuda(device) = on.device() else {
         return Ok(false);
     };
+
     let found = launches
         .0
         .lock()
@@ -275,18 +315,22 @@ fn direct(
                 && e.classes.iter().zip(values).all(|(c, v)| *c == v.class())
         })
         .map(|e| e.kernel.clone());
+
     let kernel = match found {
         Some(kernel) => kernel,
         None => {
             let key = direct::key(&identity(), device, values);
             let mut nothing = false;
+
             let kernel = direct::compiled(&key, || {
                 Python::attach(|py| {
                     let kwargs = PyDict::new(py);
                     kwargs.set_item("compile", true)?;
                     let info = compile(py, kwargs)?.into_bound(py);
+
                     if info.is_none() {
                         nothing = true;
+
                         return Ok(direct::Compiled {
                             function: 0,
                             warps: 0,
@@ -295,6 +339,7 @@ fn direct(
                             types: Vec::new(),
                         });
                     }
+
                     let (function, warps, shared, plain, types): (
                         usize,
                         u32,
@@ -302,6 +347,7 @@ fn direct(
                         bool,
                         Vec<String>,
                     ) = info.extract()?;
+
                     Ok(direct::Compiled {
                         function,
                         warps,
@@ -312,9 +358,11 @@ fn direct(
                 })
                 .map_err(|e: PyErr| e.to_string())
             })?;
+
             if nothing {
                 return Ok(true);
             }
+
             launches
                 .0
                 .lock()
@@ -326,12 +374,15 @@ fn direct(
                     classes: values.iter().map(|v| v.class()).collect(),
                     kernel: kernel.clone(),
                 }));
+
             kernel
         }
     };
+
     if !kernel.plain {
         return Ok(false);
     }
+
     direct::launch(&kernel, grid, values)?;
     Ok(true)
 }
@@ -360,9 +411,9 @@ fn triton_gemm(
     launches: &super::triton::Launches,
     epilogue: &super::triton::Epilogue,
 ) -> Result<(), String> {
-    crate::kernels::launched::launched("dot_general", || {
+    crate::profiler::launched::launched("dot_general", || {
         let template = format!(
-            "# @triton.jit: lumen/kernels/dot_general/triton.py's kernel, BLOCK_M={} BLOCK_N={} BLOCK_K={} GROUP_M={} stages={} warps={}\n",
+            "# @triton.jit: lumen/codegen/dot_general/triton/gemm_kernel.py's kernel, BLOCK_SIZE_M={} BLOCK_SIZE_N={} BLOCK_SIZE_K={} GROUP_SIZE_M={} stages={} warps={}\n",
             config.block_m,
             config.block_n,
             config.block_k,
@@ -370,11 +421,15 @@ fn triton_gemm(
             config.stages,
             config.warps
         );
+
         Some(triton_code(&template, functions))
     });
+
     #[cfg(not(lumen_cuda_linked))]
     let _ = launches;
+
     current(tensors[2]);
+
     let call = |py: Python<'_>, kwargs: Option<Bound<'_, PyDict>>| -> PyResult<Py<PyAny>> {
         let tensors = tensors.map(|t| PyTensor::wrap(t.clone()));
         let extra: Vec<PyTensor> = epilogue
@@ -382,7 +437,7 @@ fn triton_gemm(
             .iter()
             .map(|t| PyTensor::wrap(t.clone()))
             .collect();
-        py.import("lumen.kernels.dot_general.triton")?
+        py.import("lumen.codegen.dot_general.triton.gemm_kernel")?
             .getattr("dot_general")?
             .call(
                 (
@@ -410,6 +465,7 @@ fn triton_gemm(
             )
             .map(Bound::unbind)
     };
+
     #[cfg(lumen_cuda_linked)]
     {
         use super::triton::direct::Value;
@@ -472,6 +528,7 @@ fn triton_gemm(
             return Ok(());
         }
     }
+
     Python::attach(|py| call(py, None).map(|_| ())).map_err(|e| e.to_string())
 }
 
@@ -479,7 +536,7 @@ fn triton_gemm(
 #[allow(clippy::too_many_arguments)]
 fn triton_loop(
     kernel: &super::triton::Kernel,
-    config: &crate::codegen::triton::LoopConfig,
+    config: &crate::codegen::elementwise::triton::LoopConfig,
     functions: &[super::triton::Function],
     launches: &super::triton::Launches,
     inputs: &[crate::Tensor],
@@ -487,23 +544,90 @@ fn triton_loop(
     n: usize,
     programs: usize,
 ) -> Result<(), String> {
-    crate::kernels::launched::launched(&kernel.name, || {
-        let source = format!(
-            "# BLOCK_SIZE={} warps={}\n{}",
-            config.block_size, config.warps, kernel.source
-        );
+    crate::profiler::launched::launched(&kernel.name, || {
+        let source = match kernel.template {
+            Some(template) => {
+                let (module, name) = template.kernel();
+
+                format!(
+                    "# @triton.jit: {module}'s {name}, BLOCK_SIZE={} warps={}\n",
+                    config.block_size, config.warps
+                )
+            }
+            None => format!(
+                "# BLOCK_SIZE={} warps={}\n{}",
+                config.block_size, config.warps, kernel.source
+            ),
+        };
+
         Some(triton_code(&source, functions))
     });
+
+    let constexprs = kernel
+        .template
+        .map(|t| t.constexprs(n, &kernel.segments))
+        .unwrap_or_default();
+
     #[cfg(not(lumen_cuda_linked))]
     let _ = launches;
+
     current(out);
+
     let call = |py: Python<'_>, kwargs: Option<Bound<'_, PyDict>>| -> PyResult<Py<PyAny>> {
         let inputs: Vec<PyTensor> = inputs.iter().map(|t| PyTensor::wrap(t.clone())).collect();
         // Inputs passed by value (scalars) are named by position for the launcher.
         let scalars: Vec<usize> = (0..kernel.by_value.len())
             .filter(|&k| kernel.by_value[k])
             .collect();
-        py.import("lumen.codegen.triton")?
+
+        // A template kernel takes the tensors as its `EXTRA` tuple and its constexprs by name.
+        if let Some(template) = kernel.template {
+            let (module, name) = template.kernel();
+
+            let tensors: Vec<PyTensor> = inputs
+                .into_iter()
+                .chain([PyTensor::wrap(out.clone())])
+                .collect();
+
+            let values = PyDict::new(py);
+
+            for (key, value) in &constexprs {
+                match value {
+                    super::triton::Constexpr::Int(v) => values.set_item(key, v)?,
+                    super::triton::Constexpr::Ints(v) => {
+                        values.set_item(key, pyo3::types::PyTuple::new(py, v)?)?
+                    }
+                    super::triton::Constexpr::DType(dtype) => {
+                        let name = crate::codegen::utils::triton::triton_type(*dtype)
+                            .expect("a Triton dtype")
+                            .trim_start_matches("tl.");
+
+                        values.set_item(key, py.import("triton.language")?.getattr(name)?)?
+                    }
+                }
+            }
+
+            return py
+                .import("lumen.codegen.utils.triton")?
+                .getattr("template")?
+                .call(
+                    (
+                        module,
+                        name,
+                        tensors,
+                        scalars,
+                        triton_functions(functions),
+                        values,
+                        programs,
+                        config.block_size,
+                        config.warps,
+                    ),
+                    kwargs.as_ref(),
+                )
+                .map(Bound::unbind);
+        }
+
+        py.import("lumen.codegen.utils.triton")?
             .getattr("launch")?
             .call(
                 (
@@ -522,6 +646,7 @@ fn triton_loop(
             )
             .map(Bound::unbind)
     };
+
     #[cfg(lumen_cuda_linked)]
     {
         use super::triton::direct::Value;
@@ -533,15 +658,18 @@ fn triton_loop(
                 true => Value::scalar(t),
                 false => Value::of(t),
             })
-            .chain([Value::of(out), Value::Int(n as i128)])
+            .chain([Value::of(out)])
+            // A template kernel's element counts are constexprs; a generated one takes `n`.
+            .chain(kernel.template.is_none().then_some(Value::Int(n as i128)))
             .collect();
         let identity = || {
             format!(
-                "loop|{}|{}|{}|{}",
+                "loop|{}|{}|{}|{}|{:?}",
                 kernel.name,
                 config.block_size,
                 config.warps,
-                names(functions)
+                names(functions),
+                constexprs
             )
         };
         let tiles = [config.block_size, config.warps, 0, 0, 0, 0];
@@ -558,33 +686,39 @@ fn triton_loop(
             return Ok(());
         }
     }
+
     Python::attach(|py| call(py, None).map(|_| ())).map_err(|e| e.to_string())
 }
 
 /// Launches one of lumen's Triton flash-attention kernels (`launch.kernel`) with its tile config.
 fn triton_attention(launch: &super::triton::Launch) -> Result<(), String> {
     let config = launch.config;
-    crate::kernels::launched::launched("flash_attention", || {
+
+    crate::profiler::launched::launched("flash_attention", || {
         let template = format!(
-            "# @triton.jit: lumen/kernels/attention/triton.py's {} kernel, BLOCK_M={} BLOCK_N={} stages={} warps={}\n",
+            "# @triton.jit: lumen/codegen/attention/triton's {} kernel, BLOCK_SIZE_M={} BLOCK_SIZE_N={} stages={} warps={}\n",
             launch.kernel, config.block_m, config.block_n, config.stages, config.warps
         );
+
         Some(triton_code(&template, launch.functions))
     });
+
     let device = launch
         .tensors
         .iter()
         .flatten()
         .next()
         .ok_or("an attention reads tensors")?;
+
     current(device);
+
     let call = |py: Python<'_>, kwargs: Option<Bound<'_, PyDict>>| -> PyResult<Py<PyAny>> {
         let tensors: Vec<Option<PyTensor>> = launch
             .tensors
             .iter()
             .map(|t| t.as_ref().map(|t| PyTensor::wrap(t.clone())))
             .collect();
-        py.import("lumen.kernels.attention.triton")?
+        py.import("lumen.codegen.attention.triton.kernel")?
             .getattr("attention")?
             .call(
                 (
@@ -600,10 +734,11 @@ fn triton_attention(launch: &super::triton::Launch) -> Result<(), String> {
             )
             .map(Bound::unbind)
     };
+
     #[cfg(lumen_cuda_linked)]
     {
         use super::triton::direct::Value;
-        let [batch, sq, sk, h, hv] = launch.sizes;
+        let [batch, heads, sq, sk, h, hv] = launch.sizes;
         // The dK/dV kernel always takes a dQ; one it doesn't read, like any absent tensor, is the first.
         let mut tensors: Vec<Option<&crate::Tensor>> =
             launch.tensors.iter().map(Option::as_ref).collect();
@@ -615,6 +750,10 @@ fn triton_attention(launch: &super::triton::Launch) -> Result<(), String> {
             .iter()
             .map(|t| Value::of(t.unwrap_or(device)))
             .collect();
+        // The forward kernel's `EXTRA` tuple, flattened, holds at least the first tensor.
+        if launch.kernel == "forward" && values.len() == 6 {
+            values.push(Value::of(device));
+        }
         values.extend([sq, sk].map(|s| Value::Int(s as i128)));
         values.push(Value::Int(launch.causal.unwrap_or(0) as i128));
         if launch.kernel != "forward" {
@@ -647,12 +786,13 @@ fn triton_attention(launch: &super::triton::Launch) -> Result<(), String> {
             identity,
             device,
             &values,
-            [blocks, batch, 1],
+            [blocks, heads, batch],
             |py, kw| call(py, Some(kw)),
         )? {
             return Ok(());
         }
     }
+
     Python::attach(|py| call(py, None).map(|_| ())).map_err(|e| e.to_string())
 }
 

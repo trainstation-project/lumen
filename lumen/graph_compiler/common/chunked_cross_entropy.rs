@@ -8,6 +8,7 @@ use crate::graph_compiler::pass::{CompilerPass, Module};
 /// Rewrites each matched cross entropy whose logits are also computed in row chunks, until none is left.
 fn chunked_cross_entropy(graph: &Graph) -> Graph {
     let (producer, readers) = uses(graph);
+
     for i in 0..graph.nodes().len() {
         if let Some(f) = matched(graph, &producer, &readers, i)
             && let Some(g) = chunked(graph, &producer, i, &f)
@@ -15,6 +16,7 @@ fn chunked_cross_entropy(graph: &Graph) -> Graph {
             return chunked_cross_entropy(&g);
         }
     }
+
     graph.clone()
 }
 
@@ -24,6 +26,7 @@ fn chunked_cross_entropy(graph: &Graph) -> Graph {
 fn chunked(graph: &Graph, producer: &[Option<usize>], dot: usize, f: &Found) -> Option<Graph> {
     let nodes = graph.nodes();
     let (b, d) = (graph.type_of(f.h).shape[0], graph.type_of(f.h).shape[1]);
+
     // Other dots with the same weight on row slices `[start, end)` of `h` covering every column.
     let mut chunks: Vec<(usize, usize, usize)> = (0..nodes.len())
         .filter(|&k| {
@@ -33,6 +36,7 @@ fn chunked(graph: &Graph, producer: &[Option<usize>], dot: usize, f: &Found) -> 
         })
         .filter_map(|k| {
             let s = &nodes[producer[nodes[k].inputs[0]]?];
+
             match &s.primitive {
                 Primitive::Slice {
                     start_indices,
@@ -45,50 +49,63 @@ fn chunked(graph: &Graph, producer: &[Option<usize>], dot: usize, f: &Found) -> 
             }
         })
         .collect();
+
     chunks.sort_by_key(|c| c.1);
+
     // The chunks must tile rows `0..b` without gaps or overlap.
     let covered = chunks
         .iter()
         .try_fold(0, |row, c| (c.1 == row).then_some(c.2));
+
     if chunks.is_empty() || covered != Some(b) {
         return None;
     }
+
     // Nodes replayed per chunk: the softmax region plus the gather-index computation above the target.
     let mut region: Vec<usize> = f.members.iter().copied().filter(|&k| k != dot).collect();
     let mut stack = vec![nodes[f.pick].inputs[1]];
+
     while let Some(v) = stack.pop() {
         if v == f.target {
             continue;
         }
+
         let k = producer[v]?;
+
         if !region.contains(&k) {
             region.push(k);
             stack.extend(&nodes[k].inputs);
         }
     }
+
     region.sort_unstable();
     let (lse, loss) = (nodes[f.lse].output, nodes[f.loss].output);
     let mut out = Graph::new();
     let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
+
     for &v in graph.inputs() {
         map[v] = out.input(graph.type_of(v).clone());
     }
+
     // Values that depend on the joined lse/loss and must wait for every chunk.
     let mut waiting = vec![false; graph.types.len()];
     // Values derived from chunk logits.
     let mut logits = vec![false; graph.types.len()];
     let mut deferred = Vec::new();
     let mut rows: Vec<(usize, usize, Var, Var)> = Vec::new();
+
     let emit = |out: &mut Graph, map: &mut [Var], node: &Node| {
         out.set_origin(node);
         let ins: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
         map[node.output] = out.apply(node.primitive.clone(), &ins).expect("well typed");
         out.set_label(map[node.output], node.label);
     };
+
     for (k, node) in nodes.iter().enumerate() {
         if f.members.contains(&k) {
             continue;
         }
+
         if let Some(&(_, start, end)) = chunks.iter().find(|c| c.0 == k) {
             out.set_origins(&[node, &nodes[dot]]);
             let ins: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
@@ -96,17 +113,21 @@ fn chunked(graph: &Graph, producer: &[Option<usize>], dot: usize, f: &Found) -> 
             out.set_label(map[node.output], node.label);
             logits[node.output] = true;
             out.set_origin(&nodes[f.pick]);
+
             let target = Primitive::Slice {
                 start_indices: vec![start],
                 limit_indices: vec![end],
                 view: false,
             };
+
             let mut local = vec![usize::MAX; graph.types.len()];
             local[nodes[dot].output] = map[node.output];
             local[f.target] = out.apply(target, &[map[f.target]]).ok()?;
+
             for &j in &region {
                 let n = &nodes[j];
                 let p = of_rows(&n.primitive, b, end - start)?;
+
                 let ins: Vec<Var> = n
                     .inputs
                     .iter()
@@ -118,14 +139,18 @@ fn chunked(graph: &Graph, producer: &[Option<usize>], dot: usize, f: &Found) -> 
                         }
                     })
                     .collect();
+
                 out.set_origin(n);
                 local[n.output] = out.apply(p, &ins).ok()?;
                 out.set_label(local[n.output], n.label);
             }
+
             rows.push((start, end, local[lse], local[loss]));
+
             if rows.len() < chunks.len() {
                 continue;
             }
+
             rows.sort_by_key(|r| r.0);
             out.set_origin(&nodes[f.lse]);
             map[lse] = joined(&mut out, rows.iter().map(|r| r.2).collect())?;
@@ -133,6 +158,7 @@ fn chunked(graph: &Graph, producer: &[Option<usize>], dot: usize, f: &Found) -> 
             map[loss] = joined(&mut out, rows.iter().map(|r| r.3).collect())?;
             continue;
         }
+
         // A slice of the lse or loss matching a chunk's rows is that chunk's value.
         if let Primitive::Slice {
             start_indices,
@@ -156,6 +182,7 @@ fn chunked(graph: &Graph, producer: &[Option<usize>], dot: usize, f: &Found) -> 
             }
         }
         logits[node.output] = node.inputs.iter().any(|&v| logits[v]);
+
         // Readers of the lse/loss go after the last chunk; reading logits too would need them earlier.
         if node
             .inputs
@@ -165,18 +192,23 @@ fn chunked(graph: &Graph, producer: &[Option<usize>], dot: usize, f: &Found) -> 
             if logits[node.output] {
                 return None;
             }
+
             waiting[node.output] = true;
             deferred.push(k);
             continue;
         }
+
         emit(&mut out, &mut map, node);
     }
+
     if rows.len() < chunks.len() {
         return None;
     }
+
     for j in deferred {
         emit(&mut out, &mut map, &nodes[j]);
     }
+
     let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
     out.set_outputs(&outputs).ok()?;
     Some(out.prune().0)
@@ -201,6 +233,7 @@ fn joined(out: &mut Graph, mut values: Vec<Var>) -> Option<Var> {
             })
             .collect::<Option<_>>()?;
     }
+
     values.pop()
 }
 
@@ -208,16 +241,20 @@ fn joined(out: &mut Graph, mut values: Vec<Var>) -> Option<Var> {
 /// `None` for primitives that can't be.
 fn of_rows(p: &Primitive, b: usize, c: usize) -> Option<Primitive> {
     use Primitive::*;
+
     let rows = |shape: &[usize]| {
         let mut shape = shape.to_vec();
+
         if let Some(n) = shape.first_mut() {
             if *n % b != 0 {
                 return None;
             }
             *n = *n / b * c;
         }
+
         Some(shape)
     };
+
     Some(match p {
         Reshape { new_sizes } => Reshape {
             new_sizes: rows(new_sizes)?,

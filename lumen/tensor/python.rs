@@ -61,12 +61,14 @@ fn flatten<'py>(
                 "ragged nested lists are not supported",
             ));
         }
+
         for item in list.iter() {
             flatten(&item, depth + 1, shape, flat)?;
         }
     } else {
         flat.push(obj.clone());
     }
+
     Ok(())
 }
 
@@ -74,18 +76,22 @@ fn flatten<'py>(
 fn infer_dtype(flat: &[Bound<'_, PyAny>]) -> PyResult<DType> {
     let mut all_bool = true;
     let mut all_int = true;
+
     for o in flat {
         let is_bool = o.is_instance_of::<PyBool>();
         let is_int = is_bool || o.is_instance_of::<PyInt>();
         let is_float = is_int || o.is_instance_of::<PyFloat>();
+
         if !is_float {
             return Err(PyTypeError::new_err(format!(
                 "cannot infer dtype of element {o:?}; expected bool/int/float"
             )));
         }
+
         all_bool &= is_bool;
         all_int &= is_int;
     }
+
     Ok(if all_bool {
         DType::Bool
     } else if all_int {
@@ -103,12 +109,14 @@ fn tensor_from_flat(
     device: core::Device,
 ) -> PyResult<Tensor> {
     let numel: usize = shape.iter().product();
+
     if numel != flat.len() {
         return Err(PyValueError::new_err(format!(
             "shape {shape:?} implies {numel} elements, got {}",
             flat.len()
         )));
     }
+
     // Builds from values Python converts to `$t` directly.
     macro_rules! build {
         ($t:ty) => {{
@@ -159,12 +167,14 @@ fn has_data(t: &Tensor) -> PyResult<()> {
             "meta tensors have no data: make the tensor by running a function (lumen.compile) or loading it",
         ));
     }
+
     Ok(())
 }
 
 /// The element at `index` as a Python bool, int or float.
 fn scalar_to_py(py: Python<'_>, t: &Tensor, index: &[usize]) -> PyResult<Py<PyAny>> {
     has_data(t)?;
+
     Ok(match t.dtype() {
         DType::F32 => t.get::<f32>(index).into_py_any(py)?,
         DType::F64 => t.get::<f64>(index).into_py_any(py)?,
@@ -251,6 +261,7 @@ where
                     )
                 })
                 .collect::<PyResult<Vec<_>>>()?;
+
             Ok(PyList::new(py, rows)?.into_any().unbind())
         }
     }
@@ -259,6 +270,7 @@ where
 /// Tensor options from a Python dtype name and device.
 fn options(dtype: Option<&str>, device: Option<&Bound<'_, PyAny>>) -> PyResult<TensorOptions> {
     let options = TensorOptions::new().device(resolve_device(device)?);
+
     Ok(match dtype {
         Some(dtype) => options.dtype(parse_dtype(dtype)?),
         None => options,
@@ -297,11 +309,13 @@ impl PyTensor {
     fn normalize_index(&self, dim: usize, index: isize) -> PyResult<usize> {
         let n = self.inner.shape()[dim] as isize;
         let i = if index < 0 { index + n } else { index };
+
         if !(0..n).contains(&i) {
             return Err(PyIndexError::new_err(format!(
                 "index {index} out of bounds for dim {dim} of size {n}"
             )));
         }
+
         Ok(i as usize)
     }
 
@@ -314,6 +328,7 @@ impl PyTensor {
                 index.len()
             )));
         }
+
         index
             .into_iter()
             .enumerate()
@@ -338,10 +353,12 @@ impl PyTensor {
         let mut flat = Vec::new();
         flatten(data, 0, &mut inferred_shape, &mut flat)?;
         let shape = shape.unwrap_or(inferred_shape);
+
         let dtype = match dtype {
             Some(s) => parse_dtype(s)?,
             None => infer_dtype(&flat)?,
         };
+
         Ok(Self::wrap(tensor_from_flat(&flat, &shape, dtype, device)?))
     }
 
@@ -355,6 +372,7 @@ impl PyTensor {
         alignment: usize,
     ) -> PyResult<Self> {
         let options = options(dtype, device)?;
+
         Ok(Self::wrap(unsafe {
             Tensor::empty_aligned(&shape, options, alignment)
         }))
@@ -536,20 +554,25 @@ impl PyTensor {
     fn to(&self, device: Option<&Bound<'_, PyAny>>, dtype: Option<&str>) -> PyResult<Self> {
         let device = device.map(|d| resolve_device(Some(d))).transpose()?;
         let mut t = self.inner.clone();
+
         if let Some(dtype) = dtype {
             if t.device() != core::Device::Meta(0) {
                 has_data(&t)?;
             }
+
             t = t
                 .to_dtype(parse_dtype(dtype)?)
                 .map_err(PyRuntimeError::new_err)?;
         }
+
         if let Some(device) = device.filter(|&d| d != t.device()) {
             if device != core::Device::Meta(0) {
                 has_data(&t)?;
             }
+
             t = t.to(device);
         }
+
         Ok(Self::wrap(t))
     }
 
@@ -580,9 +603,11 @@ impl PyTensor {
     /// A contiguous copy on the same device.
     fn clone(&self) -> PyResult<Self> {
         has_data(&self.inner)?;
+
         let options = TensorOptions::new()
             .dtype(self.inner.dtype())
             .device(self.inner.device());
+
         let t = unsafe { Tensor::empty(self.inner.shape(), options) };
         t.copy_(&self.inner).map_err(PyValueError::new_err)?;
         Ok(Self::wrap(t))
@@ -608,6 +633,7 @@ impl PyTensor {
     /// The parameter's tensor on `device`, created on first use.
     fn _placed(&self, device: &Bound<'_, PyAny>) -> PyResult<Self> {
         let device = resolve_device(Some(device))?;
+
         self.inner
             .placed(device)
             .map(Self::wrap)
@@ -634,11 +660,13 @@ impl PyTensor {
     /// The single element as a Python number.
     fn item(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
         let n = self.inner.numel();
+
         if n != 1 {
             return Err(PyRuntimeError::new_err(format!(
                 "a Tensor with {n} elements cannot be converted to Scalar"
             )));
         }
+
         scalar_to_py(py, &self.inner, &vec![0; self.inner.ndim()])
     }
 
@@ -654,10 +682,12 @@ impl PyTensor {
         let host = self.inner.to(core::Device::Cpu(0));
         let (shape, strides) = (host.shape(), host.strides());
         let ptr = host.data_ptr().cast_const();
+
         // Identity conversion for types Python takes as they are.
         fn same<T>(v: T) -> T {
             v
         }
+
         match host.dtype() {
             DType::F32 => nested_list(py, ptr.cast::<f32>(), shape, strides, &same),
             DType::F64 => nested_list(py, ptr.cast::<f64>(), shape, strides, &same),
@@ -703,15 +733,19 @@ impl PyTensor {
         if let Ok(i) = key.extract::<isize>() {
             let i = self.normalize_index(0, i)?;
             let view = self.inner.select(0, i);
+
             if view.ndim() == 0 {
                 return scalar_to_py(py, &view, &[]);
             }
+
             return Ok(Py::new(py, Self::wrap(view))?.into_any());
         }
+
         if let Ok(tuple) = key.cast::<PyTuple>() {
             let index = self.normalize_indices(tuple.extract()?)?;
             return scalar_to_py(py, &self.inner, &index);
         }
+
         Err(PyTypeError::new_err(
             "indices must be an int (view) or a tuple of ints (scalar)",
         ))
@@ -725,8 +759,10 @@ impl PyTensor {
             let tuple = key
                 .cast::<PyTuple>()
                 .map_err(|_| PyTypeError::new_err("indices must be an int or a tuple of ints"))?;
+
             self.normalize_indices(tuple.extract()?)?
         };
+
         set_value(&self.inner, &index, value)
     }
 }

@@ -17,8 +17,10 @@ fn default_world() -> Result<(usize, usize), String> {
     if !super::is_initialized() && super::get_world_size()? > 1 {
         let (store, rank, world_size) =
             super::rendezvous("env://", None, None, super::DEFAULT_TIMEOUT)?;
+
         super::init_process_group(store, rank, world_size)?;
     }
+
     Ok((super::get_rank()?, super::get_world_size()?))
 }
 
@@ -44,17 +46,21 @@ pub fn tpu_slice_env(
     libtpu_init_args: &str,
 ) -> Result<Vec<(&'static str, String)>, String> {
     let addresses: Vec<&str> = addresses.split(',').filter(|a| !a.is_empty()).collect();
+
     if addresses.is_empty() {
         return Err(format!("{TPU_SLICEBUILDER_ADDRESSES} is empty"));
     }
+
     if world_size > addresses.len() {
         return Err(format!(
             "a world of {world_size} processes spans several TPU slices, but {TPU_SLICEBUILDER_ADDRESSES} lists one of {} processes",
             addresses.len()
         ));
     }
+
     // workers past one slice's address list wrap around; the size check above means this is only the identity today
     let task = rank % addresses.len();
+
     let port = addresses[task]
         .rsplit_once(':')
         .map(|(_, port)| port.to_owned())
@@ -64,18 +70,22 @@ pub fn tpu_slice_env(
                 addresses[task]
             )
         })?;
+
     // each process owns one chip, so per-process chip bounds are all ones in the topology's rank
     let chip = match topology.split(',').count() {
         4 => "1,1,1,1",
         _ => "1,1,1",
     };
+
     let insecure = "--slicebuilder_use_insecure_grpc";
+
     let init_args = match libtpu_init_args.contains(insecure) {
         true => libtpu_init_args.to_owned(),
         false => format!("{libtpu_init_args} {insecure}=true")
             .trim()
             .to_owned(),
     };
+
     Ok(vec![
         ("CLOUD_TPU_TASK_ID", task.to_string()),
         ("TPU_VISIBLE_DEVICES", local_rank.to_string()),
@@ -98,13 +108,16 @@ fn join_tpu_slice() -> Result<(), String> {
             "the TPU was opened before its mesh: build the mesh before anything uses the TPU, so this process joins the slice with its one chip".into(),
         );
     }
+
     let required = |name: &str| {
         std::env::var(name).map_err(|_| {
             format!("{name} is not set: run `eval $(python -m lumen.distributed | sed 's/^/export /')` or lumen.distributed.set_tpu_launch_env() before launching the workers")
         })
     };
+
     let rank = super::get_rank()?;
     let local_rank = super::env_index("LOCAL_RANK", rank)?;
+
     let env = tpu_slice_env(
         &required(TPU_TOPOLOGY)?,
         &required(TPU_SLICEBUILDER_ADDRESSES)?,
@@ -113,9 +126,11 @@ fn join_tpu_slice() -> Result<(), String> {
         super::get_world_size()?,
         &std::env::var("LIBTPU_INIT_ARGS").unwrap_or_default(),
     )?;
+
     for (name, value) in env {
         unsafe { std::env::set_var(name, value) };
     }
+
     Ok(())
 }
 
@@ -125,6 +140,7 @@ impl MeshBackend for Tpu {
         if !super::is_initialized() && super::get_world_size()? > 1 {
             join_tpu_slice()?;
         }
+
         default_world()
     }
 }
@@ -134,17 +150,21 @@ impl MeshBackend for Mps {
     fn world(&self, mesh_size: usize) -> Result<(usize, usize), String> {
         self.check(0)?;
         let devices = self.device_count();
+
         if mesh_size != devices {
             return Err(format!(
                 "an MPS mesh holds the {devices} MPS device, got {mesh_size} devices"
             ));
         }
+
         let world_size = super::get_world_size()?;
+
         if world_size != 1 {
             return Err(format!(
                 "MPS runs in one process, but WORLD_SIZE is {world_size}"
             ));
         }
+
         Ok((0, 1))
     }
 }
@@ -154,6 +174,7 @@ pub fn mesh_backend(device_type: &str) -> Result<&'static dyn MeshBackend, Strin
     let device = Device::of_type(device_type, 0).ok_or_else(|| {
         format!("device_type must be one of cpu, mps, cuda, tpu, meta, got '{device_type}'")
     })?;
+
     Ok(match device {
         Device::Cpu(_) => &Cpu,
         Device::Mps(_) => &Mps,

@@ -6,7 +6,7 @@ import re
 
 import lumen
 
-from .common import KERNELS, _traced_at, source_of, type_text
+from .common import LUMEN, _traced_at, prelude, source_of, type_text
 
 
 def _slug(text):
@@ -43,7 +43,7 @@ def _launch_code(step, kernel, code):
     src = source_of(kernel)
     if src is not None:
         path, anchor = src
-        return f"// {path}\n" + _snippet((KERNELS / path).read_text(), anchor), "metal"
+        return f"// {path}\n" + _snippet((LUMEN / path).read_text(), anchor), "metal"
     return step["text"] + "\n", "txt"
 
 
@@ -85,7 +85,10 @@ def program_source(graph, name="program"):
 
 
 def _pallas(step, at, module, spec):
-    """Python script that rebuilds a launch's Mosaic program from its Pallas template ``module`` and JSON ``spec``."""
+    """Python script that rebuilds a launch's Mosaic program from its Pallas template ``module`` and JSON ``spec``,
+    or, for a generated program (``module`` ``generated``), its source run on the device's memory (``spec``)."""
+    if module == "generated":
+        return _header(step, at, "txt") + spec
     return (
         _header(step, at, "txt")
         + f"import json\n\nfrom {module} import program\n\n"
@@ -121,6 +124,9 @@ def dump_code(graph, plan, run, device, directory):
             module, spec = template
             pallas = name.rsplit(".", 1)[0] + ".pallas.py"
             (directory / pallas).write_text(_pallas(steps[at], at, module, spec))
+            if module == "generated":
+                index.append(f"{n:04d}  {' ' * 9}  its Pallas: its generated program  {pallas}")
+                continue
             index.append(f"{n:04d}  {' ' * 9}  its Pallas: {module}'s program(spec)  {pallas}")
             templates.add(module)
     for module in sorted(templates):
@@ -129,7 +135,7 @@ def dump_code(graph, plan, run, device, directory):
         (directory / "pallas" / f"{module}.py").write_text(source.read_text())
         index.append(f"pallas/{module}.py  the template {module}")
     if str(device).startswith("mps"):
-        (directory / "prelude.metal").write_text((KERNELS / "mps" / "kernels.metal").read_text())
+        (directory / "prelude.metal").write_text(prelude())
         index.append("prelude.metal  the Metal prelude every kernel above is compiled with")
     (directory / "graph.txt").write_text(str(graph) + "\n")
     (directory / "program.py").write_text(program_source(graph))

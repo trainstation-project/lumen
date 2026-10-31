@@ -21,7 +21,7 @@ class ShapeDtypeStruct:
 
 def program(spec):
     """The Mosaic of pallas_call kernel ``spec["kernel"]`` for ``spec``
-    (Rust's entry: ``lumen/kernels/tpu``)."""
+    (Rust's entry: ``lumen/runtime/tpu.rs``)."""
     return _CALLS[spec["kernel"]](spec)
 
 
@@ -74,7 +74,7 @@ def pallas_call(
 
             def body(scalars, memory, result):
                 """Views the scalar-addressed rows as refs, applies aliases, then runs the kernel."""
-                from lumen.kernels.tpu.pallas import view
+                from lumen.codegen.utils.tpu.pallas import view
 
                 refs = [
                     view(memory if i < len(args) else result, scalars[i], shape, dtype)

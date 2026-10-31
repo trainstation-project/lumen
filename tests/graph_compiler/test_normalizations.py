@@ -205,6 +205,63 @@ def test_rms_norm_backward_recomputes_its_normalized_input(device, triton_on_cud
 
 
 @pytest.mark.parametrize("device", [MPS, CUDA])
+def test_wide_rms_norm_of_a_residual_kept_in_float32_fuses(device, triton_on_cuda):
+    """A projection plus a residual kept in float32, its bfloat16 rounding
+    RMS-normalized over rows too wide for one GEMM tile: on CUDA the GEMM
+    writes both values and the norm's partials (``dot_partials``), as it
+    writes a single one; the values the CPU's."""
+    m, d = 64, 1024
+    x, w, r, g = rand(m, d), rand(d, d, seed=1) / 32, rand(m, d, seed=2), rand(d, seed=3)
+
+    def block(x, w, r, g):
+        """The float32 residual sum and the RMS norm of its bfloat16 rounding."""
+        s = F.matmul(x.bfloat16(), w.t().bfloat16(), "float32", "float32") + r
+        f = s.bfloat16().float()
+        return (f / F.sqrt(F.mean(f * f, -1, keepdim=True) + 1e-6) * g).bfloat16(), s
+
+    try:
+        args = [lumen.from_numpy(a).to(device) for a in (x, w, r, g)]
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    if device == "cuda":
+        labels = [s["label"] for s in lumen.graph_compiler.Plan(lumen.make_graph(block)(*args), device).steps()]
+        assert any(label.endswith("partials") for label in labels), labels
+    got = lumen.compile(block)(*args)
+    want = lumen.compile(block, device="cpu")(*(lumen.from_numpy(a) for a in (x, w, r, g)))
+    for a, b in zip(got, want):
+        a, b = (lumen.to_numpy(t.to("cpu").to(dtype="float32")) for t in (a, b))
+        np.testing.assert_allclose(a, b, rtol=2e-2, atol=2e-2)
+
+
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_residual_read_by_an_rms_norm_and_the_loss_trains(device, triton_on_cuda):
+    """A projection plus a residual, rounded to bfloat16, read by an RMS
+    norm and by the loss: the norm's row writes its partials, so the fusion
+    reading its root doesn't host that root too (a row root hosted
+    elsewhere left its partials unwritten: the plan's steps waited on each
+    other). The loss and gradients the CPU's."""
+    x, w, r, g = rand(64, 64), rand(64, 64, seed=1) / 8, rand(64, 64, seed=2), rand(64, seed=3)
+
+    def loss(x, w, r, g):
+        """The summed norm and residual of the projection of `x`."""
+        h = (F.matmul(x.bfloat16(), w.t().bfloat16(), "float32", "float32") + r).bfloat16()
+        f = h.float()
+        n = f / F.sqrt(F.mean(f * f, -1, keepdim=True) + 1e-6) * g
+        return F.sum(n) + F.sum(f)
+
+    step = lumen.value_and_grad(loss, (0, 1, 2, 3))
+    try:
+        args = [lumen.from_numpy(a).to(device) for a in (x, w, r, g)]
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    got = lumen.compile(step)(*args)
+    want = lumen.compile(step, device="cpu")(*(lumen.from_numpy(a) for a in (x, w, r, g)))
+    got, want = [got[0], *got[1]], [want[0], *want[1]]
+    for a, b in zip(got, want):
+        np.testing.assert_allclose(lumen.to_numpy(a.to("cpu")), lumen.to_numpy(b), rtol=2e-2, atol=2e-2)
+
+
+@pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize(
     "f, kernels",
     [

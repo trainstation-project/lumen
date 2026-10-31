@@ -172,9 +172,9 @@ def _read_early_and_late(a, w):
 def test_dump_to_writes_each_pass(compiler, tmp_path, device, triton_on_cuda):
     """``dump_to``: each compiled graph written before its passes and after
     each, a file each, named by its pipeline, step and pass (XLA's
-    ``--xla_dump_to``); the MPS pipeline's last passes generate the
-    kernels, then place the slices read in place; the Triton pipeline's
-    fuses loops."""
+    ``--xla_dump_to``); the MPS pipeline's last passes place the slices
+    read in place, wrap the lone nodes left in elementwise fusions, then generate the
+    kernels; the Triton pipeline's fuses."""
     f = lambda x: F.exp(x) * 2.0 + 1.0  # noqa: E731
     graph = lumen.make_graph(f)(lumen.empty([8], device="meta"))
     lumen.config.compiler.cpu.dump_to = lumen.config.compiler.of(device).dump_to = str(tmp_path)
@@ -187,13 +187,13 @@ def test_dump_to_writes_each_pass(compiler, tmp_path, device, triton_on_cuda):
     assert "cpu.01.simplify.txt" in steps
     if "mps" in devices:
         mps = sorted(s for s in steps if s.startswith("mps."))
-        assert mps[-2].endswith(".codegen.txt") and mps[-1].endswith(".place_views.txt"), mps
-        assert any(".loop_fusion." in s for s in mps)
+        assert [s.split(".")[2] for s in mps[-3:]] == ["place_views", "alone", "codegen"], mps
+        assert any(".fusion." in s for s in mps)
         assert (
-            "fusion_" in (tmp_path / next(p.name for p in tmp_path.iterdir() if p.name.endswith(mps[-2]))).read_text()
+            "fusion_" in (tmp_path / next(p.name for p in tmp_path.iterdir() if p.name.endswith(mps[-1]))).read_text()
         )
     if "cuda" in devices:
-        assert any(s.startswith("triton.") and ".loop_fusion." in s for s in steps), steps
+        assert any(s.startswith("triton.") and ".fusion." in s for s in steps), steps
     lumen.config.compiler.reset()
     count = len(list(tmp_path.iterdir()))
     lumen.graph_compiler.Plan(graph, "cpu")

@@ -24,6 +24,7 @@ fn assert_err(result: Result<impl std::fmt::Debug, Error>, expected: fn(&Error) 
 fn serialization_is_byte_for_byte() {
     let attn = f32s(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0], &[1, 2, 3]);
     let out = serialize(&[("attn.0", &attn)], None).unwrap();
+
     assert_eq!(
         out,
         [
@@ -34,6 +35,7 @@ fn serialization_is_byte_for_byte() {
             0, 0, 64, 64, 0, 0, 128, 64, 0, 0, 160, 64
         ]
     );
+
     read_metadata(&out).unwrap();
 }
 
@@ -42,6 +44,7 @@ fn serialization_is_byte_for_byte() {
 fn header_is_padded_to_eight_bytes() {
     let attn = f32s(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0], &[1, 1, 2, 3]);
     let out = serialize(&[("attn0", &attn)], None).unwrap();
+
     assert_eq!(
         out,
         [
@@ -58,13 +61,16 @@ fn header_is_padded_to_eight_bytes() {
 #[test]
 fn empty_files_and_metadata() {
     let out = serialize(&[], None).unwrap();
+
     assert_eq!(
         out,
         [8, 0, 0, 0, 0, 0, 0, 0, 123, 125, 32, 32, 32, 32, 32, 32]
     );
+
     read_metadata(&out).unwrap();
     let metadata = BTreeMap::from([("framework".to_string(), "pt".to_string())]);
     let out = serialize(&[], Some(metadata)).unwrap();
+
     assert_eq!(
         out,
         [
@@ -73,6 +79,7 @@ fn empty_files_and_metadata() {
             125, 125, 32, 32, 32, 32, 32
         ]
     );
+
     let (_, metadata) = read_metadata(&out).unwrap();
     assert_eq!(metadata.metadata().unwrap()["framework"], "pt");
 }
@@ -84,10 +91,12 @@ fn deserialization() {
     let loaded = deserialize(serialized, Device::Cpu(0)).unwrap();
     assert_eq!(loaded.len(), 1);
     let (name, t) = &loaded[0];
+
     assert_eq!(
         (name.as_str(), t.shape(), t.dtype()),
         ("test", &[2, 2][..], DType::I32)
     );
+
     assert_eq!(t.to_vec::<i32>(), [0; 4]);
 }
 
@@ -107,18 +116,22 @@ fn empty_shapes_and_zero_sized_tensors() {
 #[test]
 fn overlapping_offsets_are_rejected() {
     let mut header = String::from("{");
+
     for i in 0..10 {
         if i > 0 {
             header.push(',');
         }
+
         header.push_str(&format!(
             "\"weight_{i}\":{{\"dtype\":\"F32\",\"shape\":[2,2],\"data_offsets\":[0,16]}}"
         ));
     }
+
     header.push('}');
     let mut file = (header.len() as u64).to_le_bytes().to_vec();
     file.extend(header.as_bytes());
     file.extend([0u8; 16]);
+
     assert_err(read_metadata(&file), |e| {
         matches!(e, Error::InvalidOffset(_))
     });
@@ -128,10 +141,13 @@ fn overlapping_offsets_are_rejected() {
 #[test]
 fn incomplete_buffers_are_rejected() {
     let extra = b"<\x00\x00\x00\x00\x00\x00\x00{\"test\":{\"dtype\":\"I32\",\"shape\":[2,2],\"data_offsets\":[0,16]}}\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00extra_bogus_data_for_polyglot_file";
+
     assert_err(read_metadata(extra), |e| {
         matches!(e, Error::MetadataIncompleteBuffer)
     });
+
     let short = b"<\x00\x00\x00\x00\x00\x00\x00{\"test\":{\"dtype\":\"I32\",\"shape\":[2,2],\"data_offsets\":[0,16]}}\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+
     assert_err(read_metadata(short), |e| {
         matches!(e, Error::MetadataIncompleteBuffer)
     });
@@ -141,21 +157,28 @@ fn incomplete_buffers_are_rejected() {
 #[test]
 fn malformed_headers_are_rejected() {
     let too_large = b"<\x00\x00\x00\x00\xff\xff\xff{\"test\":{\"dtype\":\"I32\",\"shape\":[2,2],\"data_offsets\":[0,16]}}\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+
     assert_err(read_metadata(too_large), |e| {
         matches!(e, Error::HeaderTooLarge)
     });
+
     assert_err(read_metadata(b""), |e| matches!(e, Error::HeaderTooSmall));
+
     assert_err(read_metadata(b"<\x00\x00\x00\x00\x00\x00\x00"), |e| {
         matches!(e, Error::InvalidHeaderLength)
     });
+
     assert_err(
         read_metadata(b"\x01\x00\x00\x00\x00\x00\x00\x00\xff"),
         |e| matches!(e, Error::InvalidHeader(_)),
     );
+
     assert_err(read_metadata(b"\x01\x00\x00\x00\x00\x00\x00\x00{"), |e| {
         matches!(e, Error::InvalidHeaderDeserialization(_))
     });
+
     let bad_info = b"<\x00\x00\x00\x00\x00\x00\x00{\"test\":{\"dtype\":\"I32\",\"shape\":[2,2],\"data_offsets\":[0, 4]}}";
+
     assert_err(read_metadata(bad_info), |e| {
         matches!(e, Error::TensorInvalidInfo)
     });
@@ -174,10 +197,13 @@ fn headers_may_be_padded_with_whitespace() {
 #[test]
 fn overflowing_shapes_are_rejected() {
     let shape = b"O\x00\x00\x00\x00\x00\x00\x00{\"test\":{\"dtype\":\"I32\",\"shape\":[2,18446744073709551614],\"data_offsets\":[0,16]}}\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+
     assert_err(read_metadata(shape), |e| {
         matches!(e, Error::ValidationOverflow)
     });
+
     let bytes = b"N\x00\x00\x00\x00\x00\x00\x00{\"test\":{\"dtype\":\"I32\",\"shape\":[2,9223372036854775807],\"data_offsets\":[0,16]}}\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00";
+
     assert_err(read_metadata(bytes), |e| {
         matches!(e, Error::ValidationOverflow)
     });
@@ -188,6 +214,7 @@ fn overflowing_shapes_are_rejected() {
 #[cfg_attr(miri, ignore = "a header of MAX_HEADER_SIZE bytes, too slow for Miri")]
 fn oversized_headers_are_not_written() {
     let metadata = BTreeMap::from([("big".to_string(), "a".repeat(MAX_HEADER_SIZE))]);
+
     assert_err(serialize(&[], Some(metadata)), |e| {
         matches!(e, Error::HeaderTooLarge)
     });
@@ -240,6 +267,7 @@ fn assert_same(expected: &[(String, Tensor)], actual: &[(String, Tensor)]) {
     let mut expected: Vec<_> = expected.iter().collect();
     expected.sort_by(|a, b| a.0.cmp(&b.0));
     assert_eq!(expected.len(), actual.len());
+
     for ((en, et), (an, at)) in expected.iter().zip(actual) {
         assert_eq!((en, et.dtype(), et.shape()), (an, at.dtype(), at.shape()));
         assert_eq!(as_f64(et), as_f64(at), "{en}");
@@ -255,6 +283,7 @@ fn every_dtype_round_trips() {
     assert_same(&tensors, &loaded);
     let (n, metadata) = read_metadata(&bytes).unwrap();
     assert_eq!((N_LEN + n) % N_LEN, 0);
+
     for (_, info) in metadata.tensors() {
         assert_eq!(info.data_offsets.0 % (info.dtype.bitsize() / 8), 0);
     }
@@ -270,22 +299,27 @@ fn files_round_trip_with_metadata() {
     let tensors = tensors();
     let metadata = BTreeMap::from([("format".to_string(), "lumen \"test\"\n".to_string())]);
     save_file(&named(&tensors), Some(metadata.clone()), &path).unwrap();
+
     assert_eq!(
         std::fs::read(&path).unwrap(),
         serialize(&named(&tensors), Some(metadata.clone())).unwrap()
     );
+
     let file = SafeTensorsFile::open(&path).unwrap();
     assert_eq!(file.metadata().metadata(), Some(&metadata));
     assert_same(&tensors, &file.tensors(Device::Cpu(0)).unwrap());
+
     assert_eq!(
         file.tensor("t_f32", Device::Cpu(0))
             .unwrap()
             .to_vec::<f32>(),
         [0.0, 3.0, 1.0, 4.0, 2.0, 0.0]
     );
+
     assert_err(file.tensor("missing", Device::Cpu(0)), |e| {
         matches!(e, Error::TensorNotFound(_))
     });
+
     std::fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -302,9 +336,11 @@ fn names_need_escaping() {
 #[test]
 fn saving_needs_contiguous_tensors() {
     let t = f32s(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0], &[2, 3]).transpose(0, 1);
+
     assert_err(serialize(&[("t", &t)], None), |e| {
         matches!(e, Error::NotContiguous(_))
     });
+
     let row = f32s(&[0.0, 1.0, 2.0, 3.0, 4.0, 5.0], &[2, 3]).select(0, 1);
     let loaded = deserialize(&serialize(&[("row", &row)], None).unwrap(), Device::Cpu(0)).unwrap();
     assert_eq!(loaded[0].1.to_vec::<f32>(), [3.0, 4.0, 5.0]);
@@ -318,6 +354,7 @@ fn unsupported_dtypes_name_the_tensor() {
     file.extend(header.as_bytes());
     file.extend([0u8; 2]);
     read_metadata(&file).unwrap();
+
     assert_err(
         deserialize(&file, Device::Cpu(0)),
         |e| matches!(e, Error::UnsupportedDtype(name, dtype) if name == "w" && dtype == "F8_E4M3"),
@@ -341,15 +378,18 @@ fn tensors_load_onto_mps() {
     if !crate::device::mps::MPS.is_available() {
         return;
     }
+
     let tensors = tensors();
     let bytes = serialize(&named(&tensors), None).unwrap();
     let loaded = deserialize(&bytes, Device::Mps(0)).unwrap();
     assert!(loaded.iter().all(|(_, t)| t.device() == Device::Mps(0)));
     assert_same(&tensors, &loaded);
+
     let on_mps: Vec<(String, Tensor)> = tensors
         .iter()
         .map(|(n, t)| (n.clone(), t.to(Device::Mps(0))))
         .collect();
+
     assert_eq!(serialize(&named(&on_mps), None).unwrap(), bytes);
 }
 
@@ -361,6 +401,7 @@ fn meta_tensors_load_from_the_header_and_do_not_save() {
     let loaded = deserialize(&bytes, Device::Meta(0)).unwrap();
     assert!(loaded.iter().all(|(_, t)| t.device() == Device::Meta(0)));
     let by_name: BTreeMap<_, _> = loaded.iter().map(|(n, t)| (n.as_str(), t)).collect();
+
     for (name, t) in &tensors {
         assert_eq!(
             (
@@ -370,7 +411,9 @@ fn meta_tensors_load_from_the_header_and_do_not_save() {
             (t.dtype(), t.shape())
         );
     }
+
     let m = Tensor::zeros(&[2], TensorOptions::new().device(Device::Meta(0)));
+
     assert_err(
         serialize(&[("m", &m)], None),
         |e| matches!(e, Error::MetaTensor(n) if n == "m"),

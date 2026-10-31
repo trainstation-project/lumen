@@ -3,7 +3,7 @@ use super::common::cse::cse;
 use crate::graph::Primitive::*;
 use crate::graph::{Graph, Primitive, TensorType, Var};
 use crate::graph_compiler::plan_tests::data;
-use crate::kernels::reference;
+use crate::reference;
 use crate::{DType, Scalar};
 
 /// An `f32` tensor type of `shape`.
@@ -40,6 +40,7 @@ fn repeated_computations_run_once() {
     let x = g.input(ty(&[4, 8]));
     let w = g.input(ty(&[8, 16]));
     let a = apply(&mut g, matmul(), &[x, w]);
+
     let zero = |g: &mut Graph| {
         let z = apply(
             g,
@@ -50,12 +51,15 @@ fn repeated_computations_run_once() {
             },
             &[],
         );
+
         let b = BroadcastInDim {
             shape: vec![4, 16],
             broadcast_dimensions: vec![],
         };
+
         apply(g, b, &[z])
     };
+
     let z = zero(&mut g);
     let relu = apply(&mut g, Max, &[a, z]);
     let b = apply(&mut g, matmul(), &[x, w]);
@@ -66,6 +70,7 @@ fn repeated_computations_run_once() {
     let s = apply(&mut g, Add, &[s, z2]);
     g.set_outputs(&[s]).unwrap();
     let out = cse(&g);
+
     assert_eq!(
         names(&out),
         [
@@ -79,11 +84,14 @@ fn repeated_computations_run_once() {
         ],
         "{out}"
     );
+
     let inputs = [data(&[4, 8], 1), data(&[8, 16], 2)];
+
     let (e, a) = (
         reference::run(&g, &inputs).unwrap(),
         reference::run(&out, &inputs).unwrap(),
     );
+
     assert_eq!(e[0].to_vec::<f32>(), a[0].to_vec::<f32>());
 }
 
@@ -105,6 +113,7 @@ fn different_parameters_or_order_are_kept() {
 fn same_values(g: &Graph, simplified: &Graph, inputs: &[crate::Tensor]) {
     let want = reference::run(g, inputs).unwrap();
     let got = reference::run(simplified, inputs).unwrap();
+
     for (w, g) in want.iter().zip(&got) {
         assert_eq!(w.to_vec::<f32>(), g.to_vec::<f32>());
     }
@@ -137,6 +146,7 @@ fn algebraic_simplification() {
     let a = apply(&mut g, Neg, &[a]);
     let p = apply(&mut g, Lt, &[a, x]);
     let a = apply(&mut g, Select, &[p, a, a]);
+
     let a = apply(
         &mut g,
         Cast {
@@ -144,6 +154,7 @@ fn algebraic_simplification() {
         },
         &[a],
     );
+
     let r = apply(
         &mut g,
         Reshape {
@@ -151,7 +162,9 @@ fn algebraic_simplification() {
         },
         &[a],
     );
+
     let r = apply(&mut g, Reshape { new_sizes: vec![6] }, &[r]);
+
     let t = apply(
         &mut g,
         Transpose {
@@ -159,6 +172,7 @@ fn algebraic_simplification() {
         },
         &[a],
     );
+
     let t = apply(
         &mut g,
         Transpose {
@@ -166,23 +180,29 @@ fn algebraic_simplification() {
         },
         &[t],
     );
+
     let inner = BroadcastInDim {
         shape: vec![4, 2, 3],
         broadcast_dimensions: vec![1, 2],
     };
+
     let b = apply(&mut g, inner, &[x]);
+
     let outer = BroadcastInDim {
         shape: vec![5, 4, 2, 3],
         broadcast_dimensions: vec![1, 2, 3],
     };
+
     let b = apply(&mut g, outer, &[b]);
     g.set_outputs(&[r, t, b]).unwrap();
     let simplified = super::common::simplify::simplify_with(&g, false);
+
     assert_eq!(
         names(&simplified),
         ["reshape", "broadcast_in_dim"],
         "{simplified}"
     );
+
     same_values(&g, &simplified, &[data(&[2, 3], 1)]);
 }
 
@@ -194,6 +214,7 @@ fn transposes_of_dots_swap_their_operands() {
         let a = g.input(ty(&[4, 6]));
         let b = g.input(ty(&[6, 5]));
         let d = apply(&mut g, matmul(), &[a, b]);
+
         let t = apply(
             &mut g,
             Transpose {
@@ -201,19 +222,23 @@ fn transposes_of_dots_swap_their_operands() {
             },
             &[d],
         );
+
         let outputs = if read_twice { vec![t, d] } else { vec![t] };
         g.set_outputs(&outputs).unwrap();
         g
     };
+
     let inputs = [data(&[4, 6], 1), data(&[6, 5], 2)];
     let g = build(false);
     let swapped = super::common::simplify::simplify_with(&g, true);
     assert_eq!(names(&swapped), ["dot_general"], "{swapped}");
     same_values(&g, &swapped, &inputs);
+
     assert_eq!(
         names(&super::common::simplify::simplify_with(&g, false)),
         ["dot_general", "transpose"]
     );
+
     let twice = super::common::simplify::simplify_with(&build(true), true);
     assert_eq!(names(&twice), ["dot_general", "transpose"], "{twice}");
 }
@@ -225,9 +250,11 @@ fn rearranges_move_past_elementwise_primitives() {
     let x = g.input(ty(&[2, 3]));
     let y = g.input(ty(&[2, 3]));
     let two = apply(&mut g, full(&[3, 2], 2.0), &[]);
+
     let t = Transpose {
         permutation: vec![1, 0],
     };
+
     let tx = apply(&mut g, t.clone(), &[x]);
     let ty_ = apply(&mut g, t, &[y]);
     let a = apply(&mut g, Add, &[tx, ty_]);
@@ -235,12 +262,15 @@ fn rearranges_move_past_elementwise_primitives() {
     let a = apply(&mut g, Exp, &[a]);
     g.set_outputs(&[a]).unwrap();
     let moved = super::common::simplify::simplify_with(&g, true);
+
     assert_eq!(
         names(&moved),
         ["add", "full", "mul", "exp", "transpose"],
         "{moved}"
     );
+
     same_values(&g, &moved, &[data(&[2, 3], 1), data(&[2, 3], 2)]);
+
     assert_eq!(
         names(&super::common::simplify::simplify_with(&g, false)),
         ["full", "transpose", "transpose", "add", "mul", "exp"]
@@ -252,11 +282,13 @@ fn rearranges_move_past_elementwise_primitives() {
 #[test]
 fn casts_move_past_layout_primitives() {
     let cast = |dtype| Cast { new_dtype: dtype };
+
     let widened = |g: &mut Graph| {
         let x = g.input(ty(&[2, 3]));
         let b = apply(g, cast(DType::BF16), &[x]);
         apply(g, cast(DType::F32), &[b])
     };
+
     let inputs = [data(&[2, 3], 1)];
     let mut g = Graph::new();
     let w = widened(&mut g);
@@ -267,26 +299,33 @@ fn casts_move_past_layout_primitives() {
     same_values(&g, &moved, &inputs);
     let mut g = Graph::new();
     let y = g.input(ty(&[2, 3]));
+
     let t = Transpose {
         permutation: vec![1, 0],
     };
+
     let t = apply(&mut g, t, &[y]);
+
     let slice = Slice {
         start_indices: vec![0, 0],
         limit_indices: vec![2, 2],
         view: false,
     };
+
     let s = apply(&mut g, slice, &[t]);
     let n = apply(&mut g, cast(DType::BF16), &[s]);
     let o = apply(&mut g, cast(DType::F32), &[n]);
     g.set_outputs(&[o]).unwrap();
     let moved = super::common::simplify::simplify_with(&g, true);
+
     assert_eq!(
         names(&moved),
         ["cast", "transpose", "slice", "cast"],
         "{moved}"
     );
+
     same_values(&g, &moved, &inputs);
+
     // 1.0 is exact in bf16, so the widening cast can move past the concat; 0.1 isn't.
     for (value, want) in [
         (1.0, vec!["cast", "full", "concatenate", "cast"]),
@@ -295,6 +334,7 @@ fn casts_move_past_layout_primitives() {
         let mut g = Graph::new();
         let w = widened(&mut g);
         let c = apply(&mut g, full(&[2, 3], value), &[]);
+
         let cat = apply(
             &mut g,
             Concatenate {
@@ -303,6 +343,7 @@ fn casts_move_past_layout_primitives() {
             },
             &[w, c],
         );
+
         g.set_outputs(&[cat]).unwrap();
         let moved = super::common::simplify::simplify_with(&g, true);
         assert_eq!(names(&moved), want, "{moved}");
@@ -330,14 +371,17 @@ fn host_values_run_in_a_host_stage() {
         true => crate::Device::Mps(0),
         false => crate::Device::Meta(0),
     };
+
     let plan = super::compile(&to_host_graph(), device).unwrap();
     let staged = plan.staged.as_ref().expect("a staged plan");
     let hosts: Vec<bool> = staged.stages.iter().map(|s| s.host).collect();
     assert_eq!(hosts, [false, true]);
+
     assert_eq!(
         staged.stages[1].inputs,
         [crate::graph_compiler::Source::ToHost(0, 0)]
     );
+
     if device == crate::Device::Mps(0) {
         let x = crate::Tensor::from_slice(&[1.0f32, 2.0], DType::F32).to(device);
         let out = plan.run(&[x]).unwrap();
@@ -353,6 +397,7 @@ fn values_copied_back_at_once_pass_through_a_host_stage() {
         true => crate::Device::Mps(0),
         false => crate::Device::Meta(0),
     };
+
     let mut g = Graph::new();
     let x = g.input(ty(&[2]));
     let three = apply(&mut g, full(&[2], 3.0), &[]);
@@ -366,10 +411,12 @@ fn values_copied_back_at_once_pass_through_a_host_stage() {
     let staged = plan.staged.as_ref().expect("a staged plan");
     let hosts: Vec<bool> = staged.stages.iter().map(|s| s.host).collect();
     assert_eq!(hosts, [false, true, false]);
+
     assert_eq!(
         staged.stages[2].inputs,
         [crate::graph_compiler::Source::ToDevice(1, 0)]
     );
+
     if device == crate::Device::Mps(0) {
         let x = crate::Tensor::from_slice(&[1.0f32, 2.0], DType::F32).to(device);
         let out = plan.run(&[x]).unwrap();
@@ -401,6 +448,7 @@ fn ops_on_host_and_device_values_raise() {
     let y = apply(&mut g, Add, &[h, x]);
     g.set_outputs(&[y]).unwrap();
     let error = super::compile(&g, crate::Device::Meta(0)).unwrap_err();
+
     assert!(
         error.contains("Expected all tensors to be on the same device"),
         "{error}"
@@ -417,6 +465,7 @@ fn a_pipeline_runs_its_passes_in_order_and_dumps_each() {
 
     /// Test pass that negates the graph's first output.
     struct Negate;
+
     impl CompilerPass<GraphModule<'_>> for Negate {
         fn name(&self) -> &'static str {
             "negate"
@@ -437,6 +486,7 @@ fn a_pipeline_runs_its_passes_in_order_and_dumps_each() {
     let s = apply(&mut g, Add, &[y, z]);
     g.set_outputs(&[s]).unwrap();
     let dir = std::env::temp_dir().join(format!("lumen-passes-{}", std::process::id()));
+
     let options = Options {
         config: super::Configs {
             cpu: CpuConfig {
@@ -447,28 +497,68 @@ fn a_pipeline_runs_its_passes_in_order_and_dumps_each() {
         },
         ..Options::default()
     };
+
     let mut module = GraphModule {
         graph: g,
         device: crate::Device::Cpu(0),
         options: &options,
     };
+
     Pipeline::new("test")
         .add(Cse)
         .add(Negate)
         .run(&mut module)
         .unwrap();
+
     assert_eq!(names(&module.graph), ["exp", "add", "neg"]);
+
     let mut files: Vec<String> = std::fs::read_dir(&dir)
         .unwrap()
         .map(|e| e.unwrap().file_name().into_string().unwrap())
         .collect();
+
     files.sort();
     let steps: Vec<&str> = files.iter().map(|f| f.split_once('.').unwrap().1).collect();
+
     assert_eq!(
         steps,
         ["test.00.input.txt", "test.01.cse.txt", "test.02.negate.txt"]
     );
+
     let last = std::fs::read_to_string(dir.join(&files[2])).unwrap();
     assert_eq!(last, module.graph.to_string());
     std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// `Strides::of` keeps only the operands not laid out contiguously in their own buffers.
+#[test]
+fn attention_strides_record_only_strided_operands() {
+    use super::common::attention::Strides;
+    let mut g = Graph::new();
+    let a = g.input(ty(&[2, 3]));
+    let b = g.input(ty(&[2, 3]));
+    let sum = apply(&mut g, Add, &[a, b]);
+    g.set_outputs(&[sum, a]).unwrap();
+
+    let strides = Strides::of(
+        &g,
+        &[vec![3, 1], vec![1, 2]],
+        &[(0, vec![3, 1]), (4, vec![3, 1])],
+    );
+
+    assert_eq!(strides.inputs, [(1, vec![1, 2])].into_iter().collect());
+
+    assert_eq!(
+        strides.outputs,
+        [(1, (4, vec![3, 1]))].into_iter().collect()
+    );
+
+    assert_eq!(
+        Strides::of(
+            &g,
+            &[vec![3, 1], vec![3, 1]],
+            &[(0, vec![3, 1]), (0, vec![3, 1])]
+        ),
+        Strides::default()
+    );
 }

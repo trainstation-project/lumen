@@ -2,10 +2,10 @@
 //! atomic accumulation unless deterministic.
 
 use super::fusion::fusible;
+use crate::codegen::dot_general::mps::{float_groups, gemv};
 use crate::graph::{Graph, Node, Primitive};
 use crate::graph_compiler::common::split_k::Rules;
 use crate::graph_compiler::pass::{CompilerPass, Module};
-use crate::kernels::dot_general::mps::{float_groups, gemv};
 
 /// Splits `graph`'s matmuls by MPS's rules; `atomic` and `fuse` as in `Rules`.
 pub(super) fn split_k(graph: &Graph, atomic: bool, fuse: bool) -> Graph {
@@ -17,6 +17,7 @@ pub(super) fn split_k(graph: &Graph, atomic: bool, fuse: bool) -> Graph {
         atomic,
         fuse,
     };
+
     crate::graph_compiler::common::split_k::split_k(graph, &rules)
 }
 
@@ -27,6 +28,7 @@ pub(super) fn atomic_dot(body: &Graph) -> Option<&Node> {
             let split = matches!(dot.primitive, Primitive::DotGeneral { .. })
                 && matches!(&sum.primitive, Primitive::ReduceSum { axes, .. } if axes == &[0])
                 && sum.inputs == [dot.output];
+
             split.then_some(dot)
         }
         _ => None,

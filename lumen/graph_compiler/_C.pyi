@@ -36,6 +36,13 @@ class Plan:
         """Whether it runs steps on the Apple Neural Engine (Core ML
         programs, ``lumen.config.compiler.mps.neural_engine``)."""
 
+    @property
+    def capturable(self) -> bool:
+        """Whether a CUDA graph can capture its steps: it runs as steps (not
+        host and device stages), and none moves values to or from the host,
+        waits on the host or another stream, calls a custom op or Pallas
+        kernel, or runs a collective."""
+
     def _invalidate_neural_engine(self) -> None:
         """Compile its Neural Engine steps' programs again on their next
         run, from their weights' values then."""
