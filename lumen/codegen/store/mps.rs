@@ -1,5 +1,13 @@
-//! Output store helpers shared by the Metal kernels: each output's store through its view.
-use super::*;
+//! Metal loads' and stores' addressing, shared by the generated kernels: the strided offset of a flat index,
+//! and each output's store through its view.
+
+use std::collections::HashMap;
+use std::fmt::Write;
+
+use indoc::writedoc;
+
+use crate::graph::Graph;
+use crate::tensor::contiguous_strides;
 
 /// Per-output `NAME_store{k}` helpers and the calls storing `result` and `extra` at index `j`;
 /// outputs in `views` are written at their offset and strides instead of contiguously.
@@ -66,4 +74,65 @@ pub(crate) fn written(
     }
 
     (stores, writes)
+}
+
+/// Metal expression of the strided offset for flat index `idx` into `shape`, merging adjacent
+/// dims that stay contiguous under `strides` into one divide/modulo term.
+pub(crate) fn gather_index(idx: &str, shape: &[usize], strides: &[usize]) -> String {
+    let spans = contiguous_strides(shape);
+
+    struct Run {
+        first: usize,
+        last: usize,
+        size: usize,
+        stride: usize,
+    }
+
+    let mut runs: Vec<Run> = Vec::new();
+
+    for d in (0..shape.len()).filter(|&d| shape[d] != 1 && strides[d] != 0) {
+        match runs.last_mut() {
+            Some(run)
+                if run.stride == strides[d] * shape[d]
+                    && shape[run.last + 1..d].iter().all(|&n| n == 1) =>
+            {
+                run.last = d;
+                run.size *= shape[d];
+                run.stride = strides[d];
+            }
+            _ => runs.push(Run {
+                first: d,
+                last: d,
+                size: shape[d],
+                stride: strides[d],
+            }),
+        }
+    }
+
+    let terms: Vec<String> = runs
+        .iter()
+        .map(|run| {
+            let mut c = idx.to_string();
+
+            if spans[run.last] != 1 {
+                c = format!("{c} / {}u", spans[run.last]);
+            }
+
+            if shape[..run.first].iter().any(|&n| n != 1) {
+                c = format!("({c}) % {}u", run.size);
+            }
+
+            if run.stride != 1 {
+                c = format!("({c}) * {}u", run.stride);
+            }
+
+            c
+        })
+        .collect();
+
+    if terms.is_empty() {
+        "0".into()
+    } else {
+        terms.join(" + ")
+    }
 }
