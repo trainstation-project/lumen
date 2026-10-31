@@ -1,6 +1,5 @@
 //! Kernel modules per op family and the dispatch table mapping an op and device to its kernel.
 pub mod dummy_op;
-pub mod factory;
 #[cfg(lumen_mps_linked)]
 pub(crate) mod mps;
 #[cfg(feature = "python")]

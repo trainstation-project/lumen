@@ -71,8 +71,8 @@ _SOURCES = [
     (r"^reduce_\w+_cols_", "codegen/reduction/mps/kernel.metal", "inline void reduce_cols"),
     (r"^reduce_\w+_grouped_", "codegen/reduction/mps/kernel.metal", "inline void reduce_grouped"),
     (r"^reduce_", "codegen/reduction/mps/kernel.metal", "inline void reduce("),
-    (r"^fill_\d$", "kernels/factory/mps/kernels.metal", "#define FULL"),
-    (r"^iota_", "kernels/factory/mps/kernels.metal", "#define IOTA"),
+    (r"^fill_\d$", "codegen/factory/mps/kernel.metal", "#define FULL"),
+    (r"^iota_", "codegen/factory/mps/kernel.metal", "#define IOTA"),
 ]
 
 

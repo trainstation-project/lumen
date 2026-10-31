@@ -174,7 +174,7 @@ const PRIMITIVE_KERNELS: &[&str] = &[
     "lumen/codegen/dot_general/mps/linear_cross_entropy/kernel.metal",
     "lumen/codegen/dynamic_slice/mps/kernel.metal",
     "lumen/codegen/scatter_add/mps/kernel.metal",
-    "lumen/kernels/factory/mps/kernels.metal",
+    "lumen/codegen/factory/mps/kernel.metal",
 ];
 
 /// Concatenates `sources` into an Objective-C raw string constant `name` written to `OUT_DIR/header`.

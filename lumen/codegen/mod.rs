@@ -6,6 +6,7 @@ pub(crate) mod dot_general;
 pub(crate) mod dynamic_slice;
 pub(crate) mod elementwise;
 pub(crate) mod emitter;
+pub(crate) mod factory;
 pub(crate) mod gather;
 pub(crate) mod kinds;
 pub(crate) mod layout;
