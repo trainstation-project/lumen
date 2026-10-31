@@ -702,7 +702,7 @@ impl Tensor {
 
     /// Waits for pending device work on this tensor.
     pub fn wait_(&self) -> &Self {
-        crate::kernels::wait::wait(self);
+        crate::runtime::wait::wait(self);
         self
     }
 

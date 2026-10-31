@@ -11,7 +11,6 @@ pub mod reference;
 mod tests;
 #[cfg(lumen_tpu_linked)]
 pub(crate) mod tpu;
-pub mod wait;
 
 use std::any::Any;
 use std::collections::HashMap;
