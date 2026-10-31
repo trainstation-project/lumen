@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::fmt::Write;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
-use indoc::{formatdoc, indoc, writedoc};
+use indoc::{formatdoc, indoc};
 
 use crate::codegen::elementwise::ElementwiseCodegen;
 use crate::codegen::layout::LayoutCodegen;
@@ -21,16 +21,15 @@ use crate::{DType, Scalar};
 
 mod config;
 mod emitter;
-mod stores;
 
 pub(crate) use crate::codegen::dot_general::mps::*;
 pub(crate) use crate::codegen::kinds::reduction_root;
 pub(crate) use crate::codegen::layout::mps::transpose::*;
 pub(crate) use crate::codegen::reduction::mps::{has_epilogue, split_launches};
 pub(crate) use crate::codegen::row::mps::*;
+pub(crate) use crate::codegen::store::mps::{gather_index, written};
 pub(crate) use config::*;
-pub(crate) use emitter::{Emitter, gather_index};
-pub(crate) use stores::written;
+pub(crate) use emitter::Emitter;
 
 /// The Metal code generator.
 pub(crate) struct Mps;
