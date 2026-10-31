@@ -276,13 +276,17 @@ class _Host:
     correction), recorded into ``graph`` to run on the CPU each call, before
     the device plan. A device op reading one of its values reads it as a
     scalar input of the device graph, passed by value (``imported``): the
-    scalars' own inputs, or values it computes (``hoisted``)."""
+    scalars' own inputs, or values it computes (``hoisted``). When calls
+    replay as CUDA graphs (``mirrored``), each host op is also recorded in
+    the device graph, on the scalars' inputs there: device ops read those
+    copies, computed inside the graph, and nothing is hoisted."""
 
     def __init__(self, device_graph, device):
         """A host trace feeding ``device_graph`` on ``device``."""
         self.graph = Graph()
         self.device_graph, self.device = device_graph, device
         self.imports, self.hoisted, self.constants = {}, [], {}
+        self.mirrored = _graphed(device)
 
     def owns(self, x):
         """Whether ``x`` is a value of the host graph."""
@@ -328,6 +332,11 @@ class _Host:
         var = self.graph.apply(name, [self.value(x) for x in operands], params)
         if self.graph.type_of(var)[1]:
             return None
+        if self.mirrored:
+            mirror = self.device_graph.apply(
+                name, [self.imports[x.var].var if self.owns(x) else x.var for x in operands], params
+            )
+            self.imports[var] = TracedTensor(self.device_graph, mirror, self.device)
         return TracedTensor(self.graph, var, self.device)
 
 
