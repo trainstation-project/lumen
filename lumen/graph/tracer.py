@@ -884,17 +884,19 @@ class Compiled:
         staged = set(args + scalars)
         fixed = [workspace.data_ptr()] + [t.data_ptr() for i, t in enumerate(inputs) if i not in staged]
 
-        def stage(buffers, vectors):
+        def stage(buffers, vectors, graph=None):
             """Copies this call's arguments into ``buffers`` and its runtime scalars into ``vectors``
-            (``(positions, vector)`` per dtype), one copy a vector."""
+            (``(positions, vector)`` per dtype), one copy a vector: on ``graph``'s stream when given,
+            so the host doesn't wait for its last replay."""
+            copy = (lambda dst, src: dst.copy_(src)) if graph is None else graph.stage
             for i, buffer in zip(args, buffers):
-                buffer.copy_(inputs[i])
+                copy(buffer, inputs[i] if inputs[i].is_contiguous() else inputs[i].contiguous())
             for positions, vector in vectors:
-                vector.copy_(tensor([inputs[i].item() for i in positions], dtype=vector.dtype))
+                copy(vector, tensor([inputs[i].item() for i in positions], dtype=vector.dtype))
 
         if record and record[3] == fixed:
             graph, buffers, vectors, _, outputs = record
-            stage(buffers, vectors)
+            stage(buffers, vectors, graph)
             if profiler._profiler_enabled():
                 from lumen.profiler import record_function
 

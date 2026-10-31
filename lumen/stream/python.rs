@@ -291,6 +291,14 @@ impl PyCudaGraph {
         self.inner.end().map_err(PyRuntimeError::new_err)
     }
 
+    /// Copies `src` into `dst`, an input the graph reads, on its stream, without waiting for its
+    /// replays so far.
+    fn stage(&self, dst: PyRef<'_, PyTensor>, src: PyRef<'_, PyTensor>) -> PyResult<()> {
+        self.inner
+            .stage(&dst.inner, &src.inner)
+            .map_err(PyRuntimeError::new_err)
+    }
+
     /// Launches the captured graph.
     fn replay(&self) -> PyResult<()> {
         self.inner.replay().map_err(PyRuntimeError::new_err)

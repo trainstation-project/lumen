@@ -41,6 +41,14 @@ pub(crate) mod ffi {
         ) -> i32;
 
         pub fn cudaGraphLaunch(exec: *mut c_void, stream: *mut c_void) -> i32;
+
+        pub fn cudaMemcpyAsync(
+            dst: *mut c_void,
+            src: *const c_void,
+            count: usize,
+            kind: i32,
+            stream: *mut c_void,
+        ) -> i32;
         pub fn cudaGraphGetNodes(
             graph: *mut c_void,
             nodes: *mut *mut c_void,
@@ -177,6 +185,36 @@ impl CudaGraph {
         self.exec = exec as usize;
 
         Ok(())
+    }
+
+    /// Copies `src` into `dst`, an input the graph reads, on the graph's stream: after its replays
+    /// so far, without waiting for them (from the host, once `src` is staged). Both are contiguous
+    /// and of one size; `src` is on the host or the graph's device.
+    pub fn stage(&self, dst: &crate::Tensor, src: &crate::Tensor) -> Result<(), String> {
+        if !(dst.is_contiguous() && src.is_contiguous()) || dst.nbytes() != src.nbytes() {
+            return Err("CudaGraph.stage copies between contiguous tensors of one size".into());
+        }
+
+        // cudaMemcpyHostToDevice or cudaMemcpyDeviceToDevice.
+        let kind = match src.device() {
+            crate::Device::Cpu(_) => 1,
+            _ => 3,
+        };
+
+        CUDA.set_device(self.device);
+
+        checked(
+            unsafe {
+                ffi::cudaMemcpyAsync(
+                    dst.data_ptr().cast(),
+                    src.data_ptr().cast_const().cast(),
+                    src.nbytes(),
+                    kind,
+                    self.stream as *mut c_void,
+                )
+            },
+            "cudaMemcpyAsync",
+        )
     }
 
     /// Launches the captured graph on its stream; profiled, its kernels are timed under the names of
