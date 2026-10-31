@@ -1324,18 +1324,28 @@ impl Plan {
             ));
         }
 
+        // Metal has no float64 or float8 type for a kernel to compute or copy them in.
         if executor == Device::Mps(0) {
-            let f64_step = self.steps.iter().find(|s| {
+            let unsupported = |ty: &TensorType| {
+                matches!(
+                    ty.dtype,
+                    DType::F64 | DType::F8E4M3FN | DType::F8E5M2 | DType::F8E4M3B11FNUZ
+                )
+            };
+
+            let step = self.steps.iter().find_map(|s| {
                 s.inputs
                     .iter()
                     .chain([&s.output])
-                    .any(|(_, ty)| ty.dtype == DType::F64)
+                    .find(|(_, ty)| unsupported(ty))
+                    .map(|(_, ty)| (s, ty.dtype))
             });
 
-            if let Some(step) = f64_step {
+            if let Some((step, dtype)) = step {
                 return Err(format!(
-                    "{}: float64 is not supported on MPS",
-                    step.primitive.name()
+                    "{}: {} is not supported on MPS",
+                    step.primitive.name(),
+                    dtype.full_name()
                 ));
             }
         }

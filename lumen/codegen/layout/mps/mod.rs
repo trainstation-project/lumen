@@ -1,111 +1,18 @@
-//! Encodes layout primitives (reshape, broadcast, transpose, slice) on MPS as strided copies.
+//! Metal layout: the generator of transposes fused with elementwise ops, staged through tiles, and the
+//! reshape steps the plan copies outputs with. Other lone layout steps run as one-node loops.
 
 pub(crate) mod transpose;
 
 use crate::Tensor;
-use crate::codegen::gather::mps::gather;
-use crate::graph::Primitive::*;
 use crate::graph_compiler::plan::Step;
-use crate::kernels::mps::{Grid, dims32_arg, launch, u32_arg};
-use crate::tensor::contiguous_strides;
 
-/// Encodes a layout step as a gather of the input under the strides that produce the output.
+/// Encodes a reshape step, the copy the plan writes an output aliasing another buffer with: the input's
+/// bytes copied whole, a reshape keeping their order.
 pub(crate) fn encode(
     step: &Step,
     inputs: &[*const u8],
     output: *mut u8,
     keep: Vec<Tensor>,
 ) -> Result<(), String> {
-    let (x, out) = (&step.inputs[0].1, &step.output.1);
-    let xs = contiguous_strides(&x.shape);
-    let (width, name) = (out.dtype.size_of(), step.label);
-
-    let strides = match &step.primitive {
-        Reshape { .. } => {
-            return copy(width, &[out.numel()], &[1], inputs[0], output, keep, name);
-        }
-        BroadcastInDim {
-            broadcast_dimensions,
-            ..
-        } => {
-            // Broadcast dims, and kept dims of size 1, read with stride 0.
-            let mut strides = vec![0; out.shape.len()];
-
-            for (k, &d) in broadcast_dimensions.iter().enumerate() {
-                if x.shape[k] != 1 {
-                    strides[d] = xs[k];
-                }
-            }
-
-            strides
-        }
-        Transpose { permutation } => permutation.iter().map(|&d| xs[d]).collect(),
-        Slice { start_indices, .. } => {
-            let start: usize = start_indices.iter().zip(&xs).map(|(s, st)| s * st).sum();
-            let src = inputs[0].wrapping_add(start * width);
-            return copy(width, &out.shape, &xs, src, output, keep, name);
-        }
-        _ => unreachable!("a layout primitive"),
-    };
-
-    copy(width, &out.shape, &strides, inputs[0], output, keep, name)
-}
-
-/// Copies `src` viewed with `shape` and element `strides` into contiguous `dst`: through the tiled transpose
-/// when the innermost dim is strided and another dim has unit stride, otherwise as a gather.
-fn copy(
-    width: usize,
-    shape: &[usize],
-    strides: &[usize],
-    src: *const u8,
-    dst: *mut u8,
-    keep: Vec<Tensor>,
-    name: &'static str,
-) -> Result<(), String> {
-    // Drop unit dims and merge neighbors that are contiguous with each other.
-    let mut dims: Vec<(usize, usize)> = Vec::new();
-
-    for (&size, &stride) in shape.iter().zip(strides) {
-        match dims.last_mut() {
-            _ if size == 1 => {}
-            Some(last) if last.1 == size * stride => *last = (last.0 * size, stride),
-            _ => dims.push((size, stride)),
-        }
-    }
-
-    let buffers = [src, dst.cast_const()];
-    let inner_stride = dims.last().map_or(0, |d| d.1);
-    let a = dims.iter().position(|d| d.1 == 1);
-
-    // `a` is the unit-stride source dim, `b` the innermost (strided) output dim; the rest are batch dims.
-    if let (true, Some(a)) = (inner_stride > 1, a) {
-        let b = dims.len() - 1;
-        let out_strides = contiguous_strides(&dims.iter().map(|d| d.0).collect::<Vec<_>>());
-        let batch: Vec<usize> = (0..b).filter(|&d| d != a).collect();
-
-        let args = [
-            u32_arg(batch.len() as u32),
-            dims32_arg(batch.iter().map(|&d| dims[d].0)),
-            dims32_arg(batch.iter().map(|&d| dims[d].1)),
-            dims32_arg(batch.iter().map(|&d| out_strides[d])),
-            u32_arg(dims[a].0 as u32),
-            u32_arg(dims[b].0 as u32),
-            u32_arg(out_strides[a] as u32),
-            u32_arg(dims[b].1 as u32),
-        ];
-
-        let batches = batch.iter().map(|&d| dims[d].0).product();
-        let grid = Grid::Groups([dims[a].0.div_ceil(32), dims[b].0.div_ceil(32), batches]);
-
-        return launch(
-            &format!("transpose_{width}"),
-            &buffers,
-            &args,
-            grid,
-            keep,
-            name,
-        );
-    }
-
-    gather(width, &dims, buffers, keep, name)
+    crate::codegen::dynamic_slice::mps::copy(inputs[0], output, &step.output.1, keep, step.label)
 }
