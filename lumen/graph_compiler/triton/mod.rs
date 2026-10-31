@@ -318,11 +318,12 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
     let mut pipeline = Pipeline::new("triton");
     pipeline.add(TakeAlongAxis);
 
-    if config.fused_linear_cross_entropy {
+    // With fusion off (`fuse`), as on MPS: no pass merges ops, each runs as its own kernel.
+    if config.fuse && config.fused_linear_cross_entropy {
         pipeline.add(ChunkedCrossEntropy);
     }
 
-    if config.merge_dots {
+    if config.fuse && config.merge_dots {
         pipeline.add(MergeDotsBackward).add(MergeDots {
             target: Target {
                 reads: fusion::fusible,
@@ -333,11 +334,11 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
         });
     }
 
-    if config.flash_attention {
+    if config.fuse && config.flash_attention {
         pipeline.add(FlashAttention).add(FlashAttentionBackward);
     }
 
-    if config.fused_linear_cross_entropy {
+    if config.fuse && config.fused_linear_cross_entropy {
         pipeline.add(LinearCrossEntropy);
     }
 
@@ -353,27 +354,29 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
     }
 
     // As on MPS: update chains, normalization rows, in-place concatenations, then fusion.
-    pipeline.add(Updates {
-        least: 2,
-        most: usize::MAX,
-    });
+    if config.fuse {
+        pipeline.add(Updates {
+            least: 2,
+            most: usize::MAX,
+        });
 
-    if config.normalization_diamonds {
-        pipeline.add(Diamonds);
-    }
+        if config.normalization_diamonds {
+            pipeline.add(Diamonds);
+        }
 
-    pipeline.add(PlaceConcats);
-    pipeline.add(Fusion);
+        pipeline.add(PlaceConcats);
+        pipeline.add(Fusion);
 
-    // Rows too wide for one GEMM tile: the GEMM feeding them writes their reductions' partials too.
-    if config.normalization_diamonds {
-        pipeline.add(WideRows);
+        // Rows too wide for one GEMM tile: the GEMM feeding them writes their reductions' partials too.
+        if config.normalization_diamonds {
+            pipeline.add(WideRows);
+        }
     }
 
     pipeline.add(PlaceViews);
     pipeline.add(Alone);
 
-    if config.horizontal_fusion {
+    if config.fuse && config.horizontal_fusion {
         pipeline.add(HorizontalFusion);
     }
 

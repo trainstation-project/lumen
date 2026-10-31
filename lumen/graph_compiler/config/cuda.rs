@@ -5,6 +5,7 @@ use super::{CompilerConfig, device_config};
 device_config! {
     CudaConfig, PyCudaConfig, "CudaConfig", cuda, crate::Device::Cuda(0), {
         use_triton_backend, set_use_triton_backend: bool = false;
+        fuse, set_fuse: bool = true;
         autotune, set_autotune: bool = true;
         safe_kernels, set_safe_kernels: bool = false;
         horizontal_fusion, set_horizontal_fusion: bool = true;

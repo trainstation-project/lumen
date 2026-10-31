@@ -22,6 +22,7 @@ class CudaConfig(CompilerConfig):
     """The CUDA compiler's settings (``lumen.config.compiler.cuda``)."""
 
     use_triton_backend: bool = False
+    fuse: bool = True
     autotune: bool = True
     safe_kernels: bool = False
     horizontal_fusion: bool = True

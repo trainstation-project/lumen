@@ -23,7 +23,7 @@ struct PyPlan {
 #[pymethods]
 impl PyPlan {
     /// Compiles `graph` for `device`; `donate`, `parameters`, `packable` and `scalars` are input
-    /// positions, `donate_into` `(input, output)` pairs, and `fuse` overrides MPS fusion.
+    /// positions, `donate_into` `(input, output)` pairs, and `fuse` overrides MPS and CUDA fusion.
     #[new]
     #[pyo3(signature = (graph, device = None, fuse = None, donate = Vec::new(), parameters = None, packable = Vec::new(), scalars = Vec::new(), donate_into = Vec::new()))]
     #[allow(clippy::too_many_arguments)]
@@ -56,6 +56,7 @@ impl PyPlan {
         let mask = |positions: &[usize]| (0..n).map(|i| positions.contains(&i)).collect();
         let mut config = crate::graph_compiler::config::configs();
         config.mps.fuse = fuse.unwrap_or(config.mps.fuse);
+        config.cuda.fuse = fuse.unwrap_or(config.cuda.fuse);
 
         let options = crate::graph_compiler::Options {
             config,
