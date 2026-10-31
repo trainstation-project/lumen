@@ -2,6 +2,7 @@
 //! host-side holds, through the CUDA runtime.
 
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 use crate::device::cuda::CUDA;
@@ -28,6 +29,164 @@ pub(crate) mod ffi {
             host: extern "C" fn(*mut c_void),
             data: *mut c_void,
         ) -> i32;
+
+        pub fn cudaStreamDestroy(stream: *mut c_void) -> i32;
+        pub fn cudaStreamBeginCapture(stream: *mut c_void, mode: i32) -> i32;
+        pub fn cudaStreamEndCapture(stream: *mut c_void, graph: *mut *mut c_void) -> i32;
+
+        pub fn cudaGraphInstantiateWithFlags(
+            exec: *mut *mut c_void,
+            graph: *mut c_void,
+            flags: u64,
+        ) -> i32;
+
+        pub fn cudaGraphLaunch(exec: *mut c_void, stream: *mut c_void) -> i32;
+        pub fn cudaGraphDestroy(graph: *mut c_void) -> i32;
+        pub fn cudaGraphExecDestroy(exec: *mut c_void) -> i32;
+        pub fn cudaGetErrorString(err: i32) -> *const std::ffi::c_char;
+    }
+}
+
+/// The stream lumen's CUDA kernels launch on: the default stream (null), or a graph's capture stream
+/// while it captures.
+static LAUNCH_STREAM: AtomicUsize = AtomicUsize::new(0);
+
+/// The stream to launch lumen's CUDA kernels on, as a `cudaStream_t`.
+#[cfg_attr(not(feature = "python"), allow(dead_code))]
+pub(crate) fn launch_stream() -> *mut c_void {
+    LAUNCH_STREAM.load(Ordering::Acquire) as *mut c_void
+}
+
+/// `cudaStreamCaptureModeThreadLocal`: only this thread's unsafe calls invalidate the capture.
+const CAPTURE_THREAD_LOCAL: i32 = 1;
+
+/// `call`'s error `err` as a message, or `Ok` when it succeeded.
+fn checked(err: i32, call: &str) -> Result<(), String> {
+    match err {
+        0 => Ok(()),
+        e => {
+            let message = unsafe { std::ffi::CStr::from_ptr(ffi::cudaGetErrorString(e)) };
+
+            Err(format!("{call} failed: {}", message.to_string_lossy()))
+        }
+    }
+}
+
+/// A CUDA graph of lumen's kernel launches on one device: `begin` redirects them to a capture stream
+/// (blocking, so ordered with the default stream), `end` instantiates what was launched, and `replay`
+/// launches it all again. Memory allocated while capturing stays the graph's until it is dropped.
+pub struct CudaGraph {
+    device: usize,
+    stream: usize,
+    exec: usize,
+    held: Vec<usize>,
+}
+
+impl CudaGraph {
+    /// Starts capturing device `device`'s launches into a new graph.
+    pub fn begin(device: usize) -> Result<CudaGraph, String> {
+        CUDA.set_device(device);
+
+        let mut stream = std::ptr::null_mut();
+
+        checked(
+            unsafe { ffi::cudaStreamCreateWithFlags(&mut stream, 0) },
+            "cudaStreamCreateWithFlags",
+        )?;
+
+        if let Err(e) = checked(
+            unsafe { ffi::cudaStreamBeginCapture(stream, CAPTURE_THREAD_LOCAL) },
+            "cudaStreamBeginCapture",
+        ) {
+            unsafe { ffi::cudaStreamDestroy(stream) };
+
+            return Err(e);
+        }
+
+        crate::allocator::cuda::hold(device);
+        LAUNCH_STREAM.store(stream as usize, Ordering::Release);
+
+        Ok(CudaGraph {
+            device,
+            stream: stream as usize,
+            exec: 0,
+            held: Vec::new(),
+        })
+    }
+
+    /// The capture stream, as a `cudaStream_t` integer (for launchers that take one).
+    pub fn stream(&self) -> usize {
+        self.stream
+    }
+
+    /// Ends the capture and instantiates the graph; errors (and keeps nothing) if a launch while
+    /// capturing could not be captured.
+    pub fn end(&mut self) -> Result<(), String> {
+        LAUNCH_STREAM.store(0, Ordering::Release);
+        self.held = crate::allocator::cuda::held(self.device);
+
+        let mut graph = std::ptr::null_mut();
+
+        checked(
+            unsafe { ffi::cudaStreamEndCapture(self.stream as *mut c_void, &mut graph) },
+            "cudaStreamEndCapture",
+        )?;
+
+        let mut exec = std::ptr::null_mut();
+        let made = checked(
+            unsafe { ffi::cudaGraphInstantiateWithFlags(&mut exec, graph, 0) },
+            "cudaGraphInstantiateWithFlags",
+        );
+
+        unsafe { ffi::cudaGraphDestroy(graph) };
+        made?;
+        self.exec = exec as usize;
+
+        Ok(())
+    }
+
+    /// Launches the captured graph on its stream.
+    pub fn replay(&self) -> Result<(), String> {
+        if self.exec == 0 {
+            return Err("the CUDA graph was never captured".into());
+        }
+
+        CUDA.set_device(self.device);
+
+        checked(
+            unsafe { ffi::cudaGraphLaunch(self.exec as *mut c_void, self.stream as *mut c_void) },
+            "cudaGraphLaunch",
+        )
+    }
+}
+
+/// Ends a capture still running, destroys the graph and its stream, and gives back the memory it held.
+impl Drop for CudaGraph {
+    fn drop(&mut self) {
+        CUDA.set_device(self.device);
+
+        if LAUNCH_STREAM.load(Ordering::Acquire) == self.stream {
+            LAUNCH_STREAM.store(0, Ordering::Release);
+            self.held = crate::allocator::cuda::held(self.device);
+
+            let mut graph = std::ptr::null_mut();
+
+            unsafe { ffi::cudaStreamEndCapture(self.stream as *mut c_void, &mut graph) };
+
+            if !graph.is_null() {
+                unsafe { ffi::cudaGraphDestroy(graph) };
+            }
+        }
+
+        // The graph's last replay finishes before it and its memory go.
+        unsafe { ffi::cudaStreamSynchronize(self.stream as *mut c_void) };
+
+        if self.exec != 0 {
+            unsafe { ffi::cudaGraphExecDestroy(self.exec as *mut c_void) };
+        }
+
+        unsafe { ffi::cudaStreamDestroy(self.stream as *mut c_void) };
+        crate::allocator::cuda::release(self.device, &self.held);
     }
 }
 

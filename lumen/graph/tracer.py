@@ -657,6 +657,9 @@ class Compiled:
         self._baked = {}
         self._hosts, self._pending = {}, []
         self._fast = {}
+        # CUDA graphs by plan (``config.compiler.cuda.cuda_graphs``): each plan's graph, its staged
+        # arguments, the addresses it was captured at and its outputs, or None once it cannot capture.
+        self._graphs, self._warm = {}, set()
         # The signatures whose plans' workspaces `deallocate_memory` freed: their calls wait for `allocate_memory`.
         self._freed = set()
 
@@ -749,8 +752,8 @@ class Compiled:
                 plan, workspace, out, to_host, key = hit
                 self._latest[:] = [key]
                 if to_host is None:
-                    return plan.run_in(workspace, list(args))[0]
-                outputs = iter(zip(plan.run_in(workspace, list(args)), to_host))
+                    return self._run(key, plan, workspace, list(args))[0]
+                outputs = iter(zip(self._run(key, plan, workspace, list(args)), to_host))
 
                 def returned(_):
                     """The next plan output, copied to the host if its traced tensor was on the CPU."""
@@ -776,7 +779,7 @@ class Compiled:
                 Tensor.empty(list(shape), dtype, "meta") for dtype, shape in map(graph.type_of, graph.outputs())
             ]
         else:
-            outputs = plan.run_in(workspace, inputs)
+            outputs = self._run(self._latest[0], plan, workspace, inputs)
         outputs = iter(outputs)
 
         to_host = []
@@ -831,6 +834,67 @@ class Compiled:
                 random._advance(drawn)
         return result
 
+    def _run(self, key, plan, workspace, inputs):
+        """``plan.run_in(workspace, inputs)`` for signature ``key``; on CUDA with
+        ``config.compiler.cuda.cuda_graphs``, a plan a graph can capture
+        (nothing written back, no runtime scalars, ``plan.capturable``) runs
+        as usual on its first call, is captured on its second, its arguments
+        copied into buffers of its own, and from then on replays: each call
+        copies its arguments in and launches the graph. Weights and the
+        workspace are read where they were captured; when one moves, the plan
+        is captured again."""
+        record = self._graphs.get(id(plan), ())
+        if record is None or not self._capturable(key, plan):
+            return plan.run_in(workspace, inputs)
+        layout = self._plans[key][5]
+        staged = [i for i, (kind, _) in enumerate(layout) if kind == "arg"]
+        fixed = [workspace.data_ptr()] + [t.data_ptr() for i, t in enumerate(inputs) if i not in staged]
+        if record and record[2] == fixed:
+            graph, buffers, _, outputs = record
+            for i, buffer in zip(staged, buffers):
+                buffer.copy_(inputs[i])
+            graph.replay()
+            return outputs
+        if id(plan) not in self._warm:
+            # The first call compiles the plan's kernels, which capturing cannot.
+            self._warm.add(id(plan))
+            return plan.run_in(workspace, inputs)
+        from lumen.codegen.utils import triton
+        from lumen.stream._C import CudaGraph
+
+        self._graphs.pop(id(plan), None)
+        buffers = [Tensor.empty(list(inputs[i].shape), inputs[i].dtype, key[1]) for i in staged]
+        for i, buffer in zip(staged, buffers):
+            buffer.copy_(inputs[i])
+        captured = list(inputs)
+        for i, buffer in zip(staged, buffers):
+            captured[i] = buffer
+        graph = CudaGraph(key[1])
+        try:
+            with triton.on_stream(graph.stream):
+                outputs = plan.run_in(workspace, captured)
+            graph.end()
+        except RuntimeError as e:
+            del graph
+            self._graphs[id(plan)] = None
+            warnings.warn(f"{self._fn.__name__}: a CUDA graph could not capture its plan, which runs uncaptured: {e}")
+            return plan.run_in(workspace, inputs)
+        graph.replay()
+        self._graphs[id(plan)] = graph, buffers, fixed, outputs
+        return outputs
+
+    def _capturable(self, key, plan):
+        """Whether a CUDA graph may capture ``plan``, signature ``key``'s:
+        on CUDA with ``config.compiler.cuda.cuda_graphs``, writing nothing
+        back, with no runtime scalars, and ``plan.capturable``."""
+        if _device_type(key[1]) != "cuda" or not config.compiler.cuda.cuda_graphs:
+            return False
+        written, written_scalars, written_arguments, host = self._plans[key][2]
+        drawn, layout = self._plans[key][3], self._plans[key][5]
+        scalars = any(kind in ("scalar", "hoisted", "rng") for kind, _ in layout)
+        plain = host[0] is None and not (written or written_scalars or written_arguments or drawn is not None)
+        return plain and not scalars and plan.capturable
+
     def dump_graph(self, path, *args, device=None, runs=5, json_path=None, fragment=False):
         """Write the graph and plan for ``args``' signature (default: the
         latest call's; meta tensors trace it without data) to ``path`` as an
@@ -882,6 +946,8 @@ class Compiled:
             return
         key = self._latest[0]
         entries = self._plans[key][6]
+        for plan, _ in entries:
+            self._graphs.pop(id(plan), None)
         entries[:] = [(plan, None) for plan, _ in entries]
         self._fast = {k: v for k, v in self._fast.items() if v[4] != key}
         self._freed.add(key)

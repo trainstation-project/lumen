@@ -5,6 +5,8 @@ use std::collections::HashMap;
 #[cfg(lumen_cuda_linked)]
 use std::ptr::NonNull;
 #[cfg(lumen_cuda_linked)]
+use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(lumen_cuda_linked)]
 use std::sync::{Arc, Mutex, OnceLock};
 
 #[cfg(lumen_cuda_linked)]
@@ -73,10 +75,30 @@ impl CudaAllocator {
 #[cfg(lumen_cuda_linked)]
 impl Allocator for CudaAllocator {
     fn allocate(&self, nbytes: usize) -> NonNull<u8> {
-        self.region.take(nbytes, |n| malloc(self.index, n), || {})
+        let ptr = self.region.take(nbytes, |n| malloc(self.index, n), || {});
+
+        if GRAPHS.load(Ordering::Acquire) > 0
+            && let Some(held) = holds().get_mut(&self.index)
+            && held.capturing
+        {
+            held.blocks.insert(ptr.as_ptr() as usize, None);
+            held.taken.push(ptr.as_ptr() as usize);
+        }
+
+        ptr
     }
 
     unsafe fn deallocate(&self, ptr: NonNull<u8>, nbytes: usize) {
+        // A block a CUDA graph launches into is given back when the graph goes, not when freed.
+        if GRAPHS.load(Ordering::Acquire) > 0
+            && let Some(held) = holds().get_mut(&self.index)
+            && let Some(freed) = held.blocks.get_mut(&(ptr.as_ptr() as usize))
+        {
+            *freed = Some(nbytes);
+
+            return;
+        }
+
         self.region.give(ptr, nbytes)
     }
 }
@@ -89,6 +111,73 @@ impl Drop for CudaAllocator {
             unsafe { free(self.index, base) }
         }
     }
+}
+
+/// A device's blocks taken while a CUDA graph captured, each with its size once freed: the graph
+/// launches into them, so a freed one returns to the region only when its graph is dropped.
+#[cfg(lumen_cuda_linked)]
+#[derive(Default)]
+struct Held {
+    capturing: bool,
+    taken: Vec<usize>,
+    blocks: HashMap<usize, Option<usize>>,
+}
+
+/// CUDA graphs capturing or alive, which hold blocks; while none is, freeing skips `holds`.
+#[cfg(lumen_cuda_linked)]
+static GRAPHS: AtomicUsize = AtomicUsize::new(0);
+
+/// Each device's held blocks.
+#[cfg(lumen_cuda_linked)]
+fn holds() -> std::sync::MutexGuard<'static, HashMap<usize, Held>> {
+    static HOLDS: OnceLock<Mutex<HashMap<usize, Held>>> = OnceLock::new();
+
+    HOLDS
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// Starts holding the blocks device `index` hands out, for a CUDA graph capturing.
+#[cfg(lumen_cuda_linked)]
+pub(crate) fn hold(index: usize) {
+    GRAPHS.fetch_add(1, Ordering::AcqRel);
+    holds().entry(index).or_default().capturing = true;
+}
+
+/// Stops holding new blocks on device `index`; returns those taken since `hold`, which stay held.
+#[cfg(lumen_cuda_linked)]
+pub(crate) fn held(index: usize) -> Vec<usize> {
+    let mut holds = holds();
+    let held = holds.entry(index).or_default();
+
+    held.capturing = false;
+    std::mem::take(&mut held.taken)
+}
+
+/// Lets go of `blocks` of device `index`: those already freed return to the region, the others
+/// when freed.
+#[cfg(lumen_cuda_linked)]
+pub(crate) fn release(index: usize, blocks: &[usize]) {
+    let freed: Vec<(usize, usize)> = {
+        let mut holds = holds();
+        let held = holds.entry(index).or_default();
+
+        blocks
+            .iter()
+            .filter_map(|b| held.blocks.remove(b).flatten().map(|n| (*b, n)))
+            .collect()
+    };
+
+    let allocator = allocator(index);
+
+    for (block, nbytes) in freed {
+        let ptr = NonNull::new(block as *mut u8).expect("a held block is not null");
+
+        unsafe { allocator.deallocate(ptr, nbytes) };
+    }
+
+    GRAPHS.fetch_sub(1, Ordering::AcqRel);
 }
 
 /// Returns the shared allocator for CUDA device `index`, creating it on first use.

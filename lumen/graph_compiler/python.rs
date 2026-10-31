@@ -109,6 +109,24 @@ impl PyPlan {
         })
     }
 
+    /// Whether a CUDA graph can capture this plan's steps: none waits on the host or another
+    /// stream, calls out to a custom op or a Pallas kernel, or runs a collective.
+    #[getter]
+    fn capturable(&self) -> bool {
+        !self.inner.steps().iter().any(|s| {
+            matches!(
+                s.primitive,
+                Primitive::HostWait
+                    | Primitive::DeviceWait
+                    | Primitive::CustomCall { .. }
+                    | Primitive::PallasCall { .. }
+                    | Primitive::AllReduce { .. }
+                    | Primitive::AllGather { .. }
+                    | Primitive::ReduceScatter { .. }
+            )
+        })
+    }
+
     /// Drops the cached Neural Engine models of this plan's steps (MPS builds only).
     fn _invalidate_neural_engine(&self) {
         #[cfg(lumen_mps_linked)]

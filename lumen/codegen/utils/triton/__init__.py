@@ -1,5 +1,6 @@
 """Python side of the Triton backend: compiles generated kernel sources and launches them."""
 
+import contextlib
 import importlib
 import linecache
 import struct
@@ -29,6 +30,22 @@ def compiled(name, source):
         exec(compile(source, filename, "exec"), scope)
         kernels[name] = scope[name]
     return kernels[name]
+
+
+@contextlib.contextmanager
+def on_stream(stream):
+    """Triton launches its kernels on CUDA stream `stream` (a `cudaStream_t` integer) inside the
+    block, as a CUDA graph capturing needs: its launcher asks the driver for the current stream."""
+    driver = triton.runtime.driver.active
+    before = vars(driver).get("get_current_stream")
+    driver.get_current_stream = lambda device=None: stream
+    try:
+        yield
+    finally:
+        if before is None:
+            del driver.get_current_stream
+        else:
+            driver.get_current_stream = before
 
 
 def functions(specs):

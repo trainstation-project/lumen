@@ -255,8 +255,52 @@ impl PyEvent {
     }
 }
 
-/// Adds `Stream` and `Event` to the Python module.
+/// Python `CudaGraph`: lumen's kernel launches on a CUDA device captured once and replayed.
+#[cfg(lumen_cuda_linked)]
+#[pyclass(name = "CudaGraph", module = "lumen")]
+pub(crate) struct PyCudaGraph {
+    inner: core::stream::cuda::CudaGraph,
+}
+
+#[cfg(lumen_cuda_linked)]
+#[pymethods]
+impl PyCudaGraph {
+    /// Starts capturing lumen's launches on CUDA device `device` (the default device when `None`).
+    #[new]
+    #[pyo3(signature = (device = None))]
+    fn new(device: Option<&Bound<'_, PyAny>>) -> PyResult<Self> {
+        let core::Device::Cuda(index) = crate::device::python::resolve_device(device)? else {
+            return Err(PyValueError::new_err(
+                "CudaGraph: a CUDA graph captures a CUDA device",
+            ));
+        };
+
+        let inner = core::stream::cuda::CudaGraph::begin(index).map_err(PyRuntimeError::new_err)?;
+
+        Ok(PyCudaGraph { inner })
+    }
+
+    /// The capture stream, as a `cudaStream_t` integer.
+    #[getter]
+    fn stream(&self) -> usize {
+        self.inner.stream()
+    }
+
+    /// Ends the capture and instantiates the graph.
+    fn end(&mut self) -> PyResult<()> {
+        self.inner.end().map_err(PyRuntimeError::new_err)
+    }
+
+    /// Launches the captured graph.
+    fn replay(&self) -> PyResult<()> {
+        self.inner.replay().map_err(PyRuntimeError::new_err)
+    }
+}
+
+/// Adds `Stream`, `Event` and, in a CUDA build, `CudaGraph` to the Python module.
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    #[cfg(lumen_cuda_linked)]
+    m.add_class::<PyCudaGraph>()?;
     m.add_class::<PyStream>()?;
     m.add_class::<PyEvent>()
 }

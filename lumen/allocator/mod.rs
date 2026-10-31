@@ -3,7 +3,7 @@
 
 pub mod config;
 mod cpu;
-mod cuda;
+pub(crate) mod cuda;
 mod meta;
 mod mps;
 #[cfg(test)]

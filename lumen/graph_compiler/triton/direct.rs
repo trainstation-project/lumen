@@ -285,8 +285,9 @@ fn bytes(ty: &str, value: Value) -> Result<Option<[u8; 8]>, String> {
     Ok(Some(out))
 }
 
-/// Launches `kernel` on `grid` with `values` (its runtime parameters in order) on lumen's stream, then
-/// the two scratch pointers Triton appends, null since the kernel needs no scratch.
+/// Launches `kernel` on `grid` with `values` (its runtime parameters in order) on lumen's stream (a
+/// CUDA graph's capture stream while it captures), then the two scratch pointers Triton appends,
+/// null since the kernel needs no scratch.
 pub(crate) fn launch(kernel: &Compiled, grid: [usize; 3], values: &[Value]) -> Result<(), String> {
     if kernel.types.len() != values.len() {
         return Err(format!(
@@ -324,7 +325,7 @@ pub(crate) fn launch(kernel: &Compiled, grid: [usize; 3], values: &[Value]) -> R
             1,
             1,
             kernel.shared,
-            std::ptr::null_mut(),
+            crate::stream::cuda::launch_stream(),
             params.as_mut_ptr(),
             std::ptr::null_mut(),
         )
