@@ -311,7 +311,10 @@ pub(crate) fn encode(
         | Select
         | Unary(_)
         | Binary(_)
-        | Gather { .. } => {
+        | Gather { .. }
+        | BroadcastInDim { .. }
+        | Transpose { .. }
+        | Slice { .. } => {
             unreachable!("a one-node fusion's loop kernel (graph_compiler::mps::alone)")
         }
         ReduceSum { .. } | ReduceMax { .. } | Cumsum { .. } | Concatenate { .. } => {
@@ -322,12 +325,8 @@ pub(crate) fn encode(
         }
         DotGeneral { .. } => crate::codegen::dot_general::mps::encode,
 
-        Reshape { .. } | BroadcastInDim { .. } | Transpose { .. } | Slice { .. } => {
-            crate::codegen::layout::mps::encode
-        }
-        DynamicSlice { .. } | DynamicUpdateSlice => {
-            crate::codegen::indexing::mps::dynamic_slice::encode
-        }
+        Reshape { .. } => crate::codegen::layout::mps::encode,
+        DynamicSlice { .. } | DynamicUpdateSlice => crate::codegen::dynamic_slice::mps::encode,
         ScatterAdd { .. } => crate::codegen::indexing::mps::scatter_add::encode,
         HostWait => super::wait::encode,
         ToHost | ToDevice => {

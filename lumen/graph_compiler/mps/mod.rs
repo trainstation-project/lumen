@@ -146,7 +146,8 @@ impl Blocks for MpsModule<'_> {
 }
 
 impl Lone for MpsModule<'_> {
-    /// Whether `n` needs its own kernel: a float GEMM, a copying concatenation, a gather or an elementwise op.
+    /// Whether `n` needs its own kernel: a float GEMM, a copying concatenation, a gather, a layout op that
+    /// copies (a broadcast, transpose or slice not placed as a view) or an elementwise op.
     fn alone(graph: &Graph, n: &Node) -> bool {
         let float = |v: Var| {
             matches!(
@@ -165,6 +166,9 @@ impl Lone for MpsModule<'_> {
                 in_place: false,
                 ..
             } | Primitive::Gather { .. }
+                | Primitive::BroadcastInDim { .. }
+                | Primitive::Transpose { .. }
+                | Primitive::Slice { view: false, .. }
         ) || super::elementwise(&n.primitive)
     }
 
@@ -284,9 +288,10 @@ fn pipeline<'a>(config: &MpsConfig) -> Pipeline<MpsModule<'a>> {
         p.add(fusion::LoopFusion);
     }
 
+    // Slices a GEMM reads in place become views before the lone layout ops left become loops, as on Triton.
+    p.add(PlaceViews);
     p.add(Alone);
     p.add(Codegen);
-    p.add(PlaceViews);
     p
 }
 
@@ -933,7 +938,7 @@ pub(super) fn encode_with(
         if output.cast_const() != inputs[0] {
             let x = &step.inputs[0].1;
 
-            crate::codegen::indexing::mps::dynamic_slice::copy(
+            crate::codegen::dynamic_slice::mps::copy(
                 inputs[0],
                 output,
                 x,

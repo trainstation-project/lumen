@@ -16,8 +16,9 @@ from lumen.profiler import ProfilerActivity, profile
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
 def test_autotuned_loops_match_untuned(device, dtype, tmp_path, triton_on_cuda):
     """A loop the compiler autotunes computes what the untuned loop does, at
-    lengths no block size divides. A Triton loop's dumped source carries
-    the ``BLOCK_SIZE`` and warps it picked."""
+    lengths no block size divides. A Triton loop's dumped source names its
+    template kernel and the ``BLOCK_SIZE`` and warps it picked, then its
+    generated ``BODY``."""
     compiler = getattr(lumen.config.compiler, device)
     try:
         for n in ((1 << 16) + 7, 1 << 20, (3 << 20) + 1):
@@ -34,9 +35,9 @@ def test_autotuned_loops_match_untuned(device, dtype, tmp_path, triton_on_cuda):
         if device != "cuda":
             return
         lumen.compile(lambda x: -x * 2).dump_code(str(tmp_path), x)
-        source = "".join(p.read_text() for p in tmp_path.glob("*fusion_*.py"))
-        assert re.search(r"# BLOCK_SIZE=\d+ warps=\d+", source)
-        assert "BLOCK_SIZE: tl.constexpr" in source
+        source = "".join(p.read_text() for p in tmp_path.glob("*elementwise_*.py"))
+        assert re.search(r"elementwise_kernel, BLOCK_SIZE=\d+ warps=\d+", source)
+        assert re.search(r"def elementwise_[0-9a-f]+\(EXTRA, BLOCK, MASK, SEGMENT: tl.constexpr\)", source)
     finally:
         compiler.autotune = True
 

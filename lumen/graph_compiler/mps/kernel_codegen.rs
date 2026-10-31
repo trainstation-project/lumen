@@ -6,7 +6,7 @@ use super::autotune::Tunable;
 use super::place_concats::in_place_concats;
 use super::{Kernel, MpsModule, PENDING, codegen, request};
 use crate::codegen::attention::AttentionCodegen;
-use crate::codegen::indexing::IndexingCodegen;
+use crate::codegen::dynamic_slice::DynamicSliceCodegen;
 use crate::graph::{Primitive, Var};
 use crate::graph_compiler::common::alone::wrapped;
 use crate::graph_compiler::common::attention::{self, Strides};
@@ -82,7 +82,7 @@ impl<'a> CompilerPass<MpsModule<'a>> for Codegen {
 
             if name == crate::graph::UPDATES {
                 let (kernel, source) =
-                    codegen::Mps::updates(body).expect("a Metal kernel of every updates body");
+                    codegen::Mps::updates(body, &()).expect("a Metal kernel of every updates body");
 
                 super::record_launch(&kernel, body, None);
                 m.sources.insert(kernel.clone(), source);
