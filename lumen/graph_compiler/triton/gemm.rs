@@ -201,7 +201,7 @@ fn gemm(
 ) -> Result<(), String> {
     let launch = GEMM
         .get()
-        .ok_or("the Triton backend's GEMM is Python's (lumen.codegen.dot_general.triton): none is installed")?;
+        .ok_or("the Triton backend's GEMM is Python's (lumen.codegen.dot_general.triton.gemm_kernel): none is installed")?;
 
     if let Primitive::LinearCrossEntropy = step.primitive {
         let config = tuned.copied().unwrap_or(CONFIGS[UNTUNED]);

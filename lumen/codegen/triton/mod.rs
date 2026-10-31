@@ -11,8 +11,6 @@ use crate::tensor::dtype::dispatch_dtype;
 use crate::tensor::storage::as_bytes;
 use crate::{DType, Element, Scalar};
 
-mod cross_entropy;
-
 pub(crate) use crate::codegen::attention::triton::{
     ATTENTION_CONFIGS, AttentionConfig, untuned_attention,
 };
@@ -34,7 +32,6 @@ pub(crate) use crate::codegen::kinds::reduction_root;
 pub(crate) use crate::codegen::reduction::triton::scan;
 pub(crate) use crate::codegen::row::triton::{ROW_PARTIALS, row_count, row_groups, row_looped};
 pub(crate) use crate::codegen::store::triton::{gather_index, load, store, stored_at};
-pub(crate) use cross_entropy::{cross_entropy_combine, cross_entropy_epilogue};
 
 /// The Triton code generator.
 pub(crate) struct Triton;

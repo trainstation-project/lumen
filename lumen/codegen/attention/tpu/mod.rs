@@ -1,5 +1,5 @@
-//! TPU flash attention: the Pallas forward and backward programs (`forward.py`, `backward.py` and their
-//! helpers in `__init__.py`, beside this file) and the specs generated per fusion for them: each attention
+//! TPU flash attention: the Pallas forward and backward programs (`forward_kernel.py`, `backward_kernel.py` and their
+//! helpers in `utils.py`, beside this file) and the specs generated per fusion for them: each attention
 //! operand and output checked to be read or written as whole tiles per head, and the blocks chosen
 //! (`config.rs`); and launching an attention fusion's program (`encode`).
 
@@ -784,8 +784,8 @@ fn written_at(
 #[cfg(lumen_tpu_linked)]
 fn run(index: usize, kind: &str, spec: String, rows: &[*const u8]) -> Result<(), String> {
     let module = match kind {
-        "forward" => "lumen.codegen.attention.tpu.forward",
-        _ => "lumen.codegen.attention.tpu.backward",
+        "forward" => "lumen.codegen.attention.tpu.forward_kernel",
+        _ => "lumen.codegen.attention.tpu.backward_kernel",
     };
 
     let launched = Launch {

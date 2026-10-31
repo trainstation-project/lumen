@@ -2,7 +2,7 @@
 
 import lumen.functional as F
 from lumen import pallas as pl
-from lumen.codegen.attention.tpu import (
+from lumen.codegen.attention.tpu.utils import (
     LANES,
     NN,
     NT,
@@ -15,8 +15,8 @@ from lumen.codegen.attention.tpu import (
     first_query_block,
     heads,
 )
-from lumen.codegen.attention.tpu import key_block as fetched
-from lumen.codegen.attention.tpu import (
+from lumen.codegen.attention.tpu.utils import key_block as fetched
+from lumen.codegen.attention.tpu.utils import (
     lanes,
     masked,
     matrix,

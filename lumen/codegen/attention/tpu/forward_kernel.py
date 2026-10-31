@@ -3,7 +3,7 @@
 import lumen
 import lumen.functional as F
 from lumen import pallas as pl
-from lumen.codegen.attention.tpu import (
+from lumen.codegen.attention.tpu.utils import (
     LANES,
     MASK,
     NN,
@@ -14,8 +14,8 @@ from lumen.codegen.attention.tpu import (
     chunk,
     heads,
 )
-from lumen.codegen.attention.tpu import key_block as fetched
-from lumen.codegen.attention.tpu import (
+from lumen.codegen.attention.tpu.utils import key_block as fetched
+from lumen.codegen.attention.tpu.utils import (
     masked,
     matrix,
     mul,

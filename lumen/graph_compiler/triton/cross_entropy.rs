@@ -3,24 +3,30 @@
 //! logit), then a kernel combining a row's tiles into its loss and `logsumexp`.
 
 use super::gemm::{Epilogue, Gemm};
-use super::{Function, Kernel, Launches};
+use super::{Function, Kernel, Launches, Template};
 use crate::codegen::triton::{self as codegen, Config, LOOP_CONFIGS, UNTUNED_LOOP};
 use crate::graph::Primitive;
 use crate::graph_compiler::plan::Step;
 use crate::tensor::contiguous_strides;
-use crate::{DType, Tensor, TensorOptions};
+use crate::{DType, Device, Tensor, TensorOptions};
 
-/// A linear cross entropy's prologues and epilogue, generated for its tensors' layouts.
+/// The fixed GEMM epilogue (lumen.codegen.dot_general.triton.linear_cross_entropy_kernel), bound by the source
+/// importing it.
+const EPILOGUE: &str = "cross_entropy_epilogue";
+
+/// A linear cross entropy's prologues for its tensors' layouts and its fixed epilogue.
 struct Prepared {
     functions: Vec<Function>,
     /// The kernels compiled for the GEMM and the combine.
     launches: Launches,
     /// `[batch, m, k, n]`: the rows, the hidden size and the classes.
     sizes: [usize; 4],
+    /// The epilogue's by-value scalars: the rows, the classes and the labels' stride.
+    scalars: [Tensor; 3],
 }
 
-/// The prologues reading `h` (`[b, d]`) and `w` (`[v, d]`) and the epilogue reducing their product's
-/// tiles, its labels `target`.
+/// The prologues reading `h` (`[b, d]`) and `w` (`[v, d]`), the epilogue reducing their product's tiles,
+/// and the scalars it reads its labels `target` with.
 fn prepare(h: &Tensor, w: &Tensor, target: &Tensor) -> Prepared {
     let dot = Primitive::DotGeneral {
         lhs_contracting: vec![1],
@@ -41,17 +47,21 @@ fn prepare(h: &Tensor, w: &Tensor, target: &Tensor) -> Prepared {
         (&logits, &contiguous_strides(&logits)),
     );
 
-    let epilogue =
-        codegen::cross_entropy_epilogue(rows, classes, (target.shape(), target.strides()));
+    let import = format!(
+        "from lumen.codegen.dot_general.triton.linear_cross_entropy_kernel import {EPILOGUE}\n"
+    );
+    let scalar =
+        |v: usize| Tensor::full(&[], v as i64, TensorOptions::new().device(Device::Cpu(0)));
 
     Prepared {
         functions: vec![
             Function::new("PROLOGUE_A", code.prologue_a),
             Function::new("PROLOGUE_B", code.prologue_b),
-            Function::new("EPILOGUE", epilogue),
+            Function::new("EPILOGUE", (EPILOGUE.into(), import)),
         ],
         sizes: code.sizes,
         launches: Launches::default(),
+        scalars: [scalar(rows), scalar(classes), scalar(target.strides()[0])],
     }
 }
 
@@ -89,11 +99,20 @@ pub(super) fn run(
         )
     };
 
-    let extra = [sums.clone(), picked.clone(), target.clone()];
+    let [rows_at, classes_at, stride_at] = &prepared.scalars;
+
+    let extra = [
+        sums.clone(),
+        picked.clone(),
+        target.clone(),
+        rows_at.clone(),
+        classes_at.clone(),
+        stride_at.clone(),
+    ];
 
     let epilogue = Epilogue {
         tensors: &extra,
-        scalars: &[],
+        scalars: &[3, 4, 5],
         flags: codegen::EpilogueFlags {
             group: 1,
             ..codegen::EpilogueFlags::default()
@@ -110,32 +129,32 @@ pub(super) fn run(
         &epilogue,
     )?;
 
-    let (name, source) = codegen::cross_entropy_combine(tiles, (out.shape(), out.strides()));
+    if !out.is_contiguous() {
+        return Err(format!(
+            "{}: the combine writes a contiguous [2, b] result, got strides {:?}",
+            step.label,
+            out.strides()
+        ));
+    }
+
     let partials = [peaks, sums, picked];
-
-    let functions: Vec<Function> = partials
-        .iter()
-        .enumerate()
-        .map(|(k, t)| Function::new(format!("LOAD{k}"), codegen::load(t.shape(), t.strides())))
-        .collect();
-
     let loop_config = LOOP_CONFIGS[UNTUNED_LOOP];
 
-    // One program a row: its lanes are the whole block.
+    // One program a row, its lanes the whole block: the fixed combine over contiguous partials and `out`.
     let kernel = Kernel {
-        name,
-        source,
+        name: "cross_entropy_combine".into(),
+        source: String::new(),
         by_value: vec![false; 3],
         lanes: loop_config.block_size,
         splits: 1,
         segments: Vec::new(),
-        template: None,
+        template: Some(Template::CrossEntropyCombine { tiles }),
     };
 
     super::launch(
         &kernel,
         &loop_config,
-        &functions,
+        &[],
         &prepared.launches,
         &partials,
         out,

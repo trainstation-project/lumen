@@ -398,7 +398,7 @@ pub(crate) fn encode(
         .collect();
 
     let launched = Launch {
-        module: "lumen.codegen.row.tpu",
+        module: "lumen.codegen.row.tpu.kernel",
         kernel,
         spec,
         rows: &rows_of,

@@ -82,13 +82,16 @@ pub struct Kernel {
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(not(feature = "python"), allow(dead_code))]
 pub enum Template {
-    /// `elementwise_kernel` (lumen.codegen.elementwise.triton): blocks of each grid segment's elements.
+    /// `elementwise_kernel` (lumen.codegen.elementwise.triton.kernel): blocks of each grid segment's elements.
     Elementwise,
-    /// `transpose_kernel` (lumen.codegen.layout.triton): `TILE` x `TILE` tiles of an `a` x `b` output, per
+    /// `transpose_kernel` (lumen.codegen.layout.triton.kernel): `TILE` x `TILE` tiles of an `a` x `b` output, per
     /// batch.
     Transpose { a: usize, b: usize },
-    /// `dynamic_update_slice_kernel` (lumen.codegen.dynamic_slice.triton): blocks of the update's elements.
+    /// `dynamic_update_slice_kernel` (lumen.codegen.dynamic_slice.triton.kernel): blocks of the update's elements.
     DynamicUpdateSlice,
+    /// `cross_entropy_combine_kernel` (lumen.codegen.dot_general.triton.linear_cross_entropy_kernel): one row a
+    /// program, its `tiles` partials `BLOCK_SIZE` at a time.
+    CrossEntropyCombine { tiles: usize },
     /// `scatter_add_kernel` (lumen.codegen.scatter_add.triton): blocks of the positions off the `length`-long
     /// axis (`after` inner ones per outer), adding `picks` updates at each.
     ScatterAdd {
@@ -103,11 +106,20 @@ impl Template {
     /// The Python module and name of the kernel.
     pub fn kernel(self) -> (&'static str, &'static str) {
         match self {
-            Template::Elementwise => ("lumen.codegen.elementwise.triton", "elementwise_kernel"),
-            Template::Transpose { .. } => ("lumen.codegen.layout.triton", "transpose_kernel"),
+            Template::Elementwise => (
+                "lumen.codegen.elementwise.triton.kernel",
+                "elementwise_kernel",
+            ),
+            Template::Transpose { .. } => {
+                ("lumen.codegen.layout.triton.kernel", "transpose_kernel")
+            }
             Template::DynamicUpdateSlice => (
-                "lumen.codegen.dynamic_slice.triton",
+                "lumen.codegen.dynamic_slice.triton.kernel",
                 "dynamic_update_slice_kernel",
+            ),
+            Template::CrossEntropyCombine { .. } => (
+                "lumen.codegen.dot_general.triton.linear_cross_entropy_kernel",
+                "cross_entropy_combine_kernel",
             ),
             Template::ScatterAdd { .. } => {
                 ("lumen.codegen.scatter_add.triton", "scatter_add_kernel")
@@ -117,7 +129,7 @@ impl Template {
 
     /// The kernel's constexprs for a launch over `n` outputs in `segments` (empty for one segment): a
     /// loop's segments' element counts, a transpose's output sides and tile, an update's element count, a
-    /// scatter-add's positions off the axis and its sizes.
+    /// cross entropy's rows and tiles, a scatter-add's positions off the axis and its sizes.
     pub fn constexprs(self, n: usize, segments: &[usize]) -> Vec<(&'static str, Constexpr)> {
         match self {
             Template::Elementwise => {
@@ -134,6 +146,9 @@ impl Template {
                 ("TILE", Constexpr::Int(TILE)),
             ],
             Template::DynamicUpdateSlice => vec![("N", Constexpr::Int(n))],
+            Template::CrossEntropyCombine { tiles } => {
+                vec![("N", Constexpr::Int(n)), ("TILES", Constexpr::Int(tiles))]
+            }
             Template::ScatterAdd {
                 length,
                 after,
