@@ -1,4 +1,5 @@
-//! Metal launch of `scatter_add`: copies the operand into the output, then adds the updates in.
+//! Metal scatter-adds: the fixed `scatter_add` kernels (`kernels.metal`) and their launch, which copies the
+//! operand into the output, then adds the updates in.
 
 use crate::graph::Primitive;
 use crate::graph_compiler::plan::Step;

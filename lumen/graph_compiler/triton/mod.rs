@@ -48,7 +48,6 @@ use super::plan::{Buffer, Step, Tuned};
 use super::{CompilerConfig, Options, Plan, plan_options, positions};
 use crate::codegen::dynamic_slice::DynamicSliceCodegen;
 use crate::codegen::elementwise::ElementwiseCodegen;
-use crate::codegen::indexing::IndexingCodegen;
 use crate::codegen::layout::{LayoutCodegen, TILE, transpose_tiling};
 use crate::codegen::reduction::ReductionCodegen;
 use crate::codegen::row::RowCodegen;
@@ -79,7 +78,7 @@ pub struct Kernel {
     pub template: Option<Template>,
 }
 
-/// A fixed Triton kernel a step's generated `BODY` runs in.
+/// A fixed Triton kernel a step's generated `BODY` runs in (a scatter-add's runs without one).
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[cfg_attr(not(feature = "python"), allow(dead_code))]
 pub enum Template {
@@ -90,6 +89,13 @@ pub enum Template {
     Transpose { a: usize, b: usize },
     /// `dynamic_update_slice_kernel` (lumen.codegen.dynamic_slice.triton): blocks of the update's elements.
     DynamicUpdateSlice,
+    /// `scatter_add_kernel` (lumen.codegen.scatter_add.triton): blocks of the positions off the `length`-long
+    /// axis (`after` inner ones per outer), adding `picks` updates at each.
+    ScatterAdd {
+        length: usize,
+        after: usize,
+        picks: usize,
+    },
 }
 
 #[cfg_attr(not(feature = "python"), allow(dead_code))]
@@ -103,11 +109,15 @@ impl Template {
                 "lumen.codegen.dynamic_slice.triton",
                 "dynamic_update_slice_kernel",
             ),
+            Template::ScatterAdd { .. } => {
+                ("lumen.codegen.scatter_add.triton", "scatter_add_kernel")
+            }
         }
     }
 
     /// The kernel's constexprs for a launch over `n` outputs in `segments` (empty for one segment): a
-    /// loop's segments' element counts, a transpose's output sides and tile, an update's element count.
+    /// loop's segments' element counts, a transpose's output sides and tile, an update's element count, a
+    /// scatter-add's positions off the axis and its sizes.
     pub fn constexprs(self, n: usize, segments: &[usize]) -> Vec<(&'static str, Constexpr)> {
         match self {
             Template::Elementwise => {
@@ -124,6 +134,16 @@ impl Template {
                 ("TILE", Constexpr::Int(TILE)),
             ],
             Template::DynamicUpdateSlice => vec![("N", Constexpr::Int(n))],
+            Template::ScatterAdd {
+                length,
+                after,
+                picks,
+            } => vec![
+                ("N", Constexpr::Int(n)),
+                ("LENGTH", Constexpr::Int(length)),
+                ("AFTER", Constexpr::Int(after)),
+                ("PICKS", Constexpr::Int(picks)),
+            ],
         }
     }
 }
@@ -416,12 +436,15 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
                 1,
             )
         }
-        Primitive::ScatterAdd { axis } => {
-            let (name, source) =
-                codegen::Triton::scatter_add(&step.inputs[0].1, *axis, step.inputs[1].1.numel())
-                    .expect("a Triton kernel of every scatter_add");
+        Primitive::ScatterAdd { .. } => {
+            let types: Vec<String> = step.inputs.iter().map(|(_, t)| t.to_string()).collect();
 
-            (name, source, 1, 1)
+            (
+                templated("scatter_add", &format!("{:?} {types:?}", step.primitive)),
+                String::new(),
+                1,
+                1,
+            )
         }
         _ => return None,
     };
@@ -445,6 +468,15 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
     let template = match &step.primitive {
         Primitive::Fusion { name, .. } if name == UPDATES => Some(Template::DynamicUpdateSlice),
         Primitive::DynamicUpdateSlice => Some(Template::DynamicUpdateSlice),
+        Primitive::ScatterAdd { axis } => {
+            let x = &step.inputs[0].1.shape;
+
+            Some(Template::ScatterAdd {
+                length: x[*axis],
+                after: x[axis + 1..].iter().product(),
+                picks: step.inputs[1].1.numel(),
+            })
+        }
         Primitive::Fusion { name, body, .. }
             if name != UPDATES && name != ROW && codegen::reduction_root(body).is_none() =>
         {
@@ -818,14 +850,13 @@ pub(crate) fn copy(dst: &Tensor, src: &Tensor) -> Result<(), String> {
 
 /// A loop step's generated helpers for its tensors' layouts, and the kernels compiled for them.
 struct Helpers {
-    /// The loads of its tensor inputs, then the stores of its outputs (and a scatter-add's load of its
-    /// output).
+    /// The loads of its tensor inputs, then the stores of its outputs; a templated step's `BODY` instead.
     functions: Vec<Function>,
     launches: Launches,
 }
 
 /// A loop step's helpers for its tensors' layouts: the loads of its tensor inputs, the stores of `out`
-/// and `outs` (and a scatter-add's load of `out`).
+/// and `outs`, or a templated step's `BODY`.
 fn loop_helpers(
     step: &Step,
     kernel: &Kernel,
@@ -833,6 +864,14 @@ fn loop_helpers(
     out: &Tensor,
     outs: &[Tensor],
 ) -> Helpers {
+    // A scatter-add's kernel is fixed: its tensors are contiguous, as it reads no strided inputs.
+    if let Some(Template::ScatterAdd { .. }) = kernel.template {
+        return Helpers {
+            functions: Vec::new(),
+            launches: Launches::default(),
+        };
+    }
+
     if let Some(template) = kernel.template {
         let owned = |t: &Tensor| (t.shape().to_vec(), t.strides().to_vec());
 
@@ -893,12 +932,6 @@ fn loop_helpers(
         ));
     }
 
-    if let Primitive::ScatterAdd { .. } = step.primitive {
-        functions.push(Function::new(
-            "OUTLOAD",
-            codegen::load(out.shape(), out.strides()),
-        ));
-    }
     Helpers {
         functions,
         launches: Launches::default(),
