@@ -842,9 +842,14 @@ class Compiled:
         copied into buffers of its own, and from then on replays: each call
         copies its arguments in and launches the graph. Weights and the
         workspace are read where they were captured; when one moves, the plan
-        is captured again."""
+        is captured again. While the profiler records, calls run uncaptured,
+        so its trace has their steps."""
         record = self._graphs.get(id(plan), ())
         if record is None or not self._capturable(key, plan):
+            return plan.run_in(workspace, inputs)
+        from lumen.profiler._C import _profiler_enabled
+
+        if _profiler_enabled():
             return plan.run_in(workspace, inputs)
         layout = self._plans[key][5]
         staged = [i for i, (kind, _) in enumerate(layout) if kind == "arg"]
@@ -874,8 +879,11 @@ class Compiled:
             with triton.on_stream(graph.stream):
                 outputs = plan.run_in(workspace, captured)
             graph.end()
-        except RuntimeError as e:
+        except BaseException as e:
+            # Dropping the graph ends its capture, so lumen launches on its own stream again.
             del graph
+            if isinstance(e, (KeyboardInterrupt, SystemExit)):
+                raise
             self._graphs[id(plan)] = None
             warnings.warn(f"{self._fn.__name__}: a CUDA graph could not capture its plan, which runs uncaptured: {e}")
             return plan.run_in(workspace, inputs)
@@ -885,9 +893,11 @@ class Compiled:
 
     def _capturable(self, key, plan):
         """Whether a CUDA graph may capture ``plan``, signature ``key``'s:
-        on CUDA with ``config.compiler.cuda.cuda_graphs``, writing nothing
-        back, with no runtime scalars, and ``plan.capturable``."""
-        if _device_type(key[1]) != "cuda" or not config.compiler.cuda.cuda_graphs:
+        on CUDA with ``config.compiler.cuda.cuda_graphs`` and the Triton
+        backend (without it, the plan runs on the CPU), writing nothing back,
+        with no runtime scalars, and ``plan.capturable``."""
+        cuda = config.compiler.cuda
+        if _device_type(key[1]) != "cuda" or not (cuda.cuda_graphs and cuda.use_triton_backend):
             return False
         written, written_scalars, written_arguments, host = self._plans[key][2]
         drawn, layout = self._plans[key][3], self._plans[key][5]

@@ -30,7 +30,7 @@ class CudaConfig(CompilerConfig):
     deterministic: bool = False
     normalization_diamonds: bool = True
     fused_linear_cross_entropy: bool = True
-    cuda_graphs: bool = False
+    cuda_graphs: bool = True
 
 class MpsConfig(CompilerConfig):
     """The MPS compiler's settings (``lumen.config.compiler.mps``)."""

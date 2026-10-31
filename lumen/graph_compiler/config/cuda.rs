@@ -13,7 +13,7 @@ device_config! {
         normalization_diamonds, set_normalization_diamonds: bool = true;
         fused_linear_cross_entropy, set_fused_linear_cross_entropy: bool = true;
         deterministic, set_deterministic: bool = false;
-        cuda_graphs, set_cuda_graphs: bool = false;
+        cuda_graphs, set_cuda_graphs: bool = true;
     }
 }
 
