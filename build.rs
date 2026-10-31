@@ -165,7 +165,7 @@ const PRIMITIVE_KERNELS: &[&str] = &[
     "lumen/codegen/random/mps/philox.metal",
     "lumen/codegen/random/mps/kernel.metal",
     "lumen/codegen/reduction/mps/kernel.metal",
-    "lumen/kernels/scan/mps/kernels.metal",
+    "lumen/codegen/scan/mps/kernel.metal",
     "lumen/codegen/dot_general/mps/integer/matmul_kernel.metal",
     "lumen/codegen/dot_general/mps/integer/matmul_wide_kernel.metal",
     "lumen/codegen/dot_general/mps/tiled/matmul_sg_kernel.metal",

@@ -1,5 +1,7 @@
 //! Metal encoding of `Cumsum`, splitting long scans into chunks scanned in three passes.
 use crate::codegen::reduction::mps::kernel_dtype;
+use crate::codegen::scan::ScanCodegen;
+use crate::codegen::utils::mps::Mps;
 use crate::graph::{Primitive, TensorType};
 use crate::graph_compiler::plan::Step;
 use crate::kernels::mps::{Grid, launch, u32_arg, u64_arg};
@@ -57,6 +59,17 @@ fn scan(x: &TensorType, axis: usize) -> Scan {
         rows,
         chunks: n.div_ceil(chunk).max(1),
         chunk,
+    }
+}
+
+/// Metal runs a cumsum with its fixed kernel (`encode`): there is no code to generate.
+impl ScanCodegen for Mps {
+    /// Nothing: every scan fails.
+    type Code = ();
+
+    /// Fails: `x`'s cumsum runs Metal's fixed kernel.
+    fn scan(x: &TensorType, _: usize, _: bool, _: DType) -> Result<(), String> {
+        Err(format!("a cumsum of {x} runs Metal's fixed kernel"))
     }
 }
 

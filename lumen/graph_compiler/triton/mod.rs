@@ -54,9 +54,10 @@ use crate::codegen::elementwise::triton::{
 use crate::codegen::kinds::{gemm_dot, reduction_root};
 use crate::codegen::layout::{LayoutCodegen, TILE, transpose_tiling};
 use crate::codegen::reduction::ReductionCodegen;
-use crate::codegen::reduction::triton::scan;
 use crate::codegen::row::RowCodegen;
 use crate::codegen::row::triton::{row_count, row_groups, row_looped};
+use crate::codegen::scan::ScanCodegen;
+use crate::codegen::scan::triton::Scan;
 use crate::codegen::store::triton::{load, store};
 use crate::codegen::utils::triton as codegen;
 use crate::graph::{Graph, Primitive, TensorType, UPDATES};
@@ -106,6 +107,9 @@ pub enum Template {
         after: usize,
         picks: usize,
     },
+    /// `scan_kernel` (lumen.codegen.scan.triton.kernel): a tile of the lines a program, scanned as `Scan`
+    /// tiles them.
+    Scan(Scan),
 }
 
 #[cfg_attr(not(feature = "python"), allow(dead_code))]
@@ -131,12 +135,14 @@ impl Template {
             Template::ScatterAdd { .. } => {
                 ("lumen.codegen.scatter_add.triton", "scatter_add_kernel")
             }
+            Template::Scan(_) => ("lumen.codegen.scan.triton.kernel", "scan_kernel"),
         }
     }
 
     /// The kernel's constexprs for a launch over `n` outputs in `segments` (empty for one segment): a
     /// loop's segments' element counts, a transpose's output sides and tile, an update's element count, a
-    /// cross entropy's rows and tiles, a scatter-add's positions off the axis and its sizes.
+    /// cross entropy's rows and tiles, a scatter-add's positions off the axis and its sizes, a scan's lines
+    /// and tiling.
     pub fn constexprs(self, n: usize, segments: &[usize]) -> Vec<(&'static str, Constexpr)> {
         match self {
             Template::Elementwise => {
@@ -166,6 +172,15 @@ impl Template {
                 ("AFTER", Constexpr::Int(after)),
                 ("PICKS", Constexpr::Int(picks)),
             ],
+            Template::Scan(scan) => vec![
+                ("N", Constexpr::Int(n)),
+                ("LENGTH", Constexpr::Int(scan.length)),
+                ("INNER", Constexpr::Int(scan.inner)),
+                ("LANES", Constexpr::Int(scan.lanes)),
+                ("ROWS", Constexpr::Int(scan.rows.into())),
+                ("REVERSE", Constexpr::Int(scan.reverse.into())),
+                ("ACCUM_DTYPE", Constexpr::DType(scan.accum_dtype)),
+            ],
         }
     }
 }
@@ -177,6 +192,8 @@ pub enum Constexpr {
     Int(usize),
     /// A tuple of ints.
     Ints(Vec<usize>),
+    /// A `triton.language` dtype.
+    DType(DType),
 }
 
 /// A jit helper bound to a kernel's constexpr parameter.
@@ -438,15 +455,16 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
                 1,
             ),
         },
-        Primitive::Cumsum {
-            axis,
-            reverse,
-            accum_dtype,
-        } => {
-            let (name, source, lanes) = scan(&step.inputs[0].1, *axis, *reverse, *accum_dtype);
-
-            (name, source, lanes, 1)
-        }
+        // A cumsum runs in the scan template, loading and storing through helpers for its layouts.
+        Primitive::Cumsum { .. } => (
+            templated(
+                "scan",
+                &format!("{:?} {}", step.primitive, step.inputs[0].1),
+            ),
+            String::new(),
+            scan(step)?.lanes,
+            1,
+        ),
         Primitive::DynamicUpdateSlice => {
             let types: Vec<String> = step.inputs.iter().map(|(_, t)| t.to_string()).collect();
 
@@ -485,6 +503,7 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
 
     // An elementwise fusion computed from transposes it can tile runs a tile of the output a program.
     let template = match &step.primitive {
+        Primitive::Cumsum { .. } => Some(Template::Scan(scan(step)?)),
         Primitive::Fusion { name, .. } if name == UPDATES => Some(Template::DynamicUpdateSlice),
         Primitive::DynamicUpdateSlice => Some(Template::DynamicUpdateSlice),
         Primitive::ScatterAdd { axis } => {
@@ -519,6 +538,22 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
         segments,
         template,
     })
+}
+
+/// How the scan template tiles cumsum `step`, or `None` for a step that is not one.
+fn scan(step: &Step) -> Option<Scan> {
+    let Primitive::Cumsum {
+        axis,
+        reverse,
+        accum_dtype,
+    } = step.primitive
+    else {
+        return None;
+    };
+
+    let scan = codegen::Triton::scan(&step.inputs[0].1, axis, reverse, accum_dtype);
+
+    Some(scan.expect("a Triton scan of every cumsum"))
 }
 
 /// Autotuning candidates for loop kernels.
@@ -890,7 +925,8 @@ fn loop_helpers(
         };
     }
 
-    if let Some(template) = kernel.template {
+    // A scan's kernel is fixed too, its tensors loaded and stored through the helpers below.
+    if let Some(template) = kernel.template.filter(|t| !matches!(t, Template::Scan(_))) {
         let owned = |t: &Tensor| (t.shape().to_vec(), t.strides().to_vec());
 
         let layouts = codegen::Tensors {

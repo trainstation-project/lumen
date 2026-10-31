@@ -574,6 +574,13 @@ fn triton_loop(
                     super::triton::Constexpr::Ints(v) => {
                         values.set_item(key, pyo3::types::PyTuple::new(py, v)?)?
                     }
+                    super::triton::Constexpr::DType(dtype) => {
+                        let name = crate::codegen::utils::triton::triton_type(*dtype)
+                            .expect("a Triton dtype")
+                            .trim_start_matches("tl.");
+
+                        values.set_item(key, py.import("triton.language")?.getattr(name)?)?
+                    }
                 }
             }
 
