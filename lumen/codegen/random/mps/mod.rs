@@ -31,5 +31,6 @@ pub(crate) fn encode(
     let n = step.output.1.numel();
     let args = [u64_arg(offset as usize), u32_arg(n as u32)];
     let grid = elementwise_grid(n, step.output.1.dtype);
+
     launch_step(step, "random_bits", inputs, output, &args, grid, keep)
 }
