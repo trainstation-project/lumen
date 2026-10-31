@@ -56,7 +56,7 @@ use crate::codegen::layout::{LayoutCodegen, TILE, transpose_tiling};
 use crate::codegen::reduction::ReductionCodegen;
 use crate::codegen::row::RowCodegen;
 use crate::codegen::row::triton::{row_count, row_groups, row_looped};
-use crate::codegen::scan::triton::scan;
+use crate::codegen::scan::ScanCodegen;
 use crate::codegen::store::triton::{load, store};
 use crate::codegen::utils::triton as codegen;
 use crate::graph::{Graph, Primitive, TensorType, UPDATES};
@@ -443,7 +443,9 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
             reverse,
             accum_dtype,
         } => {
-            let (name, source, lanes) = scan(&step.inputs[0].1, *axis, *reverse, *accum_dtype);
+            let (name, source, lanes) =
+                codegen::Triton::scan(&step.inputs[0].1, *axis, *reverse, *accum_dtype)
+                    .expect("a Triton scan of every cumsum");
 
             (name, source, lanes, 1)
         }
