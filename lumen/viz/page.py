@@ -11,7 +11,7 @@ from lumen.graph._C import FUSION_SEPARATOR
 from lumen.graph_compiler._C import Plan
 from lumen.profiler import ProfilerActivity, profile
 
-from .common import KERNELS, LUMEN, source_of, type_text
+from .common import KERNELS, LUMEN, prelude, source_of, type_text
 
 
 def profile_steps(plan, run, runs, device):
@@ -229,7 +229,7 @@ def collect(graph, plan, inputs, title, runs=5, device=None, run=None, scalars=(
         "views": views,
         "sources": {f: (LUMEN / f).read_text() for f in files},
         "code": code_of(view["nodes"] for view in views.values()),
-        "prelude": (KERNELS / "mps" / "kernels.metal").read_text(),
+        "prelude": prelude(),
     }
 
 

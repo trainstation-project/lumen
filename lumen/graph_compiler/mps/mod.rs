@@ -65,6 +65,7 @@ unsafe extern "C" {
 /// Kernel templates and helpers every generated Metal source is compiled against.
 const PRELUDE: &str = concat!(
     include_str!("../../kernels/mps/kernels.metal"),
+    include_str!("../../codegen/random/mps/philox.metal"),
     indoc::indoc!(
         "
 

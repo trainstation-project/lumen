@@ -11,6 +11,7 @@ use indoc::formatdoc;
 
 use super::AttentionCodegen;
 use crate::codegen::mps::*;
+use crate::codegen::random::RandomCodegen;
 use crate::graph::{Graph, Var};
 use crate::graph_compiler::common::attention::{
     Access, Attention, Backward, Dropout, Score, Strides, Term, grid_batch,
@@ -399,7 +400,8 @@ impl AttentionCodegen for Mps {
     fn dropout(d: &Dropout, dtype: DType, sq: usize, sk: usize) -> Result<String, String> {
         let t = metal_type(dtype);
         let scale = constant(dtype, Scalar::Float(d.scale));
-        let (offset, threshold) = (d.offset, d.threshold);
+        let threshold = d.threshold;
+        let bits = Mps::bits("seed", "start", d.offset, "at");
 
         Ok(formatdoc!(
             "
@@ -407,7 +409,7 @@ impl AttentionCodegen for Mps {
                 ulong seed, start;
                 inline {t} operator()({t} x, uint b, uint i, uint j) const {{
                     ulong at = (ulong(b) * {sq}ul + i) * {sk}ul + j;
-                    bool dropped = philox_bits(seed, start + {offset}ul + at) < {threshold}u;
+                    bool dropped = {bits} < {threshold}u;
                     return dropped ? {t}(0) : {t}(Mul::apply(x, {scale}));
                 }}
             }};
