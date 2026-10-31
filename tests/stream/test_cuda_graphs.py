@@ -87,13 +87,37 @@ def test_cuda_graphs_read_weights_in_place(device, cuda_graphs):
     np.testing.assert_allclose(lumen.to_numpy(compiled(first, X)), np.tanh(x @ (2 * w)), rtol=1e-4, atol=1e-4)
 
 
+class Counted(lumen.nn.Module):
+    """A weight and a step count, as an optimizer keeps them."""
+
+    w: lumen.Tensor
+    t: int
+
+
 @pytest.mark.parametrize("device", [CUDA])
-def test_cuda_graphs_leave_runtime_scalars_uncaptured(device, cuda_graphs):
-    """A plan with a runtime scalar (an int seen with two values) reads it
-    on the host each call, so no graph captures it: it runs as usual."""
-    x = rand(1024)
-    compiled = lumen.compile(lambda x, n: x * n)
+def test_cuda_graphs_replay_runtime_scalars_and_write_back(device, cuda_graphs):
+    """A step reading a runtime scalar (the count, an int seen with two
+    values), writing its weight in place and counting itself, as AdamW's
+    does, is captured with the count a device input: every replay reads
+    that call's count, and the weight and count are written back."""
+    x, w = rand(256), rand(256, seed=1)
+
+    def step(m, x):
+        """Adds ``x · t`` to the weight, ``t`` the step's number, and returns the weight's sum."""
+        m.t = m.t + 1
+        m.w.copy_(m.w + x * m.t)
+        return F.sum(m.w)
+
+    compiled = lumen.compile(step, device=device)
+    m = Counted(meta(256), 0)
+    compiled(m, meta(256))
+    m.load_state_dict({"w": lumen.from_numpy(w)})
     X = lumen.from_numpy(x).to(device)
-    for n in range(1, 5):
-        np.testing.assert_allclose(lumen.to_numpy(compiled(X, n)), x * n, rtol=1e-6)
-    assert not any(compiled._graphs.values())
+    want = w.astype(np.float64)
+    for t in range(1, 7):
+        got = compiled(m, X)
+        want = want + x * t
+        assert m.t == t
+        np.testing.assert_allclose(lumen.to_numpy(got), want.sum(), rtol=1e-5)
+    np.testing.assert_allclose(lumen.to_numpy(m.w._placed(device).to("cpu")), want, rtol=1e-5)
+    assert any(compiled._graphs.values())
