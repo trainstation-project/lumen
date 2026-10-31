@@ -54,9 +54,9 @@ use crate::codegen::elementwise::triton::{
 use crate::codegen::kinds::{gemm_dot, reduction_root};
 use crate::codegen::layout::{LayoutCodegen, TILE, transpose_tiling};
 use crate::codegen::reduction::ReductionCodegen;
-use crate::codegen::reduction::triton::scan;
 use crate::codegen::row::RowCodegen;
 use crate::codegen::row::triton::{row_count, row_groups, row_looped};
+use crate::codegen::scan::triton::scan;
 use crate::codegen::store::triton::{load, store};
 use crate::codegen::utils::triton as codegen;
 use crate::graph::{Graph, Primitive, TensorType, UPDATES};

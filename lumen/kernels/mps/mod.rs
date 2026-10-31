@@ -271,7 +271,7 @@ pub(crate) fn encode(
         return crate::codegen::reduction::mps::encode(step, inputs, output, scratch, keep);
     }
     if let Cumsum { .. } = step.primitive {
-        return super::scan::mps::encode(step, inputs, output, scratch, keep);
+        return crate::codegen::scan::mps::encode(step, inputs, output, scratch, keep);
     }
     if let Fusion { .. } = step.primitive {
         return crate::graph_compiler::mps::encode(step, inputs, output, scratch, keep);
@@ -353,7 +353,7 @@ pub(crate) fn scratch_bytes(p: &Primitive, inputs: &[&TensorType], _output: &Ten
         }
         Primitive::Cumsum {
             axis, accum_dtype, ..
-        } => super::scan::mps::scratch_bytes(inputs[0], *axis, *accum_dtype),
+        } => crate::codegen::scan::mps::scratch_bytes(inputs[0], *axis, *accum_dtype),
         Primitive::Fusion { body, .. } => crate::graph_compiler::mps::fusion_scratch_bytes(body),
         Primitive::LinearCrossEntropy => {
             crate::codegen::dot_general::mps::linear_cross_entropy_scratch(inputs[0], inputs[1])

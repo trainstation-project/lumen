@@ -13,6 +13,7 @@ pub(crate) mod random;
 pub(crate) mod reduction;
 pub(crate) mod regions;
 pub(crate) mod row;
+pub(crate) mod scan;
 pub(crate) mod scatter_add;
 pub(crate) mod store;
 pub(crate) mod utils;
