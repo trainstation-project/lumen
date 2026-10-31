@@ -23,6 +23,55 @@ def test_graph_text():
     )
 
 
+def test_a_compiled_function_prints_its_program():
+    """``lumen.compile`` returns a ``Compiled`` named after the function; it
+    prints the traced program of its latest call's signature, as
+    ``dump_code``'s ``program.py``, and says when nothing is traced yet."""
+
+    def scaled(x):
+        """Doubles `x`."""
+        return x * 2.0
+
+    f = lumen.compile(scaled)
+    assert isinstance(f, lumen.graph.tracer.Compiled) and f.__name__ == "scaled" and f.__doc__ == "Doubles `x`."
+    assert str(f) == "<lumen.compile of scaled: not called yet, so nothing is traced>"
+    f(lumen.ones([3]))
+    assert str(f) == lumen.viz.program_source(lumen.make_graph(scaled)(lumen.ones([3])))
+
+
+def test_deallocate_memory_frees_the_workspaces_until_allocate_memory():
+    """``deallocate_memory`` frees every plan's workspace, calls raise until
+    ``allocate_memory`` allocates them again, and the plans stay compiled."""
+    from lumen.profiler import ProfilerActivity, profile
+
+    traces = []
+
+    def f(x):
+        """Records each trace and sums `x`'s rows."""
+        traces.append(x.shape)
+        return F.sum(x * x, -1)
+
+    f = lumen.compile(f)
+    x = lumen.ones([2, 3])
+    f(x)
+    f(lumen.ones([4, 3]))
+    sizes = sorted(plan.workspace_bytes for *_, entries in f._plans.values() for plan, _ in entries)
+
+    f.deallocate_memory()
+    with pytest.raises(RuntimeError, match="allocate_memory"):
+        f(x)
+    # The profiler pairs a free with the allocation it saw, so both happen while it records.
+    with profile(activities=[ProfilerActivity.CPU], profile_memory=True) as prof:
+        f.allocate_memory()
+        f.allocate_memory()
+        f.deallocate_memory()
+        f.allocate_memory()
+    events = [e["bytes"] for e in prof.events() if e["kind"] == "memory"]
+    assert sorted(events[:2]) == sizes and sorted(events[2:4]) == sorted(-n for n in sizes) and len(events) == 6
+    assert lumen.to_numpy(f(x)).tolist() == [3.0, 3.0]
+    assert len(traces) == 2
+
+
 def test_traces_once_per_signature():
     """A compiled function retraces only for new shapes, dtypes or Python scalar values."""
     traces = []
