@@ -2,8 +2,7 @@
 
 import lumen.functional as F
 from lumen import pallas as pl
-from lumen.codegen.utils.tpu import computed
-from lumen.kernels.tpu import pallas
+from lumen.codegen.utils.tpu import computed, pallas
 
 
 def program(spec):

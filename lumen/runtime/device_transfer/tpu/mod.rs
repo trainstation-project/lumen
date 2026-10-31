@@ -6,7 +6,7 @@ use crate::Tensor;
 use crate::allocator::tpu::ROW;
 use crate::device::Device;
 use crate::device::tpu::layout::Layout;
-use crate::kernels::tpu::{Launch, flush, launch};
+use crate::runtime::tpu::{Launch, flush, launch};
 
 /// The TPU tiled layout of `t`'s dtype and shape.
 fn layout(t: &Tensor) -> Layout {

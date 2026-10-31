@@ -8,7 +8,7 @@ use crate::codegen::row::tpu::{Kind, kinds, readable, row_node, rows};
 use crate::device::tpu::layout::Layout;
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::plan::Step;
-use crate::kernels::tpu::{Launch, launch};
+use crate::runtime::tpu::{Launch, launch};
 
 /// VMEM budget, in bytes, a GEMM-row block may use.
 const VMEM: usize = 88 << 20;

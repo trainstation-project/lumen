@@ -2,4 +2,6 @@
 
 pub(crate) mod device_transfer;
 pub(crate) mod dispatch;
+#[cfg(lumen_tpu_linked)]
+pub(crate) mod tpu;
 pub(crate) mod wait;

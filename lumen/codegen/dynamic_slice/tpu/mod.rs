@@ -7,7 +7,7 @@ use crate::codegen::utils::tpu::Tpu;
 use crate::device::tpu::layout::Layout;
 use crate::graph::{Graph, Primitive, TensorType};
 use crate::graph_compiler::plan::Step;
-use crate::kernels::tpu::{Launch, launch};
+use crate::runtime::tpu::{Launch, launch};
 use crate::tensor::scalar::Scalar;
 
 /// Lane width of a TPU tile.

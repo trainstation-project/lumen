@@ -6,7 +6,7 @@ use crate::codegen::utils::tpu::Tpu;
 use crate::device::tpu::layout::Layout;
 use crate::graph::{Graph, TensorType};
 use crate::graph_compiler::plan::Step;
-use crate::kernels::tpu::{Launch, launch};
+use crate::runtime::tpu::{Launch, launch};
 
 /// TPU layout: the fixed reshape Pallas program, specialized by a spec of the split or merged last dim;
 /// transposes fuse into the elementwise kernels.

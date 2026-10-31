@@ -1388,7 +1388,7 @@ impl Plan {
 
         #[cfg(lumen_tpu_linked)]
         let batch = match executor {
-            Device::Tpu(index) => Some(crate::kernels::tpu::Batch::new(index)),
+            Device::Tpu(index) => Some(crate::runtime::tpu::Batch::new(index)),
             _ => None,
         };
 
@@ -1543,7 +1543,7 @@ impl Plan {
                 #[cfg(lumen_tpu_linked)]
                 Device::Tpu(index) => {
                     let _ = scratch;
-                    crate::kernels::tpu::encode(index, step, &args, out)?;
+                    crate::runtime::tpu::encode(index, step, &args, out)?;
                 }
                 Device::Cuda(_) => {
                     let _ = scratch;

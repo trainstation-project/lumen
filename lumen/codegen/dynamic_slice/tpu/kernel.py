@@ -6,8 +6,8 @@ Unaligned updates are rolled into place inside tile-aligned windows; aligned one
 import math
 
 from lumen import pallas as pl
+from lumen.codegen.utils.tpu import pallas
 from lumen.graph import prims
-from lumen.kernels.tpu import pallas
 
 # Lane width of a TPU tile.
 LANES = 128
