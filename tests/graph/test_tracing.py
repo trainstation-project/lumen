@@ -41,9 +41,11 @@ def test_a_compiled_function_prints_its_program():
 
 def test_deallocate_memory_frees_the_current_plans_workspace():
     """``deallocate_memory`` frees the workspace of the latest call's
-    signature's plan only: other signatures keep running, that one raises
-    until ``allocate_memory`` allocates it again, and nothing retraces."""
-    from lumen.profiler import ProfilerActivity, profile
+    signature's plan only: the memory the function holds is 0 before its
+    first call and 0 again once every plan's is freed; other signatures keep
+    running, a freed one raises until ``allocate_memory``, and nothing
+    retraces."""
+    from lumen.profiler import ProfilerActivity, profile, record_function
 
     traces = []
 
@@ -54,22 +56,52 @@ def test_deallocate_memory_frees_the_current_plans_workspace():
 
     f = lumen.compile(f)
     small, large = lumen.ones([2, 3]), lumen.ones([4, 3])
-    f(small)
-    f(large)
-    ((large_plan, _),) = f._plans[f._latest[0]][6]
-    f.deallocate_memory()
-    assert lumen.to_numpy(f(small)).tolist() == [3.0, 3.0]
-    with pytest.raises(RuntimeError, match="allocate_memory"):
-        f(large)
-    # The profiler pairs a free with the allocation it saw, so both happen while it records.
+    phases = []
+
+    def phase(name, action):
+        """Runs `action` in a profiler range named `name`."""
+        with record_function(name):
+            action()
+        phases.append(name)
+
+    def raises(x):
+        """Checks a call with `x` raises, its plan's memory freed."""
+        with pytest.raises(RuntimeError, match="allocate_memory"):
+            f(x)
+
     with profile(activities=[ProfilerActivity.CPU], profile_memory=True) as prof:
-        f.allocate_memory()
-        f.allocate_memory()
-        f.deallocate_memory()
-        f.allocate_memory()
-    events = [e["bytes"] for e in prof.events() if e["kind"] == "memory"]
-    assert events == [large_plan.workspace_bytes, -large_plan.workspace_bytes, large_plan.workspace_bytes]
-    assert lumen.to_numpy(f(large)).tolist() == [3.0] * 4
+        phase("before", lambda: None)
+        phase("small", lambda: f(small))
+        phase("large", lambda: f(large))
+        phase("large freed", f.deallocate_memory)
+        phase("small runs", lambda: f(small))
+        phase("large raises", lambda: raises(large))
+        phase("large allocated", f.allocate_memory)
+        phase("allocated twice", f.allocate_memory)
+        phase("large runs", lambda: f(large))
+        phase("large freed again", f.deallocate_memory)
+        phase("small current", lambda: f(small))
+        phase("after", f.deallocate_memory)
+    events = prof.events()
+    ends = {e["name"]: e["end_us"] for e in events if e["kind"] == "user_range"}
+    memory = [e for e in events if e["kind"] == "memory"]
+    # The bytes allocated and not yet freed at the end of each phase.
+    held = {p: sum(m["bytes"] for m in memory if m["start_us"] <= ends[p]) for p in phases}
+    small_bytes, large_bytes = (plan.workspace_bytes for *_, entries in f._plans.values() for plan, _ in entries)
+    assert held == {
+        "before": 0,
+        "small": small_bytes,
+        "large": small_bytes + large_bytes,
+        "large freed": small_bytes,
+        "small runs": small_bytes,
+        "large raises": small_bytes,
+        "large allocated": small_bytes + large_bytes,
+        "allocated twice": small_bytes + large_bytes,
+        "large runs": small_bytes + large_bytes,
+        "large freed again": small_bytes,
+        "small current": small_bytes,
+        "after": 0,
+    }
     assert len(traces) == 2
 
 
