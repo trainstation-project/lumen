@@ -1,9 +1,9 @@
 //! Tests for the shared graph compiler passes: CSE, simplification, host stages and the pass pipeline.
 use super::common::cse::cse;
 use crate::graph::Primitive::*;
+use crate::graph::reference;
 use crate::graph::{Graph, Primitive, TensorType, Var};
 use crate::graph_compiler::plan_tests::data;
-use crate::kernels::reference;
 use crate::{DType, Scalar};
 
 /// An `f32` tensor type of `shape`.

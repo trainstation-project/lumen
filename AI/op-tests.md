@@ -14,7 +14,7 @@ untested.
 ## Rules
 
 1. **The CPU is the oracle.** The CPU interpreter
-   (`lumen/kernels/reference.rs`) defines each op. A device test compiles
+   (`lumen/graph/reference.rs`) defines each op. A device test compiles
    the same function on the device and on the CPU (`lumen.compile(f,
    device=...)`) and compares the two, not a device against numpy alone.
 2. **Every supported dtype.** Floats (float32, bfloat16, float16, float64

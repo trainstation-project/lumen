@@ -1,9 +1,9 @@
 //! The profiler: a global session that records op and user ranges, memory events and device kernel
 //! timings as nested events, summarized by `Profile` and exportable as a Chrome trace.
 mod chrome;
-pub(crate) mod launched;
 #[cfg(lumen_cupti_linked)]
 pub(crate) mod cupti;
+pub(crate) mod launched;
 #[cfg(feature = "python")]
 pub(crate) mod python;
 mod summary;

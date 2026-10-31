@@ -2,7 +2,7 @@
 
 use super::Primitive::*;
 use super::{Graph, Primitive, TensorType};
-use crate::kernels::reference;
+use crate::graph::reference;
 use crate::tensor::dtype::bf16;
 use crate::{DType, Scalar, Tensor};
 

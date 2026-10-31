@@ -350,7 +350,7 @@ impl PyGraph {
         let inputs: Vec<_> = inputs.iter().map(|t| t.inner.clone()).collect();
 
         let outputs =
-            crate::kernels::reference::run(&self.inner, &inputs).map_err(PyValueError::new_err)?;
+            crate::graph::reference::run(&self.inner, &inputs).map_err(PyValueError::new_err)?;
 
         Ok(outputs.into_iter().map(PyTensor::wrap).collect())
     }

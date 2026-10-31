@@ -5,7 +5,6 @@ pub mod factory;
 pub(crate) mod mps;
 #[cfg(feature = "python")]
 pub mod python;
-pub mod reference;
 #[cfg(test)]
 mod tests;
 #[cfg(lumen_tpu_linked)]

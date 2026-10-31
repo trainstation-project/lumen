@@ -8,8 +8,8 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 
 pub use crate::graph::View;
+use crate::graph::reference;
 use crate::graph::{Graph, NEURAL_ENGINE, Node, Primitive, Scope, TensorType, UPDATES, Var};
-use crate::kernels::reference;
 use crate::tensor::contiguous_strides;
 use crate::tensor::dtype::dispatch_dtype;
 use crate::{DType, Device, Tensor, TensorOptions};
