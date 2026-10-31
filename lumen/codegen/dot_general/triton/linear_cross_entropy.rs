@@ -5,7 +5,7 @@
 
 use indoc::formatdoc;
 
-use super::{load, named, stored_at};
+use crate::codegen::triton::{load, named, stored_at};
 
 /// Generates the GEMM epilogue of a linear cross entropy over `rows` rows of `classes` logits, whose
 /// labels have layout `target`: a tile of `BLOCK_SIZE_N` classes writes, per row, its max to `ptr` and

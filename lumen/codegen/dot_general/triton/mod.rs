@@ -2,9 +2,11 @@
 //! column regions of the GEMM output.
 
 mod config;
+mod linear_cross_entropy;
 pub(crate) mod row;
 
 pub(crate) use config::*;
+pub(crate) use linear_cross_entropy::{cross_entropy_combine, cross_entropy_epilogue};
 
 use std::fmt::Write;
 
