@@ -9,7 +9,7 @@ mod tests;
 use super::common::updates::Updates;
 use diamonds::Diamonds;
 use flash_attention_backward::FlashAttentionBackward;
-use fusion::{DotRows, FuseDots, HorizontalFusion, LoopFusion};
+use fusion::{DotRows, FuseDots, Fusion, HorizontalFusion};
 use place_concats::PlaceConcats;
 
 use super::common::attention;
@@ -153,7 +153,7 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         })
         .add(FuseDots)
         .add(PlaceConcats)
-        .add(LoopFusion);
+        .add(Fusion);
 
     if options.config.tpu.horizontal_fusion {
         pipeline.add(HorizontalFusion);

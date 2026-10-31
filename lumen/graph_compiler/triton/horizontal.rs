@@ -1,4 +1,4 @@
-//! Horizontal fusion of independent small elementwise `loop` fusions into one Triton launch;
+//! Horizontal fusion of independent small `elementwise` fusions into one Triton launch;
 //! members of one element count share a grid range, others get their own.
 
 use super::TritonModule;
@@ -10,17 +10,17 @@ use crate::graph_compiler::common::horizontal::{
 use crate::graph_compiler::elementwise;
 use crate::graph_compiler::pass::CompilerPass;
 
-/// Largest output, in elements, of a loop fusion eligible for horizontal fusion.
+/// Largest output, in elements, of an elementwise fusion eligible for horizontal fusion.
 const MAX_ELEMENTS: usize = 1 << 20;
 
 /// Most tensors one horizontally fused kernel may read and write.
 const MAX_BUFFERS: usize = 64;
 
-/// Horizontal fusion target that merges small elementwise Triton `loop` fusions.
-struct Loops;
+/// Horizontal fusion target that merges small Triton `elementwise` fusions.
+struct Elementwise;
 
-impl Target for Loops {
-    /// Accepts non-empty, small `loop` fusions without a reduction or GEMM, as MPS's target does: a node
+impl Target for Elementwise {
+    /// Accepts non-empty, small `elementwise` fusions, as MPS's target does: a node
     /// alone joins only when elementwise (MPS runs a lone fill, iota or the like as its own step).
     fn candidate(&self, graph: &Graph, node: &Node) -> bool {
         let elements = graph.type_of(node.output).numel();
@@ -34,7 +34,7 @@ impl Target for Loops {
             _ => false,
         };
 
-        name == "loop"
+        name == "elementwise"
             && elements > 0
             && elements <= MAX_ELEMENTS
             && !alone
@@ -42,7 +42,7 @@ impl Target for Loops {
             && codegen::gemm_dot(body).is_none()
     }
 
-    /// Groups loops of any size together (they split the grid), and tiled transposes by exact shape, as
+    /// Groups elementwise fusions of any size together (they split the grid), and tiled transposes by exact shape, as
     /// MPS's target does.
     fn key(&self, graph: &Graph, node: &Node) -> Vec<usize> {
         tiling_key(graph, node)
@@ -58,13 +58,13 @@ impl Target for Loops {
         keeps_tiling(graph, members, body)
     }
 
-    /// Names the merged kernel `loop`; its source is generated per plan step.
+    /// Names the merged kernel `elementwise`; its source is generated per plan step.
     fn kernel(&mut self, _: &Graph, _: &[bool]) -> String {
-        "loop".into()
+        "elementwise".into()
     }
 }
 
-/// Merges independent small elementwise `loop` fusions.
+/// Merges independent small `elementwise` fusions.
 pub(super) struct HorizontalFusion;
 
 impl CompilerPass<TritonModule<'_>> for HorizontalFusion {
@@ -73,9 +73,9 @@ impl CompilerPass<TritonModule<'_>> for HorizontalFusion {
         "horizontal_fusion"
     }
 
-    /// Replaces each group of candidates with one multi-output `loop` fusion.
+    /// Replaces each group of candidates with one multi-output `elementwise` fusion.
     fn apply(&mut self, m: &mut TritonModule<'_>) -> Result<(), String> {
-        m.graph = fuse(&m.graph, &[], &mut Loops);
+        m.graph = fuse(&m.graph, &[], &mut Elementwise);
         Ok(())
     }
 }

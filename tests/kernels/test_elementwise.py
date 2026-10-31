@@ -235,7 +235,7 @@ ROUNDING = {"mps": 4e-7, "cuda": 1e-6}
 @pytest.mark.parametrize("name, prim, ref, values", UNARY, ids=[u[0] for u in UNARY])
 def test_float_functions_agree_with_the_cpu(device, name, prim, ref, values, triton_on_cuda):
     """Each float function in float32 on MPS and on CUDA (a generated
-    Triton loop, libdevice's functions), infinities, NaN and signed zeros
+    Triton kernel, libdevice's functions), infinities, NaN and signed zeros
     included: the CPU's value within a few float32 roundings."""
     got, expected = on(device, prim, np.concatenate([values, SPECIALS]).astype(np.float32))
     np.testing.assert_allclose(got, expected, rtol=ROUNDING[device], atol=0)

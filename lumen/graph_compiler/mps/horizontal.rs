@@ -18,7 +18,7 @@ pub(super) struct Horizontal<'a> {
 }
 
 impl Target for Horizontal<'_> {
-    /// Small elementwise nodes or loop fusions without reductions, attention, GEMMs or updates.
+    /// Small elementwise nodes or elementwise fusions without reductions, attention, GEMMs or updates.
     fn candidate(&self, graph: &Graph, node: &Node) -> bool {
         let elements = graph.type_of(node.output).numel();
 
@@ -46,7 +46,7 @@ impl Target for Horizontal<'_> {
         }
     }
 
-    /// Groups loops of any size together (they split the grid), and tiled kernels by exact shape.
+    /// Groups elementwise fusions of any size together (they split the grid), and tiled kernels by exact shape.
     fn key(&self, graph: &Graph, node: &Node) -> Vec<usize> {
         tiling_key(graph, node)
     }

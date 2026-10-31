@@ -31,8 +31,8 @@ impl<M: Module> CompilerPass<M> for PlaceConcats {
 
 /// Concatenations each of whose operands is read only there, once, is no program output and is
 /// produced by a node that ends a kernel of its own writing fresh memory: a matmul, or a fusible
-/// elementwise or copying layout op (a reshape or view slice aliases its operand instead). Loop
-/// fusion leaves such a concatenate unfused, so each producer is its kernel's root and writes its
+/// elementwise or copying layout op (a reshape or view slice aliases its operand instead). Fusion
+/// leaves such a concatenate unfused, so each producer is its kernel's root and writes its
 /// slot through the slot's strides.
 fn in_place(graph: &Graph) -> Vec<usize> {
     let nodes = graph.nodes();

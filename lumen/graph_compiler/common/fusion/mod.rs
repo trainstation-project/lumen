@@ -1,4 +1,4 @@
-//! Loop fusion shared by the GPU backends: groups elementwise chains, reductions, normalization rows
+//! Fusion shared by the GPU backends: groups elementwise chains, reductions, normalization rows
 //! and GEMM epilogues into `Fusion` nodes, each compiled by the backend to one kernel.
 
 mod analysis;
@@ -12,7 +12,7 @@ use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::common::diamonds::Row;
 pub(crate) use crate::graph_compiler::{constant, elementwise, label};
 
-/// What a backend brings to loop fusion: the nodes its kernels compute, their limits, the fusions it
+/// What a backend brings to fusion: the nodes its kernels compute, their limits, the fusions it
 /// turns on, and the GEMM shapes its kernels take.
 #[derive(Clone, Copy)]
 pub(crate) struct Backend {

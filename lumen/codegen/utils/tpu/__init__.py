@@ -1,4 +1,4 @@
-"""Helpers shared by the TPU Pallas kernels that rebuild a fused loop's nodes as primitives on kernel blocks."""
+"""Helpers shared by the TPU Pallas kernels that rebuild an elementwise fusion's nodes as primitives on kernel blocks."""
 
 from lumen.graph import prims
 

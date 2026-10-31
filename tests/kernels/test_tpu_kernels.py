@@ -1,4 +1,4 @@
-"""Tests for TPU kernels: dots and their merging and epilogues, flash attention, row and reduction kernels, loops, gathers and code dumps."""
+"""Tests for TPU kernels: dots and their merging and epilogues, flash attention, row and reduction kernels, elementwise fusions, gathers and code dumps."""
 
 import numpy as np
 import pytest
@@ -75,7 +75,7 @@ def test_the_profiler_times_each_tpu_program():
     events = prof.events()
     runs = [e for e in events if e["kind"] == "gpu"]
     assert [e["name"] for e in runs] == ["exp → mul"]
-    assert [e["kernel"] for e in runs] == ["loop_f32_256x512"]
+    assert [e["kernel"] for e in runs] == ["elementwise_f32_256x512"]
     ops = {e["id"]: e for e in events if e["kind"] == "op"}
     for run in runs:
         assert run["device"] == "tpu:1"
@@ -545,9 +545,9 @@ def test_a_reductions_prologue_and_epilogue_are_its_kernel():
     ],
     ids=["a value a row", "a value a column", "slice", "transpose", "iota"],
 )
-def test_layout_is_a_loops_index_maps(f, expected, shapes):
+def test_layout_is_an_elementwise_fusions_index_maps(f, expected, shapes):
     """Broadcasts, slices at whole blocks, transposes of major dimensions
-    and iota in a loop: each operand read in blocks of its own (where the
+    and iota in an elementwise fusion: each operand read in blocks of its own (where the
     layout puts them), one kernel."""
     rng = np.random.default_rng(0)
     x, v = (rng.standard_normal(s, dtype=np.float32) for s in shapes)
@@ -557,8 +557,8 @@ def test_layout_is_a_loops_index_maps(f, expected, shapes):
     np.testing.assert_array_equal(got, expected(x, v))
 
 
-def test_independent_small_loops_are_one_kernel():
-    """Horizontal fusion: loops of one shape that don't read each other run
+def test_independent_small_elementwise_fusions_are_one_kernel():
+    """Horizontal fusion: elementwise fusions of one shape that don't read each other run
     as one kernel writing each its output."""
     rng = np.random.default_rng(0)
     xs = [rng.standard_normal([256, 512], dtype=np.float32) for _ in range(4)]
@@ -614,7 +614,7 @@ def test_an_attentions_elementwise_consumers_are_its_epilogue(training):
 
 
 def test_dump_code_writes_each_launchs_pallas_and_mosaic(tmp_path):
-    """``dump_code`` writes each launch's Mosaic MLIR and a Pallas script that rebuilds it: a loop's script
+    """``dump_code`` writes each launch's Mosaic MLIR and a Pallas script that rebuilds it: an elementwise fusion's script
     is its generated program."""
     x = lumen.ones([256, 512]).to("tpu")
     f = lumen.compile(lambda x: F.exp(x) * x)

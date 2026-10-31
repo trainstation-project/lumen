@@ -315,7 +315,7 @@ pub(crate) fn encode(
         | BroadcastInDim { .. }
         | Transpose { .. }
         | Slice { .. } => {
-            unreachable!("a one-node fusion's loop kernel (graph_compiler::mps::alone)")
+            unreachable!("a one-node fusion's elementwise kernel (graph_compiler::mps::alone)")
         }
         ReduceSum { .. } | ReduceMax { .. } | Cumsum { .. } | Concatenate { .. } => {
             unreachable!("encoded above")

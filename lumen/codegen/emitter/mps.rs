@@ -293,7 +293,7 @@ impl<'a> Emitter<'a> {
                         let i = self.index(gather_index(&idx, &ty.shape, &strides));
                         format!("from_int<{t}>({i})")
                     }
-                    p => unreachable!("{p} is not loop-fusible"),
+                    p => unreachable!("{p} is not fusible"),
                 }
             }
         };

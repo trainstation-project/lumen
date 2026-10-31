@@ -1,4 +1,4 @@
-"""Triton elementwise kernel: the fixed grid of a loop fusion, its elementwise work a generated ``BODY``.
+"""Triton elementwise kernel: the fixed grid of an elementwise fusion, its elementwise work a generated ``BODY``.
 
 ``BODY(EXTRA, BLOCK, MASK, SEGMENT)`` computes and stores every output of grid segment ``SEGMENT`` at the
 flat indices ``BLOCK`` where ``MASK`` holds, reading the step's tensors and scalars from ``EXTRA`` (its

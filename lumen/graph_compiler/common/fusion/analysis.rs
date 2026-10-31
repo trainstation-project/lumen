@@ -1,4 +1,4 @@
-//! Per-graph facts shared by the loop fusion stages: producers, users, liveness and fusibility.
+//! Per-graph facts shared by the fusion stages: producers, users, liveness and fusibility.
 
 use super::{constant, elementwise};
 use crate::graph::{Graph, Node, Primitive, Var};

@@ -14,9 +14,9 @@ from lumen.profiler import ProfilerActivity, profile
 
 @pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
-def test_autotuned_loops_match_untuned(device, dtype, tmp_path, triton_on_cuda):
-    """A loop the compiler autotunes computes what the untuned loop does, at
-    lengths no block size divides. A Triton loop's dumped source names its
+def test_autotuned_elementwise_fusions_match_untuned(device, dtype, tmp_path, triton_on_cuda):
+    """An elementwise fusion the compiler autotunes computes what the untuned
+    one does, at lengths no block size divides. A Triton one's dumped source names its
     template kernel and the ``BLOCK_SIZE`` and warps it picked, then its
     generated ``BODY``."""
     compiler = getattr(lumen.config.compiler, device)
@@ -49,7 +49,7 @@ def test_reads_strided_inputs_in_place(device, triton_on_cuda):
     prologue through its strides, once a layout. A matmul reads transposed
     and permuted operands too (on Triton through the GEMM's
     ``PROLOGUE_A``/``PROLOGUE_B``). ``contiguous``, ``copy_`` and ``fill_``
-    of strided views are loops on the GPU, not host copies."""
+    of strided views are elementwise kernels on the GPU, not host copies."""
     a, b, c = rand(64, 96), rand(96, 64, seed=1), rand(2, 3, 96, seed=2)
     x, w, z = (lumen.from_numpy(v).to(device) for v in (a, b, c))
     loop = lumen.compile(lambda u, v: F.exp(u) * 2.0 + v)

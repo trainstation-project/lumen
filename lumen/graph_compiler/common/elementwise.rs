@@ -1,4 +1,4 @@
-//! Helpers for loop fusion: building fusion bodies from node groups and rewriting a graph with them.
+//! Helpers for elementwise fusion: building fusion bodies from node groups and rewriting a graph with them.
 
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::label;
@@ -8,7 +8,7 @@ pub(crate) fn members(group: &[Option<usize>], root: usize) -> Vec<usize> {
     (0..=root).filter(|&j| group[j] == Some(root)).collect()
 }
 
-/// The body of a loop over `members`, outputting `root`'s value then `extra`, and the graph values it reads.
+/// The body of an elementwise fusion of `members`, outputting `root`'s value then `extra`, and the graph values it reads.
 pub(crate) fn body(
     graph: &Graph,
     members: &[usize],
@@ -39,7 +39,7 @@ pub(crate) fn body(
 
         within[nodes[j].output] = body
             .apply(nodes[j].primitive.clone(), &ins)
-            .expect("a member of the loop");
+            .expect("a member of the fusion");
     }
 
     let outputs: Vec<Var> = std::iter::once(nodes[root].output)
@@ -47,7 +47,7 @@ pub(crate) fn body(
         .map(|v| within[v])
         .collect();
 
-    body.set_outputs(&outputs).expect("the loop's values");
+    body.set_outputs(&outputs).expect("the fusion's values");
     (body, reads)
 }
 

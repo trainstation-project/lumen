@@ -1,4 +1,4 @@
-//! MPS autotuning backends: candidate tunings for loop fusions and GEMM configs, and the timer that runs them.
+//! MPS autotuning backends: candidate tunings for elementwise fusions and GEMM configs, and the timer that runs them.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::PoisonError;
@@ -13,7 +13,7 @@ use crate::graph_compiler::common::autotune::{Kernels, Timer};
 use crate::graph_compiler::plan::{Buffer, Step, Tuned};
 use crate::kernels::mps::Encode;
 
-/// What a tunable loop fusion needs to regenerate its kernel under another tuning.
+/// What a tunable elementwise fusion needs to regenerate its kernel under another tuning.
 pub(super) struct Tunable {
     /// Per fusion input, whether it is passed by value.
     pub by_value: Vec<bool>,
@@ -24,8 +24,8 @@ pub(super) struct Tunable {
 /// Byte alignment of each buffer carved out of the timing scratch.
 const ALIGNMENT: usize = 256;
 
-/// Tuning backend for loop fusions.
-pub(super) struct Loops<'a> {
+/// Tuning backend for elementwise fusions.
+pub(super) struct Elementwise<'a> {
     /// Fusions that may be retuned, by name.
     pub tunable: &'a BTreeMap<String, Tunable>,
     pub config: &'a MpsConfig,
@@ -41,7 +41,7 @@ fn uncompiled(sources: &mut BTreeMap<String, String>) -> BTreeMap<String, String
     sources
 }
 
-impl Kernels for Loops<'_> {
+impl Kernels for Elementwise<'_> {
     type Config = Tuning;
 
     /// Tunings to try for a tunable fusion of a mid-sized output, or none.
@@ -80,7 +80,7 @@ impl Kernels for Loops<'_> {
         Tuned::new(kernel, encode)
     }
 
-    /// Compiles the newly generated loop kernels.
+    /// Compiles the newly generated elementwise kernels.
     fn compile(&mut self) -> Result<(), String> {
         compile_kernels(uncompiled(&mut self.sources))
     }

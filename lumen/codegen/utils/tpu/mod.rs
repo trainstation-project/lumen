@@ -1,4 +1,4 @@
-//! What the TPU code generators share: the backend type, which primitives a plain loop runs, the JSON
+//! What the TPU code generators share: the backend type, which primitives a plain elementwise kernel runs, the JSON
 //! nodes the Pallas programs rebuild primitives from, and outputs written into windows of wider matrices.
 
 use crate::Scalar;
@@ -10,7 +10,7 @@ use crate::graph_compiler::plan::Step;
 /// The TPU code generator.
 pub(crate) struct Tpu;
 
-/// Whether `p` can run inside a plain elementwise TPU loop (only scalar broadcasts among layout ops).
+/// Whether `p` can run inside a plain elementwise TPU kernel (only scalar broadcasts among layout ops).
 pub(crate) fn fusible(p: &Primitive) -> bool {
     use Primitive::*;
 

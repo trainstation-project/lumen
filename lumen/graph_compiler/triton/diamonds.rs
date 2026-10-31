@@ -1,4 +1,4 @@
-//! Finds normalization diamonds (row reductions broadcast back over their rows) for the shared loop
+//! Finds normalization diamonds (row reductions broadcast back over their rows) for the shared
 //! fusion to fuse into Triton row kernels, as MPS does.
 
 use super::TritonModule;
@@ -7,7 +7,7 @@ use crate::graph_compiler::common::diamonds::{diamonds, partials};
 use crate::graph_compiler::pass::CompilerPass;
 
 /// Finds each normalization row, with column sums over the same rows riding along as per-group
-/// partials, for loop fusion.
+/// partials, for fusion.
 pub(super) struct Diamonds;
 
 impl CompilerPass<TritonModule<'_>> for Diamonds {

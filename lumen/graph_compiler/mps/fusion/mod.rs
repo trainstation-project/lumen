@@ -1,4 +1,4 @@
-//! MPS loop fusion: the shared loop fusion (`common::fusion`) with Metal's kernels' limits and shapes,
+//! MPS fusion: the shared fusion (`common::fusion`) with Metal's kernels' limits and shapes,
 //! each fusion compiled to one Metal kernel.
 
 use super::{Kernel, MpsModule, horizontal, request};
@@ -10,7 +10,7 @@ use crate::graph_compiler::common::fusion::{self as common, Backend};
 use crate::graph_compiler::pass::CompilerPass;
 pub(crate) use crate::graph_compiler::{elementwise, label};
 
-/// Whether `node` can live inside a loop fusion kernel: loop ops, gathers and reductions under
+/// Whether `node` can live inside a fusion kernel: elementwise ops, gathers and reductions under
 /// 2^32 elements, none touching float64.
 pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
     use Primitive::*;
@@ -57,7 +57,7 @@ pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
     (loop_op || gather || reduction) && !f64
 }
 
-/// The shared loop fusion's view of Metal: its kernels bind at most 29 buffers, a GEMM epilogue
+/// The shared fusion's view of Metal: its kernels bind at most 29 buffers, a GEMM epilogue
 /// writes at most 4 extra outputs, and the GEMM shapes the Metal kernels take.
 fn backend(config: &MpsConfig) -> Backend {
     Backend {
@@ -86,12 +86,12 @@ pub(super) fn fuse(
     common::fuse(graph, rows, scalars, &backend(config), kernel)
 }
 
-/// Compiler pass running loop fusion, then optional horizontal fusion.
-pub(super) struct LoopFusion;
+/// Compiler pass running fusion, then optional horizontal fusion.
+pub(super) struct Fusion;
 
-impl<'a> CompilerPass<MpsModule<'a>> for LoopFusion {
+impl<'a> CompilerPass<MpsModule<'a>> for Fusion {
     fn name(&self) -> &'static str {
-        "loop_fusion"
+        "fusion"
     }
 
     /// Fuses the graph, repeating until every by-value scalar is read only by fusions.
@@ -105,7 +105,7 @@ impl<'a> CompilerPass<MpsModule<'a>> for LoopFusion {
             let kernels = &mut m.kernels;
 
             let mut kernel =
-                |_: &Graph, by_value: &[bool]| request(kernels, Kernel::Loop(by_value.to_vec()));
+                |_: &Graph, by_value: &[bool]| request(kernels, Kernel::Fusion(by_value.to_vec()));
 
             let vars: Vec<Var> = m.scalars.iter().map(|&i| m.graph.inputs()[i]).collect();
             let fused = fuse(&m.graph, &m.rows, &vars, config, &mut kernel);

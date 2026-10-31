@@ -14,7 +14,7 @@ def _matmuls(a, b, w1, w2):
 
 
 def _loops(a, b):
-    """Two elementwise loops of different sizes concatenated along rows."""
+    """Two elementwise fusions of different sizes concatenated along rows."""
     return F.cat([F.exp(a), b.t() * 2.0], 0)
 
 
@@ -33,16 +33,16 @@ def _loops(a, b):
             {"mps": ["exp → mul → transpose → concatenate"], "cuda": ["exp", "mul → transpose"]},
         ),
     ],
-    ids=["matmuls", "loops"],
+    ids=["matmuls", "elementwise"],
 )
 def test_concatenated_operands_are_written_in_place(device, f, shapes, steps, triton_on_cuda):
     """On Triton, a concatenate whose operands are each read only there and
-    produced by a kernel of their own (a matmul, a loop) copies nothing: each
+    produced by a kernel of their own (a matmul, an elementwise fusion) copies nothing: each
     kernel writes its operand into its slot of the result through the slot's
-    strides (the loops as two: the transpose runs through tiles, which
+    strides (the elementwise fusions as two: the transpose runs through tiles, which
     horizontal fusion keeps apart, as on MPS). MPS places only what
     attention's backward writes, and runs the others as a copy (two matmuls')
-    or inside the loop computing the operands. The CPU's values either way."""
+    or inside the elementwise fusion computing the operands. The CPU's values either way."""
     arrays = [rand(*s, seed=k) for k, s in enumerate(shapes)]
     try:
         args = [lumen.from_numpy(v).to(device) for v in arrays]

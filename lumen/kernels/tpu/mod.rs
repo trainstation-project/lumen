@@ -802,15 +802,15 @@ pub(crate) fn launch(index: usize, launch: Launch) -> Result<(), String> {
     }
 }
 
-/// Launches the fused elementwise loop `step` on TPU `index`, writing into `output`.
-fn encode_loop(
+/// Launches the elementwise fusion `step` on TPU `index`, writing into `output`.
+fn encode_elementwise(
     index: usize,
     step: &Step,
     inputs: &[*const u8],
     output: *mut u8,
 ) -> Result<(), String> {
     let Primitive::Fusion { body, .. } = &step.primitive else {
-        unreachable!("a loop fusion")
+        unreachable!("an elementwise fusion")
     };
 
     if step.output.1.numel() == 0 {
@@ -827,7 +827,7 @@ fn encode_loop(
     let code =
         Tpu::elementwise(body, &[], &views, &()).map_err(|e| format!("{}: {e}", step.label))?;
 
-    // An indexed loop takes its inputs, then its output; a plain one its output after the step's own inputs.
+    // An indexed elementwise kernel takes its inputs, then its output; a plain one its output after the step's own inputs.
     let n = match code.indexed {
         true => inputs.len(),
         false => step.inputs.len(),
@@ -876,8 +876,8 @@ pub(crate) fn encode(
         Primitive::Fusion { ref name, .. } if name == crate::graph::UPDATES => {
             crate::codegen::dynamic_slice::tpu::encode(index, step, inputs, output)
         }
-        Primitive::Fusion { ref name, .. } if name == "loop" => {
-            encode_loop(index, step, inputs, output)
+        Primitive::Fusion { ref name, .. } if name == "elementwise" => {
+            encode_elementwise(index, step, inputs, output)
         }
         Primitive::DotGeneral { .. } | Primitive::Fusion { .. } => {
             crate::codegen::dot_general::tpu::encode(index, step, inputs, output)

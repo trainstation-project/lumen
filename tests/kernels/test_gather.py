@@ -60,7 +60,7 @@ def test_gather(device, index_dtype, dtype, axis):
 @pytest.mark.parametrize("index_dtype", [np.int32, np.int64])
 @pytest.mark.parametrize("axis", [0, 1, 2])
 def test_gather_fuses(device, index_dtype, axis):
-    """A gather computes its elements in the kernel reading them (a loop
+    """A gather computes its elements in the kernel reading them (an elementwise
     fusion's, or a row kernel's: an embedding's lookup, its positions added,
     then normalized), reading the operand at each picked (clamped) index:
     no kernel of its own; the values the CPU's."""

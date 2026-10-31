@@ -47,8 +47,8 @@ def _independent(a, b, c):
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_independent_loop_fusions_are_one_kernel(device, compiler):
-    """Independent loop fusions (and a lone cast) of as many elements are
+def test_independent_elementwise_fusions_are_one_kernel(device, compiler):
+    """Independent elementwise fusions (and a lone cast) of as many elements are
     one step, each output what it was alone, bit for bit; with
     ``horizontal_fusion`` off, a step each."""
     arrays = rand(64, 32), rand(32, 64, seed=1), rand(16, 128, seed=2)
@@ -103,7 +103,7 @@ def test_fusions_of_different_record_function_calls_are_not_fused(device, compil
 def test_different_sizes_split_the_grid(device, compiler):
     """Fusions of different element counts are one kernel too: each count
     runs on its own range of threads, each output what it was alone, bit for
-    bit, under every loop tuning."""
+    bit, under every elementwise tuning."""
 
     def f(a, b, c, d):
         """Two computations of 2048 elements, one of 256 and one of 7."""

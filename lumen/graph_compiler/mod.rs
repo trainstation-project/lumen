@@ -142,7 +142,7 @@ fn plan_options(
     }
 }
 
-/// Whether `p` is an elementwise primitive that fusion can merge into a loop.
+/// Whether `p` is an elementwise primitive that fusion can merge into an elementwise fusion.
 #[cfg_attr(not(any(feature = "python", lumen_mps_linked)), allow(dead_code))]
 pub(crate) fn elementwise(p: &Primitive) -> bool {
     use Primitive::*;

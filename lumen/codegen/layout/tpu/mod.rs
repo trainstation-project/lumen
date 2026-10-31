@@ -9,15 +9,15 @@ use crate::graph_compiler::plan::Step;
 use crate::kernels::tpu::{Launch, launch};
 
 /// TPU layout: the fixed reshape Pallas program, specialized by a spec of the split or merged last dim;
-/// transposes fuse into the elementwise loops.
+/// transposes fuse into the elementwise kernels.
 impl LayoutCodegen for Tpu {
     /// The kernel's name and spec.
     type Code = (String, String);
     type Options = ();
 
-    /// None: a transpose fuses into the elementwise loops.
+    /// None: a transpose fuses into the elementwise kernels.
     fn transpose(_: &Graph, _: &[bool], _: &()) -> Result<(String, String), String> {
-        Err("a transpose on TPU fuses into the elementwise loops".into())
+        Err("a transpose on TPU fuses into the elementwise kernels".into())
     }
 
     /// The program reshaping `from` into `to` by splitting its last dim `a * w` into `[a, w]` or merging it

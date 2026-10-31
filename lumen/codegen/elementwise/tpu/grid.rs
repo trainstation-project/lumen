@@ -1,4 +1,4 @@
-//! Block planning for TPU loops with layout primitives: maps every value's dims onto the output's
+//! Block planning for TPU elementwise fusions with layout primitives: maps every value's dims onto the output's
 //! grid and picks block sizes every operand can be read in as whole tiles.
 
 use crate::device::tpu::layout::Layout;
@@ -59,7 +59,7 @@ impl Plan {
     }
 }
 
-/// Whether `p` only moves or generates elements, which needs the indexed loop.
+/// Whether `p` only moves or generates elements, which needs the indexed kernel.
 pub(crate) fn layout(p: &Primitive) -> bool {
     matches!(
         p,
@@ -71,7 +71,7 @@ pub(crate) fn layout(p: &Primitive) -> bool {
     )
 }
 
-/// Walks the loop back from its output, giving each value the dim map it is read at;
+/// Walks the fusion back from its output, giving each value the dim map it is read at;
 /// fails when a value is read at two different places or a primitive can't be mapped.
 fn maps(body: &Graph) -> Result<Vec<Option<Vec<Dim>>>, String> {
     let root = body.outputs()[0];
@@ -162,7 +162,7 @@ fn maps(body: &Graph) -> Result<Vec<Option<Vec<Dim>>>, String> {
                     }
                 }
             }
-            p => return Err(format!("{} in a loop", p.name())),
+            p => return Err(format!("{} in an elementwise fusion", p.name())),
         }
     }
 
@@ -215,7 +215,7 @@ fn candidates(n: usize, unit: usize, cap: usize) -> Vec<usize> {
     out
 }
 
-/// Picks blocks for the loop `body` that every operand and the output read in whole tiles, with
+/// Picks blocks for the elementwise `body` that every operand and the output read in whole tiles, with
 /// the last block dividing `window` (the output's column offset in a wider matrix).
 pub(crate) fn plan(body: &Graph, window: usize) -> Result<Plan, String> {
     let maps = maps(body)?;
@@ -239,7 +239,7 @@ pub(crate) fn plan(body: &Graph, window: usize) -> Result<Plan, String> {
     };
 
     let blocks = match rank {
-        0 => return Err("a scalar loop of layout".into()),
+        0 => return Err("a scalar elementwise fusion of layout".into()),
         1 => candidates(out.shape[0], FLAT, 64 * FLAT)
             .into_iter()
             .map(|b| vec![b])

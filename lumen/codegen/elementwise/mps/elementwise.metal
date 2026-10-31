@@ -1,4 +1,4 @@
-// The fixed loop of a loop fusion's kernel: its elementwise work a generated body functor.
+// The fixed loop of an elementwise fusion's kernel: its elementwise work a generated body functor.
 
 /// Runs `body(j)` on thread `THREAD_ID`'s elements `j` of an `n`-element loop on `NUM_THREADS` threads:
 /// `ELEMENTS_PER_THREAD` of them, consecutive from `THREAD_ID * ELEMENTS_PER_THREAD` when `CONTIGUOUS`,

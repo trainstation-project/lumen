@@ -1,4 +1,4 @@
-//! TPU elementwise loops: each fused loop generated as `lumen.pallas` source, a `program(device)` the TPU
+//! TPU elementwise fusions: each generated as `lumen.pallas` source, a `program(device)` the TPU
 //! runtime traces to Mosaic.
 
 pub(crate) mod grid;
@@ -24,11 +24,11 @@ use crate::{DType, Scalar};
 #[cfg(lumen_tpu_linked)]
 use grid::{Dim, Plan, layout, plan};
 
-/// A TPU loop: its kernel name, the `lumen.pallas` source of its `program(device)`, and whether it reads its
-/// operands through the indexing plan (it then takes its inputs, then its output; a plain loop takes its
+/// A TPU elementwise kernel: its kernel name, the `lumen.pallas` source of its `program(device)`, and whether it reads its
+/// operands through the indexing plan (it then takes its inputs, then its output; a plain one takes its
 /// output right after the step's own inputs).
 #[cfg(lumen_tpu_linked)]
-pub(crate) struct Loop {
+pub(crate) struct Elementwise {
     pub(crate) kernel: String,
     pub(crate) source: String,
     pub(crate) indexed: bool,
@@ -199,7 +199,7 @@ fn widest(shapes: &[&Vec<usize>]) -> Vec<usize> {
         .map_or_else(Vec::new, |s| s.to_vec())
 }
 
-/// The values of a loop as its kernel holds them: each one's name and block shape, by graph value.
+/// The values of an elementwise fusion as its kernel holds them: each one's name and block shape, by graph value.
 #[cfg(lumen_tpu_linked)]
 struct Values {
     names: HashMap<Var, String>,
@@ -235,7 +235,7 @@ impl Values {
     }
 }
 
-/// Statements computing each node of a plain loop on blocks of shape `block`, a scalar broadcast only
+/// Statements computing each node of a plain elementwise fusion on blocks of shape `block`, a scalar broadcast only
 /// widened when its operand isn't already of the block's shape.
 #[cfg(lumen_tpu_linked)]
 fn plain_nodes(body: &Graph, values: &mut Values, block: &[usize]) -> Vec<String> {
@@ -272,7 +272,7 @@ fn plain_nodes(body: &Graph, values: &mut Values, block: &[usize]) -> Vec<String
     lines
 }
 
-/// The `program(device)` of a plain loop over `out`'s shape in `blocks`, each operand of `out`'s shape or
+/// The `program(device)` of a plain elementwise fusion over `out`'s shape in `blocks`, each operand of `out`'s shape or
 /// a scalar (`broadcast`), its first output written in `window` when it has one.
 #[cfg(lumen_tpu_linked)]
 fn plain(
@@ -285,7 +285,7 @@ fn plain(
     let shape = &out.shape;
     let scalar = shape.is_empty();
 
-    // Its leading dims, rows and columns are L, M and N; a rank-1 loop's one dim goes unnamed.
+    // Its leading dims, rows and columns are L, M and N; a rank-1 fusion's one dim goes unnamed.
     let (view, block_shape, spec, grid, consts) = match blocks {
         &[bl, bm, bn] => {
             let (m, n) = (shape[shape.len() - 2], shape[shape.len() - 1]);
@@ -333,7 +333,7 @@ fn plain(
             let spec = "pl.BlockSpec((BLOCK_SIZE,), lambda BLOCK_ID: (BLOCK_ID,))".to_string();
             (view, vec![b], spec, "(NUM_BLOCKS,)".to_string(), consts)
         }
-        blocks => unreachable!("a loop's blocks: {blocks:?}"),
+        blocks => unreachable!("an elementwise fusion's blocks: {blocks:?}"),
     };
 
     // A windowed first output writes its columns at `start` of a buffer `whole` wide.
@@ -469,12 +469,12 @@ fn plain(
     program(&specs, &kernel)
 }
 
-/// Statements computing each node of an indexed loop on its block of `plan`, `ids` naming the program ids.
+/// Statements computing each node of an indexed elementwise fusion on its block of `plan`, `ids` naming the program ids.
 #[cfg(lumen_tpu_linked)]
 fn indexed_nodes(body: &Graph, values: &mut Values, plan: &Plan) -> Vec<String> {
     let block = |v: Var| match body.type_of(v).shape.is_empty() {
         true => Vec::new(),
-        false => plan.block(plan.maps[v].as_ref().expect("a value of the loop")),
+        false => plan.block(plan.maps[v].as_ref().expect("a value of the fusion")),
     };
 
     let mut lines = Vec::new();
@@ -590,11 +590,16 @@ fn indexed_nodes(body: &Graph, values: &mut Values, plan: &Plan) -> Vec<String> 
     lines
 }
 
-/// The `program(device)` of a loop with layout primitives (slices, transposes, broadcasts), each value read
+/// The `program(device)` of an elementwise fusion with layout primitives (slices, transposes, broadcasts), each value read
 /// in blocks placed by the indexing plan, writing `out` in `window` when it has one.
 #[cfg(lumen_tpu_linked)]
-fn indexed(body: &Graph, out: &TensorType, window: Option<(usize, usize)>) -> Result<Loop, String> {
-    let plan = plan(body, window.map_or(0, |w| w.1)).map_err(|e| format!("a loop on TPU: {e}"))?;
+fn indexed(
+    body: &Graph,
+    out: &TensorType,
+    window: Option<(usize, usize)>,
+) -> Result<Elementwise, String> {
+    let plan = plan(body, window.map_or(0, |w| w.1))
+        .map_err(|e| format!("an elementwise fusion on TPU: {e}"))?;
 
     // Grid dim `d` is named by its number: BLOCK_ID_d, BLOCK_SIZE_d, NUM_BLOCKS_d.
     let dims: Vec<String> = (0..plan.blocks.len()).map(|d| d.to_string()).collect();
@@ -750,14 +755,14 @@ fn indexed(body: &Graph, out: &TensorType, window: Option<(usize, usize)>) -> Re
     .flatten()
     .collect();
 
-    Ok(Loop {
-        kernel: format!("loop_{}_{}", out.dtype, shown.join("x")),
+    Ok(Elementwise {
+        kernel: format!("elementwise_{}_{}", out.dtype, shown.join("x")),
         source: program(&consts, &kernel),
         indexed: true,
     })
 }
 
-/// A loop's whole source: `program(device)` defining `specs`, then its `kernel(rows, memory, result)` of
+/// An elementwise fusion's whole source: `program(device)` defining `specs`, then its `kernel(rows, memory, result)` of
 /// the `kernel` statements, traced on the device's memory.
 #[cfg(lumen_tpu_linked)]
 fn program(specs: &[String], kernel: &[String]) -> String {
@@ -802,21 +807,21 @@ fn program(specs: &[String], kernel: &[String]) -> String {
     )
 }
 
-/// TPU loops: one Pallas program a fusion, generated with its shapes, blocks and nodes written out, its
+/// TPU elementwise fusions: one Pallas program a fusion, generated with its shapes, blocks and nodes written out, its
 /// blocks chosen from the shapes.
 #[cfg(lumen_tpu_linked)]
 impl ElementwiseCodegen for Tpu {
-    type Code = Loop;
+    type Code = Elementwise;
     type Schedule = ();
 
-    /// Loops with layout primitives go through the indexed path; otherwise every operand must have the
+    /// Fusions with layout primitives go through the indexed path; otherwise every operand must have the
     /// output's shape or be a scalar. Inputs are read as their buffers, by value or not.
     fn elementwise(
         body: &Graph,
         _: &[bool],
         views: &HashMap<usize, (usize, Vec<usize>)>,
         _: &(),
-    ) -> Result<Loop, String> {
+    ) -> Result<Elementwise, String> {
         let out = body.type_of(body.outputs()[0]);
 
         let window = views
@@ -847,7 +852,7 @@ impl ElementwiseCodegen for Tpu {
             .find(|t| t.shape != out.shape && !t.shape.is_empty())
         {
             return Err(format!(
-                "a loop on TPU: operands of the output's shape {out}, got {t}"
+                "an elementwise fusion on TPU: operands of the output's shape {out}, got {t}"
             ));
         }
 
@@ -866,7 +871,7 @@ impl ElementwiseCodegen for Tpu {
             let n = *out.shape.last().expect("a matrix");
 
             blocks[2] = block(gcd(n, start), 128, 2048)
-                .ok_or("a loop on TPU: a window of no whole columns' block")?;
+                .ok_or("an elementwise fusion on TPU: a window of no whole columns' block")?;
         }
 
         // A leading block of 1 is left out of the kernel name.
@@ -878,8 +883,8 @@ impl ElementwiseCodegen for Tpu {
             .map(usize::to_string)
             .collect();
 
-        Ok(Loop {
-            kernel: format!("loop_{}_{}", out.dtype, shown.join("x")),
+        Ok(Elementwise {
+            kernel: format!("elementwise_{}_{}", out.dtype, shown.join("x")),
             source: plain(body, out, &broadcast, &blocks, window),
             indexed: false,
         })

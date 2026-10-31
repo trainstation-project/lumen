@@ -93,7 +93,7 @@ struct MpsModule<'a> {
     packed: Vec<(Vec<usize>, usize)>,
     /// Per packed block, how many members each interleaved group spans (all ones: side by side).
     interleaved: Vec<Vec<usize>>,
-    /// Normalization rows found by the diamonds pass, consumed by loop fusion.
+    /// Normalization rows found by the diamonds pass, consumed by fusion.
     rows: Vec<diamonds::Row>,
     /// Graph input indices passed to kernels by value.
     scalars: Vec<usize>,
@@ -101,7 +101,7 @@ struct MpsModule<'a> {
     kernels: Vec<Kernel>,
     /// Generated Metal sources by kernel name.
     sources: BTreeMap<String, String>,
-    /// Loop kernels that the autotuner may regenerate, by kernel name.
+    /// Elementwise kernels that the autotuner may regenerate, by kernel name.
     tunable: BTreeMap<String, autotune::Tunable>,
 }
 
@@ -177,9 +177,9 @@ impl Lone for MpsModule<'_> {
         Some(&mut self.scalars)
     }
 
-    /// Requests a loop kernel with the by-value flags, returning its pending name.
+    /// Requests a fusion kernel with the by-value flags, returning its pending name.
     fn kernel(&mut self, _: &Graph, by_value: &[bool]) -> String {
-        request(&mut self.kernels, Kernel::Loop(by_value.to_vec()))
+        request(&mut self.kernels, Kernel::Fusion(by_value.to_vec()))
     }
 }
 
@@ -203,8 +203,8 @@ impl Module for MpsModule<'_> {
 
 /// Kind of kernel a fusion requests, generated later by the codegen pass.
 enum Kernel {
-    /// Loop fusion, with a by-value flag per input.
-    Loop(Vec<bool>),
+    /// A fusion's kernel generated from its body, with a by-value flag per input.
+    Fusion(Vec<bool>),
     /// Flash attention forward.
     Attention,
     /// Flash attention backward.
@@ -259,7 +259,7 @@ fn pipeline<'a>(config: &MpsConfig) -> Pipeline<MpsModule<'a>> {
         p.add(ClampIndices);
     }
 
-    // Batched inner products (attention backward's delta, read through transposes) run as loops.
+    // Batched inner products (attention backward's delta, read through transposes) run as elementwise fusions.
     p.add(Simplify { matched: true }).add(DotStrength);
 
     if config.neural_engine {
@@ -285,10 +285,10 @@ fn pipeline<'a>(config: &MpsConfig) -> Pipeline<MpsModule<'a>> {
         }
 
         p.add(PlaceConcats);
-        p.add(fusion::LoopFusion);
+        p.add(fusion::Fusion);
     }
 
-    // Slices a GEMM reads in place become views before the lone layout ops left become loops, as on Triton.
+    // Slices a GEMM reads in place become views before the lone layout ops left become elementwise fusions, as on Triton.
     p.add(PlaceViews);
     p.add(Alone);
     p.add(Codegen);
@@ -364,13 +364,13 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
             timer: autotune::Mps,
         };
 
-        let mut loops = autotune::Loops {
+        let mut elementwise = autotune::Elementwise {
             tunable: &tunable,
             config,
             sources: BTreeMap::new(),
         };
 
-        tuner.tune(&mut loops, &mut plan)?;
+        tuner.tune(&mut elementwise, &mut plan)?;
         tuner.tune(&mut autotune::Gemms::new(config), &mut plan)?;
     }
 
@@ -538,7 +538,7 @@ enum Launch {
     Reduction,
     /// Tiled transpose.
     Transpose,
-    /// Plain elementwise loop.
+    /// Plain elementwise fusion.
     Elementwise,
     /// A chain of constant-start updates written into its operand.
     Updates,
@@ -625,7 +625,7 @@ fn carried(t: &Tensor) -> TensorType {
     TensorType::new(carrier, t.shape())
 }
 
-/// Copies `src` into `dst` bit for bit with a loop kernel, honoring both tensors' strides.
+/// Copies `src` into `dst` bit for bit with an elementwise kernel, honoring both tensors' strides.
 pub(crate) fn copy(dst: &Tensor, src: &Tensor) -> Result<(), String> {
     let mut body = Graph::new();
     let x = body.input(carried(dst));
@@ -658,7 +658,7 @@ pub(crate) fn fill(dst: &Tensor, value: Scalar) -> Result<(), String> {
     run_loop(body, "fill_", dst, &scalar, true)
 }
 
-/// Compiles (once) and runs the one-input loop `body` from `src` into `dst`.
+/// Compiles (once) and runs the one-input elementwise `body` from `src` into `dst`.
 /// `by_value` passes `src` as a scalar argument instead of a buffer.
 fn run_loop(
     body: Graph,
@@ -1207,11 +1207,11 @@ pub(super) fn encode_with(
     let out = &step.output.1;
     let n = out.numel();
 
-    let Some(Tuning::Loop {
+    let Some(Tuning::Elementwise {
         per_thread, group, ..
     }) = tuning
     else {
-        unreachable!("a loop's tuning")
+        unreachable!("an elementwise fusion's tuning")
     };
 
     // A horizontal fusion of several element counts runs each on its own range of threads.

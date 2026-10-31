@@ -1,5 +1,5 @@
 //! Metal source generation for fused graph bodies: picks a kernel shape (GEMV row, GEMM, row
-//! reduction, reduction, transpose or elementwise loop) and emits its source.
+//! reduction, reduction, transpose or elementwise kernel) and emits its source.
 pub(crate) mod ane;
 
 use std::collections::HashMap;
@@ -20,7 +20,7 @@ use crate::{DType, Scalar};
 pub(crate) use crate::codegen::attention::mps::{backward_block_with_dq, decodes};
 pub(crate) use crate::codegen::dot_general::mps::*;
 pub(crate) use crate::codegen::elementwise::mps::{
-    TUNED_ELEMENTS, Tuning, loop_tuning, loop_tunings,
+    TUNED_ELEMENTS, Tuning, elementwise_tuning, elementwise_tunings,
 };
 pub(crate) use crate::codegen::emitter::Emit;
 pub(crate) use crate::codegen::emitter::mps::Emitter;
@@ -40,21 +40,21 @@ pub(crate) const THREAD_ARGS: &str = indoc! {"
     uint sg [[simdgroup_index_in_threadgroup]],
     uint lane [[thread_index_in_simdgroup]]"};
 
-/// Default launch tuning when `body` lowers to the elementwise loop, else `None`.
+/// Default launch tuning when `body` lowers to the elementwise kernel, else `None`.
 pub(crate) fn tuning_of(body: &Graph) -> Option<Tuning> {
-    is_loop(body).then(|| loop_tuning(body))
+    is_elementwise(body).then(|| elementwise_tuning(body))
 }
 
-/// Candidate launch tunings to autotune when `body` lowers to the elementwise loop.
+/// Candidate launch tunings to autotune when `body` lowers to the elementwise kernel.
 pub(crate) fn tunings_of(body: &Graph) -> Vec<Tuning> {
-    match is_loop(body) {
-        true => loop_tunings(body),
+    match is_elementwise(body) {
+        true => elementwise_tunings(body),
         false => Vec::new(),
     }
 }
 
-/// Whether `body` matches no specialized kernel shape and lowers to the elementwise loop.
-fn is_loop(body: &Graph) -> bool {
+/// Whether `body` matches no specialized kernel shape and lowers to the elementwise kernel.
+fn is_elementwise(body: &Graph) -> bool {
     row_dot(body).is_none()
         && gemm_dot(body).is_none()
         && row_reductions(body).is_empty()
@@ -94,10 +94,10 @@ pub(crate) fn kernel(
             .expect("a Metal kernel of every tiled transpose");
     }
 
-    let tuning = tuning.unwrap_or_else(|| loop_tuning(body));
+    let tuning = tuning.unwrap_or_else(|| elementwise_tuning(body));
 
     Mps::elementwise(body, by_value, views, &tuning)
-        .expect("a Metal loop of every elementwise body")
+        .expect("a Metal kernel of every elementwise body")
 }
 
 /// Whether the kernel chosen for `body` can write its outputs through strided views.
