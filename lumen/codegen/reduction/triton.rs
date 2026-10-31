@@ -278,14 +278,6 @@ impl Tile {
             false => format!("{inner}[:, None] {op} {outer}[None, :]"),
         }
     }
-
-    /// Broadcasts an outputs vector to the tile.
-    pub(crate) fn spread(&self, outer: &str) -> String {
-        match self.rows {
-            true => format!("{outer}[:, None]"),
-            false => format!("{outer}[None, :]"),
-        }
-    }
 }
 
 /// Combine expression of `a` and `b` for a sum or a max; bool max is `or`, float max propagates NaN.
