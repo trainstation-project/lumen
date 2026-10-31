@@ -1,6 +1,6 @@
 //! `dummy_op`, a fill-like test op with no built-in kernels that exercises Python kernel registration.
 use crate::Tensor;
-use crate::kernels::Op;
+use crate::runtime::dispatch::Op;
 use crate::tensor::scalar::Scalar;
 
 /// Native kernel signature: writes `Scalar` into the tensor in place.
@@ -19,7 +19,7 @@ pub fn dummy_op(t: &Tensor, value: Scalar) {
     #[cfg(feature = "python")]
     if let Some(handle) = crate::kernels::python::handle_for(
         DUMMY_OP.name(),
-        crate::kernels::DispatchKey::of(t.device()),
+        crate::runtime::dispatch::DispatchKey::of(t.device()),
     ) && handle.launch(
         DUMMY_OP.name(),
         t.device(),

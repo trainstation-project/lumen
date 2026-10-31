@@ -9,7 +9,7 @@ use pyo3::types::PyTuple;
 
 use crate as core;
 use crate::device::python::resolve_device;
-use crate::kernels::{DispatchKey, Op};
+use crate::runtime::dispatch::{DispatchKey, Op};
 use crate::tensor::dtype::{DType, Element, dispatch_dtype};
 use crate::tensor::python::{PyTensor, dtype_name};
 use crate::tensor::scalar::Scalar;

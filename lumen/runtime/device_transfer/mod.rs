@@ -10,7 +10,7 @@ mod tpu;
 
 use crate::Tensor;
 use crate::device::Device;
-use crate::kernels::{DispatchKey, Op};
+use crate::runtime::dispatch::{DispatchKey, Op};
 
 /// A copy kernel: writes all of `src`'s bytes into `dst`.
 pub type CopyKernel = fn(dst: &Tensor, src: &Tensor);

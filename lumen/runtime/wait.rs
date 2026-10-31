@@ -2,7 +2,7 @@
 
 use crate::Tensor;
 use crate::device::Device;
-use crate::kernels::{DispatchKey, Op};
+use crate::runtime::dispatch::{DispatchKey, Op};
 
 /// Kernel that blocks until the device holding the tensor is idle.
 pub type WaitKernel = fn(&Tensor);
