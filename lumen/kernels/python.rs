@@ -66,7 +66,7 @@ impl Launcher {
             .call_method0("find_libtvm_ffi")?
             .extract()?;
 
-        core::kernels::tvm_ffi::load(&path).map_err(PyRuntimeError::new_err)?;
+        core::custom_op::ffi::load(&path).map_err(PyRuntimeError::new_err)?;
 
         Ok(Launcher::TvmFfi {
             handle: function.call_method0("__chandle__")?.extract()?,
@@ -147,7 +147,7 @@ impl KernelHandle {
 
             let launched = match step {
                 Ok(Step::TvmFfi(handle)) => {
-                    core::kernels::tvm_ffi::launch(handle, address, value, STREAM).map(|()| true)
+                    core::custom_op::ffi::launch(handle, address, value, STREAM).map(|()| true)
                 }
                 Ok(Step::Done(launched)) => Ok(launched),
                 Err(e) => Err(e),
