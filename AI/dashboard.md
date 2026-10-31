@@ -6,9 +6,9 @@ description: Use whenever a change adds or changes what a device runs (a primiti
 # Keep the dashboard current
 
 `dashboard/` shows which primitives and fusions each device runs and how
-fast the elementwise ops run on MPS. Nothing regenerates its data: when a
-change makes a device run something new (or stop), update the data in the
-same change.
+fast single ops and fused programs run on MPS against PyTorch. Nothing
+regenerates its data: when a change makes a device run something new (or
+stop), update the data in the same change.
 
 ## What to update
 
@@ -17,6 +17,7 @@ same change.
 | A primitive runs (or stops running) on a device | Its row in `data/primitives.json`: the device's status, and its `<device>_kernel` / `<device>_note` if the row has them |
 | A new primitive | A new row in `data/primitives.json`, its `category` one of those already used |
 | A pass that fuses something new on a device | Its row in `data/fusions.json` (`fusion`, `category`, a status per device, `what`, `pass`), or the device's status in an existing row |
+| A new fusion, or a fusion pass changing on MPS | A program it fuses in `bench.py`'s `FUSIONS`, named by its row's `bench`, then run that benchmark |
 | A new device or backend | `STATUS` in `index.html` (a Triton GPU: `GPUS`), and that device's key in every row of both files |
 | An elementwise op on MPS, new or with a new kernel | Its entry in `bench.py`'s `OPS`, then re-run its benchmark |
 

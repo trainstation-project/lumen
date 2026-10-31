@@ -8,7 +8,8 @@
   "cuda": "missing",
   "triton": "runs",
   "what": "Chains of elementwise ops become one generated kernel.",
-  "pass": "loop_fusion"
+  "pass": "loop_fusion",
+  "bench": "fused_gelu"
  },
  {
   "fusion": "Layout inside loops",
@@ -19,7 +20,8 @@
   "cuda": "missing",
   "triton": "runs",
   "what": "Broadcasts, slices, transposes and iota become indexing inside a loop instead of copies.",
-  "pass": "loop_fusion / codegen indexing"
+  "pass": "loop_fusion / codegen indexing",
+  "bench": "fused_transpose"
  },
  {
   "fusion": "Horizontal fusion",
@@ -30,7 +32,8 @@
   "cuda": "missing",
   "triton": "missing",
   "what": "Independent small loops of one shape run as one multi-output kernel.",
-  "pass": "horizontal_fusion"
+  "pass": "horizontal_fusion",
+  "bench": "fused_horizontal"
  },
  {
   "fusion": "Multi-output loop fusion",
@@ -41,7 +44,8 @@
   "cuda": "missing",
   "triton": "missing",
   "what": "A fusion also writes values its consumers outside need (vertical multi-output).",
-  "pass": "loop_fusion (hosts)"
+  "pass": "loop_fusion (hosts)",
+  "bench": "fused_multi_output"
  },
  {
   "fusion": "Reduction prologue and epilogue",
@@ -52,7 +56,8 @@
   "cuda": "missing",
   "triton": "missing",
   "what": "Elementwise work before and after a reduction runs in the reduction's kernel.",
-  "pass": "loop_fusion"
+  "pass": "loop_fusion",
+  "bench": "fused_reduction"
  },
  {
   "fusion": "Normalization diamond (row)",
@@ -63,7 +68,8 @@
   "cuda": "missing",
   "triton": "missing",
   "what": "softmax, RMSNorm and LayerNorm: a row's reductions and the elementwise work around them, one kernel.",
-  "pass": "normalization_diamonds"
+  "pass": "normalization_diamonds",
+  "bench": "fused_rms_norm"
  },
  {
   "fusion": "Row partials (wide rows)",
@@ -74,7 +80,8 @@
   "cuda": "missing",
   "triton": "missing",
   "what": "Column sums a row kernel adds up too, for rows wider than one block.",
-  "pass": "normalization_diamonds"
+  "pass": "normalization_diamonds",
+  "bench": "fused_rms_norm_backward"
  },
  {
   "fusion": "GEMM epilogue",
@@ -85,7 +92,8 @@
   "cuda": "missing",
   "triton": "missing",
   "what": "Elementwise consumers (bias, activation, cast) of a matmul run as it writes its output.",
-  "pass": "fuse_dots / dot_epilogues"
+  "pass": "fuse_dots / dot_epilogues",
+  "bench": "fused_matmul_epilogue"
  },
  {
   "fusion": "GEMM + normalization",
@@ -96,7 +104,8 @@
   "cuda": "missing",
   "triton": "missing",
   "what": "A matmul and the norm diamond reading it: one kernel, the product never written to memory.",
-  "pass": "dot_rows / row_dots"
+  "pass": "dot_rows / row_dots",
+  "bench": "fused_matmul_rms_norm"
  },
  {
   "fusion": "Merged dots",
@@ -118,7 +127,8 @@
   "cuda": "missing",
   "triton": "missing",
   "what": "Long-K matmuls with small M and N split K across threadgroups.",
-  "pass": "split_k"
+  "pass": "split_k",
+  "bench": "fused_split_k"
  },
  {
   "fusion": "Flash attention",
@@ -129,7 +139,8 @@
   "cuda": "missing",
   "triton": "missing",
   "what": "Attention forward and backward as tiled kernels; scores never materialized.",
-  "pass": "flash_attention, flash_attention_backward"
+  "pass": "flash_attention, flash_attention_backward",
+  "bench": "fused_attention"
  },
  {
   "fusion": "Fused linear cross-entropy",
@@ -139,8 +150,9 @@
   "tpu": "missing",
   "cuda": "missing",
   "triton": "missing",
-  "what": "Logits h·wᵀ reduced to log-sum-exp and the target logit without storing them.",
-  "pass": "linear_cross_entropy"
+  "what": "Logits h\u00b7w\u1d40 reduced to log-sum-exp and the target logit without storing them.",
+  "pass": "linear_cross_entropy",
+  "bench": "fused_linear_cross_entropy"
  },
  {
   "fusion": "Chunked cross-entropy",
@@ -151,7 +163,8 @@
   "cuda": "missing",
   "triton": "missing",
   "what": "Cross-entropy's backward a chunk of rows at a time.",
-  "pass": "chunked_cross_entropy"
+  "pass": "chunked_cross_entropy",
+  "bench": "fused_cross_entropy_backward"
  },
  {
   "fusion": "take_along_axis as gather",
@@ -173,7 +186,8 @@
   "cuda": "missing",
   "triton": "missing",
   "what": "Producers write straight into their slot of the result; no copy. TPU: along the last dimension.",
-  "pass": "place_concats"
+  "pass": "place_concats",
+  "bench": "fused_concatenate"
  },
  {
   "fusion": "Strided operand views",
@@ -184,7 +198,8 @@
   "cuda": "missing",
   "triton": "missing",
   "what": "Slices a matmul reads are passed as strided views instead of copied.",
-  "pass": "place_views"
+  "pass": "place_views",
+  "bench": "fused_strided_matmul"
  },
  {
   "fusion": "Merged update chains",
