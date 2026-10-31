@@ -11,8 +11,6 @@ pub mod reference;
 mod tests;
 #[cfg(lumen_tpu_linked)]
 pub(crate) mod tpu;
-#[cfg(feature = "python")]
-pub(crate) mod tvm_ffi;
 pub mod wait;
 
 use std::any::Any;
