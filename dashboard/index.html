@@ -89,7 +89,6 @@
   .lx-op-head span { color: var(--muted); }
   .lx-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: 8px 24px; }
   .lx-chart-title { margin: 4px 0 0; font-size: 13px; font-weight: 500; font-family: var(--mono); color: var(--muted); }
-  .lx-sub { margin: 4px 0 0; font-size: 13px; font-weight: 500; color: var(--muted); }
   .lx-section-title { margin: 8px 0 0; font: 400 22px/1.2 var(--serif); }
   .lx-device { display: flex; flex-wrap: wrap; align-items: baseline; gap: 12px; color: var(--muted); font-size: 13px; }
   .lx-run { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; font-size: 12px; color: var(--muted); }
@@ -509,32 +508,43 @@ function charts(op, v) {
     });
   }
   const key = legend([...IMPLS.map(([, who, color]) => [who, color]), [compute ? "roofline" : "device bandwidth", "var(--roof)", true]]);
-  return { nodes: [el("h3", "lx-sub", compute ? "Roofline" : "Bandwidth"), key, grid], draw: () => drawn.forEach((d) => d()) };
+  return { label: compute ? "Roofline" : "Bandwidth", nodes: [key, grid], draw: () => drawn.forEach((d) => d()) };
 }
 
-/** Code, Graph and Plan tabs of the kernel captured for `op`. */
-function codeTabs(op, perf) {
+/** The Code, Graph and Plan panes of the kernel captured for `op`. */
+function codePanes(op, perf) {
   const code = perf.code[op];
   const [graph, kernel] = code ? graphAndKernel(code.kernel) : ["", "Not captured for this op."];
-  const panes = [["Code", el("pre")], ["Graph", el("pre", null, graph)], ["Plan", el("pre", null, code ? code.plan : "")]];
-  panes[0][1].replaceChildren(...highlighted(kernel));
+  const source = el("pre");
+  source.replaceChildren(...highlighted(kernel));
+  return [["Code", [source]], ["Graph", [el("pre", null, graph)]], ["Plan", [el("pre", null, code ? code.plan : "")]]];
+}
+
+// The tab each op's section shows, kept while the section redraws.
+const SHOWN = {};
+
+/** A tab bar over `panes` (`[label, nodes, onShow]`), showing the one `SHOWN[op]` names or the first. */
+function tabbed(op, panes) {
   const tabs = el("div", "lx-tabs");
   tabs.setAttribute("role", "tablist");
-  for (const [i, [label, pane]] of panes.entries()) {
+  const boxes = panes.map(([, nodes]) => { const box = el("div", "lx-panel"); box.setAttribute("role", "tabpanel"); box.append(...nodes); return box; });
+  const show = (i) => {
+    SHOWN[op] = panes[i][0];
+    for (const [j, box] of boxes.entries()) {
+      box.hidden = j !== i;
+      tabs.children[j].setAttribute("aria-selected", String(j === i));
+    }
+    panes[i][2]?.();
+  };
+  for (const [i, [label]] of panes.entries()) {
     const b = el("button", "lx-tab", label);
     b.type = "button";
     b.setAttribute("role", "tab");
-    b.setAttribute("aria-selected", String(i === 0));
-    pane.hidden = i !== 0;
-    b.addEventListener("click", () => {
-      for (const [j, [, other]] of panes.entries()) {
-        other.hidden = j !== i;
-        tabs.children[j].setAttribute("aria-selected", String(j === i));
-      }
-    });
+    b.addEventListener("click", () => show(i));
     tabs.append(b);
   }
-  return [el("h3", "lx-sub", "Codegen"), tabs, ...panes.map(([, pane]) => pane)];
+  const at = Math.max(0, panes.findIndex(([label]) => label === SHOWN[op]));
+  return { nodes: [tabs, ...boxes], show: () => show(at) };
 }
 
 const MEASURE_COLUMNS = [
@@ -557,7 +567,7 @@ function measurements(op, perf) {
   sort.draw();
   const scroll = el("div", "lx-scroll");
   scroll.append(t);
-  return [el("h3", "lx-sub", "Measurements"), scroll];
+  return [scroll];
 }
 
 // One section per op, in name order; each shows the current device's status, benchmarks and code.
@@ -605,17 +615,19 @@ function drawSection(op) {
     const at = perf.measured_at?.[op];
     nodes.push(el("p", "lx-note", at ? `Measured ${new Date(at).toLocaleString()} on ${perf.device}.` : `Measured on ${perf.device}.`));
   }
-  let draw = null;
+  let shown = null;
   if (!device.perf) nodes.push(el("p", "lx-note", `No benchmarks run on ${device.label}.`));
   else if (!(device.perf in PERFS)) nodes.push(el("p", "lx-note", "Loading…"));
   else if (!measured) { if (!device.runnable) nodes.push(el("p", "lx-note", `Not benchmarked on ${device.label} yet.`)); }
   else {
     const c = charts(op, view(perf));
-    nodes.push(...c.nodes, ...codeTabs(op, perf), ...measurements(op, perf));
-    draw = c.draw;
+    const t = tabbed(op, [[c.label, c.nodes, c.draw], ...codePanes(op, perf), ["Measurements", measurements(op, perf)]]);
+    nodes.push(...t.nodes);
+    shown = t.show;
   }
   s.replaceChildren(...nodes);
-  if (draw && !s.hidden) draw();
+  // Charts size to their box, so a pane is shown once the section is.
+  if (shown && !s.hidden) shown();
 }
 
 // The index of ops: filters choose which ops (and sections) show.
