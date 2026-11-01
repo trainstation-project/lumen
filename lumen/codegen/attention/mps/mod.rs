@@ -207,12 +207,12 @@ impl AttentionCodegen for Mps {
                     group.x, group.z, group.y, {heads}u, sg, lane, tid.y * 16 + tid.x{epi});"
             ),
             false => {
-                let bk = key_block(a);
+                let (bk, groups) = (key_block(a), forward_groups(a));
 
                 formatdoc!(
                     "
-                    threadgroup {t} ks[{bk} * {h}], vs[{bk} * {hv}];
-                    flash_attention<{t}, {o}, {h}u, {hv}u, {bk}u, {causal}, {raw}, {lse},
+                    threadgroup {t} ks[{bk} * ({h} + ATTN_PAD({t}))], vs[{bk} * ({hv} + ATTN_PAD({t}))];
+                    flash_attention<{t}, {o}, {h}u, {hv}u, {bk}u, {groups}u, {causal}, {raw}, {lse},
                                     NAME_ix, NAME_score, {w}>(
                         {q}, {k}, {v}, out, {raw_arg}, {lse_arg},
                         NAME_ix(), {sq}u, {sk}u, NAME_score(), {offset},
@@ -346,8 +346,8 @@ impl AttentionCodegen for Mps {
         let call = match (dkdv, dq) {
             (true, true) => formatdoc!(
                 "
-                threadgroup {t} qs[{rows} * {h}], gs[{rows} * {hv}];
-                threadgroup {t} ks[ATTN_BQ * {h}], dss[ATTN_BQ * {rows}];
+                threadgroup {t} qs[{rows} * ({h} + ATTN_PAD({t}))], gs[{rows} * ({hv} + ATTN_PAD({t}))];
+                threadgroup {t} ks[ATTN_BQ * ({h} + ATTN_PAD({t}))], dss[ATTN_BQ * {rows}];
                 threadgroup float lses[{rows}], deltas[{rows}];
                 flash_attention_dkdv<{t}, {h}u, {hv}u, {rows}u, {causal}, true,
                                      NAME_ix, NAME_score, {dk_t}, {dv_t}>(
@@ -360,7 +360,7 @@ impl AttentionCodegen for Mps {
             ),
             (true, false) => formatdoc!(
                 "
-                threadgroup {t} qs[{rows} * {h}], gs[{rows} * {hv}];
+                threadgroup {t} qs[{rows} * ({h} + ATTN_PAD({t}))], gs[{rows} * ({hv} + ATTN_PAD({t}))];
                 threadgroup float lses[{rows}], deltas[{rows}];
                 flash_attention_dkdv<{t}, {h}u, {hv}u, {rows}u, {causal}, false,
                                      NAME_ix, NAME_score, {dk_t}, {dv_t}>(
@@ -373,7 +373,7 @@ impl AttentionCodegen for Mps {
             ),
             (false, _) => formatdoc!(
                 "
-                threadgroup {t} ks[{rows} * {h}], vs[{rows} * {hv}];
+                threadgroup {t} ks[{rows} * ({h} + ATTN_PAD({t}))], vs[{rows} * ({hv} + ATTN_PAD({t}))];
                 flash_attention_dq<{t}, {h}u, {hv}u, {rows}u, {causal},
                                    NAME_ix, NAME_score, {dq_t}>(
                     {q}, {k}, {v}, {g}, {lse}, {delta},
