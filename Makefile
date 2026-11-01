@@ -71,9 +71,10 @@ fmt-check:
 
 # The C++/Objective-C++/Metal sources (the .mm shims and .metal kernels);
 # style is the shared .clang-format (from lm-engine). clang-format 21.1.6 (the
-# pre-commit hook's) runs through uvx, outside the project's environment.
+# pre-commit hook's): the one on PATH (CI pip-installs it), else through uvx,
+# outside the project's environment.
 CPP_SOURCES := $(shell find lumen -name '*.mm' -o -name '*.metal' -o -name '*.h')
-CLANG_FORMAT := uvx --from clang-format==21.1.6 clang-format
+CLANG_FORMAT := $(or $(shell command -v clang-format),uvx --from clang-format==21.1.6 clang-format)
 
 clang-format-check:
 	$(CLANG_FORMAT) --dry-run --Werror --style=file:.clang-format $(CPP_SOURCES)
