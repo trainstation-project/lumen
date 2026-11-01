@@ -266,12 +266,13 @@ fn triton_code(kernel: &str, functions: &[super::triton::Function]) -> String {
     [passed.join("\n"), kernel.to_owned()].join("\n")
 }
 
-/// A kernel compiled for one of a step's launches: the kernel's name and launch config, and the device
-/// and argument classes it was compiled for.
+/// A kernel compiled for one of a step's launches: the kernel's name, launch config and template
+/// constexprs, and the device and argument classes it was compiled for.
 #[cfg(lumen_cuda_linked)]
 struct Entry {
     name: String,
     config: [usize; 6],
+    constexprs: Vec<(&'static str, super::triton::Constexpr)>,
     device: usize,
     classes: Vec<super::triton::direct::Class>,
     kernel: std::sync::Arc<super::triton::direct::Compiled>,
@@ -279,15 +280,17 @@ struct Entry {
 
 /// Launches a Triton kernel from Rust when it compiles to a plain launch, returning whether it did (or
 /// had nothing to launch); otherwise the caller's Python launch runs it. The kernel is found in the
-/// step's `launches` by its `name`, launch `config` and its `values`' classes (its runtime parameters, in
-/// order, each run's own); the first launch of a class builds its `identity` (the kernel, its constexprs
-/// and launch options) and compiles it with `compile`, the Python launcher's call with `compile=True`.
+/// step's `launches` by its `name`, launch `config`, template `constexprs` and its `values`' classes (its
+/// runtime parameters, in order, each run's own); the first launch of a class builds its `identity` (the
+/// kernel, its constexprs and launch options) and compiles it with `compile`, the Python launcher's call
+/// with `compile=True`.
 #[cfg(lumen_cuda_linked)]
 #[allow(clippy::too_many_arguments)]
 fn direct(
     launches: &super::triton::Launches,
     name: &str,
     config: [usize; 6],
+    constexprs: &[(&'static str, super::triton::Constexpr)],
     identity: impl FnOnce() -> String,
     on: &crate::Tensor,
     values: &[super::triton::direct::Value],
@@ -310,6 +313,7 @@ fn direct(
         .find(|e| {
             e.name == name
                 && e.config == config
+                && e.constexprs == constexprs
                 && e.device == device
                 && e.classes.len() == values.len()
                 && e.classes.iter().zip(values).all(|(c, v)| *c == v.class())
@@ -370,6 +374,7 @@ fn direct(
                 .push(std::sync::Arc::new(Entry {
                     name: name.to_owned(),
                     config,
+                    constexprs: constexprs.to_vec(),
                     device,
                     classes: values.iter().map(|v| v.class()).collect(),
                     kernel: kernel.clone(),
@@ -519,6 +524,7 @@ fn triton_gemm(
             launches,
             "gemm",
             tiles,
+            &[],
             identity,
             tensors[2],
             &values,
@@ -677,6 +683,7 @@ fn triton_loop(
             launches,
             &kernel.name,
             tiles,
+            &constexprs,
             identity,
             out,
             &values,
@@ -783,6 +790,7 @@ fn triton_attention(launch: &super::triton::Launch) -> Result<(), String> {
             launch.launches,
             launch.kernel,
             tiles,
+            &[],
             identity,
             device,
             &values,

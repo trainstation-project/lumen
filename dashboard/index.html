@@ -129,8 +129,8 @@
   <div class="lx-device" id="lx-device"></div>
   <div class="lx-run" id="all-box">
     <select id="all-mode" aria-label="What to benchmark">
-      <option value="all">All ops</option>
-      <option value="missing">Ops not measured yet</option>
+      <option value="all">All ops and fusions</option>
+      <option value="missing">Not measured yet</option>
     </select>
     <button id="all-run" type="button">Run benchmarks</button>
     <span id="all-status" class="lx-run-status" role="status"></span>
@@ -162,6 +162,8 @@
   <section class="lx-card" id="fusion">
     <div class="lx-scroll"><table id="fusion-table"><thead><tr></tr></thead><tbody></tbody></table></div>
   </section>
+
+  <div class="lx-panel" id="fusion-sections"></div>
 </div>
 <div class="lx-tip" id="lx-tip" hidden></div>
 <script>
@@ -232,6 +234,12 @@ try {
 }
 PRIMITIVES.sort((a, b) => a.primitive.localeCompare(b.primitive));
 const PRIMITIVE = Object.fromEntries(PRIMITIVES.map((r) => [r.primitive, r]));
+// A fusion row's benchmarks: its `bench`, one name or a list (forward, then backward).
+const benches = (r) => [].concat(r.bench ?? []);
+// Fusions with a benchmark, keyed by its name; their sections follow the ops'.
+const FUSED = Object.fromEntries(FUSIONS.flatMap((r) => benches(r).map((b) => [b, r])));
+// The status row of an op or a fusion benchmark.
+const rowOf = (op) => PRIMITIVE[op] ?? FUSED[op];
 
 // Each tab is a device: a status column of the data files, and the benchmarks measured on it, if any.
 const STATUS = [["cpu", "CPU"], ["mps", "MPS"], ["tpu", "TPU"], ["cuda", "CUDA"]];
@@ -312,9 +320,9 @@ function chip(value) {
   return c;
 }
 
-/** The chip of `op`'s status on the current device. */
+/** The chip of `op`'s (or a fusion benchmark's) status on the current device. */
 function statusChip(op) {
-  const value = PRIMITIVE[op]?.[current.device.status];
+  const value = rowOf(op)?.[current.device.status];
   if (!value) return el("span", null, "—");
   const c = chip(value);
   return current.device.runnable ? progressed(c, op) : c;
@@ -553,6 +561,7 @@ const MEASURE_COLUMNS = [
     render: (r) => r.error ? "" : r.compute_bound ? fmt.tflops(r.flops / r.lumen_us / 1e6) : fmt.gbs(r.gbs) },
   { key: "speedup", label: "Speedup over PyTorch", kind: "num", sort: speedup,
     render: (r) => r.error ? "" : maybe(speedup(r), (v) => `${v.toFixed(2)}×`) },
+  { key: "kernels", label: "Kernels", kind: "num", render: (r) => r.kernels ?? "" },
 ];
 const measureSorts = {};
 
@@ -570,15 +579,15 @@ function measurements(op, perf) {
   return [scroll];
 }
 
-// One section per op, in name order; each shows the current device's status, benchmarks and code.
-const OPS = PRIMITIVES.map((r) => r.primitive);
+// One section per op, in name order, then one per fusion benchmark, in the fusion table's order; each shows
+// the current device's status, benchmarks and code.
+const OPS = [...PRIMITIVES.map((r) => r.primitive), ...Object.keys(FUSED)];
 const SECTIONS = new Map();
-const sectionsBox = document.getElementById("op-sections");
 for (const op of OPS) {
   const s = el("section", "lx-card lx-op");
   s.id = `op-${op}`;
   SECTIONS.set(op, s);
-  sectionsBox.append(s);
+  document.getElementById(op in FUSED ? "fusion-sections" : "op-sections").append(s);
 }
 
 let benchmarking = false;
@@ -590,12 +599,14 @@ function drawSection(op) {
   const known = KNOWN[op] || {};
   const head = el("div", "lx-op-head");
   const name = el("h2");
-  const anchor = el("a", null, op);
+  // A fusion with several benchmarks names each section by its benchmark too.
+  const fused = FUSED[op] && (benches(FUSED[op]).length > 1 ? `${FUSED[op].fusion}: ${op}` : FUSED[op].fusion);
+  const anchor = el("a", null, fused ?? op);
   anchor.href = hrefOf(op);
   name.append(anchor);
   head.append(name);
   if (known.formula) head.append(el("span", null, `${known.formula} · ${known.kind}`));
-  const row = PRIMITIVE[op];
+  const row = rowOf(op);
   const facts = el("div", "lx-device");
   facts.append(statusChip(op), ...[row?.[`${device.status}_kernel`], row?.[`${device.status}_note`]].filter(Boolean).map((t) => el("span", null, t)));
   const nodes = [head, facts];
@@ -636,6 +647,8 @@ const kindSel = document.getElementById("prim-kind");
 const gaps = document.getElementById("prim-gaps");
 for (const k of [...new Set(PRIMITIVES.map((r) => r.category))]) { const o = el("option", null, k); o.value = k; kindSel.append(o); }
 function shows(op) {
+  // The filters choose ops; fusion benchmarks always show.
+  if (op in FUSED) return true;
   const q = search.value.trim().toLowerCase();
   const row = PRIMITIVE[op];
   const perf = current.device.perf ? PERFS[current.device.perf] : null;
@@ -662,7 +675,8 @@ function drawSections() {
 for (const input of [search, kindSel, gaps]) input.addEventListener(input === search ? "input" : "change", () => { drawIndex(); drawSections(); });
 
 const FUS_COLUMNS = [
-  { key: "fusion", label: "Fusion" }, { key: "category", label: "Kind" },
+  { key: "fusion", label: "Fusion", render: (r) => { if (!r.bench) return r.fusion; const a = el("a", "lx-op", r.fusion); a.href = hrefOf(benches(r)[0]); return a; } },
+  { key: "category", label: "Kind" },
   { key: "status", label: "Status", kind: "dev", sort: (r) => r[current.device.status], render: (r) => chip(r[current.device.status]) },
   { key: "what", label: "What it does", kind: "why" }, { key: "pass", label: "Pass", wide: true },
 ];
@@ -809,7 +823,7 @@ allButton.addEventListener("click", () => {
   const ops = OPS.filter((op) => KNOWN[op] && (which === "all" || !perf?.rows.some((r) => r.op === op)));
   if (!ops.length) {
     allStatus.className = "lx-run-status";
-    allStatus.textContent = "Every op is measured already; choose All ops to measure them again.";
+    allStatus.textContent = "Every op and fusion is measured already; choose All ops and fusions to measure them again.";
     return;
   }
   runOps(ops);

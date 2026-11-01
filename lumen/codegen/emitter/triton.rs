@@ -236,7 +236,9 @@ impl<'a> Emitter<'a> {
     }
 
     /// Inverse error function via Giles' single-precision approximation: two polynomials in
-    /// `w = -log(1 - a^2)`, split at `w = 5`.
+    /// `w = -log(1 - a^2)`, split at `w = 5`. Each element evaluates only its branch's, as MPS
+    /// does: the branch picks the coefficients and the point, and each step is one explicit FMA
+    /// (the approximation's own arithmetic, not traced multiplies and adds).
     fn erf_inv(&mut self, a: &str, f: &str) -> String {
         const SMALL: [&str; 9] = [
             "2.81022636e-08",
@@ -263,25 +265,25 @@ impl<'a> Emitter<'a> {
         ];
 
         let w = self.local(format!("-libdevice.log((1.0 - {a}) * (1.0 + {a}))"));
-        let near = self.local(format!("{w} - 2.5"));
-        let far = self.local(format!("libdevice.sqrt({w}) - 3.0"));
+        let near = self.local(format!("{w} < 5.0"));
+        let at = self.local(format!(
+            "tl.where({near}, {w} - 2.5, libdevice.sqrt({w}) - 3.0)"
+        ));
 
-        let mut polynomial = |at: &str, coefficients: &[&str]| {
-            let mut p = self.local(format!("tl.full([], {}, {f})", coefficients[0]));
-
-            for c in &coefficients[1..] {
-                p = self.local(format!("{c} + {p} * {at}"));
-            }
-
-            p
+        let coefficient = |k: usize| {
+            format!(
+                "tl.where({near}, tl.full([], {}, {f}), tl.full([], {}, {f}))",
+                SMALL[k], LARGE[k]
+            )
         };
 
-        let small = polynomial(&near, &SMALL);
-        let large = polynomial(&far, &LARGE);
+        let mut p = self.local(coefficient(0));
 
-        format!(
-            "tl.where(tl.abs({a}) == 1.0, {a} * float(\"inf\"), tl.where({w} < 5.0, {small}, {large}) * {a})"
-        )
+        for k in 1..SMALL.len() {
+            p = self.local(format!("tl.fma({p}, {at}, {})", coefficient(k)));
+        }
+
+        format!("tl.where(tl.abs({a}) == 1.0, {a} * float(\"inf\"), {p} * {a})")
     }
 
     /// XLA `reduce_precision`: rounds the mantissa to nearest-even at `mantissa_bits` and clamps the

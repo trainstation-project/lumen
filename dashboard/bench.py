@@ -1,5 +1,6 @@
 """Benchmarks single lumen ops against PyTorch on one device and saves the results for the dashboard."""
 
+import contextlib
 import datetime
 import json
 import math
@@ -16,6 +17,7 @@ from typing import Callable, NamedTuple, Optional
 import numpy as np
 
 import lumen
+import lumen.functional as F
 from lumen import prims
 
 try:
@@ -53,12 +55,19 @@ LANES_PER_CORE = 128
 ROW = 1024
 EMBEDDING = 512
 DOT = (((1,), (0,)), ((), ()))
+# Attention benchmarks: heads, head dim, and the sizes (q's elements, so sequences of 256 to 8192).
+HEADS, HEAD_DIM = 8, 64
+ATTENTION_SIZES = tuple(1 << k for k in range(17, 23))
+# Columns of split-K's weight, and its sizes (the weight's elements: K of 4096 and up).
+SPLIT_N = 256
+SPLIT_SIZES = SIZES[3:]
 
 
 class Op(NamedTuple):
-    """A benchmarked op: its ``lumen`` and ``torch`` functions (for ``sized`` ops, functions of n
-    returning them), an ``inputs(n, dtype, rng)`` maker of ``(array, dtype)`` pairs, the dtypes and
-    sizes it runs at, and ``flops(n)`` for compute-bound ops (None: memory-bound)."""
+    """A benchmarked op or fusion: its ``lumen`` and ``torch`` functions (for ``sized`` ops, functions
+    of n returning them), an ``inputs(n, dtype, rng)`` maker of ``(array, dtype)`` pairs, the dtypes
+    and sizes it runs at, ``flops(n)`` for compute-bound ops (None: memory-bound), and the
+    ``(name, value)`` compiler flags of the device it runs with (``flags``: a fusion off by default)."""
 
     kind: str
     formula: str
@@ -69,11 +78,19 @@ class Op(NamedTuple):
     sizes: tuple = SIZES
     flops: Optional[Callable] = None
     sized: bool = False
+    flags: tuple = ()
 
 
 def in_float32(op):
-    """``op`` computed in float32 and cast back to its first input's dtype."""
-    return lambda *xs: op(*[x.to(dtype="float32") for x in xs]).to(dtype=xs[0].dtype)
+    """``op`` computed in float32, each of its outputs cast back to its first input's dtype."""
+
+    def run(*xs):
+        """``op`` of ``xs`` in float32."""
+        out = op(*[x.to(dtype="float32") for x in xs])
+        cast = [o.to(dtype=xs[0].dtype) for o in outputs(out)]
+        return tuple(cast) if isinstance(out, (tuple, list)) else cast[0]
+
+    return run
 
 
 def rows(n):
@@ -187,6 +204,80 @@ def lce(h, w, target):
     logits = h.float() @ w.float().T
     lse = torch.logsumexp(logits, -1)
     return torch.stack([lse - logits.gather(1, target.long()[:, None])[:, 0], lse])
+
+
+def floats(*shapes):
+    """Input maker of uniform ``[-1, 1)`` arrays, one per shape (a function of n)."""
+    return lambda n, dtype, rng: [(rng.uniform(-1, 1, shape(n)).astype(np.float32), dtype) for shape in shapes]
+
+
+def with_bias(n, dtype, rng):
+    """Two square matrices (as :func:`square`) and a bias row."""
+    return square(n, dtype, rng) + [(rng.uniform(-1, 1, side(n)).astype(np.float32), dtype)]
+
+
+def sliced(n, dtype, rng):
+    """A ``[s, 2s]`` matrix whose left half multiplies an ``[s, s]`` one, scaled as :func:`square`."""
+    s = side(n)
+    scale = np.sqrt(3 / s)
+    return [((rng.uniform(-1, 1, shape) * scale).astype(np.float32), dtype) for shape in ((s, 2 * s), (s, s))]
+
+
+def split(n, dtype, rng):
+    """Four rows of K and a ``[K, SPLIT_N]`` weight, K = n / SPLIT_N."""
+    k = n // SPLIT_N
+    return [
+        ((rng.uniform(-1, 1, shape) * np.sqrt(3 / k)).astype(np.float32), dtype) for shape in ((4, k), (k, SPLIT_N))
+    ]
+
+
+def qkv(n, dtype, rng):
+    """Query, key and value ``[1, S, HEADS, HEAD_DIM]`` of n elements each."""
+    return floats(*[lambda n: (1, n // (HEADS * HEAD_DIM), HEADS, HEAD_DIM)] * 3)(n, dtype, rng)
+
+
+def gelu(tanh):
+    """GELU's tanh approximation, written out with ``tanh`` (lumen's or torch's)."""
+    return lambda x: 0.5 * x * (1.0 + tanh(0.7978845608 * (x + 0.044715 * x * x * x)))
+
+
+def rms(x, w):
+    """RMSNorm of ``x``'s rows times ``w``, written out in lumen."""
+    return x / F.sqrt(F.mean(x * x, -1, keepdim=True) + 1e-6) * w
+
+
+def torch_grad(f, wrt):
+    """A torch function returning the gradients of scalar ``f`` with respect to its inputs ``wrt``."""
+
+    def run(*xs):
+        """The gradients at ``xs``."""
+        xs = [x.detach().requires_grad_(i in wrt) for i, x in enumerate(xs)]
+        return torch.autograd.grad(f(*xs), [xs[i] for i in wrt])
+
+    return run
+
+
+def merged(n, dtype, rng):
+    """Activations ``[n / EMBEDDING, EMBEDDING]`` and three ``[EMBEDDING, EMBEDDING]`` weights, scaled as :func:`square`."""
+    scale = np.sqrt(3 / EMBEDDING)
+    x = (rng.uniform(-1, 1, (n // EMBEDDING, EMBEDDING)).astype(np.float32), dtype)
+    return [x] + [((rng.uniform(-1, 1, (EMBEDDING, EMBEDDING)) * scale).astype(np.float32), dtype) for _ in range(3)]
+
+
+def cotangents(make, *shapes):
+    """Input maker ``make``'s inputs, then a uniform cotangent per shape (a function of n)."""
+    return lambda n, dtype, rng: make(n, dtype, rng) + floats(*shapes)(n, dtype, rng)
+
+
+def projections(matmul):
+    """``x``'s products with three weights (q/k/v projections) through ``matmul``."""
+    return lambda x, a, b, c: tuple(matmul(x, w) for w in (a, b, c))
+
+
+def attention_flops(n):
+    """FLOPs of causal attention on query, key and value of n elements: half of 4 · S² · H per head."""
+    s = n // (HEADS * HEAD_DIM)
+    return 2 * HEADS * s * s * HEAD_DIM
 
 
 def updated(x, u, i):
@@ -402,6 +493,178 @@ OPS = {
     ),
 }
 
+# Programs one compiler fusion runs (``data/fusions.json``'s ``bench``), against eager PyTorch.
+FUSIONS = {
+    "fused_gelu": Op(
+        "fusion",
+        "GELU (tanh) written out, in float32: one loop",
+        in_float32(gelu(F.tanh)),
+        gelu(lambda x: torch.tanh(x)),
+        floats(lambda n: n),
+    ),
+    "fused_transpose": Op(
+        "fusion",
+        "eˣᵀ · 2 + b, square, b a broadcast row: the transpose and broadcast as indexing",
+        in_float32(lambda x, b: F.exp(x.t()) * 2.0 + b),
+        lambda x, b: torch.exp(x.T) * 2.0 + b,
+        floats(lambda n: (side(n), side(n)), lambda n: (side(n),)),
+        sizes=SQUARE_SIZES,
+    ),
+    "fused_horizontal": Op(
+        "fusion",
+        "eᵃ · 2 + 1, (b − 1) · b and tanh c, independent: one kernel",
+        in_float32(lambda a, b, c: (F.exp(a) * 2.0 + 1.0, (b - 1.0) * b, F.tanh(c))),
+        lambda a, b, c: (torch.exp(a) * 2.0 + 1.0, (b - 1.0) * b, torch.tanh(c)),
+        floats(*[lambda n: n // 3] * 3),
+    ),
+    "fused_multi_output": Op(
+        "fusion",
+        "h = x · σ(x), returned with h² + 1: one loop writing both",
+        in_float32(lambda x: (lambda h: (h, h * h + 1.0))(x * F.sigmoid(x))),
+        lambda x: (lambda h: (h, h * h + 1.0))(x * torch.sigmoid(x)),
+        floats(lambda n: n),
+    ),
+    "fused_reduction": Op(
+        "fusion",
+        f"Σ(eˣ · 2 − y) · 0.5 + 1 over each row of {ROW}: one reduction kernel",
+        in_float32(lambda x, y: F.sum(F.exp(x) * 2.0 - y, -1) * 0.5 + 1.0),
+        lambda x, y: torch.sum(torch.exp(x) * 2.0 - y, -1) * 0.5 + 1.0,
+        floats(lambda n: (rows(n), ROW), lambda n: (ROW,)),
+    ),
+    "fused_rms_norm": Op(
+        "fusion",
+        f"RMSNorm of rows of {ROW} times w, written out: one row kernel",
+        in_float32(rms),
+        lambda x, w: torch.nn.functional.rms_norm(x, (ROW,), w, 1e-6),
+        floats(lambda n: (rows(n), ROW), lambda n: (ROW,)),
+    ),
+    "fused_rms_norm_backward": Op(
+        "fusion",
+        f"RMSNorm's gradients (rows of {ROW}): w's column sums as partials of the row kernel",
+        in_float32(lumen.grad(lambda x, w, c: F.sum(rms(x, w) * c), (0, 1))),
+        torch_grad(lambda x, w, c: torch.sum(torch.nn.functional.rms_norm(x, (ROW,), w, 1e-6) * c), (0, 1)),
+        floats(lambda n: (rows(n), ROW), lambda n: (ROW,), lambda n: (rows(n), ROW)),
+    ),
+    "fused_matmul_epilogue": Op(
+        "fusion",
+        "relu(A · B + b), square: the bias and relu as the product is written",
+        lambda a, b, c: F.relu(F.matmul(a, b, "float32", a.dtype) + c),
+        lambda a, b, c: torch.relu(a @ b + c),
+        with_bias,
+        sizes=SQUARE_SIZES,
+        flops=lambda n: 2 * side(n) ** 3,
+    ),
+    "fused_matmul_rms_norm": Op(
+        "fusion",
+        f"RMSNorm of X · W, X [n / {EMBEDDING}, {EMBEDDING}], W [{EMBEDDING}, 64]: the product never written",
+        lambda x, w, g: rms(F.matmul(x, w, "float32", "float32"), g.to(dtype="float32")).to(dtype=x.dtype),
+        lambda x, w, g: torch.nn.functional.rms_norm(x @ w, (64,), g, 1e-6),
+        floats(lambda n: (n // EMBEDDING, EMBEDDING), lambda n: (EMBEDDING, 64), lambda n: (64,)),
+        flops=lambda n: 2 * n * 64,
+    ),
+    "fused_split_k": Op(
+        "fusion",
+        f"[4, K] · [K, {SPLIT_N}], K = n / {SPLIT_N}: K split across threadgroups",
+        lambda x, w: F.matmul(x, w, "float32", x.dtype),
+        lambda x, w: x @ w,
+        split,
+        sizes=SPLIT_SIZES,
+    ),
+    "fused_attention": Op(
+        "fusion",
+        f"causal attention, {HEADS} heads of {HEAD_DIM}: tiled, scores never written",
+        lambda q, k, v: F.flash_attention(q, k, v, is_causal=True),
+        lambda q, k, v: torch.nn.functional.scaled_dot_product_attention(
+            q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), is_causal=True
+        ).transpose(1, 2),
+        qkv,
+        sizes=ATTENTION_SIZES,
+        flops=attention_flops,
+    ),
+    "fused_attention_backward": Op(
+        "fusion",
+        "gradients of causal attention (as above) against a cotangent: dQ, dK and dV tiled from the log-sum-exp",
+        lumen.grad(lambda q, k, v, c: F.sum(F.flash_attention(q, k, v, is_causal=True) * c), (0, 1, 2)),
+        torch_grad(
+            lambda q, k, v, c: torch.sum(
+                torch.nn.functional.scaled_dot_product_attention(
+                    q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), is_causal=True
+                ).transpose(1, 2)
+                * c
+            ),
+            (0, 1, 2),
+        ),
+        floats(*[lambda n: (1, n // (HEADS * HEAD_DIM), HEADS, HEAD_DIM)] * 4),
+        sizes=ATTENTION_SIZES,
+        flops=lambda n: 5 * attention_flops(n) // 2,
+    ),
+    "fused_merged_dots": Op(
+        "fusion",
+        f"x · Wq, x · Wk, x · Wv (x [n / {EMBEDDING}, {EMBEDDING}]): one product over the packed weights",
+        projections(lambda x, w: F.matmul(x, w, "float32", x.dtype)),
+        projections(lambda x, w: x @ w),
+        merged,
+        sizes=SQUARE_SIZES,
+        flops=lambda n: 6 * n * EMBEDDING,
+    ),
+    "fused_merged_dots_backward": Op(
+        "fusion",
+        "the projections' gradients against a cotangent each: dx as one product, the weights' as one",
+        lumen.grad(
+            lambda x, a, b, c, ca, cb, cc: F.sum(F.matmul(x, a, "float32", x.dtype) * ca)
+            + F.sum(F.matmul(x, b, "float32", x.dtype) * cb)
+            + F.sum(F.matmul(x, c, "float32", x.dtype) * cc),
+            (0, 1, 2, 3),
+        ),
+        torch_grad(
+            lambda x, a, b, c, ca, cb, cc: torch.sum((x @ a) * ca) + torch.sum((x @ b) * cb) + torch.sum((x @ c) * cc),
+            (0, 1, 2, 3),
+        ),
+        cotangents(merged, *[lambda n: (n // EMBEDDING, EMBEDDING)] * 3),
+        sizes=SQUARE_SIZES,
+        flops=lambda n: 12 * n * EMBEDDING,
+    ),
+    "fused_linear_cross_entropy": Op(
+        "fusion",
+        f"cross entropy of h · wᵀ (√n rows, √n classes, {EMBEDDING} features): logits never written",
+        lambda h, w, t: F.cross_entropy(F.matmul(h, w.t(), "float32", "float32"), t),
+        lambda h, w, t: torch.nn.functional.cross_entropy(h.float() @ w.float().T, t.long(), reduction="none"),
+        vocabulary,
+        sizes=SQUARE_SIZES,
+        flops=lambda n: 2 * n * EMBEDDING,
+    ),
+    "fused_cross_entropy_backward": Op(
+        "fusion",
+        "gradients of Σ cross entropy of h · wᵀ (as above): a chunk of rows at a time",
+        lumen.grad(lambda h, w, t: F.sum(F.cross_entropy(F.matmul(h, w.t(), "float32", "float32"), t)), (0, 1)),
+        torch_grad(
+            lambda h, w, t: torch.nn.functional.cross_entropy(h.float() @ w.float().T, t.long(), reduction="sum"),
+            (0, 1),
+        ),
+        vocabulary,
+        sizes=SQUARE_SIZES,
+        flops=lambda n: 6 * n * EMBEDDING,
+        flags=(("fused_linear_cross_entropy_chunk_size", 1024),),
+    ),
+    "fused_concatenate": Op(
+        "fusion",
+        f"[eᵃ; tanh b · 2], halves of rows of {ROW}: each written into its slot",
+        in_float32(lambda a, b: F.cat([F.exp(a), F.tanh(b) * 2.0], 0)),
+        lambda a, b: torch.cat([torch.exp(a), torch.tanh(b) * 2.0]),
+        floats(*[lambda n: (rows(n) // 2, ROW)] * 2),
+    ),
+    "fused_strided_matmul": Op(
+        "fusion",
+        "A[:, :s] · B, A [s, 2s]: the slice read in place",
+        lambda a, b: F.matmul(a[:, : b.shape[0]], b, "float32", a.dtype),
+        lambda a, b: a[:, : b.shape[0]] @ b,
+        sliced,
+        sizes=SQUARE_SIZES,
+        flops=lambda n: 2 * side(n) ** 3,
+    ),
+}
+OPS.update(FUSIONS)
+
 
 def gpu_cores():
     """GPU core count of this Mac, or None elsewhere."""
@@ -500,6 +763,20 @@ def rotation(per_call):
     return min(max(-(-ROTATION_BYTES // per_call), 2), 4096)
 
 
+@contextlib.contextmanager
+def flagged(op):
+    """Sets ``op``'s compiler flags on the benchmarked device while compiling and running it."""
+    config = getattr(lumen.config.compiler, DEVICE)
+    old = [(name, getattr(config, name)) for name, _ in op.flags]
+    for name, value in op.flags:
+        setattr(config, name, value)
+    try:
+        yield
+    finally:
+        for name, value in old:
+            setattr(config, name, value)
+
+
 def kernel_code(f, args):
     """The first launched kernel's source and the plan text of compiled ``f`` on ``args``."""
     with tempfile.TemporaryDirectory() as d:
@@ -518,9 +795,10 @@ def code_of(name):
     n = next(n for n in op.sizes if n >= 1 << 20)
     lf = op.lumen(n) if op.sized else op.lumen
     lt = [to_lumen(a, d) for a, d in op.inputs(n, op.dtypes[0], np.random.default_rng(0))]
-    f = lumen.compile(lf, device=DEVICE)
-    f(*lt)
-    return kernel_code(f, lt)
+    with flagged(op):
+        f = lumen.compile(lf, device=DEVICE)
+        f(*lt)
+        return kernel_code(f, lt)
 
 
 def to_lumen(array, dtype):
@@ -564,6 +842,12 @@ def measure(name, measured=lambda row: None):
         raise RuntimeError(NO_TORCH)
     op = OPS[name]
     rng = np.random.default_rng(0)
+    with flagged(op):
+        return timed_rows(name, op, rng, measured)
+
+
+def timed_rows(name, op, rng, measured):
+    """The rows and kernel code :func:`measure` returns, with ``op``'s flags set."""
     rows, code = [], None
     for dtype in op.dtypes:
         for n in op.sizes:
@@ -607,6 +891,7 @@ def measure(name, measured=lambda row: None):
             # Time the precompiled plan directly, with a workspace per input set.
             graph = lumen.make_graph(lf)(*lt)
             plan = lumen.graph_compiler.Plan(graph, DEVICE, parameters=list(range(len(lt))))
+            row["kernels"] = len(plan.steps())
             workspaces = [
                 lumen.Tensor.empty([max(plan.workspace_bytes, 1)], "uint8", DEVICE, alignment=plan.workspace_alignment)
                 for _ in range(sets)
