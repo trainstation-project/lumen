@@ -87,8 +87,59 @@
 /// The scatter kernels for element type `T`, with int32 and int64 indices.
 #define SCATTER_KERNELS(NAME, T) SCATTER_ROWS(NAME, T, i32, int) SCATTER_ROWS(NAME, T, i64, long)
 
+/// Adds `v` into `*p` with a native atomic add.
+template <typename T> inline void scatter_atomic_add(device T *p, T v) {
+    atomic_fetch_add_explicit((device _atomic<T> *)p, v, memory_order_relaxed);
+}
+
+/// Adds the 16-bit `v` into `*p` by compare-and-swap of the 32-bit word holding it (Metal has no
+/// 16-bit atomics).
+template <typename T> inline void scatter_atomic_add16(device T *p, T v) {
+    const ulong at = ulong(p);
+    device atomic_uint *word = (device atomic_uint *)(at & ~ulong(3));
+    const uint shift = uint(at & 2) * 8;
+    uint old = atomic_load_explicit(word, memory_order_relaxed), next;
+    do {
+        const T sum = as_type<T>(ushort(old >> shift)) + v;
+        next = (old & ~(0xffffu << shift)) | (uint(as_type<ushort>(sum)) << shift);
+    } while (!atomic_compare_exchange_weak_explicit(word, &old, next, memory_order_relaxed, memory_order_relaxed));
+}
+
+/// Adds `v` into `*p` atomically.
+inline void scatter_atomic_add(device half *p, half v) { scatter_atomic_add16(p, v); }
+
+/// Adds `v` into `*p` atomically.
+inline void scatter_atomic_add(device bfloat *p, bfloat v) { scatter_atomic_add16(p, v); }
+
+/// Thread per update element (torch's `index_add`): adds it into its row with an atomic add, so
+/// duplicate indices sum in an arbitrary order. Index math in 32 bits (64-bit division is slow);
+/// `count` (the updates' elements) fits.
+#define SCATTER_ATOMIC(NAME, T, INAME, I)                                                      \
+    kernel void scatter_add_atomic_##NAME##_##INAME(device const T *updates [[buffer(0)]],     \
+                                                    device const I *index [[buffer(1)]],       \
+                                                    device T *out [[buffer(2)]],               \
+                                                    constant uint &n [[buffer(3)]],            \
+                                                    constant uint &m [[buffer(4)]],            \
+                                                    constant uint &inner [[buffer(5)]],        \
+                                                    constant uint &count [[buffer(6)]],        \
+                                                    uint t [[thread_position_in_grid]]) {      \
+        if (t >= count) {                                                                      \
+            return;                                                                            \
+        }                                                                                      \
+        const uint rows = m * inner, o = t / rows, r = t % rows, i = r / inner, c = r % inner; \
+        scatter_atomic_add(out + (ulong(o) * n + ulong(index[i])) * inner + c, updates[t]);    \
+    }
+
+/// The atomic scatter kernels for element type `T`, with int32 and int64 indices.
+#define SCATTER_ATOMICS(NAME, T) SCATTER_ATOMIC(NAME, T, i32, int) SCATTER_ATOMIC(NAME, T, i64, long)
+
 #ifndef TEMPLATES_ONLY
 FOR_NUMERIC(SCATTER_KERNELS)
+SCATTER_ATOMICS(i32, int)
+SCATTER_ATOMICS(u32, uint)
+SCATTER_ATOMICS(f16, half)
+SCATTER_ATOMICS(bf16, bfloat)
+SCATTER_ATOMICS(f32, float)
 SCATTER_COUNT(i32, int)
 SCATTER_COUNT(i64, long)
 SCATTER_PLACE(i32, int)
