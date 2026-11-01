@@ -1,86 +1,130 @@
-/// Indices staged in threadgroup memory per pass of the scan kernel; also its threadgroup size.
-#define SCAN_BLOCK 256
+/// Updates of one axis position the row kernel sorts in threadgroup memory; a position hit more often
+/// walks the indices in order instead (at most `m / SCATTER_SEGMENT` positions can).
+#define SCATTER_SEGMENT 1024
+/// Threads of the row kernel's threadgroup, one a column.
+#define SCATTER_THREADS 256
 
-/// Thread per (outer, inner) position off the axis: adds every update row into `out` at its index,
-/// in index order, so duplicate indices sum deterministically without atomics.
-#define SCATTER_ADD(NAME, T, INAME, I)                                              \
-    kernel void scatter_add_##NAME##_##INAME(device const T *updates [[buffer(0)]], \
-                                             device const I *index [[buffer(1)]],   \
-                                             device T *out [[buffer(2)]],           \
-                                             constant ulong &n [[buffer(3)]],       \
-                                             constant ulong &m [[buffer(4)]],       \
-                                             constant ulong &inner [[buffer(5)]],   \
-                                             constant ulong &total [[buffer(6)]],   \
-                                             uint2 at [[thread_position_in_grid]],  \
-                                             uint2 grid [[threads_per_grid]]) {     \
-        ulong j = ulong(at.y) * grid.x + at.x;                                      \
-        if (j >= total) {                                                           \
-            return;                                                                 \
-        }                                                                           \
-        ulong r = j % inner, o = j / inner;                                         \
-        for (ulong t = 0; t < m; ++t) {                                             \
-            ulong k = ulong(index[t]);                                              \
-            device T *e = out + (o * n + k) * inner + r;                            \
-            *e = Add::apply(*e, updates[(o * m + t) * inner + r]);                  \
-        }                                                                           \
+/// Counts the updates at each axis position: `counts` (zeroed) gets one per index.
+#define SCATTER_COUNT(INAME, I)                                                            \
+    kernel void scatter_add_count_##INAME(device const I *index [[buffer(0)]],             \
+                                          device atomic_uint *counts [[buffer(1)]],        \
+                                          constant ulong &m [[buffer(2)]],                 \
+                                          uint t [[thread_position_in_grid]]) {            \
+        if (t < m) {                                                                       \
+            atomic_fetch_add_explicit(counts + ulong(index[t]), 1u, memory_order_relaxed); \
+        }                                                                                  \
     }
 
-/// Thread per output element: scans the indices in blocks staged in threadgroup memory and sums
-/// the updates whose index hits its axis position; suited to small `n * m`.
-#define SCATTER_ADD_SCAN(NAME, T, INAME, I)                                                     \
-    kernel void scatter_add_scan_##NAME##_##INAME(device const T *updates [[buffer(0)]],        \
+/// Writes each update's number into its axis position's segment of `order`, at `starts` plus the
+/// position's `cursor` (zeroed); a segment's order is arbitrary, the row kernel sorts it.
+#define SCATTER_PLACE(INAME, I)                                                                     \
+    kernel void scatter_add_place_##INAME(device const I *index [[buffer(0)]],                      \
+                                          device const uint *starts [[buffer(1)]],                  \
+                                          device atomic_uint *cursor [[buffer(2)]],                 \
+                                          device uint *order [[buffer(3)]],                         \
+                                          constant ulong &m [[buffer(4)]],                          \
+                                          uint t [[thread_position_in_grid]]) {                     \
+        if (t < m) {                                                                                \
+            ulong k = ulong(index[t]);                                                              \
+            order[starts[k] + atomic_fetch_add_explicit(cursor + k, 1u, memory_order_relaxed)] = t; \
+        }                                                                                           \
+    }
+
+/// Threadgroup per (axis position, column block, outer index) with updates: sorts the position's
+/// segment of update numbers and adds those updates into its row in update order, a thread a
+/// column, so duplicate indices sum as the serial kernel does, deterministically without float
+/// atomics. A position with more updates than a segment holds walks all the indices in order.
+#define SCATTER_ROWS(NAME, T, INAME, I)                                                         \
+    kernel void scatter_add_rows_##NAME##_##INAME(device const T *updates [[buffer(0)]],        \
                                                   device const I *index [[buffer(1)]],          \
                                                   device T *out [[buffer(2)]],                  \
-                                                  constant ulong &n [[buffer(3)]],              \
-                                                  constant ulong &m [[buffer(4)]],              \
-                                                  constant ulong &inner [[buffer(5)]],          \
-                                                  constant ulong &total [[buffer(6)]],          \
+                                                  device const uint *starts [[buffer(3)]],      \
+                                                  device const uint *order [[buffer(4)]],       \
+                                                  constant ulong &n [[buffer(5)]],              \
+                                                  constant ulong &m [[buffer(6)]],              \
+                                                  constant ulong &inner [[buffer(7)]],          \
                                                   uint3 group [[threadgroup_position_in_grid]], \
-                                                  uint3 tid [[thread_position_in_threadgroup]], \
-                                                  uint lane [[thread_index_in_simdgroup]]) {    \
-        threadgroup uint rows[SCAN_BLOCK];                                                      \
-        uint flat = tid.y * 16 + tid.x;                                                         \
-        ulong j = ulong(group.x) * SCAN_BLOCK + flat;                                           \
-        bool live = j < total;                                                                  \
-        ulong r = j % inner, k = j / inner % n, o = j / inner / n;                              \
-        T e = live ? out[j] : T(0);                                                             \
-        for (ulong t0 = 0; t0 < m; t0 += SCAN_BLOCK) {                                          \
-            threadgroup_barrier(mem_flags::mem_threadgroup);                                    \
-            if (t0 + flat < m) {                                                                \
-                rows[flat] = uint(index[t0 + flat]);                                            \
+                                                  uint t [[thread_index_in_threadgroup]]) {     \
+        threadgroup uint seg[SCATTER_SEGMENT], sorted[SCATTER_SEGMENT];                         \
+        const ulong k = group.x, o = group.z, c = ulong(group.y) * SCATTER_THREADS + t;         \
+        const uint s0 = starts[k], len = starts[k + 1] - s0;                                    \
+        if (len == 0) {                                                                         \
+            return;                                                                             \
+        }                                                                                       \
+        const bool live = c < inner;                                                            \
+        device T *at = out + (o * n + k) * inner + c;                                           \
+        device const T *u = updates + o * m * inner + c;                                        \
+        T e = live ? *at : T(0);                                                                \
+        if (len <= SCATTER_SEGMENT) {                                                           \
+            for (uint i = t; i < len; i += SCATTER_THREADS) {                                   \
+                seg[i] = order[s0 + i];                                                         \
             }                                                                                   \
             threadgroup_barrier(mem_flags::mem_threadgroup);                                    \
-            uint block = uint(min(ulong(SCAN_BLOCK), m - t0));                                  \
-            device const T *u = updates + (o * m + t0) * inner + r;                             \
-            if (inner % 32 == 0) {                                                              \
-                                                                                                \
-                for (uint t = 0; live && t < block; t += 32) {                                  \
-                    bool hit = t + lane < block && rows[t + lane] == k;                         \
-                    uint bits = uint(static_cast<simd_vote::vote_t>(simd_ballot(hit)));         \
-                    while (bits != 0) {                                                         \
-                        uint b = ctz(bits);                                                     \
-                        bits &= bits - 1;                                                       \
-                        e = Add::apply(e, u[(t + b) * inner]);                                  \
-                    }                                                                           \
+            /* Update numbers are distinct: each one's rank is how many are smaller. */         \
+            for (uint i = t; i < len; i += SCATTER_THREADS) {                                   \
+                uint v = seg[i], r = 0;                                                         \
+                for (uint j = 0; j < len; ++j) {                                                \
+                    r += seg[j] < v;                                                            \
                 }                                                                               \
-            } else {                                                                            \
-                for (uint t = 0; live && t < block; ++t) {                                      \
-                    if (rows[t] == k) {                                                         \
-                        e = Add::apply(e, u[t * inner]);                                        \
-                    }                                                                           \
+                sorted[r] = v;                                                                  \
+            }                                                                                   \
+            threadgroup_barrier(mem_flags::mem_threadgroup);                                    \
+            for (uint i = 0; live && i < len; ++i) {                                            \
+                e = Add::apply(e, u[ulong(sorted[i]) * inner]);                                 \
+            }                                                                                   \
+        } else {                                                                                \
+            for (ulong i = 0; live && i < m; ++i) {                                             \
+                if (ulong(index[i]) == k) {                                                     \
+                    e = Add::apply(e, u[i * inner]);                                            \
                 }                                                                               \
             }                                                                                   \
         }                                                                                       \
         if (live) {                                                                             \
-            out[j] = e;                                                                         \
+            *at = e;                                                                            \
         }                                                                                       \
     }
 
-/// Both scatter kernels for element type `T`, with int32 and int64 indices.
-#define SCATTER_KERNELS(NAME, T)   \
-    SCATTER_ADD(NAME, T, i32, int) \
-    SCATTER_ADD(NAME, T, i64, long) SCATTER_ADD_SCAN(NAME, T, i32, int) SCATTER_ADD_SCAN(NAME, T, i64, long)
+/// The scatter kernels for element type `T`, with int32 and int64 indices.
+#define SCATTER_KERNELS(NAME, T) SCATTER_ROWS(NAME, T, i32, int) SCATTER_ROWS(NAME, T, i64, long)
 
 #ifndef TEMPLATES_ONLY
 FOR_NUMERIC(SCATTER_KERNELS)
+SCATTER_COUNT(i32, int)
+SCATTER_COUNT(i64, long)
+SCATTER_PLACE(i32, int)
+SCATTER_PLACE(i64, long)
+
+/// Exclusive prefix sum of the `n` per-position `counts` into `starts` (`n + 1` entries), zeroing the
+/// counts for the place kernel's cursors: one threadgroup of 1024 threads, each a contiguous run.
+kernel void scatter_add_starts(device uint *counts [[buffer(0)]],
+                               device uint *starts [[buffer(1)]],
+                               constant ulong &n [[buffer(2)]],
+                               uint t [[thread_index_in_threadgroup]],
+                               uint sg [[simdgroup_index_in_threadgroup]],
+                               uint lane [[thread_index_in_simdgroup]]) {
+    threadgroup uint sums[32];
+    const ulong per = (n + 1023) / 1024, a = min(n, ulong(t) * per), b = min(n, a + per);
+    uint total = 0;
+    for (ulong k = a; k < b; ++k) {
+        total += counts[k];
+    }
+    const uint before = simd_prefix_exclusive_sum(total);
+    if (lane == 31) {
+        sums[sg] = before + total;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    if (sg == 0) {
+        sums[lane] = simd_prefix_exclusive_sum(sums[lane]);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    uint run = sums[sg] + before;
+    for (ulong k = a; k < b; ++k) {
+        starts[k] = run;
+        run += counts[k];
+        counts[k] = 0;
+    }
+    if (t == 1023) {
+        starts[n] = run;
+    }
+}
 #endif
