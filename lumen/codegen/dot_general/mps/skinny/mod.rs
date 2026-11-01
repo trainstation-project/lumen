@@ -20,13 +20,23 @@ pub(crate) fn skinny(
     rhs: &TensorType,
     out: &TensorType,
 ) -> bool {
+    skinny_rows(dot, lhs, rhs, out).is_some()
+}
+
+/// The output rows of `dot` when it should use the skinny kernel (`skinny`), else `None`.
+pub(crate) fn skinny_rows(
+    dot: &Primitive,
+    lhs: &TensorType,
+    rhs: &TensorType,
+    out: &TensorType,
+) -> Option<usize> {
     let (ls, rs) = (
         contiguous_strides(&lhs.shape),
         contiguous_strides(&rhs.shape),
     );
 
-    plan_matmul(dot, lhs, rhs, out, &ls, &rs, "", None).is_ok_and(|launch_| {
-        let [m, n, k, ..] = launch_.p;
-        m <= SKINNY_ROWS && launch_.p[8] == 1 && m * n * k >= SKINNY_WORK
-    })
+    let launch_ = plan_matmul(dot, lhs, rhs, out, &ls, &rs, "", None).ok()?;
+    let [m, n, k, ..] = launch_.p;
+
+    (m <= SKINNY_ROWS && launch_.p[8] == 1 && m * n * k >= SKINNY_WORK).then_some(m)
 }

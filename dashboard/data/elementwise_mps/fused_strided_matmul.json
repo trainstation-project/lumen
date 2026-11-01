@@ -13,13 +13,13 @@
    "stored_bytes": 16384,
    "flops": 524288,
    "compute_bound": true,
-   "lumen_us": 3.431,
-   "torch_us": 15.499,
+   "lumen_us": 3.326,
+   "torch_us": 15.747,
    "matches_torch": true,
    "rotation": 4096,
    "chained": false,
    "kernels": 1,
-   "gbs": 19.1
+   "gbs": 19.7
   },
   {
    "op": "fused_strided_matmul",
@@ -34,13 +34,13 @@
    "stored_bytes": 65536,
    "flops": 4194304,
    "compute_bound": true,
-   "lumen_us": 4.83,
-   "torch_us": 16.633,
+   "lumen_us": 4.765,
+   "torch_us": 16.386,
    "matches_torch": true,
    "rotation": 2048,
    "chained": false,
    "kernels": 1,
-   "gbs": 54.27
+   "gbs": 55.01
   },
   {
    "op": "fused_strided_matmul",
@@ -55,13 +55,13 @@
    "stored_bytes": 262144,
    "flops": 33554432,
    "compute_bound": true,
-   "lumen_us": 13.957,
-   "torch_us": 18.448,
+   "lumen_us": 13.958,
+   "torch_us": 18.666,
    "matches_torch": true,
    "rotation": 512,
    "chained": false,
    "kernels": 1,
-   "gbs": 75.13
+   "gbs": 75.12
   },
   {
    "op": "fused_strided_matmul",
@@ -76,13 +76,13 @@
    "stored_bytes": 1048576,
    "flops": 268435456,
    "compute_bound": true,
-   "lumen_us": 69.536,
-   "torch_us": 45.94,
+   "lumen_us": 67.67,
+   "torch_us": 45.995,
    "matches_torch": true,
    "rotation": 128,
    "chained": false,
    "kernels": 1,
-   "gbs": 60.32
+   "gbs": 61.98
   },
   {
    "op": "fused_strided_matmul",
@@ -97,13 +97,13 @@
    "stored_bytes": 4194304,
    "flops": 2147483648,
    "compute_bound": true,
-   "lumen_us": 424.978,
-   "torch_us": 336.634,
+   "lumen_us": 441.758,
+   "torch_us": 332.879,
    "matches_torch": true,
    "rotation": 32,
    "chained": false,
    "kernels": 1,
-   "gbs": 39.48
+   "gbs": 37.98
   },
   {
    "op": "fused_strided_matmul",
@@ -118,13 +118,13 @@
    "stored_bytes": 16777216,
    "flops": 17179869184,
    "compute_bound": true,
-   "lumen_us": 2894.89,
-   "torch_us": 2533.479,
+   "lumen_us": 3036.99,
+   "torch_us": 2535.179,
    "matches_torch": true,
    "rotation": 8,
    "chained": false,
    "kernels": 1,
-   "gbs": 23.18
+   "gbs": 22.1
   },
   {
    "op": "fused_strided_matmul",
@@ -139,13 +139,13 @@
    "stored_bytes": 67108864,
    "flops": 137438953472,
    "compute_bound": true,
-   "lumen_us": 22291.731,
-   "torch_us": 20001.721,
+   "lumen_us": 23630.531,
+   "torch_us": 19966.023,
    "matches_torch": true,
    "rotation": 2,
    "chained": false,
    "kernels": 1,
-   "gbs": 12.04
+   "gbs": 11.36
   },
   {
    "op": "fused_strided_matmul",
@@ -160,13 +160,13 @@
    "stored_bytes": 8192,
    "flops": 524288,
    "compute_bound": true,
-   "lumen_us": 3.15,
-   "torch_us": 15.712,
+   "lumen_us": 3.105,
+   "torch_us": 15.744,
    "matches_torch": true,
    "rotation": 4096,
    "chained": false,
    "kernels": 1,
-   "gbs": 10.4
+   "gbs": 10.55
   },
   {
    "op": "fused_strided_matmul",
@@ -181,13 +181,13 @@
    "stored_bytes": 32768,
    "flops": 4194304,
    "compute_bound": true,
-   "lumen_us": 4.352,
-   "torch_us": 16.112,
+   "lumen_us": 4.386,
+   "torch_us": 16.874,
    "matches_torch": true,
    "rotation": 4096,
    "chained": false,
    "kernels": 1,
-   "gbs": 30.12
+   "gbs": 29.88
   },
   {
    "op": "fused_strided_matmul",
@@ -202,13 +202,13 @@
    "stored_bytes": 131072,
    "flops": 33554432,
    "compute_bound": true,
-   "lumen_us": 11.656,
-   "torch_us": 17.809,
+   "lumen_us": 10.745,
+   "torch_us": 18.975,
    "matches_torch": true,
    "rotation": 1024,
    "chained": false,
    "kernels": 1,
-   "gbs": 44.98
+   "gbs": 48.79
   },
   {
    "op": "fused_strided_matmul",
@@ -223,13 +223,13 @@
    "stored_bytes": 524288,
    "flops": 268435456,
    "compute_bound": true,
-   "lumen_us": 60.048,
-   "torch_us": 39.162,
+   "lumen_us": 58.313,
+   "torch_us": 38.751,
    "matches_torch": true,
    "rotation": 256,
    "chained": false,
    "kernels": 1,
-   "gbs": 34.92
+   "gbs": 35.96
   },
   {
    "op": "fused_strided_matmul",
@@ -244,13 +244,13 @@
    "stored_bytes": 2097152,
    "flops": 2147483648,
    "compute_bound": true,
-   "lumen_us": 355.348,
-   "torch_us": 292.169,
+   "lumen_us": 354.849,
+   "torch_us": 290.743,
    "matches_torch": true,
    "rotation": 64,
    "chained": false,
    "kernels": 1,
-   "gbs": 23.61
+   "gbs": 23.64
   },
   {
    "op": "fused_strided_matmul",
@@ -265,13 +265,13 @@
    "stored_bytes": 8388608,
    "flops": 17179869184,
    "compute_bound": true,
-   "lumen_us": 2470.802,
-   "torch_us": 2301.723,
+   "lumen_us": 2469.373,
+   "torch_us": 2305.988,
    "matches_torch": true,
    "rotation": 16,
    "chained": false,
    "kernels": 1,
-   "gbs": 13.58
+   "gbs": 13.59
   },
   {
    "op": "fused_strided_matmul",
@@ -286,18 +286,18 @@
    "stored_bytes": 33554432,
    "flops": 137438953472,
    "compute_bound": true,
-   "lumen_us": 19178.452,
-   "torch_us": 18301.55,
+   "lumen_us": 19152.76,
+   "torch_us": 18237.56,
    "matches_torch": true,
    "rotation": 4,
    "chained": false,
    "kernels": 1,
-   "gbs": 7.0
+   "gbs": 7.01
   }
  ],
  "code": {
-  "kernel": "// step 0: dot_general\n// { lambda %0:f32[1024,1024] %1:f32[1024,1024]. let\n//     %2:f32[1024,1024] = dot_general[dimension_numbers=(((1,), (0,)), ((), ())) accum_dtype=f32 output_dtype=f32] %0 %1\n//   in (%2) }\n\nstruct fusion_f62e60940b2af778_epi {\n    device const float *in0;\n    device const float *in1;\n    inline float operator()(float r, ulong i) const {\n        uint j = uint(i);\n        return r;\n    }\n};\n\n[[max_total_threads_per_threadgroup(256)]]\nkernel void fusion_f62e60940b2af778(device const float *in0 [[buffer(0)]],\n                                    device const float *in1 [[buffer(1)]],\n                                    device float *out [[buffer(2)]],\n                                    constant ulong *p [[buffer(3)]],\n                                    uint3 group [[threadgroup_position_in_grid]],\n                                    uint3 tid [[thread_position_in_threadgroup]],\n                                    uint sg [[simdgroup_index_in_threadgroup]],\n                                    uint lane [[thread_index_in_simdgroup]]) {\n    threadgroup float lt[SG_LT_OF(128, 16, float, float, 8)], rt[16 * 64];\n    matmul_sg_impl<float, float, float, 128, 64, 16, float,\n                   fusion_f62e60940b2af778_epi, false, false, false, false, 1, false,\n                   256, 2, true>(\n        in0, in1, out, p,\n        lt, rt,\n        group, tid.y * 16 + tid.x, sg, lane,\n        fusion_f62e60940b2af778_epi{in0, in1});\n}\n\n[[max_total_threads_per_threadgroup(256)]]\nkernel void fusion_f62e60940b2af778_mid(device const float *in0 [[buffer(0)]],\n                                        device const float *in1 [[buffer(1)]],\n                                        device float *out [[buffer(2)]],\n                                        constant ulong *p [[buffer(3)]],\n                                        uint3 group [[threadgroup_position_in_grid]],\n                                        uint3 tid [[thread_position_in_threadgroup]],\n                                        uint sg [[simdgroup_index_in_threadgroup]],\n                                        uint lane [[thread_index_in_simdgroup]]) {\n    threadgroup float lt[SG_LT_OF(64, 16, float, float, 8)], rt[16 * 64];\n    matmul_sg_impl<float, float, float, 64, 64, 16, float,\n                   fusion_f62e60940b2af778_epi, false, false, false, false, 1, false,\n                   256, 2, true>(\n        in0, in1, out, p,\n        lt, rt,\n        group, tid.y * 16 + tid.x, sg, lane,\n        fusion_f62e60940b2af778_epi{in0, in1});\n}\n\n[[max_total_threads_per_threadgroup(256)]]\nkernel void fusion_f62e60940b2af778_small(device const float *in0 [[buffer(0)]],\n                                          device const float *in1 [[buffer(1)]],\n                                          device float *out [[buffer(2)]],\n                                          constant ulong *p [[buffer(3)]],\n                                          uint3 group [[threadgroup_position_in_grid]],\n                                          uint3 tid [[thread_position_in_threadgroup]],\n                                          uint sg [[simdgroup_index_in_threadgroup]],\n                                          uint lane [[thread_index_in_simdgroup]]) {\n    threadgroup float lt[SG_LT_OF(32, 32, float, float, 8)], rt[32 * 32];\n    matmul_sg_impl<float, float, float, 32, 32, 32, float,\n                   fusion_f62e60940b2af778_epi, false, false, false, false, 1, false,\n                   256, 2, true>(\n        in0, in1, out, p,\n        lt, rt,\n        group, tid.y * 16 + tid.x, sg, lane,\n        fusion_f62e60940b2af778_epi{in0, in1});\n}",
-  "plan": "plan (workspace 4194304 bytes)\n    ws+0:f32[1024,1024] = fusion[name=fusion_f62e60940b2af778 body={ lambda %0:f32[1024,1024] %1:f32[1024,1024]. let\n    %2:f32[1024,1024] = dot_general[dimension_numbers=(((1,), (0,)), ((), ())) accum_dtype=f32 output_dtype=f32] %0 %1\n  in (%2) }] in0[+0 strides [2048, 1]] in1"
+  "kernel": "// step 0: dot_general\n// { lambda %0:f32[1024,1024] %1:f32[1024,1024]. let\n//     %2:f32[1024,1024] = dot_general[dimension_numbers=(((1,), (0,)), ((), ())) accum_dtype=f32 output_dtype=f32] %0 %1\n//   in (%2) }\n\nstruct fusion_564e6047895f9b3a_epi {\n    device const float *in0;\n    device const float *in1;\n    inline float operator()(float r, ulong i) const {\n        uint j = uint(i);\n        return r;\n    }\n};\n\n[[max_total_threads_per_threadgroup(256)]]\nkernel void fusion_564e6047895f9b3a(device const float *in0 [[buffer(0)]],\n                                    device const float *in1 [[buffer(1)]],\n                                    device float *out [[buffer(2)]],\n                                    constant ulong *p [[buffer(3)]],\n                                    uint3 group [[threadgroup_position_in_grid]],\n                                    uint3 tid [[thread_position_in_threadgroup]],\n                                    uint sg [[simdgroup_index_in_threadgroup]],\n                                    uint lane [[thread_index_in_simdgroup]]) {\n    threadgroup float lt[SG_LT_OF(128, 16, float, float, 8)], rt[SG_RT(16, 64, float)];\n    matmul_sg_impl<float, float, float, 128, 64, 16, float,\n                   fusion_564e6047895f9b3a_epi, false, false, false, false, 1, false,\n                   256, 2, true>(\n        in0, in1, out, p,\n        lt, rt,\n        group, tid.y * 16 + tid.x, sg, lane,\n        fusion_564e6047895f9b3a_epi{in0, in1});\n}\n\n[[max_total_threads_per_threadgroup(256)]]\nkernel void fusion_564e6047895f9b3a_mid(device const float *in0 [[buffer(0)]],\n                                        device const float *in1 [[buffer(1)]],\n                                        device float *out [[buffer(2)]],\n                                        constant ulong *p [[buffer(3)]],\n                                        uint3 group [[threadgroup_position_in_grid]],\n                                        uint3 tid [[thread_position_in_threadgroup]],\n                                        uint sg [[simdgroup_index_in_threadgroup]],\n                                        uint lane [[thread_index_in_simdgroup]]) {\n    threadgroup float lt[SG_LT_OF(64, 16, float, float, 8)], rt[SG_RT(16, 64, float)];\n    matmul_sg_impl<float, float, float, 64, 64, 16, float,\n                   fusion_564e6047895f9b3a_epi, false, false, false, false, 1, false,\n                   256, 2, true>(\n        in0, in1, out, p,\n        lt, rt,\n        group, tid.y * 16 + tid.x, sg, lane,\n        fusion_564e6047895f9b3a_epi{in0, in1});\n}\n\n[[max_total_threads_per_threadgroup(256)]]\nkernel void fusion_564e6047895f9b3a_small(device const float *in0 [[buffer(0)]],\n                                          device const float *in1 [[buffer(1)]],\n                                          device float *out [[buffer(2)]],\n                                          constant ulong *p [[buffer(3)]],\n                                          uint3 group [[threadgroup_position_in_grid]],\n                                          uint3 tid [[thread_position_in_threadgroup]],\n                                          uint sg [[simdgroup_index_in_threadgroup]],\n                                          uint lane [[thread_index_in_simdgroup]]) {\n    threadgroup float lt[SG_LT_OF(32, 32, float, float, 8)], rt[SG_RT(32, 32, float)];\n    matmul_sg_impl<float, float, float, 32, 32, 32, float,\n                   fusion_564e6047895f9b3a_epi, false, false, false, false, 1, false,\n                   256, 2, true>(\n        in0, in1, out, p,\n        lt, rt,\n        group, tid.y * 16 + tid.x, sg, lane,\n        fusion_564e6047895f9b3a_epi{in0, in1});\n}",
+  "plan": "plan (workspace 4194304 bytes)\n    ws+0:f32[1024,1024] = fusion[name=fusion_564e6047895f9b3a body={ lambda %0:f32[1024,1024] %1:f32[1024,1024]. let\n    %2:f32[1024,1024] = dot_general[dimension_numbers=(((1,), (0,)), ((), ())) accum_dtype=f32 output_dtype=f32] %0 %1\n  in (%2) }] in0[+0 strides [2048, 1]] in1"
  },
- "measured_at": "2026-10-31T09:08:13+00:00"
+ "measured_at": "2026-11-01T06:24:10+00:00"
 }

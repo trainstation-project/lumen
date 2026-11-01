@@ -13,13 +13,13 @@
    "stored_bytes": 256,
    "flops": 4194304,
    "compute_bound": true,
-   "lumen_us": 20.718,
-   "torch_us": 23.331,
+   "lumen_us": 13.722,
+   "torch_us": 23.946,
    "matches_torch": true,
    "rotation": 2045,
    "chained": false,
    "kernels": 2,
-   "gbs": 12.68
+   "gbs": 19.14
   },
   {
    "op": "fused_linear_cross_entropy",
@@ -34,13 +34,13 @@
    "stored_bytes": 512,
    "flops": 16777216,
    "compute_bound": true,
-   "lumen_us": 21.52,
-   "torch_us": 25.861,
+   "lumen_us": 14.193,
+   "torch_us": 26.424,
    "matches_torch": true,
    "rotation": 1023,
    "chained": false,
    "kernels": 2,
-   "gbs": 24.41
+   "gbs": 37.01
   },
   {
    "op": "fused_linear_cross_entropy",
@@ -55,13 +55,13 @@
    "stored_bytes": 1024,
    "flops": 67108864,
    "compute_bound": true,
-   "lumen_us": 36.426,
-   "torch_us": 31.209,
+   "lumen_us": 25.971,
+   "torch_us": 30.994,
    "matches_torch": true,
    "rotation": 512,
    "chained": false,
    "kernels": 2,
-   "gbs": 28.84
+   "gbs": 40.45
   },
   {
    "op": "fused_linear_cross_entropy",
@@ -76,13 +76,13 @@
    "stored_bytes": 2048,
    "flops": 268435456,
    "compute_bound": true,
-   "lumen_us": 77.063,
-   "torch_us": 74.151,
+   "lumen_us": 68.208,
+   "torch_us": 74.855,
    "matches_torch": true,
    "rotation": 256,
    "chained": false,
    "kernels": 2,
-   "gbs": 27.27
+   "gbs": 30.81
   },
   {
    "op": "fused_linear_cross_entropy",
@@ -97,13 +97,13 @@
    "stored_bytes": 4096,
    "flops": 1073741824,
    "compute_bound": true,
-   "lumen_us": 240.449,
-   "torch_us": 224.048,
+   "lumen_us": 227.354,
+   "torch_us": 225.95,
    "matches_torch": true,
    "rotation": 128,
    "chained": false,
    "kernels": 2,
-   "gbs": 17.48
+   "gbs": 18.48
   },
   {
    "op": "fused_linear_cross_entropy",
@@ -118,13 +118,13 @@
    "stored_bytes": 8192,
    "flops": 4294967296,
    "compute_bound": true,
-   "lumen_us": 836.606,
-   "torch_us": 890.19,
+   "lumen_us": 785.271,
+   "torch_us": 917.213,
    "matches_torch": true,
    "rotation": 64,
    "chained": false,
    "kernels": 2,
-   "gbs": 10.05
+   "gbs": 10.7
   },
   {
    "op": "fused_linear_cross_entropy",
@@ -139,13 +139,13 @@
    "stored_bytes": 16384,
    "flops": 17179869184,
    "compute_bound": true,
-   "lumen_us": 3225.543,
-   "torch_us": 3278.961,
+   "lumen_us": 3041.254,
+   "torch_us": 3319.988,
    "matches_torch": true,
    "rotation": 32,
    "chained": false,
    "kernels": 2,
-   "gbs": 5.21
+   "gbs": 5.53
   },
   {
    "op": "fused_linear_cross_entropy",
@@ -160,13 +160,13 @@
    "stored_bytes": 256,
    "flops": 4194304,
    "compute_bound": true,
-   "lumen_us": 20.725,
-   "torch_us": 25.753,
+   "lumen_us": 12.739,
+   "torch_us": 26.002,
    "matches_torch": true,
    "rotation": 4081,
    "chained": false,
    "kernels": 2,
-   "gbs": 6.35
+   "gbs": 10.33
   },
   {
    "op": "fused_linear_cross_entropy",
@@ -181,13 +181,13 @@
    "stored_bytes": 512,
    "flops": 16777216,
    "compute_bound": true,
-   "lumen_us": 21.11,
-   "torch_us": 28.561,
+   "lumen_us": 13.123,
+   "torch_us": 29.809,
    "matches_torch": true,
    "rotation": 2041,
    "chained": false,
    "kernels": 2,
-   "gbs": 12.47
+   "gbs": 20.05
   },
   {
    "op": "fused_linear_cross_entropy",
@@ -202,13 +202,13 @@
    "stored_bytes": 1024,
    "flops": 67108864,
    "compute_bound": true,
-   "lumen_us": 38.956,
-   "torch_us": 38.156,
+   "lumen_us": 23.161,
+   "torch_us": 37.729,
    "matches_torch": true,
    "rotation": 1021,
    "chained": false,
    "kernels": 2,
-   "gbs": 13.51
+   "gbs": 22.73
   },
   {
    "op": "fused_linear_cross_entropy",
@@ -223,13 +223,13 @@
    "stored_bytes": 2048,
    "flops": 268435456,
    "compute_bound": true,
-   "lumen_us": 74.08,
-   "torch_us": 86.89,
+   "lumen_us": 60.354,
+   "torch_us": 88.459,
    "matches_torch": true,
    "rotation": 511,
    "chained": false,
    "kernels": 2,
-   "gbs": 14.21
+   "gbs": 17.44
   },
   {
    "op": "fused_linear_cross_entropy",
@@ -244,13 +244,13 @@
    "stored_bytes": 4096,
    "flops": 1073741824,
    "compute_bound": true,
-   "lumen_us": 218.947,
-   "torch_us": 242.988,
+   "lumen_us": 187.429,
+   "torch_us": 248.478,
    "matches_torch": true,
    "rotation": 256,
    "chained": false,
    "kernels": 2,
-   "gbs": 9.62
+   "gbs": 11.23
   },
   {
    "op": "fused_linear_cross_entropy",
@@ -265,13 +265,13 @@
    "stored_bytes": 8192,
    "flops": 4294967296,
    "compute_bound": true,
-   "lumen_us": 762.979,
-   "torch_us": 950.479,
+   "lumen_us": 651.613,
+   "torch_us": 979.807,
    "matches_torch": true,
    "rotation": 128,
    "chained": false,
    "kernels": 2,
-   "gbs": 5.52
+   "gbs": 6.46
   },
   {
    "op": "fused_linear_cross_entropy",
@@ -286,18 +286,18 @@
    "stored_bytes": 16384,
    "flops": 17179869184,
    "compute_bound": true,
-   "lumen_us": 2953.261,
-   "torch_us": 3387.559,
+   "lumen_us": 2522.872,
+   "torch_us": 3419.852,
    "matches_torch": true,
    "rotation": 64,
    "chained": false,
    "kernels": 2,
-   "gbs": 2.85
+   "gbs": 3.34
   }
  ],
  "code": {
-  "kernel": "// step 0: linear_cross_entropy\n// linear_cross_entropy\n\n// codegen/dot_general/mps/linear_cross_entropy/kernel.metal\n#define LCE_PARTIALS_TILE(KIND, NAME, T, LNAME, L, BM, BN, BK)                                      \\\n    kernel void lce_partials_##KIND##NAME##_##LNAME(device const T *h [[buffer(0)]],                \\\n                                                    device const T *w [[buffer(1)]],                \\\n                                                    device const L *target [[buffer(2)]],           \\\n                                                    device float *out [[buffer(3)]],                \\\n                                                    device float *maxima [[buffer(4)]],             \\\n                                                    device float *sums [[buffer(5)]],               \\\n                                                    constant ulong *p [[buffer(6)]],                \\\n                                                    uint3 group [[threadgroup_position_in_grid]],   \\\n                                                    uint3 tid [[thread_position_in_threadgroup]],   \\\n                                                    uint sg [[simdgroup_index_in_threadgroup]],     \\\n                                                    uint lane [[thread_index_in_simdgroup]]) {      \\\n        threadgroup T lt[SG_LT(BM, BK, T, float)], rt[BK * BN];                                     \\\n        threadgroup float halves[BM * SG_COLS * 2];                                                 \\\n        LceRows<L, BM, BN> rows{target, out, maxima, sums, halves, p[0], p[1], group.x};            \\\n        matmul_sg_impl<T, float, float, BM, BN, BK, float, LceRows<L, BM, BN>, false, false, true>( \\\n            h, w, out, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane, rows);                       \\\n    }",
+  "kernel": "// step 0: linear_cross_entropy\n// linear_cross_entropy\n\n// codegen/dot_general/mps/linear_cross_entropy/kernel.metal\n#define LCE_PARTIALS_TILE(KIND, NAME, T, LNAME, L, BM, BN, BK)                                      \\\n    kernel void lce_partials_##KIND##NAME##_##LNAME(device const T *h [[buffer(0)]],                \\\n                                                    device const T *w [[buffer(1)]],                \\\n                                                    device const L *target [[buffer(2)]],           \\\n                                                    device float *out [[buffer(3)]],                \\\n                                                    device float *maxima [[buffer(4)]],             \\\n                                                    device float *sums [[buffer(5)]],               \\\n                                                    constant ulong *p [[buffer(6)]],                \\\n                                                    uint3 group [[threadgroup_position_in_grid]],   \\\n                                                    uint3 tid [[thread_position_in_threadgroup]],   \\\n                                                    uint sg [[simdgroup_index_in_threadgroup]],     \\\n                                                    uint lane [[thread_index_in_simdgroup]]) {      \\\n        threadgroup T lt[SG_LT(BM, BK, T, float)], rt[SG_RT(BK, BN, T)];                            \\\n        threadgroup float halves[BM * SG_COLS * 2];                                                 \\\n        LceRows<L, BM, BN> rows{target, out, maxima, sums, halves, p[0], p[1], group.x};            \\\n        matmul_sg_impl<T, float, float, BM, BN, BK, float, LceRows<L, BM, BN>, false, false, true>( \\\n            h, w, out, p, lt, rt, group, tid.y * 16 + tid.x, sg, lane, rows);                       \\\n    }",
   "plan": "plan (workspace 139264 bytes)\n    ws+131072:f32[2,1024] = linear_cross_entropy in0 in1 in2 (scratch ws+0, 131072 bytes)\n    ws+0:f32[1024] = fusion[name=fusion_8f8445cf8510e662 body={ lambda %0:f32[2,1024]. let\n    %1:f32[1,1024] = slice[limit_indices=(1, 1024) start_indices=(0, 0)] %0\n    %2:f32[1024] = reshape[new_sizes=(1024,)] %1\n  in (%2) }] ws+131072"
  },
- "measured_at": "2026-10-31T09:05:34+00:00"
+ "measured_at": "2026-11-01T06:26:20+00:00"
 }
