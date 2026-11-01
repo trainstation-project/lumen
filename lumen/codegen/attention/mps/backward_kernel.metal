@@ -59,13 +59,12 @@ inline void flash_attention_dkdv(device const T *q,
     const uint fr = frag_row(lane), fc = frag_col(lane);
     const uint row = BLOCK_ID_N * BLOCK_SIZE_N + sg * ATTN_ROWS + fr;
     const bool in_rows = row < sk;
+    // The padded row lengths of the query, output-gradient and key tiles.
+    constexpr uint LQ = D + ATTN_PAD(T), LG = DV + ATTN_PAD(T), LK = D + ATTN_PAD(T);
     // The dQ path keeps this block's keys in threadgroup memory for the dS * K product.
     if constexpr (DQ) {
         dq += ix.dq(BLOCK_ID_B, BLOCK_ID_H);
-        for (uint e = t; e < BLOCK_SIZE_N * D; e += 256) {
-            uint j = e / D, d = e % D, key = BLOCK_ID_N * BLOCK_SIZE_N + j;
-            ks[e] = key < sk ? k[key * Ix::K_ROW + d * Ix::K_COL] : T(0);
-        }
+        load_tile<T, BLOCK_SIZE_N, D, LK, Ix::K_ROW, Ix::K_COL>(ks, k, BLOCK_ID_N * BLOCK_SIZE_N, sk, t);
     }
     simdgroup_matrix<T, 8, 8> km[D / 8], vm[DV / 8];
     ATTN_UNROLL for (uint c = 0; c < D / 8; ++c) {
@@ -89,14 +88,8 @@ inline void flash_attention_dkdv(device const T *q,
     }
     for (uint q0 = first; q0 < sq; q0 += BLOCK_SIZE_M) {
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        for (uint e = t; e < BLOCK_SIZE_M * D; e += 256) {
-            uint i = e / D, d = e % D;
-            qs[e] = q0 + i < sq ? q[(q0 + i) * Ix::Q_ROW + d * Ix::Q_COL] : T(0);
-        }
-        for (uint e = t; e < BLOCK_SIZE_M * DV; e += 256) {
-            uint i = e / DV, d = e % DV;
-            gs[e] = q0 + i < sq ? g[(q0 + i) * Ix::G_ROW + d * Ix::G_COL] : T(0);
-        }
+        load_tile<T, BLOCK_SIZE_M, D, LQ, Ix::Q_ROW, Ix::Q_COL>(qs, q, q0, sq, t);
+        load_tile<T, BLOCK_SIZE_M, DV, LG, Ix::G_ROW, Ix::G_COL>(gs, g, q0, sq, t);
         for (uint i = t; i < BLOCK_SIZE_M; i += 256) {
             lses[i] = q0 + i < sq ? lse[(q0 + i) * Ix::LSE_COL] : 0.0f;
             deltas[i] = q0 + i < sq ? delta[(q0 + i) * Ix::DELTA_COL] : 0.0f;
@@ -107,12 +100,12 @@ inline void flash_attention_dkdv(device const T *q,
             simdgroup_matrix<float, 8, 8> st(0), dpt(0);
             ATTN_UNROLL for (uint c = 0; c < D / 8; ++c) {
                 simdgroup_matrix<T, 8, 8> qt;
-                simdgroup_load(qt, qs + ic * 8 * D + c * 8, D, ulong2(0, 0), true);
+                simdgroup_load(qt, qs + ic * 8 * LQ + c * 8, LQ, ulong2(0, 0), true);
                 simdgroup_multiply_accumulate(st, km[c], qt, st);
             }
             ATTN_UNROLL for (uint c = 0; c < DV / 8; ++c) {
                 simdgroup_matrix<T, 8, 8> gt;
-                simdgroup_load(gt, gs + ic * 8 * DV + c * 8, DV, ulong2(0, 0), true);
+                simdgroup_load(gt, gs + ic * 8 * LG + c * 8, LG, ulong2(0, 0), true);
                 simdgroup_multiply_accumulate(dpt, vm[c], gt, dpt);
             }
             thread auto &s = frag(st);
@@ -130,12 +123,12 @@ inline void flash_attention_dkdv(device const T *q,
             frag(dsm) = vec<T, 2>(ds);
             ATTN_UNROLL for (uint c = 0; c < DV / 8; ++c) {
                 simdgroup_matrix<T, 8, 8> gm;
-                simdgroup_load(gm, gs + ic * 8 * DV + c * 8, DV);
+                simdgroup_load(gm, gs + ic * 8 * LG + c * 8, LG);
                 simdgroup_multiply_accumulate(dvm[c], pm, gm, dvm[c]);
             }
             ATTN_UNROLL for (uint c = 0; c < D / 8; ++c) {
                 simdgroup_matrix<T, 8, 8> qm;
-                simdgroup_load(qm, qs + ic * 8 * D + c * 8, D);
+                simdgroup_load(qm, qs + ic * 8 * LQ + c * 8, LQ);
                 simdgroup_multiply_accumulate(dkm[c], dsm, qm, dkm[c]);
             }
             // Stage dS^T for the cross-simdgroup dQ product below.
@@ -151,7 +144,7 @@ inline void flash_attention_dkdv(device const T *q,
                 ATTN_UNROLL for (uint j = 0; j < BLOCK_SIZE_N / 8; ++j) {
                     simdgroup_matrix<T, 8, 8> dsq, km;
                     simdgroup_load(dsq, dss + j * 8 * BLOCK_SIZE_M + i * 8, BLOCK_SIZE_M, ulong2(0, 0), true);
-                    simdgroup_load(km, ks + j * 8 * D + c * 8, D);
+                    simdgroup_load(km, ks + j * 8 * LK + c * 8, LK);
                     simdgroup_multiply_accumulate(acc, dsq, km, acc);
                 }
                 uint query = q0 + i * 8 + fr, d = c * 8 + fc;
@@ -245,27 +238,23 @@ inline void flash_attention_dq(device const T *q,
         long hi = long(min(BLOCK_ID_M * BLOCK_SIZE_M + BLOCK_SIZE_M, sq)) + long(offset);
         last = uint(clamp(hi, 0l, long(sk)));
     }
+    // The key and value tiles' padded row lengths.
+    constexpr uint LK = D + ATTN_PAD(T), LV = DV + ATTN_PAD(T);
     for (uint k0 = 0; k0 < last; k0 += BLOCK_SIZE_N) {
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        for (uint e = t; e < BLOCK_SIZE_N * D; e += 256) {
-            uint j = e / D, d = e % D;
-            ks[e] = k0 + j < sk ? k[(k0 + j) * Ix::K_ROW + d * Ix::K_COL] : T(0);
-        }
-        for (uint e = t; e < BLOCK_SIZE_N * DV; e += 256) {
-            uint j = e / DV, d = e % DV;
-            vs[e] = k0 + j < sk ? v[(k0 + j) * Ix::V_ROW + d * Ix::V_COL] : T(0);
-        }
+        load_tile<T, BLOCK_SIZE_N, D, LK, Ix::K_ROW, Ix::K_COL>(ks, k, k0, sk, t);
+        load_tile<T, BLOCK_SIZE_N, DV, LV, Ix::V_ROW, Ix::V_COL>(vs, v, k0, sk, t);
         threadgroup_barrier(mem_flags::mem_threadgroup);
         ATTN_UNROLL for (uint jc = 0; jc < BLOCK_SIZE_N / 8; ++jc) {
             simdgroup_matrix<float, 8, 8> s(0), dp(0);
             ATTN_UNROLL for (uint c = 0; c < D / 8; ++c) {
                 simdgroup_matrix<T, 8, 8> kt;
-                simdgroup_load(kt, ks + jc * 8 * D + c * 8, D, ulong2(0, 0), true);
+                simdgroup_load(kt, ks + jc * 8 * LK + c * 8, LK, ulong2(0, 0), true);
                 simdgroup_multiply_accumulate(s, qm[c], kt, s);
             }
             ATTN_UNROLL for (uint c = 0; c < DV / 8; ++c) {
                 simdgroup_matrix<T, 8, 8> vt;
-                simdgroup_load(vt, vs + jc * 8 * DV + c * 8, DV, ulong2(0, 0), true);
+                simdgroup_load(vt, vs + jc * 8 * LV + c * 8, LV, ulong2(0, 0), true);
                 simdgroup_multiply_accumulate(dp, gm[c], vt, dp);
             }
             thread auto &se = frag(s);
@@ -281,7 +270,7 @@ inline void flash_attention_dq(device const T *q,
             frag(dsm) = vec<T, 2>(ds);
             ATTN_UNROLL for (uint c = 0; c < D / 8; ++c) {
                 simdgroup_matrix<T, 8, 8> km;
-                simdgroup_load(km, ks + jc * 8 * D + c * 8, D);
+                simdgroup_load(km, ks + jc * 8 * LK + c * 8, LK);
                 simdgroup_multiply_accumulate(dqm[c], dsm, km, dqm[c]);
             }
         }

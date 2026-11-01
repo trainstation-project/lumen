@@ -966,14 +966,19 @@ pub(super) fn encode_with(
         let a = attention::of_body(body).expect("an attention");
         let (outer, heads) = attention::grid_batch(&a.batch);
 
-        // Decode attention runs one threadgroup per query, otherwise one per 64 queries.
-        let queries = match decodes(&a) {
-            true => a.sq,
-            false => a.sq.div_ceil(64),
+        // Decode attention runs one threadgroup per query, otherwise one of `forward_groups`
+        // simdgroups per 8 of them.
+        let groups = crate::codegen::attention::mps::forward_groups(&a);
+
+        let grid = match decodes(&a) {
+            true => Grid::Groups([a.sq, heads, outer]),
+            false => Grid::GroupsOf {
+                groups: [a.sq.div_ceil(8 * groups), heads, outer],
+                threads: 32 * groups,
+            },
         };
 
         let buffers = attention_buffers(a.dropout.is_some())?;
-        let grid = Grid::Groups([queries, heads, outer]);
         return launch(name, &buffers, &scalars, grid, keep, step.label);
     }
 
