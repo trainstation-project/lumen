@@ -30,7 +30,7 @@
   "mps": "runs",
   "tpu": "runs",
   "cuda": "missing",
-  "triton": "missing",
+  "triton": "runs",
   "what": "Independent small loops of one shape run as one multi-output kernel.",
   "pass": "horizontal_fusion",
   "bench": "fused_horizontal"
@@ -42,7 +42,7 @@
   "mps": "runs",
   "tpu": "missing",
   "cuda": "missing",
-  "triton": "missing",
+  "triton": "runs",
   "what": "A fusion also writes values its consumers outside need (vertical multi-output).",
   "pass": "loop_fusion (hosts)",
   "bench": "fused_multi_output"
@@ -54,7 +54,7 @@
   "mps": "runs",
   "tpu": "runs",
   "cuda": "missing",
-  "triton": "missing",
+  "triton": "runs",
   "what": "Elementwise work before and after a reduction runs in the reduction's kernel.",
   "pass": "loop_fusion",
   "bench": "fused_reduction"
@@ -66,7 +66,7 @@
   "mps": "runs",
   "tpu": "runs",
   "cuda": "missing",
-  "triton": "missing",
+  "triton": "runs",
   "what": "softmax, RMSNorm and LayerNorm: a row's reductions and the elementwise work around them, one kernel.",
   "pass": "normalization_diamonds",
   "bench": "fused_rms_norm"
@@ -78,7 +78,7 @@
   "mps": "runs",
   "tpu": "missing",
   "cuda": "missing",
-  "triton": "missing",
+  "triton": "runs",
   "what": "Column sums a row kernel adds up too, for rows wider than one block.",
   "pass": "normalization_diamonds",
   "bench": "fused_rms_norm_backward"
@@ -90,7 +90,7 @@
   "mps": "runs",
   "tpu": "runs",
   "cuda": "missing",
-  "triton": "missing",
+  "triton": "runs",
   "what": "Elementwise consumers (bias, activation, cast) of a matmul run as it writes its output.",
   "pass": "fuse_dots / dot_epilogues",
   "bench": "fused_matmul_epilogue"
@@ -102,7 +102,7 @@
   "mps": "runs",
   "tpu": "runs",
   "cuda": "missing",
-  "triton": "missing",
+  "triton": "runs",
   "what": "A matmul and the norm diamond reading it: one kernel, the product never written to memory.",
   "pass": "dot_rows / row_dots",
   "bench": "fused_matmul_rms_norm"
@@ -114,7 +114,7 @@
   "mps": "runs",
   "tpu": "runs",
   "cuda": "missing",
-  "triton": "missing",
+  "triton": "runs",
   "what": "Matmuls sharing an operand (q/k/v, gate/up) run as one over packed weights, forward and backward.",
   "pass": "merge_dots, merge_dots_backward",
   "bench": ["fused_merged_dots", "fused_merged_dots_backward"]
@@ -126,7 +126,7 @@
   "mps": "runs",
   "tpu": "missing",
   "cuda": "missing",
-  "triton": "missing",
+  "triton": "runs",
   "what": "Long-K matmuls with small M and N split K across threadgroups.",
   "pass": "split_k",
   "bench": "fused_split_k"
@@ -138,7 +138,7 @@
   "mps": "runs",
   "tpu": "runs",
   "cuda": "missing",
-  "triton": "missing",
+  "triton": "runs",
   "what": "Attention forward and backward as tiled kernels; scores never materialized.",
   "pass": "flash_attention, flash_attention_backward",
   "bench": ["fused_attention", "fused_attention_backward"]
@@ -150,7 +150,7 @@
   "mps": "runs",
   "tpu": "missing",
   "cuda": "missing",
-  "triton": "missing",
+  "triton": "runs",
   "what": "Logits h\u00b7w\u1d40 reduced to log-sum-exp and the target logit without storing them.",
   "pass": "linear_cross_entropy",
   "bench": "fused_linear_cross_entropy"
@@ -162,7 +162,7 @@
   "mps": "runs",
   "tpu": "missing",
   "cuda": "missing",
-  "triton": "missing",
+  "triton": "runs",
   "what": "Cross-entropy's backward a chunk of rows at a time.",
   "pass": "chunked_cross_entropy",
   "bench": "fused_cross_entropy_backward"
@@ -185,7 +185,7 @@
   "mps": "runs",
   "tpu": "runs",
   "cuda": "missing",
-  "triton": "missing",
+  "triton": "runs",
   "what": "Producers write straight into their slot of the result; no copy. TPU: along the last dimension.",
   "pass": "place_concats",
   "bench": "fused_concatenate"
@@ -197,7 +197,7 @@
   "mps": "runs",
   "tpu": "missing",
   "cuda": "missing",
-  "triton": "missing",
+  "triton": "runs",
   "what": "Slices a matmul reads are passed as strided views instead of copied.",
   "pass": "place_views",
   "bench": "fused_strided_matmul"
@@ -206,10 +206,10 @@
   "fusion": "Merged update chains",
   "category": "memory",
   "cpu": "missing",
-  "mps": "missing",
+  "mps": "runs",
   "tpu": "runs",
   "cuda": "missing",
-  "triton": "missing",
+  "triton": "runs",
   "what": "Chains of dynamic_update_slice at constant starts run as one kernel, VMEM-resident when they fit.",
   "pass": "dynamic_update_slices"
  },
