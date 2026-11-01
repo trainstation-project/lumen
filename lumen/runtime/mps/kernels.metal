@@ -346,15 +346,9 @@ template <typename A> inline A reduce_precision_op(A a, uint exponent_bits, uint
 /// Minimum that propagates NaN from either operand.
 template <typename A> inline A min_op(A x, A y) { return x != x || y != y ? x + y : (y < x ? y : x); }
 
-/// Power in float; a negative base with an integral exponent gets the sign from the exponent's parity.
-template <typename A, typename B> inline A pow_op(A a, B b) {
-    float x = float(a), y = float(b);
-    if (x < 0.0f && y == trunc(y)) {
-        float r = pow(-x, y);
-        return A(fmod(fabs(y), 2.0f) == 1.0f ? -r : r);
-    }
-    return A(pow(x, y));
-}
+/// Power in float, as torch's MPS `pow`: `precise::pow` already gives a negative base with an integral exponent
+/// the exponent's parity.
+template <typename A, typename B> inline A pow_op(A a, B b) { return A(precise::pow(float(a), float(b))); }
 
 /// Remainder with the sign of the dividend; integer `x % 0` is `x` and signed `x % -1` is 0 (XLA semantics).
 inline float rem_op(float x, float y) { return fmod(x, y); }
