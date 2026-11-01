@@ -35,10 +35,8 @@ def test_split_k_agrees(device, compiler, dtype):
     long contraction (a decode step's) is one dot of the chunks' partials,
     then their sum (each labelled split-K), rounded to bfloat16 once, after
     it. Each agrees with the dot as traced (off) to rounding. One of many
-    tiles is not split. On MPS the partials may be added atomically (not
-    ``deterministic``) where they cost more than the operands: one kernel
-    adding its chunks' products to its float32 output; Triton always sums
-    them in a reduction."""
+    tiles is not split. Partials costing more than the operands split the
+    same way: a product, then a sum."""
     rng = np.random.default_rng(0)
     a, b = rng.standard_normal((4, 4096)).astype(np.float32), rng.standard_normal((4096, 256)).astype(np.float32)
     x, w = _placed(device, dtype, a, b)
@@ -49,10 +47,6 @@ def test_split_k_agrees(device, compiler, dtype):
     split_plan = ["dot_general (split-K)", "reduce_sum (split-K)" + rounded]
     assert _labels(f, device, x, w) == split_plan
     results = [lumen.to_numpy(lumen.compile(f)(x, w).to(dtype="float32"))]
-    if device == "mps":
-        compiler.deterministic = True
-        assert _labels(f, device, x, w) == split_plan
-        results.append(lumen.to_numpy(lumen.compile(f)(x, w).to(dtype="float32")))
     compiler.split_k = False
     assert _labels(f, device, x, w) == ["dot_general" + rounded]
     results.append(lumen.to_numpy(lumen.compile(f)(x, w).to(dtype="float32")))
@@ -60,8 +54,6 @@ def test_split_k_agrees(device, compiler, dtype):
     for got in results:
         np.testing.assert_allclose(got, want, atol=tol)
     compiler.split_k = True
-    if device == "mps":
-        compiler.deterministic = False
     big = lumen.empty([1024, 1024], device="meta")
     assert _labels(f, device, big, big) == ["dot_general"]
     if device != "mps":
@@ -69,11 +61,9 @@ def test_split_k_agrees(device, compiler, dtype):
     a, b = (rng.standard_normal(s).astype(np.float32) for s in ((352, 2048), (2048, 352)))
     x, w = _placed(device, "bfloat16", a, b)
     want = lumen.to_numpy(x.to(dtype="float32")).astype(np.float64) @ lumen.to_numpy(w.to(dtype="float32"))
-    assert _labels(f, device, x, w) == ["dot_general (split-K)", cast]
-    atomic = lumen.to_numpy(lumen.compile(f)(x, w).to(dtype="float32"))
-    np.testing.assert_allclose(atomic, want, atol=2e-2 * np.abs(want).max())
-    compiler.deterministic = True
     assert _labels(f, device, x, w) == ["dot_general (split-K)", "reduce_sum (split-K) → " + cast]
+    got = lumen.to_numpy(lumen.compile(f)(x, w).to(dtype="float32"))
+    np.testing.assert_allclose(got, want, atol=2e-2 * np.abs(want).max())
 
 
 @pytest.mark.parametrize("device", [MPS, CUDA])
@@ -82,9 +72,8 @@ def test_split_k_then_silu(device, compiler, dtype):
     """SiLU after a matmul of few output tiles and a long contraction: not
     split, it is the matmul's epilogue (one kernel); split, it needs every
     chunk's products: the epilogue of the ``reduce_sum`` of the dot's
-    partials (reading the sum twice), on MPS atomic adds allowed or not
-    (its partials cost less than its operands). Each agrees with SiLU of
-    the exact product to rounding."""
+    partials (reading the sum twice), deterministic or not on MPS. Each
+    agrees with SiLU of the exact product to rounding."""
     rng = np.random.default_rng(0)
     a, b = rng.standard_normal((4, 4096)).astype(np.float32), rng.standard_normal((4096, 256)).astype(np.float32)
     x, w = _placed(device, dtype, a, b)

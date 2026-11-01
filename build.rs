@@ -169,7 +169,6 @@ const PRIMITIVE_KERNELS: &[&str] = &[
     "lumen/codegen/dot_general/mps/integer/matmul_kernel.metal",
     "lumen/codegen/dot_general/mps/integer/matmul_wide_kernel.metal",
     "lumen/codegen/dot_general/mps/tiled/matmul_sg_kernel.metal",
-    "lumen/codegen/dot_general/mps/tiled/matmul_atomic_kernel.metal",
     "lumen/codegen/dot_general/mps/skinny/kernel.metal",
     "lumen/codegen/dot_general/mps/linear_cross_entropy/kernel.metal",
     "lumen/codegen/dynamic_slice/mps/kernel.metal",

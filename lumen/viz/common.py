@@ -39,7 +39,6 @@ def type_text(dtype, shape):
 
 # (kernel name pattern, source file under lumen/, line prefix where its code starts); first match wins.
 _SOURCES = [
-    (r"^matmul_atomic_", "codegen/dot_general/mps/tiled/matmul_atomic_kernel.metal", "#define MATMUL_ATOMIC"),
     (
         r"^lce_partials",
         "codegen/dot_general/mps/linear_cross_entropy/kernel.metal",
