@@ -11,6 +11,21 @@ use crate::graph_compiler::pass::{CompilerPass, Module};
 /// and 27.5 µs whole; at 16 and 32 rows splitting wins (bf16 [16, 16384] · [16384, 1024]: 178 vs 302 µs).
 const WHOLE_ROWS: usize = 4;
 
+/// The chunks MLX's split-K picks (`steel_gemm_splitk_axpby`): an output of at most 2048 32 x 32 tiles
+/// with `k` at least 128 and at least `m` and `n` splits into `next_pow2((k / 16) / tiles)` chunks, 2 to
+/// 32, more as K per tile grows. The pass takes it where it beats the 256-threadgroup target: on an M4
+/// Pro, small outputs of long K run 6-38% faster (bf16 [64, 16384] · [16384, 64]: 32 chunks 29 µs, 8
+/// chunks 40 µs), larger ones keep their count.
+fn chunks(m: usize, n: usize, k: usize) -> Option<usize> {
+    let tiles = m.div_ceil(32) * n.div_ceil(32);
+
+    if tiles > 2048 || k / 16 < 8 || k < m.max(n) {
+        return None;
+    }
+
+    Some((k / 16 / tiles).next_power_of_two().clamp(2, 32))
+}
+
 /// Splits `graph`'s matmuls by MPS's rules.
 pub(super) fn split_k(graph: &Graph) -> Graph {
     let rules = Rules {
@@ -20,6 +35,7 @@ pub(super) fn split_k(graph: &Graph) -> Graph {
             gemv(dot, lhs, rhs, out).is_some()
                 || skinny_rows(dot, lhs, rhs, out).is_some_and(|m| m <= WHOLE_ROWS)
         },
+        chunks: Some(&chunks),
     };
 
     crate::graph_compiler::common::split_k::split_k(graph, &rules)

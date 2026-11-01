@@ -26,6 +26,7 @@ impl<M: Module> CompilerPass<M> for SplitK {
             tiles: &|m, n| m.div_ceil(tile.block_m) * n.div_ceil(tile.block_n),
             target: TARGET,
             unsplit: &|_, _, _, _| false,
+            chunks: None,
         };
 
         *m.graph_mut() = split_k(m.graph(), &rules);

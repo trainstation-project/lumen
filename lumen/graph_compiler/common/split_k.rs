@@ -9,6 +9,9 @@ const MAX_SPLIT: usize = 8;
 const MIN_CHUNK: usize = 256;
 /// Smallest K worth splitting.
 const MIN_K: usize = 2048;
+/// Elements every K chunk is a multiple of: a 16-byte vector of 2-byte elements, so the split product
+/// keeps its vector loads (M4 Pro, f32 300 x 20000 x 200: 32 chunks of 625 run 25% slower than 4 of 5000).
+const CHUNK_ALIGN: usize = 8;
 
 /// A backend's rules for splitting K.
 pub(crate) struct Rules<'a> {
@@ -18,6 +21,9 @@ pub(crate) struct Rules<'a> {
     pub(crate) target: usize,
     /// Whether the backend runs a dot of these operand and output types on a kernel of its own, unsplit.
     pub(crate) unsplit: &'a dyn Fn(&Primitive, &TensorType, &TensorType, &TensorType) -> bool,
+    /// A chunk count the backend would rather split an `m` x `n` output with contraction `k` into, when
+    /// it is split at all: the larger of it and the `target` count is used.
+    pub(crate) chunks: Option<&'a dyn Fn(usize, usize, usize) -> Option<usize>>,
 }
 
 /// Rewrites eligible unbatched float matmuls into a batched dot over K chunks plus a sum over chunks,
@@ -70,7 +76,16 @@ pub(crate) fn split_k(graph: &Graph, rules: &Rules) -> Graph {
             {
                 let m = lhs.numel() / lhs.shape[l];
                 let n = rhs.numel() / rhs.shape[r];
-                chunks((rules.tiles)(m, n), rules.target, lhs.shape[l]).map(|s| (l, r, s))
+                let k = lhs.shape[l];
+
+                let base = chunks((rules.tiles)(m, n), rules.target, k);
+                let wanted = rules.chunks.and_then(|f| f(m, n, k));
+
+                match (base, wanted) {
+                    (Some(b), Some(w)) => divides(b.max(w), k),
+                    (b, _) => b,
+                }
+                .map(|s| (l, r, s))
             }
             _ => None,
         };
@@ -137,9 +152,14 @@ fn chunks(groups: usize, target: usize, k: usize) -> Option<usize> {
         return None;
     }
 
-    let mut s = target.div_ceil(groups).next_power_of_two().min(MAX_SPLIT);
+    let s = target.div_ceil(groups).next_power_of_two().min(MAX_SPLIT);
+    divides(s, k)
+}
 
-    while s >= 2 && (!k.is_multiple_of(s) || k / s < MIN_CHUNK) {
+/// The largest power of two up to `s` dividing `k` into chunks of at least `MIN_CHUNK`, each a multiple
+/// of `CHUNK_ALIGN` elements (whole vector loads), if at least 2.
+pub(crate) fn divides(mut s: usize, k: usize) -> Option<usize> {
+    while s >= 2 && (!k.is_multiple_of(s * CHUNK_ALIGN) || k / s < MIN_CHUNK) {
         s /= 2;
     }
 
