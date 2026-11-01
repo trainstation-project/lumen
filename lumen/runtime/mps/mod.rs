@@ -273,6 +273,9 @@ pub(crate) fn encode(
     if let Cumsum { .. } = step.primitive {
         return crate::codegen::scan::mps::encode(step, inputs, output, scratch, keep);
     }
+    if let ScatterAdd { .. } = step.primitive {
+        return crate::codegen::scatter_add::mps::encode(step, inputs, output, scratch, keep);
+    }
     if let Fusion { .. } = step.primitive {
         return crate::graph_compiler::mps::encode(step, inputs, output, scratch, keep);
     }
@@ -316,7 +319,11 @@ pub(crate) fn encode(
         | Slice { .. } => {
             unreachable!("a one-node fusion's elementwise kernel (graph_compiler::mps::alone)")
         }
-        ReduceSum { .. } | ReduceMax { .. } | Cumsum { .. } | Concatenate { .. } => {
+        ReduceSum { .. }
+        | ReduceMax { .. }
+        | Cumsum { .. }
+        | Concatenate { .. }
+        | ScatterAdd { .. } => {
             unreachable!("encoded above")
         }
         AllReduce { .. }
@@ -336,7 +343,6 @@ pub(crate) fn encode(
 
         Reshape { .. } => crate::codegen::layout::mps::encode,
         DynamicSlice { .. } | DynamicUpdateSlice => crate::codegen::dynamic_slice::mps::encode,
-        ScatterAdd { .. } => crate::codegen::scatter_add::mps::encode,
         HostWait => crate::runtime::wait::encode,
         ToHost | ToDevice => {
             unreachable!("a stage's transfers are between its plans (compiler::stages)")
@@ -366,6 +372,9 @@ pub(crate) fn scratch_bytes(p: &Primitive, inputs: &[&TensorType], _output: &Ten
         Primitive::Fusion { body, .. } => crate::graph_compiler::mps::fusion_scratch_bytes(body),
         Primitive::LinearCrossEntropy => {
             crate::codegen::dot_general::mps::linear_cross_entropy_scratch(inputs[0], inputs[1])
+        }
+        Primitive::ScatterAdd { axis } => {
+            crate::codegen::scatter_add::mps::scratch_bytes(inputs[0], inputs[1], *axis)
         }
         _ => 0,
     }
