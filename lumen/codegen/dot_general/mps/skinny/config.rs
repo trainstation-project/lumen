@@ -14,8 +14,8 @@ pub(crate) fn skinny_configs() -> &'static [GemmConfig] {
 
         for rows in [1, 2, 4, 8] {
             for threads in [128, 256] {
-                for block in [32, 64, 128, 256] {
-                    for width in [4, 8] {
+                for block in [16, 32, 64, 128, 256] {
+                    for width in [4, 8, 16] {
                         let groups = block / width;
 
                         if groups <= threads
