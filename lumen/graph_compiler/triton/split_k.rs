@@ -1,7 +1,6 @@
 //! Triton split-K: the shared pass (`common::split_k`) with Triton's tiles, its partials always
 //! summed by a reduction (no atomics), so results stay deterministic.
 
-use super::fusion::fusible;
 use crate::codegen::dot_general::triton::{CONFIGS, UNTUNED};
 use crate::graph_compiler::common::split_k::{Rules, split_k};
 use crate::graph_compiler::pass::{CompilerPass, Module};
@@ -27,9 +26,6 @@ impl<M: Module> CompilerPass<M> for SplitK {
             tiles: &|m, n| m.div_ceil(tile.block_m) * n.div_ceil(tile.block_n),
             target: TARGET,
             unsplit: &|_, _, _, _| false,
-            fusible: &fusible,
-            atomic: false,
-            fuse: true,
         };
 
         *m.graph_mut() = split_k(m.graph(), &rules);

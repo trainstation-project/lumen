@@ -1,8 +1,7 @@
 //! Split-K shared by the backends: long-K matmuls with too few output tiles become partial products
 //! over K chunks summed over the chunks.
 
-use crate::DType;
-use crate::graph::{Graph, Node, Primitive, TensorType, Var};
+use crate::graph::{Graph, Primitive, TensorType, Var};
 
 /// Most K chunks a matmul is split into.
 const MAX_SPLIT: usize = 8;
@@ -19,18 +18,10 @@ pub(crate) struct Rules<'a> {
     pub(crate) target: usize,
     /// Whether the backend runs a dot of these operand and output types on a kernel of its own, unsplit.
     pub(crate) unsplit: &'a dyn Fn(&Primitive, &TensorType, &TensorType, &TensorType) -> bool,
-    /// Whether a node fuses into the kernel computing its operands.
-    pub(crate) fusible: &'a dyn Fn(&Graph, &Node) -> bool,
-    /// Whether an f32 split whose partials outweigh its operands may accumulate atomically.
-    pub(crate) atomic: bool,
-    /// Whether a fusible reader keeps a split out of the atomic form (the sum takes it as an epilogue).
-    pub(crate) fuse: bool,
 }
 
 /// Rewrites eligible unbatched float matmuls into a batched dot over K chunks plus a sum over chunks,
-/// by the backend's `rules`. With `rules.atomic`, an f32 split whose partials would outweigh its
-/// operands becomes a `split_k` fusion that accumulates atomically, unless `rules.fuse` is set and
-/// a fusible node reads the result.
+/// by the backend's `rules`.
 pub(crate) fn split_k(graph: &Graph, rules: &Rules) -> Graph {
     let nodes = graph.nodes();
 
@@ -38,12 +29,6 @@ pub(crate) fn split_k(graph: &Graph, rules: &Rules) -> Graph {
         nodes
             .iter()
             .any(|n| n.output == v && matches!(n.primitive, Primitive::Slice { .. }))
-    };
-
-    let fused = |v: Var| {
-        nodes
-            .iter()
-            .any(|n| n.inputs.contains(&v) && (rules.fusible)(graph, n))
     };
 
     let mut out = Graph::new();
@@ -121,40 +106,10 @@ pub(crate) fn split_k(graph: &Graph, rules: &Rules) -> Graph {
             accum_dtype: *accum_dtype,
         };
 
-        // Bytes of the partial products written and read back, against the operand bytes.
-        let partials = 2 * s * lhs.numel() / lhs.shape[l]
-            * (rhs.numel() / rhs.shape[r])
-            * accum_dtype.size_of();
-
-        let operands = (lhs.numel() + rhs.numel()) * lhs.dtype.size_of();
-
-        let atomic =
-            rules.atomic && *accum_dtype == DType::F32 && !(rules.fuse && fused(node.output));
-
-        let mut value = match atomic && partials > operands {
-            true => {
-                let mut body = Graph::new();
-                let ins = [a, b].map(|v| body.input(out.type_of(v).clone()));
-                let partials = body.apply(dot, &ins).expect("well typed");
-                let sum = body.apply(sum, &[partials]).expect("well typed");
-                body.set_outputs(&[sum]).expect("its value");
-
-                let fusion = Primitive::Fusion {
-                    name: "split_k".into(),
-                    label: "dot_general (split-K)",
-                    body,
-                };
-
-                out.apply(fusion, &[a, b]).expect("well typed")
-            }
-            false => {
-                let partials = apply(&mut out, dot, &[a, b]);
-                out.set_label(partials, Some("dot_general (split-K)"));
-                let sum = apply(&mut out, sum, &[partials]);
-                out.set_label(sum, Some("reduce_sum (split-K)"));
-                sum
-            }
-        };
+        let partials = apply(&mut out, dot, &[a, b]);
+        out.set_label(partials, Some("dot_general (split-K)"));
+        let mut value = apply(&mut out, sum, &[partials]);
+        out.set_label(value, Some("reduce_sum (split-K)"));
 
         if output_dtype != accum_dtype {
             value = apply(

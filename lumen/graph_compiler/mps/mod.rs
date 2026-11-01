@@ -84,7 +84,6 @@ const PRELUDE: &str = concat!(
     include_str!("../../codegen/dot_general/mps/integer/matmul_kernel.metal"),
     include_str!("../../codegen/dot_general/mps/integer/matmul_wide_kernel.metal"),
     include_str!("../../codegen/dot_general/mps/tiled/matmul_sg_kernel.metal"),
-    include_str!("../../codegen/dot_general/mps/tiled/matmul_atomic_kernel.metal"),
     include_str!("../../codegen/dot_general/mps/skinny/kernel.metal"),
     include_str!("../../codegen/dot_general/mps/gemv/kernel.metal"),
     include_str!("../../codegen/dot_general/mps/linear_cross_entropy/kernel.metal"),
@@ -537,8 +536,6 @@ enum Launch {
     Attention,
     /// Flash attention backward.
     AttentionBackward,
-    /// Split-K matmul accumulating with atomics.
-    AtomicDot,
     /// GEMM with a fused epilogue.
     Gemm,
     /// Row-wise reductions in one threadgroup per row group.
@@ -576,8 +573,6 @@ fn launch_of(body: &Graph) -> Launch {
         Launch::Attention
     } else if attention::backward_of_body(body).is_some() {
         Launch::AttentionBackward
-    } else if split_k::atomic_dot(body).is_some() {
-        Launch::AtomicDot
     } else if gemm_dot(body).is_some() {
         Launch::Gemm
     } else if !row_reductions(body).is_empty() {
@@ -1005,60 +1000,6 @@ pub(super) fn encode_with(
         return launch(name, &buffers, &scalars, grid, keep, step.label);
     }
 
-    if kind == Launch::AtomicDot {
-        let dot = split_k::atomic_dot(body).expect("a split-K dot");
-        let ty = |v: Var| body.type_of(v);
-        let (lhs, rhs) = (ty(dot.inputs[0]), ty(dot.inputs[1]));
-
-        let plan = crate::codegen::dot_general::mps::plan_matmul(
-            &dot.primitive,
-            lhs,
-            rhs,
-            ty(dot.output),
-            &contiguous_strides(&lhs.shape),
-            &contiguous_strides(&rhs.shape),
-            step.label,
-            None,
-        )?;
-
-        let Grid::Groups([_, _, chunks]) = plan.grid else {
-            unreachable!("a matmul's grid")
-        };
-
-        let [m, n] = [plan.p[0], plan.p[1]];
-
-        // Atomic split-K adds chunk partials into the output, so it starts at zero.
-        let zero = [
-            element_arg(DType::F32, Scalar::Float(0.0)),
-            u32_arg((m * n) as u32),
-        ];
-
-        let fill = elementwise_grid(m * n, DType::F32);
-        let label = "full (split-K output)";
-
-        launch(
-            "fill_4",
-            &[output.cast_const()],
-            &zero,
-            fill,
-            Vec::new(),
-            label,
-        )?;
-
-        let kernel = format!("matmul_atomic_{}", lhs.dtype);
-        let grid = Grid::Groups([n.div_ceil(64), m.div_ceil(64), chunks]);
-        let buffers = [inputs[0], inputs[1], output.cast_const()];
-
-        return launch(
-            &kernel,
-            &buffers,
-            &[dims_arg(plan.p)],
-            grid,
-            keep,
-            step.label,
-        );
-    }
-
     if kind == Launch::Gemm {
         let dot = gemm_dot(body).expect("a matmul");
         let ty = |v: Var| body.type_of(v);
@@ -1247,10 +1188,6 @@ pub(super) fn encode_with(
 pub(crate) fn fusion_scratch_bytes(body: &Graph) -> usize {
     if let Some((_, bytes)) = gemm::tile_scratch(body) {
         return bytes;
-    }
-
-    if split_k::atomic_dot(body).is_some() {
-        return 0;
     }
 
     match reduction_root(body).filter(|r| {

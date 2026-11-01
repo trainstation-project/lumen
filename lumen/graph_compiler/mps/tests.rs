@@ -2073,7 +2073,7 @@ fn skinny_dots_split_their_contraction() {
 
     let build = |m: usize, n: usize, k: usize, dtype: DType| build_with(m, n, k, dtype, DType::F32);
     let g = build(4, 256, 4096, DType::F32);
-    let split = super::split_k::split_k(&g, false, false);
+    let split = super::split_k::split_k(&g);
     let names: Vec<&str> = split.nodes().iter().map(|n| n.primitive.name()).collect();
 
     assert_eq!(
@@ -2092,7 +2092,7 @@ fn skinny_dots_split_their_contraction() {
         assert!((w - g).abs() <= 4096.0 * 4.0 * f32::EPSILON, "{w} {g}");
     }
 
-    let split = super::split_k::split_k(&build(4, 256, 4096, DType::BF16), false, false);
+    let split = super::split_k::split_k(&build(4, 256, 4096, DType::BF16));
     let names: Vec<&str> = split.nodes().iter().map(|n| n.primitive.name()).collect();
 
     assert_eq!(
@@ -2100,25 +2100,18 @@ fn skinny_dots_split_their_contraction() {
         ["reshape", "reshape", "dot_general", "reduce_sum", "cast"]
     );
 
-    let split = super::split_k::split_k(&g, true, false);
-    assert_eq!(split.nodes().len(), 4, "{split}");
-    let g = build(352, 352, 2048, DType::BF16);
-    let split = super::split_k::split_k(&g, true, false);
+    // Partials outweighing the operands split the same way: a product, then a sum.
+    let split = super::split_k::split_k(&build(352, 352, 2048, DType::BF16));
     let names: Vec<&str> = split.nodes().iter().map(|n| n.primitive.name()).collect();
 
     assert_eq!(
         names,
-        ["reshape", "reshape", "dot_general (split-K)", "cast"],
+        ["reshape", "reshape", "dot_general", "reduce_sum", "cast"],
         "{split}"
     );
 
-    let Primitive::Fusion { body, .. } = &split.nodes()[2].primitive else {
-        unreachable!("a fusion")
-    };
-
-    assert!(super::split_k::atomic_dot(body).is_some(), "{body}");
     let g = build_with(352, 352, 2048, DType::BF16, DType::BF16);
-    let split = super::split_k::split_k(&g, true, false);
+    let split = super::split_k::split_k(&g);
     let names: Vec<&str> = split.nodes().iter().map(|n| n.primitive.name()).collect();
 
     assert_eq!(
@@ -2166,7 +2159,7 @@ fn skinny_dots_split_their_contraction() {
         build(4, 256, 2049, DType::F32),
         build(4, 256, 1024, DType::F32),
     ] {
-        let split = super::split_k::split_k(&g, false, false);
+        let split = super::split_k::split_k(&g);
         assert_eq!(split.nodes().len(), 1, "{split}");
     }
 }
