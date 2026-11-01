@@ -35,10 +35,11 @@ template <> struct Bytes<1> {
 /// Elements of the lhs threadgroup tile: big enough for a padded `BM x BK` slice and for reuse as
 /// `S` simdgroups' 64-element staging areas of accumulator type `A`.
 #define SG_LT(BM, BK, T, A) SG_LT_OF(BM, BK, T, A, 8)
-#define SG_LT_OF(BM, BK, T, A, S)                                                                                      \
+#define SG_LT_OF(BM, BK, T, A, S) \
     (BM * (BK + SG_PAD(T)) > S * 64 * sizeof(A) / sizeof(T) ? BM * (BK + SG_PAD(T)) : S * 64 * sizeof(A) / sizeof(T))
 /// Elements of the rhs threadgroup tile: a padded `BK x BN` slice, or `BN x BK` when transposed.
-#define SG_RT(BK, BN, T) (BK * (BN + SG_PAD(T)) > BN * (BK + SG_PAD(T)) ? BK * (BN + SG_PAD(T)) : BN * (BK + SG_PAD(T)))
+#define SG_RT(BK, BN, T) \
+    (BK * (BN + SG_PAD(T)) > BN * (BK + SG_PAD(T)) ? BK * (BN + SG_PAD(T)) : BN * (BK + SG_PAD(T)))
 /// Stores one 8x8 accumulator fragment (this lane's two values `f`) at (`mb`, `nb`) through the
 /// epilogue: grouped, paired, direct, or via `stage` for edges, expanded and atomic outputs.
 template <typename A,
@@ -272,7 +273,9 @@ inline void matmul_sg_impl(device const T *lhs,
                     simdgroup_load(b[j], rt + (sx * FN * 8 + j * 8) * LDT + kk, LDT, ulong2(0, 0), true);
                 }
             } else {
-                UNROLL for (uint j = 0; j < FN; ++j) { simdgroup_load(b[j], rt + kk * LDB + sx * FN * 8 + j * 8, LDB); }
+                UNROLL for (uint j = 0; j < FN; ++j) {
+                    simdgroup_load(b[j], rt + kk * LDB + sx * FN * 8 + j * 8, LDB);
+                }
             }
             simdgroup_barrier(mem_flags::mem_none);
             UNROLL for (uint i = 0; i < FM; ++i) {
@@ -341,7 +344,9 @@ inline void matmul_sg_impl(device const T *lhs,
             if constexpr (!PREFETCH) {
                 fetch_v(k0);
             }
-            UNROLL for (uint t = 0; t < PA; ++t) { *(threadgroup CA *)(lt + (avr + VRA * t) * LDA + avc * WA) = va[t]; }
+            UNROLL for (uint t = 0; t < PA; ++t) {
+                *(threadgroup CA *)(lt + (avr + VRA * t) * LDA + avc * WA) = va[t];
+            }
             UNROLL for (uint t = 0; t < PB; ++t) {
                 threadgroup T *at = BT ? rt + (bvr + VRT * t) * LDT + bvc * WB : rt + (bvr + VRB * t) * LDB + bvc * WB;
                 *(threadgroup CB *)at = vb[t];

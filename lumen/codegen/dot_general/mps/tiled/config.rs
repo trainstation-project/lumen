@@ -38,7 +38,8 @@ pub(crate) fn configs() -> &'static [GemmConfig] {
 
                     // The tiles' rows are padded by 16 bytes (`SG_PAD`): 4 float32 elements, the most bytes
                     // of any element type.
-                    let bytes = ((bm * (bk + 4)).max(simds * 64) + (bk * (bn + 4)).max(bn * (bk + 4))) * 4;
+                    let bytes =
+                        ((bm * (bk + 4)).max(simds * 64) + (bk * (bn + 4)).max(bn * (bk + 4))) * 4;
 
                     if (4..=16).contains(&fragments)
                         && fm <= 2 * fn_
