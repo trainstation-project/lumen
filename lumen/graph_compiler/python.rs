@@ -804,8 +804,38 @@ fn triton_attention(launch: &super::triton::Launch) -> Result<(), String> {
     Python::attach(|py| call(py, None).map(|_| ())).map_err(|e| e.to_string())
 }
 
-/// Registers the Triton launch hooks and the module's Python functions and class.
+/// Launches the CUDA backend's kernel `name` of module `source` on `tensors` (inputs, then outputs, each
+/// a flat view) through `lumen.codegen.utils.cuda`, on lumen's stream (a CUDA graph's while it captures).
+fn cuda_launch(
+    name: &str,
+    source: &str,
+    tensors: &[crate::Tensor],
+    blocks: usize,
+) -> Result<(), String> {
+    current(&tensors[0]);
+
+    crate::profiler::launched::launched(name, || Some(source.to_string()));
+
+    #[cfg(lumen_cuda_linked)]
+    let stream = crate::stream::cuda::launch_stream() as usize;
+
+    #[cfg(not(lumen_cuda_linked))]
+    let stream = 0usize;
+
+    Python::attach(|py| {
+        let tensors: Vec<PyTensor> = tensors.iter().map(|t| PyTensor::wrap(t.clone())).collect();
+
+        py.import("lumen.codegen.utils.cuda")?
+            .getattr("launch")?
+            .call1((name, source, tensors, blocks, stream))
+            .map(|_| ())
+    })
+    .map_err(|e: PyErr| e.to_string())
+}
+
+/// Registers the Triton and CUDA launch hooks and the module's Python functions and class.
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    super::cuda::set_launch(cuda_launch);
     super::triton::set_gemm(triton_gemm);
     super::triton::set_loop(triton_loop);
     super::triton::set_attention(triton_attention);
