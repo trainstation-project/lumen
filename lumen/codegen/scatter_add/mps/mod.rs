@@ -8,6 +8,9 @@ use crate::{DType, Scalar, Tensor};
 
 /// Threads of the row kernel's threadgroup, one a column (`SCATTER_THREADS` in `kernel.metal`).
 const THREADS: usize = 256;
+/// Threads of the atomic kernel's threadgroup: on an M4 Pro, 16M float32 updates add in 872 µs in
+/// groups of 1024 and 1709 µs in groups of 256.
+const ATOMIC_THREADS: usize = 1024;
 
 /// Scratch bytes of a scatter-add of `indices` along an axis `n` long: each position's update count and
 /// start (`2n + 1` u32s) and the updates' order (`m` u32s).
@@ -16,9 +19,10 @@ pub(crate) fn scratch_bytes(x: &TensorType, indices: &TensorType, axis: usize) -
 }
 
 /// Encodes `out = x` with `updates` rows added at `indices` along the step's axis; inputs are
-/// `[x, indices, updates]`. The updates are sorted by position (a count, its prefix sum and a
-/// placement, in `scratch`), then a threadgroup per position with updates adds them in update order,
-/// a thread a column.
+/// `[x, indices, updates]`. Unless `mps.deterministic`, float32, float16, bfloat16, int32 and uint32
+/// updates are added in by atomics, a thread an element (torch's `index_add`); otherwise they are
+/// sorted by position (a count, its prefix sum and a placement, in `scratch`), then a threadgroup per
+/// position with updates adds them in update order, a thread a column.
 pub(crate) fn encode(
     step: &Step,
     inputs: &[*const u8],
@@ -63,6 +67,35 @@ pub(crate) fn encode(
 
     let (updates, index_buffer, out) = (inputs[2], inputs[1], output.cast_const());
     let label = step.label;
+
+    // Unless deterministic, torch's `index_add`: a thread per update element, added in atomically.
+    let count = outer.max(1) * m * inner.max(1);
+    let atomic = matches!(
+        x.dtype,
+        DType::F32 | DType::F16 | DType::BF16 | DType::I32 | DType::U32
+    );
+
+    if atomic
+        && !crate::graph_compiler::config::configs().mps.deterministic
+        && count <= u32::MAX as usize
+    {
+        let name = format!("scatter_add_atomic_{}_{index}", x.dtype.name());
+        let args = [n, m, inner.max(1), count].map(|v| u32_arg(v as u32));
+
+        let grid = Grid::GroupsOf {
+            groups: [count.div_ceil(ATOMIC_THREADS), 1, 1],
+            threads: ATOMIC_THREADS,
+        };
+
+        return launch(
+            &name,
+            &[updates, index_buffer, out],
+            &args,
+            grid,
+            keep,
+            label,
+        );
+    }
 
     // Each position's update count (then the place kernel's cursor) and start, and the updates' order.
     let at = |words: usize| scratch.wrapping_add(words * 4).cast_const();
