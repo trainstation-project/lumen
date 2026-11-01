@@ -275,7 +275,7 @@ pub(crate) fn gemm_tiles(
         }};
         kernel void NAME_tiles({params}constant ulong *p [[buffer({first_arg})]],
                                {THREAD_ARGS}) {{
-            threadgroup {t} lt[SG_LT({tile}, SG_BK, {t}, {accum})], rt[SG_BK * {tile}];
+            threadgroup {t} lt[SG_LT({tile}, SG_BK, {t}, {accum})], rt[SG_RT(SG_BK, {tile}, {t})];
             threadgroup {o} staged[{tile} * {tile}];
             matmul_sg_impl<{t}, {accum}, {o}, {tile}, {tile}, SG_BK, {o},
                            NAME_tiles_staging, false, false, true>(
@@ -445,7 +445,7 @@ pub(crate) fn gemm_rows(
         }};
         kernel void NAME({params}constant ulong *p [[buffer({first})]],
                          {THREAD_ARGS}) {{
-            threadgroup {t} lt[SG_LT({tile}, SG_BK, {t}, {accum})], rt[SG_BK * {tile}];
+            threadgroup {t} lt[SG_LT({tile}, SG_BK, {t}, {accum})], rt[SG_RT(SG_BK, {tile}, {t})];
             threadgroup {o} staged[{tile} * {n}];
             matmul_sg_impl<{t}, {accum}, {o}, {tile}, {tile}, SG_BK, {o},
                            NAME_staging, false, false, true>(

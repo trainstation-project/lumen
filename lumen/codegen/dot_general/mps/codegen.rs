@@ -458,7 +458,7 @@ pub(crate) fn gemm_regions_kernel(
         let call = match c.algorithm {
             Algorithm::Tiled => formatdoc!(
                 "
-                threadgroup {t} lt[SG_LT_OF({bm}, {bk}, {t}, {a}, {simds})], rt[{bk} * {bn}];
+                threadgroup {t} lt[SG_LT_OF({bm}, {bk}, {t}, {a}, {simds})], rt[SG_RT({bk}, {bn}, {t})];
                 matmul_sg_impl<{t}, {a}, {o}, {bm}, {bn}, {bk}, {w},
                                NAME_epi, false, false, false, {interleaved}, {ROW_COLUMNS}, {flag},
                                {threads}, {cols}, {prefetch}>(
@@ -694,7 +694,7 @@ impl GemmCodegen for Mps {
             let call = match c.algorithm {
                 Algorithm::Tiled => formatdoc!(
                     "
-                    threadgroup {t} lt[SG_LT_OF({bm}, {bk}, {t}, {a}, {simds})], rt[{bk} * {bn}];
+                    threadgroup {t} lt[SG_LT_OF({bm}, {bk}, {t}, {a}, {simds})], rt[SG_RT({bk}, {bn}, {t})];
                     matmul_sg_impl<{t}, {a}, {o}, {bm}, {bn}, {bk}, {w},
                     {flags},
                     {threads}, {cols}, {prefetch}>(
