@@ -1,6 +1,6 @@
 {
  "device": "Apple M4 Pro",
- "torch": "2.14.1",
+ "torch": "2.15.0",
  "spec_memory_gbs": 273,
  "spec_tflops": 8.08,
  "ops": {
@@ -1234,6 +1234,316 @@
   "scatter_add": {
    "formula": "n / 1024 rows of 1024 added into 4× as many",
    "kind": "indexing",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216
+   ]
+  },
+  "fused_gelu": {
+   "formula": "GELU (tanh) written out, in float32: one loop",
+   "kind": "fusion",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "fused_transpose": {
+   "formula": "eˣᵀ · 2 + b, square, b a broadcast row: the transpose and broadcast as indexing",
+   "kind": "fusion",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216
+   ]
+  },
+  "fused_horizontal": {
+   "formula": "eᵃ · 2 + 1, (b − 1) · b and tanh c, independent: one kernel",
+   "kind": "fusion",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "fused_multi_output": {
+   "formula": "h = x · σ(x), returned with h² + 1: one loop writing both",
+   "kind": "fusion",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "fused_reduction": {
+   "formula": "Σ(eˣ · 2 − y) · 0.5 + 1 over each row of 1024: one reduction kernel",
+   "kind": "fusion",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "fused_rms_norm": {
+   "formula": "RMSNorm of rows of 1024 times w, written out: one row kernel",
+   "kind": "fusion",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "fused_rms_norm_backward": {
+   "formula": "RMSNorm's gradients (rows of 1024): w's column sums as partials of the row kernel",
+   "kind": "fusion",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "fused_matmul_epilogue": {
+   "formula": "relu(A · B + b), square: the bias and relu as the product is written",
+   "kind": "fusion",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216
+   ]
+  },
+  "fused_matmul_rms_norm": {
+   "formula": "RMSNorm of X · W, X [n / 512, 512], W [512, 64]: the product never written",
+   "kind": "fusion",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "fused_split_k": {
+   "formula": "[4, K] · [K, 256], K = n / 256: K split across threadgroups",
+   "kind": "fusion",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "fused_attention": {
+   "formula": "causal attention, 8 heads of 64: tiled, scores never written",
+   "kind": "fusion",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    131072,
+    262144,
+    524288,
+    1048576,
+    2097152,
+    4194304
+   ]
+  },
+  "fused_attention_backward": {
+   "formula": "gradients of causal attention (as above) against a cotangent: dQ, dK and dV tiled from the log-sum-exp",
+   "kind": "fusion",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    131072,
+    262144,
+    524288,
+    1048576,
+    2097152,
+    4194304
+   ]
+  },
+  "fused_merged_dots": {
+   "formula": "x · Wq, x · Wk, x · Wv (x [n / 512, 512]): one product over the packed weights",
+   "kind": "fusion",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216
+   ]
+  },
+  "fused_merged_dots_backward": {
+   "formula": "the projections' gradients against a cotangent each: dx as one product, the weights' as one",
+   "kind": "fusion",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216
+   ]
+  },
+  "fused_linear_cross_entropy": {
+   "formula": "cross entropy of h · wᵀ (√n rows, √n classes, 512 features): logits never written",
+   "kind": "fusion",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216
+   ]
+  },
+  "fused_cross_entropy_backward": {
+   "formula": "gradients of Σ cross entropy of h · wᵀ (as above): a chunk of rows at a time",
+   "kind": "fusion",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216
+   ]
+  },
+  "fused_concatenate": {
+   "formula": "[eᵃ; tanh b · 2], halves of rows of 1024: each written into its slot",
+   "kind": "fusion",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216,
+    67108864
+   ]
+  },
+  "fused_strided_matmul": {
+   "formula": "A[:, :s] · B, A [s, 2s]: the slice read in place",
+   "kind": "fusion",
    "dtypes": [
     "float32",
     "bfloat16"

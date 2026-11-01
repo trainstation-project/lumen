@@ -27,6 +27,28 @@ pub(crate) fn row_shape(body: &Graph) -> (usize, usize) {
     (x.numel() / n, n)
 }
 
+/// Whether `v`, or an elementwise op or reshape of it of `rows` elements, is broadcast along the
+/// last axis.
+fn spread_along_rows(body: &Graph, rows: usize, v: Var) -> bool {
+    body.nodes()
+        .iter()
+        .filter(|node| node.inputs.contains(&v))
+        .any(|node| match &node.primitive {
+            Primitive::BroadcastInDim {
+                shape,
+                broadcast_dimensions,
+            } => broadcast_dimensions
+                .iter()
+                .zip(&body.type_of(v).shape)
+                .any(|(&d, &size)| d + 1 == shape.len() && size > 1),
+            p => {
+                (fusion::elementwise(p) || matches!(p, Primitive::Reshape { .. }))
+                    && body.type_of(node.output).numel() == rows
+                    && spread_along_rows(body, rows, node.output)
+            }
+        })
+}
+
 /// Threadgroups the row kernel launches: the partials' leading dim, one per `SIMD_ROWS` rows, or
 /// one per row.
 pub(crate) fn row_groups(body: &Graph) -> usize {
@@ -75,7 +97,9 @@ pub(crate) fn row_kernel(
     let (rows, n) = row_shape(body);
     let mut e = Emitter::new(body, by_value);
 
-    // A value is per-row when it has one element per row and is never broadcast along the last axis.
+    // A value is per-row when it has one element per row and is never broadcast along the last axis,
+    // nor is an elementwise op of it (a `[n]` weight cast, then broadcast, scales columns even when
+    // `n == rows`).
     let per_row = |v: Var| {
         body.type_of(v).numel() == rows
             && body
@@ -93,6 +117,7 @@ pub(crate) fn row_kernel(
                     p => {
                         (fusion::elementwise(p) || matches!(p, Primitive::Reshape { .. }))
                             && body.type_of(node.output).numel() == rows
+                            && !spread_along_rows(body, rows, node.output)
                     }
                 })
     };
