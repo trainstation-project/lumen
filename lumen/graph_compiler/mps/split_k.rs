@@ -16,7 +16,7 @@ const WHOLE_ROWS: usize = 4;
 /// 32, more as K per tile grows. The pass takes it where it beats the 256-threadgroup target: on an M4
 /// Pro, small outputs of long K run 6-38% faster (bf16 [64, 16384] · [16384, 64]: 32 chunks 29 µs, 8
 /// chunks 40 µs), larger ones keep their count.
-fn mlx_chunks(m: usize, n: usize, k: usize) -> Option<usize> {
+fn chunks(m: usize, n: usize, k: usize) -> Option<usize> {
     let tiles = m.div_ceil(32) * n.div_ceil(32);
 
     if tiles > 2048 || k / 16 < 8 || k < m.max(n) {
@@ -35,7 +35,7 @@ pub(super) fn split_k(graph: &Graph) -> Graph {
             gemv(dot, lhs, rhs, out).is_some()
                 || skinny_rows(dot, lhs, rhs, out).is_some_and(|m| m <= WHOLE_ROWS)
         },
-        chunks: Some(&mlx_chunks),
+        chunks: Some(&chunks),
     };
 
     crate::graph_compiler::common::split_k::split_k(graph, &rules)
