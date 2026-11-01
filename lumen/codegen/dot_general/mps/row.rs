@@ -20,6 +20,18 @@ use crate::graph_compiler::MpsConfig;
 /// Output columns one threadgroup tile covers; wider rows are reduced across tiles.
 pub(crate) const ROW_TILE: usize = 64;
 
+/// Rows a threadgroup of the single-tile row matmul (`gemm_rows`) covers for `rows` rows, and its K
+/// step: `ROW_TILE` rows with 16-wide K steps once that makes 512 threadgroups, else half as many with
+/// 32-wide ones (room for which half the rows leave), twice the threadgroups each walking half the K
+/// steps. On an M4 Pro, RMSNorm of [rows, 512] · [512, 64] takes 24 vs 15 µs at 8-512 rows with 64-row
+/// blocks, and 395 vs 427 µs at 32768 rows (f32) with 32-row ones.
+pub(crate) fn single_rows(rows: usize) -> (usize, &'static str) {
+    match rows.div_ceil(ROW_TILE) >= 512 {
+        true => (ROW_TILE, "SG_BK"),
+        false => (ROW_TILE / 2, "SMALL_BK"),
+    }
+}
+
 /// The single unbatched float matmul in a body whose row reductions can run over its output
 /// rows, or `None` when the body doesn't fit that kernel.
 pub(crate) fn row_dot(body: &Graph) -> Option<&Node> {
@@ -384,8 +396,8 @@ pub(crate) fn read_staged(source: &str, k: usize, staged: impl Fn(&str) -> Strin
     out
 }
 
-/// Generates a single-tile row matmul: each threadgroup stages a `ROW_TILE` x `n` block of the
-/// dot in threadgroup memory, then runs the row `source` over its rows.
+/// Generates a single-tile row matmul: each threadgroup stages a block of `single_rows` rows of the
+/// dot (`n` wide) in threadgroup memory, then runs the row `source` over its rows.
 pub(crate) fn gemm_rows(
     body: &Graph,
     by_value: &[bool],
@@ -410,7 +422,7 @@ pub(crate) fn gemm_rows(
 
     let (lhs, rhs) = (operand(dot.inputs[0]), operand(dot.inputs[1]));
     let (params, first) = io_params(body, by_value, out, &[]);
-    let tile = ROW_TILE;
+    let (tile, (block, bk)) = (ROW_TILE, single_rows(rows));
 
     named(formatdoc!(
         "
@@ -445,17 +457,17 @@ pub(crate) fn gemm_rows(
         }};
         kernel void NAME({params}constant ulong *p [[buffer({first})]],
                          {THREAD_ARGS}) {{
-            threadgroup {t} lt[SG_LT({tile}, SG_BK, {t}, {accum})], rt[SG_RT(SG_BK, {tile}, {t})];
-            threadgroup {o} staged[{tile} * {n}];
-            matmul_sg_impl<{t}, {accum}, {o}, {tile}, {tile}, SG_BK, {o},
+            threadgroup {t} lt[SG_LT({block}, {bk}, {t}, {accum})], rt[SG_RT({bk}, {tile}, {t})];
+            threadgroup {o} staged[{block} * {n}];
+            matmul_sg_impl<{t}, {accum}, {o}, {block}, {tile}, {bk}, {o},
                            NAME_staging, false, false, true>(
                 {lhs}, {rhs}, (device {o} *)nullptr, p,
                 lt, rt,
                 group, tid.y * 16 + tid.x, sg, lane,
                 NAME_staging{{staged}});
-            const ulong m0n = ulong(group.y) * {tile} * {n};
-            for (uint rr = sg; rr < {tile}u; rr += {SIMD_ROWS}u) {{
-                uint row = group.y * {tile}u + rr, t = lane;
+            const ulong m0n = ulong(group.y) * {block} * {n};
+            for (uint rr = sg; rr < {block}u; rr += {SIMD_ROWS}u) {{
+                uint row = group.y * {block}u + rr, t = lane;
                 if (row >= {rows}u) {{
                     break;
                 }}

@@ -1151,7 +1151,7 @@ pub(super) fn encode_with(
         let (kernel, grid) = match gemm::row_dot(body) {
             Some(_) => (
                 name.to_owned(),
-                Grid::Groups([1, plan.p[0].div_ceil(gemm::ROW_TILE), 1]),
+                Grid::Groups([1, plan.p[0].div_ceil(gemm::single_rows(plan.p[0]).0), 1]),
             ),
             None => match (config, plan.grid) {
                 (Some(c), Grid::Groups(groups)) => (
