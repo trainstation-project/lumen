@@ -77,7 +77,7 @@ template <typename L, uint BM, uint BN> struct LceRows {
                                                     uint3 tid [[thread_position_in_threadgroup]],   \
                                                     uint sg [[simdgroup_index_in_threadgroup]],     \
                                                     uint lane [[thread_index_in_simdgroup]]) {      \
-        threadgroup T lt[SG_LT(BM, BK, T, float)], rt[BK * BN];                                     \
+        threadgroup T lt[SG_LT(BM, BK, T, float)], rt[SG_RT(BK, BN, T)];                                     \
         threadgroup float halves[BM * SG_COLS * 2];                                                 \
         LceRows<L, BM, BN> rows{target, out, maxima, sums, halves, p[0], p[1], group.x};            \
         matmul_sg_impl<T, float, float, BM, BN, BK, float, LceRows<L, BM, BN>, false, false, true>( \

@@ -3,6 +3,10 @@
 template <typename T> struct Pair {
     T first, second;
 };
+/// A compile-time bool passed to a generic lambda as a value.
+template <bool B> struct Layout {
+    enum { value = B };
+};
 /// Unsigned integer type `N` bytes wide, used to move packed vectors of any element type.
 template <uint N> struct Bytes;
 template <> struct Bytes<16> {
@@ -25,10 +29,16 @@ template <> struct Bytes<1> {
 #define SG_BK 16
 #define SMALL_BK 32
 #define SG_COLS 2
-/// Elements of the lhs threadgroup tile: big enough for a `BM x BK` slice and for reuse as
+/// Elements a threadgroup tile's rows are padded by (16 bytes, as MLX does), so a simdgroup load's eight
+/// rows fall in different banks.
+#define SG_PAD(T) (16 / sizeof(T))
+/// Elements of the lhs threadgroup tile: big enough for a padded `BM x BK` slice and for reuse as
 /// `S` simdgroups' 64-element staging areas of accumulator type `A`.
 #define SG_LT(BM, BK, T, A) SG_LT_OF(BM, BK, T, A, 8)
-#define SG_LT_OF(BM, BK, T, A, S) (BM * BK > S * 64 * sizeof(A) / sizeof(T) ? BM * BK : S * 64 * sizeof(A) / sizeof(T))
+#define SG_LT_OF(BM, BK, T, A, S)                                                                                      \
+    (BM * (BK + SG_PAD(T)) > S * 64 * sizeof(A) / sizeof(T) ? BM * (BK + SG_PAD(T)) : S * 64 * sizeof(A) / sizeof(T))
+/// Elements of the rhs threadgroup tile: a padded `BK x BN` slice, or `BN x BK` when transposed.
+#define SG_RT(BK, BN, T) (BK * (BN + SG_PAD(T)) > BN * (BK + SG_PAD(T)) ? BK * (BN + SG_PAD(T)) : BN * (BK + SG_PAD(T)))
 /// Stores one 8x8 accumulator fragment (this lane's two values `f`) at (`mb`, `nb`) through the
 /// epilogue: grouped, paired, direct, or via `stage` for edges, expanded and atomic outputs.
 template <typename A,
@@ -196,6 +206,8 @@ inline void matmul_sg_impl(device const T *lhs,
     constexpr uint FM = BM / (SIMDS / COLS) / 8, FN = BN / COLS / 8;
     constexpr uint LA = BM * BK / THREADS, LB = BK * BN / THREADS;
     constexpr uint RA = THREADS / BK, RB = THREADS / BN;
+    // Row lengths of the padded lhs tile, the rhs tile and the transposed rhs tile.
+    constexpr uint LDA = BK + SG_PAD(T), LDB = BN + SG_PAD(T), LDT = BK + SG_PAD(T);
     const ulong M = p[0], N = p[1], K = p[2];
     const ulong sm = p[4], sk = p[5], rk = p[7];
     const ulong m0 = ulong(group.y) * BM, n0 = ulong(group.x) * BN;
@@ -245,16 +257,23 @@ inline void matmul_sg_impl(device const T *lhs,
     UNROLL for (uint i = 0; i < FM; ++i) {
         UNROLL for (uint j = 0; j < FN; ++j) { c[i][j] = simdgroup_matrix<A, 8, 8>(0); }
     }
-    /// Multiplies the shared tiles into this simdgroup's accumulators.
-    auto mma = [&]() {
+    /// Multiplies the shared tiles into this simdgroup's accumulators; with `bt` the rhs tile is held
+    /// transposed (`BN x BK`, K contiguous).
+    auto mma = [&](bool bt) {
         UNROLL for (uint kk = 0; kk < BK; kk += 8) {
             simdgroup_matrix<T, 8, 8> a[FM], b[FN];
             // Each SIMD group loads 8-wide fragments from the shared tiles and
             // accumulates their matrix products into c.
             simdgroup_barrier(mem_flags::mem_none);
-            UNROLL for (uint i = 0; i < FM; ++i) { simdgroup_load(a[i], lt + (sy * FM * 8 + i * 8) * BK + kk, BK); }
+            UNROLL for (uint i = 0; i < FM; ++i) { simdgroup_load(a[i], lt + (sy * FM * 8 + i * 8) * LDA + kk, LDA); }
             simdgroup_barrier(mem_flags::mem_none);
-            UNROLL for (uint j = 0; j < FN; ++j) { simdgroup_load(b[j], rt + kk * BN + sx * FN * 8 + j * 8, BN); }
+            if (bt) {
+                UNROLL for (uint j = 0; j < FN; ++j) {
+                    simdgroup_load(b[j], rt + (sx * FN * 8 + j * 8) * LDT + kk, LDT, ulong2(0, 0), true);
+                }
+            } else {
+                UNROLL for (uint j = 0; j < FN; ++j) { simdgroup_load(b[j], rt + kk * LDB + sx * FN * 8 + j * 8, LDB); }
+            }
             simdgroup_barrier(mem_flags::mem_none);
             UNROLL for (uint i = 0; i < FM; ++i) {
                 // Odd fragment rows walk the columns in reverse (serpentine order).
@@ -268,17 +287,28 @@ inline void matmul_sg_impl(device const T *lhs,
     constexpr uint W = 16 / sizeof(T);
     constexpr uint WA = LA < W ? LA : W, WB = LB < W ? LB : W;
     constexpr uint TA = BK / WA, TB = BN / WB, VRA = THREADS / TA, VRB = THREADS / TB, PA = LA / WA, PB = LB / WB;
+    // A K-contiguous rhs (a transposed weight, `x · Wᵀ`) loads `WB`-wide vectors along K instead, into a
+    // transposed `BN x BK` tile.
+    constexpr uint TT = BK / WB, VRT = THREADS / TT;
     device const T *lhs0 = lhs + group.z * p[3];
     device const T *rhs0 = rhs + group.z * p[6];
-    const bool vector = !HALVES && sk == 1 && p[8] == 1 && sm % WA == 0 && rk % WB == 0 && K % WA == 0 &&
-                        N % WB == 0 && ulong(lhs0) % (WA * sizeof(T)) == 0 && ulong(rhs0) % (WB * sizeof(T)) == 0;
-    if (vector) {
+    const bool bt = p[8] != 1 && rk == 1 && p[8] % WB == 0 && K % WB == 0;
+    const bool vector = !HALVES && sk == 1 && sm % WA == 0 && K % WA == 0 && ulong(lhs0) % (WA * sizeof(T)) == 0 &&
+                        (bt || (p[8] == 1 && rk % WB == 0 && N % WB == 0)) && ulong(rhs0) % (WB * sizeof(T)) == 0;
+    // The vector loop, its rhs layout `BT` (transposed or not) a compile-time constant so neither layout's
+    // loop branches on it.
+    auto vector_loop = [&](auto layout) {
+        constexpr bool BT = decltype(layout)::value;
         // Contiguous, aligned inputs use packed vector loads to reduce memory transactions.
         using CA = typename Bytes<WA * sizeof(T)>::type;
         using CB = typename Bytes<WB * sizeof(T)>::type;
-        const uint avr = flat / TA, avc = flat % TA, bvr = flat / TB, bvc = flat % TB;
+        const uint avr = flat / TA, avc = flat % TA;
+        // This thread's rhs vector row and column in the tile (K and N, or N and K when transposed), the
+        // distance between its vectors and the step to the next K slice.
+        const uint bvr = BT ? flat / TT : flat / TB, bvc = BT ? flat % TT : flat % TB;
+        const ulong bstep = BT ? ulong(VRT) * p[8] : ulong(VRB) * rk, badvance = BT ? BK : BK * rk;
         device const T *lv = lhs0 + (m0 + avr) * sm + avc * WA;
-        device const T *rv = rhs0 + ulong(bvr) * rk + n0 + bvc * WB;
+        device const T *rv = BT ? rhs0 + (n0 + bvr) * p[8] + bvc * WB : rhs0 + ulong(bvr) * rk + n0 + bvc * WB;
         const bool in_n = n0 + bvc * WB < N;
         CA va[PA];
         CB vb[PB];
@@ -288,7 +318,7 @@ inline void matmul_sg_impl(device const T *lhs,
             if (whole && k0 + BK <= K) {
                 // The vector fast path can load without bounds checks for full tiles.
                 UNROLL for (uint t = 0; t < PA; ++t) { va[t] = *(device const CA *)(lv + ulong(VRA * t) * sm); }
-                UNROLL for (uint t = 0; t < PB; ++t) { vb[t] = *(device const CB *)(rv + ulong(VRB * t) * rk); }
+                UNROLL for (uint t = 0; t < PB; ++t) { vb[t] = *(device const CB *)(rv + t * bstep); }
             } else {
                 // Partial vector tiles are zero-filled lane by lane.
                 const bool in_k = k0 + avc * WA < K;
@@ -297,12 +327,12 @@ inline void matmul_sg_impl(device const T *lhs,
                     va[t] = in ? *(device const CA *)(lv + ulong(VRA * t) * sm) : CA(0);
                 }
                 UNROLL for (uint t = 0; t < PB; ++t) {
-                    bool in = in_n && k0 + bvr + VRB * t < K;
-                    vb[t] = in ? *(device const CB *)(rv + ulong(VRB * t) * rk) : CB(0);
+                    bool in = BT ? k0 + bvc * WB < K && n0 + bvr + VRT * t < N : in_n && k0 + bvr + VRB * t < K;
+                    vb[t] = in ? *(device const CB *)(rv + t * bstep) : CB(0);
                 }
             }
             lv += BK;
-            rv += BK * rk;
+            rv += badvance;
         };
         if constexpr (PREFETCH) {
             fetch_v(0);
@@ -311,26 +341,34 @@ inline void matmul_sg_impl(device const T *lhs,
             if constexpr (!PREFETCH) {
                 fetch_v(k0);
             }
-            UNROLL for (uint t = 0; t < PA; ++t) { *(threadgroup CA *)(lt + (avr + VRA * t) * BK + avc * WA) = va[t]; }
-            UNROLL for (uint t = 0; t < PB; ++t) { *(threadgroup CB *)(rt + (bvr + VRB * t) * BN + bvc * WB) = vb[t]; }
+            UNROLL for (uint t = 0; t < PA; ++t) { *(threadgroup CA *)(lt + (avr + VRA * t) * LDA + avc * WA) = va[t]; }
+            UNROLL for (uint t = 0; t < PB; ++t) {
+                threadgroup T *at = BT ? rt + (bvr + VRT * t) * LDT + bvc * WB : rt + (bvr + VRB * t) * LDB + bvc * WB;
+                *(threadgroup CB *)at = vb[t];
+            }
             threadgroup_barrier(mem_flags::mem_threadgroup);
             if (PREFETCH && k0 + BK < K) {
                 fetch_v(k0 + BK);
             }
-            mma();
+            mma(BT);
             threadgroup_barrier(mem_flags::mem_threadgroup);
         }
+    };
+    if (vector && bt) {
+        vector_loop(Layout<true>());
+    } else if (vector) {
+        vector_loop(Layout<false>());
     } else {
         // General strided path for non-contiguous or unaligned inputs.
         fetch(0);
         for (ulong k0 = 0; k0 < K; k0 += BK) {
-            UNROLL for (uint t = 0; t < LA; ++t) { lt[(ar + RA * t) * BK + ac] = ra[t]; }
-            UNROLL for (uint t = 0; t < LB; ++t) { rt[(br + RB * t) * BN + bc] = rb[t]; }
+            UNROLL for (uint t = 0; t < LA; ++t) { lt[(ar + RA * t) * LDA + ac] = ra[t]; }
+            UNROLL for (uint t = 0; t < LB; ++t) { rt[(br + RB * t) * LDB + bc] = rb[t]; }
             threadgroup_barrier(mem_flags::mem_threadgroup);
             if (k0 + BK < K) {
                 fetch(k0 + BK);
             }
-            mma();
+            mma(false);
             threadgroup_barrier(mem_flags::mem_threadgroup);
         }
     }
