@@ -116,7 +116,8 @@
   "cuda": "missing",
   "triton": "missing",
   "what": "Matmuls sharing an operand (q/k/v, gate/up) run as one over packed weights, forward and backward.",
-  "pass": "merge_dots, merge_dots_backward"
+  "pass": "merge_dots, merge_dots_backward",
+  "bench": ["fused_merged_dots", "fused_merged_dots_backward"]
  },
  {
   "fusion": "Split-K",
@@ -140,7 +141,7 @@
   "triton": "missing",
   "what": "Attention forward and backward as tiled kernels; scores never materialized.",
   "pass": "flash_attention, flash_attention_backward",
-  "bench": "fused_attention"
+  "bench": ["fused_attention", "fused_attention_backward"]
  },
  {
   "fusion": "Fused linear cross-entropy",

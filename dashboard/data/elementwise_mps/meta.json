@@ -1439,6 +1439,56 @@
     4194304
    ]
   },
+  "fused_attention_backward": {
+   "formula": "gradients of causal attention (as above) against a cotangent: dQ, dK and dV tiled from the log-sum-exp",
+   "kind": "fusion",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    131072,
+    262144,
+    524288,
+    1048576,
+    2097152,
+    4194304
+   ]
+  },
+  "fused_merged_dots": {
+   "formula": "x · Wq, x · Wk, x · Wv (x [n / 512, 512]): one product over the packed weights",
+   "kind": "fusion",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216
+   ]
+  },
+  "fused_merged_dots_backward": {
+   "formula": "the projections' gradients against a cotangent each: dx as one product, the weights' as one",
+   "kind": "fusion",
+   "dtypes": [
+    "float32",
+    "bfloat16"
+   ],
+   "sizes": [
+    4096,
+    16384,
+    65536,
+    262144,
+    1048576,
+    4194304,
+    16777216
+   ]
+  },
   "fused_linear_cross_entropy": {
    "formula": "cross entropy of h · wᵀ (√n rows, √n classes, 512 features): logits never written",
    "kind": "fusion",

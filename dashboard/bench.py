@@ -257,6 +257,23 @@ def torch_grad(f, wrt):
     return run
 
 
+def merged(n, dtype, rng):
+    """Activations ``[n / EMBEDDING, EMBEDDING]`` and three ``[EMBEDDING, EMBEDDING]`` weights, scaled as :func:`square`."""
+    scale = np.sqrt(3 / EMBEDDING)
+    x = (rng.uniform(-1, 1, (n // EMBEDDING, EMBEDDING)).astype(np.float32), dtype)
+    return [x] + [((rng.uniform(-1, 1, (EMBEDDING, EMBEDDING)) * scale).astype(np.float32), dtype) for _ in range(3)]
+
+
+def cotangents(make, *shapes):
+    """Input maker ``make``'s inputs, then a uniform cotangent per shape (a function of n)."""
+    return lambda n, dtype, rng: make(n, dtype, rng) + floats(*shapes)(n, dtype, rng)
+
+
+def projections(matmul):
+    """``x``'s products with three weights (q/k/v projections) through ``matmul``."""
+    return lambda x, a, b, c: tuple(matmul(x, w) for w in (a, b, c))
+
+
 def attention_flops(n):
     """FLOPs of causal attention on query, key and value of n elements: half of 4 · S² · H per head."""
     s = n // (HEADS * HEAD_DIM)
@@ -563,6 +580,49 @@ FUSIONS = {
         qkv,
         sizes=ATTENTION_SIZES,
         flops=attention_flops,
+    ),
+    "fused_attention_backward": Op(
+        "fusion",
+        "gradients of causal attention (as above) against a cotangent: dQ, dK and dV tiled from the log-sum-exp",
+        lumen.grad(lambda q, k, v, c: F.sum(F.flash_attention(q, k, v, is_causal=True) * c), (0, 1, 2)),
+        torch_grad(
+            lambda q, k, v, c: torch.sum(
+                torch.nn.functional.scaled_dot_product_attention(
+                    q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), is_causal=True
+                ).transpose(1, 2)
+                * c
+            ),
+            (0, 1, 2),
+        ),
+        floats(*[lambda n: (1, n // (HEADS * HEAD_DIM), HEADS, HEAD_DIM)] * 4),
+        sizes=ATTENTION_SIZES,
+        flops=lambda n: 5 * attention_flops(n) // 2,
+    ),
+    "fused_merged_dots": Op(
+        "fusion",
+        f"x · Wq, x · Wk, x · Wv (x [n / {EMBEDDING}, {EMBEDDING}]): one product over the packed weights",
+        projections(lambda x, w: F.matmul(x, w, "float32", x.dtype)),
+        projections(lambda x, w: x @ w),
+        merged,
+        sizes=SQUARE_SIZES,
+        flops=lambda n: 6 * n * EMBEDDING,
+    ),
+    "fused_merged_dots_backward": Op(
+        "fusion",
+        "the projections' gradients against a cotangent each: dx as one product, the weights' as one",
+        lumen.grad(
+            lambda x, a, b, c, ca, cb, cc: F.sum(F.matmul(x, a, "float32", x.dtype) * ca)
+            + F.sum(F.matmul(x, b, "float32", x.dtype) * cb)
+            + F.sum(F.matmul(x, c, "float32", x.dtype) * cc),
+            (0, 1, 2, 3),
+        ),
+        torch_grad(
+            lambda x, a, b, c, ca, cb, cc: torch.sum((x @ a) * ca) + torch.sum((x @ b) * cb) + torch.sum((x @ c) * cc),
+            (0, 1, 2, 3),
+        ),
+        cotangents(merged, *[lambda n: (n // EMBEDDING, EMBEDDING)] * 3),
+        sizes=SQUARE_SIZES,
+        flops=lambda n: 12 * n * EMBEDDING,
     ),
     "fused_linear_cross_entropy": Op(
         "fusion",

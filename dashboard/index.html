@@ -234,8 +234,10 @@ try {
 }
 PRIMITIVES.sort((a, b) => a.primitive.localeCompare(b.primitive));
 const PRIMITIVE = Object.fromEntries(PRIMITIVES.map((r) => [r.primitive, r]));
+// A fusion row's benchmarks: its `bench`, one name or a list (forward, then backward).
+const benches = (r) => [].concat(r.bench ?? []);
 // Fusions with a benchmark, keyed by its name; their sections follow the ops'.
-const FUSED = Object.fromEntries(FUSIONS.filter((r) => r.bench).map((r) => [r.bench, r]));
+const FUSED = Object.fromEntries(FUSIONS.flatMap((r) => benches(r).map((b) => [b, r])));
 // The status row of an op or a fusion benchmark.
 const rowOf = (op) => PRIMITIVE[op] ?? FUSED[op];
 
@@ -597,7 +599,9 @@ function drawSection(op) {
   const known = KNOWN[op] || {};
   const head = el("div", "lx-op-head");
   const name = el("h2");
-  const anchor = el("a", null, FUSED[op]?.fusion ?? op);
+  // A fusion with several benchmarks names each section by its benchmark too.
+  const fused = FUSED[op] && (benches(FUSED[op]).length > 1 ? `${FUSED[op].fusion}: ${op}` : FUSED[op].fusion);
+  const anchor = el("a", null, fused ?? op);
   anchor.href = hrefOf(op);
   name.append(anchor);
   head.append(name);
@@ -671,7 +675,7 @@ function drawSections() {
 for (const input of [search, kindSel, gaps]) input.addEventListener(input === search ? "input" : "change", () => { drawIndex(); drawSections(); });
 
 const FUS_COLUMNS = [
-  { key: "fusion", label: "Fusion", render: (r) => { if (!r.bench) return r.fusion; const a = el("a", "lx-op", r.fusion); a.href = hrefOf(r.bench); return a; } },
+  { key: "fusion", label: "Fusion", render: (r) => { if (!r.bench) return r.fusion; const a = el("a", "lx-op", r.fusion); a.href = hrefOf(benches(r)[0]); return a; } },
   { key: "category", label: "Kind" },
   { key: "status", label: "Status", kind: "dev", sort: (r) => r[current.device.status], render: (r) => chip(r[current.device.status]) },
   { key: "what", label: "What it does", kind: "why" }, { key: "pass", label: "Pass", wide: true },
