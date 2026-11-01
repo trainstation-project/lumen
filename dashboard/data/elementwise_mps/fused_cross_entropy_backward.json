@@ -13,13 +13,13 @@
    "stored_bytes": 262144,
    "flops": 12582912,
    "compute_bound": true,
-   "lumen_us": 58.021,
-   "torch_us": 109.411,
+   "lumen_us": 42.73,
+   "torch_us": 109.201,
    "matches_torch": true,
    "rotation": 1024,
    "chained": true,
    "kernels": 6,
-   "gbs": 9.04
+   "gbs": 12.28
   },
   {
    "op": "fused_cross_entropy_backward",
@@ -34,13 +34,13 @@
    "stored_bytes": 524288,
    "flops": 50331648,
    "compute_bound": true,
-   "lumen_us": 47.499,
-   "torch_us": 115.116,
+   "lumen_us": 41.048,
+   "torch_us": 116.114,
    "matches_torch": true,
    "rotation": 512,
    "chained": true,
    "kernels": 7,
-   "gbs": 22.09
+   "gbs": 25.56
   },
   {
    "op": "fused_cross_entropy_backward",
@@ -55,13 +55,13 @@
    "stored_bytes": 1048576,
    "flops": 201326592,
    "compute_bound": true,
-   "lumen_us": 84.831,
-   "torch_us": 116.976,
+   "lumen_us": 81.261,
+   "torch_us": 120.624,
    "matches_torch": true,
    "rotation": 256,
    "chained": true,
    "kernels": 7,
-   "gbs": 24.73
+   "gbs": 25.82
   },
   {
    "op": "fused_cross_entropy_backward",
@@ -76,13 +76,13 @@
    "stored_bytes": 2097152,
    "flops": 805306368,
    "compute_bound": true,
-   "lumen_us": 237.777,
-   "torch_us": 200.609,
+   "lumen_us": 217.526,
+   "torch_us": 200.934,
    "matches_torch": true,
    "rotation": 128,
    "chained": true,
    "kernels": 7,
-   "gbs": 17.65
+   "gbs": 19.29
   },
   {
    "op": "fused_cross_entropy_backward",
@@ -97,13 +97,13 @@
    "stored_bytes": 4194304,
    "flops": 3221225472,
    "compute_bound": true,
-   "lumen_us": 763.913,
-   "torch_us": 667.137,
+   "lumen_us": 686.867,
+   "torch_us": 669.738,
    "matches_torch": true,
    "rotation": 64,
    "chained": true,
    "kernels": 7,
-   "gbs": 10.99
+   "gbs": 12.22
   },
   {
    "op": "fused_cross_entropy_backward",
@@ -118,13 +118,13 @@
    "stored_bytes": 8388608,
    "flops": 12884901888,
    "compute_bound": true,
-   "lumen_us": 3647.254,
-   "torch_us": 2532.504,
+   "lumen_us": 3362.733,
+   "torch_us": 2572.473,
    "matches_torch": true,
    "rotation": 32,
    "chained": true,
    "kernels": 10,
-   "gbs": 4.6
+   "gbs": 4.99
   },
   {
    "op": "fused_cross_entropy_backward",
@@ -139,13 +139,13 @@
    "stored_bytes": 16777216,
    "flops": 51539607552,
    "compute_bound": true,
-   "lumen_us": 13837.162,
-   "torch_us": 9954.694,
+   "lumen_us": 12675.138,
+   "torch_us": 10018.267,
    "matches_torch": true,
    "rotation": 16,
    "chained": true,
    "kernels": 20,
-   "gbs": 2.43
+   "gbs": 2.65
   },
   {
    "op": "fused_cross_entropy_backward",
@@ -160,13 +160,13 @@
    "stored_bytes": 131072,
    "flops": 12582912,
    "compute_bound": true,
-   "lumen_us": 56.213,
-   "torch_us": 119.838,
+   "lumen_us": 40.782,
+   "torch_us": 121.103,
    "matches_torch": true,
    "rotation": 2047,
    "chained": true,
    "kernels": 6,
-   "gbs": 4.67
+   "gbs": 6.43
   },
   {
    "op": "fused_cross_entropy_backward",
@@ -181,13 +181,13 @@
    "stored_bytes": 262144,
    "flops": 50331648,
    "compute_bound": true,
-   "lumen_us": 44.709,
-   "torch_us": 126.81,
+   "lumen_us": 36.539,
+   "torch_us": 129.222,
    "matches_torch": true,
    "rotation": 1024,
    "chained": true,
    "kernels": 7,
-   "gbs": 11.74
+   "gbs": 14.36
   },
   {
    "op": "fused_cross_entropy_backward",
@@ -202,13 +202,13 @@
    "stored_bytes": 524288,
    "flops": 201326592,
    "compute_bound": true,
-   "lumen_us": 84.353,
-   "torch_us": 128.584,
+   "lumen_us": 73.488,
+   "torch_us": 132.423,
    "matches_torch": true,
    "rotation": 512,
    "chained": true,
    "kernels": 7,
-   "gbs": 12.44
+   "gbs": 14.28
   },
   {
    "op": "fused_cross_entropy_backward",
@@ -223,13 +223,13 @@
    "stored_bytes": 1048576,
    "flops": 805306368,
    "compute_bound": true,
-   "lumen_us": 221.935,
-   "torch_us": 225.06,
+   "lumen_us": 197.204,
+   "torch_us": 226.891,
    "matches_torch": true,
    "rotation": 256,
    "chained": true,
    "kernels": 7,
-   "gbs": 9.46
+   "gbs": 10.64
   },
   {
    "op": "fused_cross_entropy_backward",
@@ -244,13 +244,13 @@
    "stored_bytes": 2097152,
    "flops": 3221225472,
    "compute_bound": true,
-   "lumen_us": 685.193,
-   "torch_us": 706.663,
+   "lumen_us": 631.737,
+   "torch_us": 706.45,
    "matches_torch": true,
    "rotation": 128,
    "chained": true,
    "kernels": 7,
-   "gbs": 6.13
+   "gbs": 6.65
   },
   {
    "op": "fused_cross_entropy_backward",
@@ -265,13 +265,13 @@
    "stored_bytes": 4194304,
    "flops": 12884901888,
    "compute_bound": true,
-   "lumen_us": 3230.522,
-   "torch_us": 2602.207,
+   "lumen_us": 2956.191,
+   "torch_us": 2663.258,
    "matches_torch": true,
    "rotation": 64,
    "chained": true,
    "kernels": 11,
-   "gbs": 2.6
+   "gbs": 2.84
   },
   {
    "op": "fused_cross_entropy_backward",
@@ -286,18 +286,18 @@
    "stored_bytes": 8388608,
    "flops": 51539607552,
    "compute_bound": true,
-   "lumen_us": 12241.072,
-   "torch_us": 10098.299,
+   "lumen_us": 11187.922,
+   "torch_us": 10187.77,
    "matches_torch": true,
    "rotation": 32,
    "chained": true,
    "kernels": 17,
-   "gbs": 1.37
+   "gbs": 1.5
   }
  ],
  "code": {
-  "kernel": "// step 0: dot_general\n// { lambda %0:f32[1024,512] %1:f32[1024,512]. let\n//     %2:f32[1024,1024] = dot_general[dimension_numbers=(((1,), (1,)), ((), ())) accum_dtype=f32 output_dtype=f32] %0 %1\n//   in (%2) }\n\nstruct fusion_a07fe05c06a3763f_epi {\n    device const float *in0;\n    device const float *in1;\n    inline float operator()(float r, ulong i) const {\n        uint j = uint(i);\n        return r;\n    }\n};\n\n[[max_total_threads_per_threadgroup(128)]]\nkernel void fusion_a07fe05c06a3763f(device const float *in0 [[buffer(0)]],\n                                    device const float *in1 [[buffer(1)]],\n                                    device float *out [[buffer(2)]],\n                                    constant ulong *p [[buffer(3)]],\n                                    uint3 group [[threadgroup_position_in_grid]],\n                                    uint3 tid [[thread_position_in_threadgroup]],\n                                    uint sg [[simdgroup_index_in_threadgroup]],\n                                    uint lane [[thread_index_in_simdgroup]]) {\n    threadgroup float lt[SG_LT_OF(64, 16, float, float, 4)], rt[16 * 64];\n    matmul_sg_impl<float, float, float, 64, 64, 16, float,\n                   fusion_a07fe05c06a3763f_epi, false, false, false, false, 1, false,\n                   128, 2, false>(\n        in0, in1, out, p,\n        lt, rt,\n        group, tid.y * 16 + tid.x, sg, lane,\n        fusion_a07fe05c06a3763f_epi{in0, in1});\n}",
-  "plan": "plan (workspace 8388612 bytes)\n    ws+0:f32[1024,1024] = fusion[name=fusion_f62e60940b2af778 body={ lambda %0:f32[1024,512] %1:f32[1024,512]. let\n    %2:f32[1024,1024] = dot_general[dimension_numbers=(((1,), (1,)), ((), ())) accum_dtype=f32 output_dtype=f32] %0 %1\n  in (%2) }] in0 in1\n    ws+4194304:f32[1024,1024] = fusion[name=fusion_6e713ce74d4317a8 body={ lambda %0:i32[1024] %1:f32[1024,1024]. let\n    %2:f32[1024] = reduce_max[axes=(1,)] %1\n    %3:f32[1024,1] = reshape[new_sizes=(1024, 1)] %2\n    %4:f32[1024,1024] = broadcast_in_dim[broadcast_dimensions=(0, 1) shape=(1024, 1024)] %3\n    %5:f32[1024,1024] = sub %1 %4\n    %6:f32[1024,1024] = exp %5\n    %7:f32[1024] = reduce_sum[axes=(1,) accum_dtype=f32] %6\n    %8:f32[1024] = log %7\n    %9:f32[1024] = add %2 %8\n    %10:f32[1024,1] = reshape[new_sizes=(1024, 1)] %9\n    %11:f32[1024,1024] = broadcast_in_dim[broadcast_dimensions=(0, 1) shape=(1024, 1024)] %10\n    %12:f32[1024,1024] = sub %1 %11\n    %13:f32[1024,1024] = exp %12\n    %14:i32[1024,1] = reshape[new_sizes=(1024, 1)] %0\n    %15:i32[1024] = iota[dimension=0 dtype=i32 shape=(1024,)]\n    %16:i32[1024,1024] = broadcast_in_dim[broadcast_dimensions=(0, 1) shape=(1024, 1024)] %14\n    %17:i32[1024,1024] = broadcast_in_dim[broadcast_dimensions=(1,) shape=(1024, 1024)] %15\n    %18:bool[1024,1024] = eq %16 %17\n    %19:f32[1024,1024] = cast[new_dtype=f32] %18\n    %20:f32[1024,1024] = sub %13 %19\n  in (%20) }] in2 ws+0\n    ws+2097152:f32[1024,512] = fusion[name=fusion_f62e60940b2af778 body={ lambda %0:f32[1024,1024] %1:f32[1024,512]. let\n    %2:f32[1024,512] = dot_general[dimension_numbers=(((1,), (0,)), ((), ())) accum_dtype=f32 output_dtype=f32] %0 %1\n  in (%2) }] ws+4194304 in1\n    ws+0:f32[1024,512] = full[dtype=f32 fill_value=0.0 shape=(1024, 512)]\n    ws+8388608:i32[] = full[dtype=i32 fill_value=0 shape=()]\n    ws+0:f32[1024,512] = dynamic_update_slice ws+0 ws+2097152 ws+8388608 ws+8388608\n    ws+2097152:f32[1024,512] = fusion[name=fusion_f62e60940b2af778 body={ lambda %0:f32[1024,1024] %1:f32[1024,512]. let\n    %2:f32[1024,512] = dot_general[dimension_numbers=(((0,), (0,)), ((), ())) accum_dtype=f32 output_dtype=f32] %0 %1\n  in (%2) }] ws+4194304 in0"
+  "kernel": "// step 0: dot_general\n// { lambda %0:f32[1024,512] %1:f32[1024,512]. let\n//     %2:f32[1024,1024] = dot_general[dimension_numbers=(((1,), (1,)), ((), ())) accum_dtype=f32 output_dtype=f32] %0 %1\n//   in (%2) }\n\nstruct fusion_997bab910b6ce8e9_epi {\n    device const float *in0;\n    device const float *in1;\n    inline float operator()(float r, ulong i) const {\n        uint j = uint(i);\n        return r;\n    }\n};\n\n[[max_total_threads_per_threadgroup(64)]]\nkernel void fusion_997bab910b6ce8e9(device const float *in0 [[buffer(0)]],\n                                    device const float *in1 [[buffer(1)]],\n                                    device float *out [[buffer(2)]],\n                                    constant ulong *p [[buffer(3)]],\n                                    uint3 group [[threadgroup_position_in_grid]],\n                                    uint3 tid [[thread_position_in_threadgroup]],\n                                    uint sg [[simdgroup_index_in_threadgroup]],\n                                    uint lane [[thread_index_in_simdgroup]]) {\n    threadgroup float lt[SG_LT_OF(32, 16, float, float, 2)], rt[SG_RT(16, 64, float)];\n    matmul_sg_impl<float, float, float, 32, 64, 16, float,\n                   fusion_997bab910b6ce8e9_epi, false, false, false, false, 1, false,\n                   64, 2, false>(\n        in0, in1, out, p,\n        lt, rt,\n        group, tid.y * 16 + tid.x, sg, lane,\n        fusion_997bab910b6ce8e9_epi{in0, in1});\n}",
+  "plan": "plan (workspace 8388612 bytes)\n    ws+0:f32[1024,1024] = fusion[name=fusion_564e6047895f9b3a body={ lambda %0:f32[1024,512] %1:f32[1024,512]. let\n    %2:f32[1024,1024] = dot_general[dimension_numbers=(((1,), (1,)), ((), ())) accum_dtype=f32 output_dtype=f32] %0 %1\n  in (%2) }] in0 in1\n    ws+4194304:f32[1024,1024] = fusion[name=fusion_6e713ce74d4317a8 body={ lambda %0:i32[1024] %1:f32[1024,1024]. let\n    %2:f32[1024] = reduce_max[axes=(1,)] %1\n    %3:f32[1024,1] = reshape[new_sizes=(1024, 1)] %2\n    %4:f32[1024,1024] = broadcast_in_dim[broadcast_dimensions=(0, 1) shape=(1024, 1024)] %3\n    %5:f32[1024,1024] = sub %1 %4\n    %6:f32[1024,1024] = exp %5\n    %7:f32[1024] = reduce_sum[axes=(1,) accum_dtype=f32] %6\n    %8:f32[1024] = log %7\n    %9:f32[1024] = add %2 %8\n    %10:f32[1024,1] = reshape[new_sizes=(1024, 1)] %9\n    %11:f32[1024,1024] = broadcast_in_dim[broadcast_dimensions=(0, 1) shape=(1024, 1024)] %10\n    %12:f32[1024,1024] = sub %1 %11\n    %13:f32[1024,1024] = exp %12\n    %14:i32[1024,1] = reshape[new_sizes=(1024, 1)] %0\n    %15:i32[1024] = iota[dimension=0 dtype=i32 shape=(1024,)]\n    %16:i32[1024,1024] = broadcast_in_dim[broadcast_dimensions=(0, 1) shape=(1024, 1024)] %14\n    %17:i32[1024,1024] = broadcast_in_dim[broadcast_dimensions=(1,) shape=(1024, 1024)] %15\n    %18:bool[1024,1024] = eq %16 %17\n    %19:f32[1024,1024] = cast[new_dtype=f32] %18\n    %20:f32[1024,1024] = sub %13 %19\n  in (%20) }] in2 ws+0\n    ws+2097152:f32[1024,512] = fusion[name=fusion_564e6047895f9b3a body={ lambda %0:f32[1024,1024] %1:f32[1024,512]. let\n    %2:f32[1024,512] = dot_general[dimension_numbers=(((1,), (0,)), ((), ())) accum_dtype=f32 output_dtype=f32] %0 %1\n  in (%2) }] ws+4194304 in1\n    ws+0:f32[1024,512] = full[dtype=f32 fill_value=0.0 shape=(1024, 512)]\n    ws+8388608:i32[] = full[dtype=i32 fill_value=0 shape=()]\n    ws+0:f32[1024,512] = dynamic_update_slice ws+0 ws+2097152 ws+8388608 ws+8388608\n    ws+2097152:f32[1024,512] = fusion[name=fusion_564e6047895f9b3a body={ lambda %0:f32[1024,1024] %1:f32[1024,512]. let\n    %2:f32[1024,512] = dot_general[dimension_numbers=(((0,), (0,)), ((), ())) accum_dtype=f32 output_dtype=f32] %0 %1\n  in (%2) }] ws+4194304 in0"
  },
- "measured_at": "2026-10-31T09:06:55+00:00"
+ "measured_at": "2026-11-01T06:25:48+00:00"
 }
