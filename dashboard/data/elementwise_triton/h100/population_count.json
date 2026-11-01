@@ -13,12 +13,12 @@
    "stored_bytes": 16384,
    "flops": 4096,
    "compute_bound": false,
-   "lumen_us": 20.866,
+   "lumen_us": 5.138,
    "torch_us": null,
    "matches_torch": null,
    "rotation": 4096,
    "chained": false,
-   "gbs": 1.57
+   "gbs": 6.38
   },
   {
    "op": "population_count",
@@ -33,12 +33,12 @@
    "stored_bytes": 65536,
    "flops": 16384,
    "compute_bound": false,
-   "lumen_us": 20.835,
+   "lumen_us": 5.087,
    "torch_us": null,
    "matches_torch": null,
    "rotation": 4096,
    "chained": false,
-   "gbs": 6.29
+   "gbs": 25.77
   },
   {
    "op": "population_count",
@@ -53,12 +53,12 @@
    "stored_bytes": 262144,
    "flops": 65536,
    "compute_bound": false,
-   "lumen_us": 20.994,
+   "lumen_us": 5.044,
    "torch_us": null,
    "matches_torch": null,
    "rotation": 1024,
    "chained": false,
-   "gbs": 24.97
+   "gbs": 103.94
   },
   {
    "op": "population_count",
@@ -73,12 +73,12 @@
    "stored_bytes": 1048576,
    "flops": 262144,
    "compute_bound": false,
-   "lumen_us": 21.129,
+   "lumen_us": 4.934,
    "torch_us": null,
    "matches_torch": null,
    "rotation": 256,
    "chained": false,
-   "gbs": 99.25
+   "gbs": 425.04
   },
   {
    "op": "population_count",
@@ -93,12 +93,12 @@
    "stored_bytes": 4194304,
    "flops": 1048576,
    "compute_bound": false,
-   "lumen_us": 21.32,
+   "lumen_us": 5.495,
    "torch_us": null,
    "matches_torch": null,
    "rotation": 64,
    "chained": false,
-   "gbs": 393.46
+   "gbs": 1526.59
   },
   {
    "op": "population_count",
@@ -113,12 +113,12 @@
    "stored_bytes": 16777216,
    "flops": 4194304,
    "compute_bound": false,
-   "lumen_us": 21.829,
+   "lumen_us": 13.589,
    "torch_us": null,
    "matches_torch": null,
    "rotation": 16,
    "chained": false,
-   "gbs": 1537.15
+   "gbs": 2469.23
   },
   {
    "op": "population_count",
@@ -133,12 +133,12 @@
    "stored_bytes": 67108864,
    "flops": 16777216,
    "compute_bound": false,
-   "lumen_us": 48.791,
+   "lumen_us": 47.37,
    "torch_us": null,
    "matches_torch": null,
    "rotation": 4,
    "chained": false,
-   "gbs": 2750.87
+   "gbs": 2833.39
   },
   {
    "op": "population_count",
@@ -153,17 +153,17 @@
    "stored_bytes": 268435456,
    "flops": 67108864,
    "compute_bound": false,
-   "lumen_us": 181.66,
+   "lumen_us": 178.578,
    "torch_us": null,
    "matches_torch": null,
    "rotation": 2,
    "chained": false,
-   "gbs": 2955.36
+   "gbs": 3006.37
   }
  ],
  "code": {
-  "kernel": "# step 0: population_count\n# /workspace/mayank/lumen/dashboard/bench.py:512  out = outputs(f(*lt))\n# { lambda %0:i32[1048576]. let\n#     %1:i32[1048576] = population_count %0\n#   in (%1) }\n\n# LOAD0 = load_41586ad75c7cc8e9\n@triton.jit\ndef load_41586ad75c7cc8e9(ptr, i, mask):\n    return tl.load(ptr + i, mask=mask)\n\n# STORE = store_154117f9bc0ad6d6\n@triton.jit\ndef store_154117f9bc0ad6d6(ptr, i, value, mask):\n    tl.store(ptr + i, value, mask=mask)\n\n@triton.jit\ndef fusion_7eb0551a65bfac90(\n    in0,\n    out,\n    n,\n    LOAD0: tl.constexpr,\n    STORE: tl.constexpr,\n    BLOCK: tl.constexpr,\n):\n    j = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)\n    mask = j < n\n    v0 = LOAD0(in0, j, mask)\n    v1 = libdevice.popc(v0.to(tl.uint32, bitcast=True).to(tl.uint32).to(tl.int32, bitcast=True)).to(tl.int32)\n    STORE(out, j, v1, mask)",
-  "plan": "plan (workspace 4194304 bytes)\n    ws+0:i32[1048576] = fusion[name=loop body={ lambda %0:i32[1048576]. let\n    %1:i32[1048576] = population_count %0\n  in (%1) }] in0"
+  "kernel": "# step 0: population_count\n# /workspace-vast/mayank/lumen-common-alone/dashboard/bench.py:576  out = outputs(f(*lt))\n# { lambda %0:i32[1048576]. let\n#     %1:i32[1048576] = population_count %0\n#   in (%1) }\n\n# BODY = elementwise_9fb1ede41f0adf2c\n@triton.jit\ndef LOAD0(ptr, i, mask):\n    return tl.load(ptr + i, mask=mask)\n\n@triton.jit\ndef STORE(ptr, i, value, mask):\n    tl.store(ptr + i, value, mask=mask)\n\n@triton.jit\ndef elementwise_9fb1ede41f0adf2c(EXTRA, BLOCK, MASK, SEGMENT: tl.constexpr):\n    in0 = EXTRA[0]\n    out = EXTRA[1]\n    v0 = LOAD0(in0, BLOCK, MASK)\n    v1 = libdevice.popc(v0.to(tl.uint32, bitcast=True).to(tl.uint32).to(tl.int32, bitcast=True)).to(tl.int32)\n    STORE(out, BLOCK, v1, MASK)\n\n# @triton.jit: lumen.codegen.elementwise.triton.kernel's elementwise_kernel, BLOCK_SIZE=4096 warps=16",
+  "plan": "plan (workspace 4194304 bytes)\n    ws+0:i32[1048576] = fusion[name=elementwise body={ lambda %0:i32[1048576]. let\n    %1:i32[1048576] = population_count %0\n  in (%1) }] in0"
  },
- "measured_at": "2026-10-25T03:12:49+00:00"
+ "measured_at": "2026-11-01T01:15:08+00:00"
 }

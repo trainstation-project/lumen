@@ -149,6 +149,12 @@ def from_numpy(a):
 
     shape = np.shape(a)
     a = np.ascontiguousarray(a)
+    if str(a.dtype) not in _ML_DTYPES:
+        # Copy the buffer through DLPack; arrays it can't export (read-only ones) go through a list.
+        try:
+            return from_dlpack(a.reshape(shape)).clone()
+        except (BufferError, TypeError):
+            pass
     values = a.ravel()
     if str(a.dtype) in _ML_DTYPES:
         values = values.astype(np.float64 if "float" in str(a.dtype) else np.int64)
