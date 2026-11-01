@@ -77,6 +77,29 @@ def test_upcast_rms_norm_is_one_kernel(device, n, triton_on_cuda):
     np.testing.assert_allclose(out[device], out["cpu"], rtol=2**-7, atol=2**-7)
 
 
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_a_weight_cast_in_a_square_norm_is_per_column(device, triton_on_cuda):
+    """An RMS norm in float32 of a bfloat16 input whose weight is cast to
+    float32 too, with as many rows as columns: the cast weight has one
+    element per row, but it scales each column, so it is read per column,
+    not once a row. The CPU's result, to a bfloat16 rounding."""
+
+    def f(x, w):
+        """The norm of `x` in float32, scaled by `w` in float32, cast back to bfloat16."""
+        h = x.float()
+        return (h / F.sqrt(F.mean(h * h, -1, keepdim=True) + 1e-6) * w.float()).to(dtype="bfloat16")
+
+    x, w = rand(64, 64), rand(64, seed=1)
+    out = {}
+    for target in ("cpu", device):
+        try:
+            X, W = (lumen.from_numpy(a).to(target).to(dtype="bfloat16") for a in (x, w))
+        except RuntimeError as e:
+            pytest.skip(str(e))
+        out[target] = lumen.to_numpy(lumen.compile(f)(X, W).to(dtype="float32"))
+    np.testing.assert_allclose(out[device], out["cpu"], rtol=2**-7, atol=2**-7)
+
+
 def _layer_norm(a, w):
     """Layer norm of `a` over its last dim, scaled by `w`."""
     xc = a - F.mean(a, -1, keepdim=True)
