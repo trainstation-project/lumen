@@ -23,8 +23,8 @@ inline void load_tile(threadgroup T *dst, device const T *src, uint r0, uint n, 
     if (COL == 1 && D % W == 0 && ROW % W == 0 && ulong(src) % 16 == 0) {
         for (uint e = t; e < ROWS * D / W; e += THREADS) {
             uint j = e / (D / W), d = e % (D / W) * W;
-            *(threadgroup uint4 *)(dst + j * LD + d) =
-                r0 + j < n ? *(device const uint4 *)(src + (r0 + j) * ROW + d) : uint4(0);
+            *(threadgroup uint4 *)(dst + j * LD + d) = r0 + j < n ? *(device const uint4 *)(src + (r0 + j) * ROW + d)
+                                                                  : uint4(0);
         }
     } else {
         for (uint e = t; e < ROWS * D; e += THREADS) {
