@@ -2082,7 +2082,8 @@ fn skinny_dots_split_their_contraction() {
         "{split}"
     );
 
-    assert_eq!(split.type_of(split.nodes()[2].output).shape, [8, 4, 256]);
+    // K per tile is long: MLX's rule's 32 chunks, held to chunks of at least 256 (16).
+    assert_eq!(split.type_of(split.nodes()[2].output).shape, [16, 4, 256]);
     let inputs = [data(&[4, 4096], 1), data(&[4096, 256], 2)];
     let want = reference::run(&g, &inputs).unwrap();
     let got = reference::run(&split, &inputs).unwrap();
