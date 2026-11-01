@@ -4,6 +4,7 @@
 pub(crate) mod common;
 pub mod config;
 mod cpu;
+pub(crate) mod cuda;
 #[cfg(lumen_mps_linked)]
 pub(crate) mod mps;
 pub(crate) mod pass;
@@ -94,9 +95,11 @@ pub fn compile_with(graph: &Graph, device: Device, options: &Options) -> Result<
 /// Dispatches a single-device graph to its backend; anything without one runs on the CPU backend.
 fn device_compile(graph: &Graph, device: Device, options: &Options) -> Result<Plan, String> {
     match device {
+        // CUDA runs on the Triton backend when asked, else on the CUDA (CuTe DSL) one.
         Device::Cuda(_) if options.config.cuda.use_triton_backend => {
             triton::compile(graph, device, options)
         }
+        Device::Cuda(_) => cuda::compile(graph, device, options),
         #[cfg(lumen_mps_linked)]
         Device::Mps(_) => mps::compile(graph, options),
         Device::Tpu(_) => tpu::compile(graph, options),

@@ -305,6 +305,31 @@ impl Tensor {
         self.offset
     }
 
+    /// A 1-D contiguous view of the elements this tensor spans, from its first: what a kernel indexing it
+    /// at its own strides reads through.
+    pub(crate) fn flat(&self) -> Tensor {
+        let extent = match self.numel() {
+            0 => 0,
+            _ => {
+                let last: usize = self
+                    .shape
+                    .iter()
+                    .zip(&self.strides)
+                    .map(|(&n, &s)| (n - 1) * s)
+                    .sum();
+                last + 1
+            }
+        };
+
+        Tensor {
+            storage: self.storage.clone(),
+            dtype: self.dtype,
+            shape: vec![extent],
+            strides: vec![1],
+            offset: self.offset,
+        }
+    }
+
     /// Id of the underlying storage, shared by all views of it.
     pub fn storage_id(&self) -> usize {
         self.storage.id()
