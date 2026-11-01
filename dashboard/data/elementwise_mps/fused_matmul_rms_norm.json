@@ -13,13 +13,13 @@
    "stored_bytes": 2048,
    "flops": 524288,
    "compute_bound": true,
-   "lumen_us": 23.425,
-   "torch_us": 15.972,
+   "lumen_us": 24.665,
+   "torch_us": 16.015,
    "matches_torch": true,
    "rotation": 3585,
    "chained": false,
    "kernels": 1,
-   "gbs": 6.39
+   "gbs": 6.07
   },
   {
    "op": "fused_matmul_rms_norm",
@@ -34,13 +34,13 @@
    "stored_bytes": 8192,
    "flops": 2097152,
    "compute_bound": true,
-   "lumen_us": 24.221,
-   "torch_us": 16.764,
+   "lumen_us": 25.261,
+   "torch_us": 16.762,
    "matches_torch": true,
    "rotation": 2619,
    "chained": false,
    "kernels": 1,
-   "gbs": 8.47
+   "gbs": 8.12
   },
   {
    "op": "fused_matmul_rms_norm",
@@ -55,13 +55,13 @@
    "stored_bytes": 32768,
    "flops": 8388608,
    "compute_bound": true,
-   "lumen_us": 25.8,
-   "torch_us": 17.178,
+   "lumen_us": 25.225,
+   "torch_us": 16.916,
    "matches_torch": true,
    "rotation": 1260,
    "chained": false,
    "kernels": 1,
-   "gbs": 16.52
+   "gbs": 16.9
   },
   {
    "op": "fused_matmul_rms_norm",
@@ -76,13 +76,13 @@
    "stored_bytes": 131072,
    "flops": 33554432,
    "compute_bound": true,
-   "lumen_us": 27.339,
-   "torch_us": 21.593,
+   "lumen_us": 26.82,
+   "torch_us": 21.394,
    "matches_torch": true,
    "rotation": 410,
    "chained": false,
    "kernels": 1,
-   "gbs": 47.95
+   "gbs": 48.88
   },
   {
    "op": "fused_matmul_rms_norm",
@@ -97,13 +97,13 @@
    "stored_bytes": 524288,
    "flops": 134217728,
    "compute_bound": true,
-   "lumen_us": 40.203,
-   "torch_us": 43.013,
+   "lumen_us": 42.36,
+   "torch_us": 43.306,
    "matches_torch": true,
    "rotation": 111,
    "chained": false,
    "kernels": 1,
-   "gbs": 120.64
+   "gbs": 114.49
   },
   {
    "op": "fused_matmul_rms_norm",
@@ -118,13 +118,13 @@
    "stored_bytes": 2097152,
    "flops": 536870912,
    "compute_bound": true,
-   "lumen_us": 129.553,
-   "torch_us": 151.109,
+   "lumen_us": 131.108,
+   "torch_us": 147.881,
    "matches_torch": true,
    "rotation": 29,
    "chained": false,
    "kernels": 1,
-   "gbs": 146.7
+   "gbs": 144.96
   },
   {
    "op": "fused_matmul_rms_norm",
@@ -139,13 +139,13 @@
    "stored_bytes": 8388608,
    "flops": 2147483648,
    "compute_bound": true,
-   "lumen_us": 428.979,
-   "torch_us": 511.735,
+   "lumen_us": 426.777,
+   "torch_us": 505.135,
    "matches_torch": true,
    "rotation": 8,
    "chained": false,
    "kernels": 1,
-   "gbs": 176.3
+   "gbs": 177.21
   },
   {
    "op": "fused_matmul_rms_norm",
@@ -160,13 +160,13 @@
    "stored_bytes": 33554432,
    "flops": 8589934592,
    "compute_bound": true,
-   "lumen_us": 1592.11,
-   "torch_us": 4076.044,
+   "lumen_us": 1616.827,
+   "torch_us": 4470.504,
    "matches_torch": true,
    "rotation": 2,
    "chained": false,
    "kernels": 1,
-   "gbs": 189.76
+   "gbs": 186.86
   },
   {
    "op": "fused_matmul_rms_norm",
@@ -181,13 +181,13 @@
    "stored_bytes": 1024,
    "flops": 524288,
    "compute_bound": true,
-   "lumen_us": 23.438,
-   "torch_us": 15.94,
+   "lumen_us": 23.869,
+   "torch_us": 16.061,
    "matches_torch": true,
    "rotation": 4096,
    "chained": false,
    "kernels": 1,
-   "gbs": 3.19
+   "gbs": 3.14
   },
   {
    "op": "fused_matmul_rms_norm",
@@ -202,13 +202,13 @@
    "stored_bytes": 4096,
    "flops": 2097152,
    "compute_bound": true,
-   "lumen_us": 24.682,
-   "torch_us": 16.938,
+   "lumen_us": 24.192,
+   "torch_us": 16.43,
    "matches_torch": true,
    "rotation": 4096,
    "chained": false,
    "kernels": 1,
-   "gbs": 4.15
+   "gbs": 4.24
   },
   {
    "op": "fused_matmul_rms_norm",
@@ -223,13 +223,13 @@
    "stored_bytes": 16384,
    "flops": 8388608,
    "compute_bound": true,
-   "lumen_us": 24.014,
-   "torch_us": 17.257,
+   "lumen_us": 23.346,
+   "torch_us": 16.846,
    "matches_torch": true,
    "rotation": 2520,
    "chained": false,
    "kernels": 1,
-   "gbs": 8.87
+   "gbs": 9.13
   },
   {
    "op": "fused_matmul_rms_norm",
@@ -244,13 +244,13 @@
    "stored_bytes": 65536,
    "flops": 33554432,
    "compute_bound": true,
-   "lumen_us": 24.652,
-   "torch_us": 18.889,
+   "lumen_us": 24.747,
+   "torch_us": 18.827,
    "matches_torch": true,
    "rotation": 820,
    "chained": false,
    "kernels": 1,
-   "gbs": 26.59
+   "gbs": 26.49
   },
   {
    "op": "fused_matmul_rms_norm",
@@ -265,13 +265,13 @@
    "stored_bytes": 262144,
    "flops": 134217728,
    "compute_bound": true,
-   "lumen_us": 36.505,
-   "torch_us": 38.01,
+   "lumen_us": 37.042,
+   "torch_us": 37.334,
    "matches_torch": true,
    "rotation": 222,
    "chained": false,
    "kernels": 1,
-   "gbs": 66.43
+   "gbs": 65.47
   },
   {
    "op": "fused_matmul_rms_norm",
@@ -286,13 +286,13 @@
    "stored_bytes": 1048576,
    "flops": 536870912,
    "compute_bound": true,
-   "lumen_us": 106.904,
-   "torch_us": 125.053,
+   "lumen_us": 107.471,
+   "torch_us": 125.778,
    "matches_torch": true,
    "rotation": 57,
    "chained": false,
    "kernels": 1,
-   "gbs": 88.89
+   "gbs": 88.42
   },
   {
    "op": "fused_matmul_rms_norm",
@@ -307,13 +307,13 @@
    "stored_bytes": 4194304,
    "flops": 2147483648,
    "compute_bound": true,
-   "lumen_us": 367.542,
-   "torch_us": 426.115,
+   "lumen_us": 365.098,
+   "torch_us": 431.142,
    "matches_torch": true,
    "rotation": 15,
    "chained": false,
    "kernels": 1,
-   "gbs": 102.88
+   "gbs": 103.57
   },
   {
    "op": "fused_matmul_rms_norm",
@@ -328,18 +328,18 @@
    "stored_bytes": 16777216,
    "flops": 8589934592,
    "compute_bound": true,
-   "lumen_us": 1382.023,
-   "torch_us": 2753.983,
+   "lumen_us": 1376.248,
+   "torch_us": 2806.402,
    "matches_torch": true,
    "rotation": 4,
    "chained": false,
    "kernels": 1,
-   "gbs": 109.3
+   "gbs": 109.76
   }
  ],
  "code": {
-  "kernel": "// step 0: dot_general → mul → reduce_sum → mul → add → sqrt → reshape → broadcast_in_dim → div → broadcast_in_dim → mul\n// { lambda %0:f32[2048,512] %1:f32[512,64] %2:f32[64]. let\n//     %3:f32[2048,64] = dot_general[dimension_numbers=(((1,), (0,)), ((), ())) accum_dtype=f32 output_dtype=f32] %0 %1\n//     %4:f32[2048,64] = mul %3 %3\n//     %5:f32[2048] = reduce_sum[axes=(1,) accum_dtype=f32] %4\n//     %6:f32[] = full[dtype=f32 fill_value=0.015625 shape=()]\n//     %7:f32[2048] = broadcast_in_dim[broadcast_dimensions=() shape=(2048,)] %6\n//     %8:f32[2048] = mul %5 %7\n//     %9:f32[] = full[dtype=f32 fill_value=1e-6 shape=()]\n//     %10:f32[2048] = broadcast_in_dim[broadcast_dimensions=() shape=(2048,)] %9\n//     %11:f32[2048] = add %8 %10\n//     %12:f32[2048] = sqrt %11\n//     %13:f32[2048,1] = reshape[new_sizes=(2048, 1)] %12\n//     %14:f32[2048,64] = broadcast_in_dim[broadcast_dimensions=(0, 1) shape=(2048, 64)] %13\n//     %15:f32[2048,64] = div %3 %14\n//     %16:f32[2048,64] = broadcast_in_dim[broadcast_dimensions=(1,) shape=(2048, 64)] %2\n//     %17:f32[2048,64] = mul %15 %16\n//   in (%17) }\n\ntemplate <typename T, typename I>\ninline T fusion_a5a88a83482e8278_load2(device const T *p, I i) {\n    return p[i];\n}\n\nstruct fusion_a5a88a83482e8278_staging {\n    threadgroup float *staged;\n    // Each lane's elements of the accumulators (two of each 8x8\n    // matrix), rounded to the dot's dtype, at their place in the\n    // tile; the columns past the rows' none.\n    template <uint FM, uint FN>\n    void tile(thread simdgroup_matrix<float, 8, 8> (&c)[FM][FN],\n              ulong m0,\n              ulong n0,\n              uint sy,\n              uint sx,\n              uint flat,\n              uint lane) {\n        const uint fr = frag_row(lane), fc = frag_col(lane);\n        UNROLL for (uint i = 0; i < FM; ++i) {\n            UNROLL for (uint j = 0; j < FN; ++j) {\n                const vec<float, 2> e = frag(c[i][j]);\n                const uint r = (sy * FM + i) * 8 + fr, col = (sx * FN + j) * 8 + fc;\n                if (col < 64u) {\n                    staged[r * 64u + col] = float(e[0]);\n                }\n                if (col + 1 < 64u) {\n                    staged[r * 64u + col + 1] = float(e[1]);\n                }\n            }\n        }\n        threadgroup_barrier(mem_flags::mem_threadgroup);\n    }\n};\n\nkernel void fusion_a5a88a83482e8278(device const float *in0 [[buffer(0)]],\n                                    device const float *in1 [[buffer(1)]],\n                                    device const float *in2 [[buffer(2)]],\n                                    device float *out [[buffer(3)]],\n                                    constant ulong *p [[buffer(4)]],\n                                    uint3 group [[threadgroup_position_in_grid]],\n                                    uint3 tid [[thread_position_in_threadgroup]],\n                                    uint sg [[simdgroup_index_in_threadgroup]],\n                                    uint lane [[thread_index_in_simdgroup]]) {\n    threadgroup float lt[SG_LT(64, SG_BK, float, float)], rt[SG_BK * 64];\n    threadgroup float staged[64 * 64];\n    matmul_sg_impl<float, float, float, 64, 64, SG_BK, float,\n                   fusion_a5a88a83482e8278_staging, false, false, true>(\n        in0, in1, (device float *)nullptr, p,\n        lt, rt,\n        group, tid.y * 16 + tid.x, sg, lane,\n        fusion_a5a88a83482e8278_staging{staged});\n    const ulong m0n = ulong(group.y) * 64 * 64;\n    for (uint rr = sg; rr < 64u; rr += 8u) {\n        uint row = group.y * 64u + rr, t = lane;\n        if (row >= 2048u) {\n            break;\n        }\n        float kept0[2];\n        float acc0 = Add::template identity<float>();\n        _Pragma(\"clang loop unroll(full)\") for (uint e = 0; e < 2u; ++e) {\n            uint c = t + e * 32u;\n            uint j = row * 64u + c;\n            float v0 = staged[(j) - m0n];\n            float v1 = Mul::apply(v0, v0);\n            acc0 = Add::apply(acc0, v1);\n            kept0[e] = v0;\n        }\n        float r0 = simd_sum(acc0);\n        // the same across the row: once a row\n        float v2 = as_type<float>(uint(0x3c800000u)) /* 0.015625 */;\n        float v3 = Mul::apply(r0, v2);\n        float v4 = as_type<float>(uint(0x358637bdu)) /* 0.000001 */;\n        float v5 = Add::apply(v3, v4);\n        float v6 = Sqrt::apply(v5);\n        _Pragma(\"clang loop unroll(full)\") for (uint e = 0; e < 2u; ++e) {\n            uint c = t + e * 32u;\n            uint j = row * 64u + c;\n            float v7 = Div::apply(kept0[e], v6);\n            uint i8 = c;\n            float v9 = fusion_a5a88a83482e8278_load2(in2, i8);\n            float v10 = Mul::apply(v7, v9);\n            out[j] = v10;\n        }\n    }\n}",
-  "plan": "plan (workspace 524288 bytes)\n    ws+0:f32[2048,64] = fusion[name=fusion_a5a88a83482e8278 body={ lambda %0:f32[2048,512] %1:f32[512,64] %2:f32[64]. let\n    %3:f32[2048,64] = dot_general[dimension_numbers=(((1,), (0,)), ((), ())) accum_dtype=f32 output_dtype=f32] %0 %1\n    %4:f32[2048,64] = mul %3 %3\n    %5:f32[2048] = reduce_sum[axes=(1,) accum_dtype=f32] %4\n    %6:f32[] = full[dtype=f32 fill_value=0.015625 shape=()]\n    %7:f32[2048] = broadcast_in_dim[broadcast_dimensions=() shape=(2048,)] %6\n    %8:f32[2048] = mul %5 %7\n    %9:f32[] = full[dtype=f32 fill_value=1e-6 shape=()]\n    %10:f32[2048] = broadcast_in_dim[broadcast_dimensions=() shape=(2048,)] %9\n    %11:f32[2048] = add %8 %10\n    %12:f32[2048] = sqrt %11\n    %13:f32[2048,1] = reshape[new_sizes=(2048, 1)] %12\n    %14:f32[2048,64] = broadcast_in_dim[broadcast_dimensions=(0, 1) shape=(2048, 64)] %13\n    %15:f32[2048,64] = div %3 %14\n    %16:f32[2048,64] = broadcast_in_dim[broadcast_dimensions=(1,) shape=(2048, 64)] %2\n    %17:f32[2048,64] = mul %15 %16\n  in (%17) }] in0 in1 in2"
+  "kernel": "// step 0: dot_general → mul → reduce_sum → mul → add → sqrt → reshape → broadcast_in_dim → div → broadcast_in_dim → mul\n// { lambda %0:f32[2048,512] %1:f32[512,64] %2:f32[64]. let\n//     %3:f32[2048,64] = dot_general[dimension_numbers=(((1,), (0,)), ((), ())) accum_dtype=f32 output_dtype=f32] %0 %1\n//     %4:f32[2048,64] = mul %3 %3\n//     %5:f32[2048] = reduce_sum[axes=(1,) accum_dtype=f32] %4\n//     %6:f32[] = full[dtype=f32 fill_value=0.015625 shape=()]\n//     %7:f32[2048] = broadcast_in_dim[broadcast_dimensions=() shape=(2048,)] %6\n//     %8:f32[2048] = mul %5 %7\n//     %9:f32[] = full[dtype=f32 fill_value=1e-6 shape=()]\n//     %10:f32[2048] = broadcast_in_dim[broadcast_dimensions=() shape=(2048,)] %9\n//     %11:f32[2048] = add %8 %10\n//     %12:f32[2048] = sqrt %11\n//     %13:f32[2048,1] = reshape[new_sizes=(2048, 1)] %12\n//     %14:f32[2048,64] = broadcast_in_dim[broadcast_dimensions=(0, 1) shape=(2048, 64)] %13\n//     %15:f32[2048,64] = div %3 %14\n//     %16:f32[2048,64] = broadcast_in_dim[broadcast_dimensions=(1,) shape=(2048, 64)] %2\n//     %17:f32[2048,64] = mul %15 %16\n//   in (%17) }\n\ntemplate <typename T, typename I>\ninline T fusion_f02e5b4d5783695b_load2(device const T *p, I i) {\n    return p[i];\n}\n\nstruct fusion_f02e5b4d5783695b_staging {\n    threadgroup float *staged;\n    // Each lane's elements of the accumulators (two of each 8x8\n    // matrix), rounded to the dot's dtype, at their place in the\n    // tile; the columns past the rows' none.\n    template <uint FM, uint FN>\n    void tile(thread simdgroup_matrix<float, 8, 8> (&c)[FM][FN],\n              ulong m0,\n              ulong n0,\n              uint sy,\n              uint sx,\n              uint flat,\n              uint lane) {\n        const uint fr = frag_row(lane), fc = frag_col(lane);\n        UNROLL for (uint i = 0; i < FM; ++i) {\n            UNROLL for (uint j = 0; j < FN; ++j) {\n                const vec<float, 2> e = frag(c[i][j]);\n                const uint r = (sy * FM + i) * 8 + fr, col = (sx * FN + j) * 8 + fc;\n                if (col < 64u) {\n                    staged[r * 64u + col] = float(e[0]);\n                }\n                if (col + 1 < 64u) {\n                    staged[r * 64u + col + 1] = float(e[1]);\n                }\n            }\n        }\n        threadgroup_barrier(mem_flags::mem_threadgroup);\n    }\n};\n\nkernel void fusion_f02e5b4d5783695b(device const float *in0 [[buffer(0)]],\n                                    device const float *in1 [[buffer(1)]],\n                                    device const float *in2 [[buffer(2)]],\n                                    device float *out [[buffer(3)]],\n                                    constant ulong *p [[buffer(4)]],\n                                    uint3 group [[threadgroup_position_in_grid]],\n                                    uint3 tid [[thread_position_in_threadgroup]],\n                                    uint sg [[simdgroup_index_in_threadgroup]],\n                                    uint lane [[thread_index_in_simdgroup]]) {\n    threadgroup float lt[SG_LT(64, SG_BK, float, float)], rt[SG_RT(SG_BK, 64, float)];\n    threadgroup float staged[64 * 64];\n    matmul_sg_impl<float, float, float, 64, 64, SG_BK, float,\n                   fusion_f02e5b4d5783695b_staging, false, false, true>(\n        in0, in1, (device float *)nullptr, p,\n        lt, rt,\n        group, tid.y * 16 + tid.x, sg, lane,\n        fusion_f02e5b4d5783695b_staging{staged});\n    const ulong m0n = ulong(group.y) * 64 * 64;\n    for (uint rr = sg; rr < 64u; rr += 8u) {\n        uint row = group.y * 64u + rr, t = lane;\n        if (row >= 2048u) {\n            break;\n        }\n        float kept0[2];\n        float acc0 = Add::template identity<float>();\n        _Pragma(\"clang loop unroll(full)\") for (uint e = 0; e < 2u; ++e) {\n            uint c = t + e * 32u;\n            uint j = row * 64u + c;\n            float v0 = staged[(j) - m0n];\n            float v1 = Mul::apply(v0, v0);\n            acc0 = Add::apply(acc0, v1);\n            kept0[e] = v0;\n        }\n        float r0 = simd_sum(acc0);\n        // the same across the row: once a row\n        float v2 = as_type<float>(uint(0x3c800000u)) /* 0.015625 */;\n        float v3 = Mul::apply(r0, v2);\n        float v4 = as_type<float>(uint(0x358637bdu)) /* 0.000001 */;\n        float v5 = Add::apply(v3, v4);\n        float v6 = Sqrt::apply(v5);\n        _Pragma(\"clang loop unroll(full)\") for (uint e = 0; e < 2u; ++e) {\n            uint c = t + e * 32u;\n            uint j = row * 64u + c;\n            float v7 = Div::apply(kept0[e], v6);\n            uint i8 = c;\n            float v9 = fusion_f02e5b4d5783695b_load2(in2, i8);\n            float v10 = Mul::apply(v7, v9);\n            out[j] = v10;\n        }\n    }\n}",
+  "plan": "plan (workspace 524288 bytes)\n    ws+0:f32[2048,64] = fusion[name=fusion_f02e5b4d5783695b body={ lambda %0:f32[2048,512] %1:f32[512,64] %2:f32[64]. let\n    %3:f32[2048,64] = dot_general[dimension_numbers=(((1,), (0,)), ((), ())) accum_dtype=f32 output_dtype=f32] %0 %1\n    %4:f32[2048,64] = mul %3 %3\n    %5:f32[2048] = reduce_sum[axes=(1,) accum_dtype=f32] %4\n    %6:f32[] = full[dtype=f32 fill_value=0.015625 shape=()]\n    %7:f32[2048] = broadcast_in_dim[broadcast_dimensions=() shape=(2048,)] %6\n    %8:f32[2048] = mul %5 %7\n    %9:f32[] = full[dtype=f32 fill_value=1e-6 shape=()]\n    %10:f32[2048] = broadcast_in_dim[broadcast_dimensions=() shape=(2048,)] %9\n    %11:f32[2048] = add %8 %10\n    %12:f32[2048] = sqrt %11\n    %13:f32[2048,1] = reshape[new_sizes=(2048, 1)] %12\n    %14:f32[2048,64] = broadcast_in_dim[broadcast_dimensions=(0, 1) shape=(2048, 64)] %13\n    %15:f32[2048,64] = div %3 %14\n    %16:f32[2048,64] = broadcast_in_dim[broadcast_dimensions=(1,) shape=(2048, 64)] %2\n    %17:f32[2048,64] = mul %15 %16\n  in (%17) }] in0 in1 in2"
  },
- "measured_at": "2026-10-31T09:26:13+00:00"
+ "measured_at": "2026-11-01T06:24:45+00:00"
 }
