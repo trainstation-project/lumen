@@ -344,15 +344,22 @@ class _RMSNorm(Function):
         kept for the backward instead of recomputed."""
         x, weight, inv = ctx.saved_tensors
         acc = _accum_dtype(x.dtype)
+
+        # Times ``1 / rms``: a written-out norm's substitute (``lumen/autograd/rms_norm.py``) may save each
+        # row's rms instead, divided by (no separate kernel inverting it).
+        def scaled(t):
+            """``t * i``."""
+            return t / inv if getattr(ctx, "reciprocal", False) else t * inv
+
         h = x.to(acc)
         d = (g if weight is None else g * weight).to(acc)
-        dx = (inv * d - h * (inv * inv * inv * mean(d * h, -1, keepdim=True))).to(x.dtype)
+        dx = (scaled(d) - h * scaled(scaled(scaled(mean(d * h, -1, keepdim=True))))).to(x.dtype)
 
         if weight is None:
             return dx, None, None
 
         rows = tuple(range(x.ndim - 1))
-        dw = sum(g.to(acc) * inv * h, rows).to(weight.dtype)
+        dw = sum(scaled(g.to(acc)) * h, rows).to(weight.dtype)
         return dx, dw, None
 
 
