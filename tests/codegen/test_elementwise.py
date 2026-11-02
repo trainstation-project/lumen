@@ -553,3 +553,24 @@ def test_elementwise_primitives_agree_with_numpy(device, shape, triton_on_cuda):
         assert out.device == f"{device}:0"
         np.testing.assert_allclose(host(out), expected, rtol=1e-5, atol=1e-5)
     np.testing.assert_array_equal(host(lumen.compile(lambda x, y: x < y)(x, y)), a < b)
+
+
+@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("dtype", ["int32", "uint32", "int64"])
+def test_integers_round_once_to_bfloat16(device, dtype, triton_on_cuda):
+    """An integer cast to bfloat16 is rounded once, the CPU's: not to
+    float32 first (2^24 + 2^16 + 1 is 2^24 + 2^17, not 2^24: float32 drops
+    its 1, leaving a tie bfloat16 breaks to even), nor on the CPU to
+    float64 first (-(2^62 + 2^54 + 1) is -(2^62 + 2^55)), extremes and
+    negatives too."""
+    info = np.iinfo(dtype)
+    values = [(1 << 24) + (1 << 16) + 1, (1 << 24) + 1, (1 << 25) + (1 << 17) + 3, 1 << 24, 255, info.max, info.min]
+    if info.min < 0:
+        values += [-((1 << 24) + (1 << 16) + 1), -((1 << 25) + (1 << 17) + 3)]
+    if info.bits == 64:
+        values += [(1 << 40) + (1 << 32) + 1, -((1 << 62) + (1 << 54) + 1)]
+    got, expected = on(device, lambda x: prims.cast(x, "bfloat16"), np.array(values, dtype))
+    np.testing.assert_array_equal(got.astype(np.float32), expected.astype(np.float32))
+    assert expected.astype(np.float32)[0] == (1 << 24) + (1 << 17)
+    if info.bits == 64:
+        assert expected.astype(np.float32)[-1] == -float((1 << 62) + (1 << 55))

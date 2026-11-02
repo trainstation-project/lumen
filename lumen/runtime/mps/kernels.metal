@@ -57,10 +57,30 @@ template <typename D> inline D from_float(float f) {
     return D(f);
 }
 
-/// Converts an integer to `D`: nonzero is true for bool, otherwise a plain value conversion.
+/// `x` as a float rounded to odd: its 24 leading bits, the last one set when any dropped bit is, so that
+/// rounding it again to a narrower float (bfloat's 8 bits) rounds `x` once.
+template <typename S> inline float to_odd_float(S x) {
+    const bool negative = x < S(0);
+    const ulong m = negative ? ulong(-(x + S(1))) + 1 : ulong(x);
+
+    if (m < (1UL << 24)) {
+        return float(x);
+    }
+
+    const int shift = 40 - int(clz(m));
+    const ulong kept = (m >> shift) | ulong((m & ((1UL << shift) - 1)) != 0);
+    const float f = ldexp(float(kept), shift);
+    return negative ? -f : f;
+}
+
+/// Converts an integer to `D`: nonzero is true for bool, a bfloat rounded once (through a float rounded to
+/// odd), otherwise a plain value conversion.
 template <typename D, typename S> inline D from_int(S x) {
     if (is_bool_t<D>()) {
         return D(x != S(0));
+    }
+    if (is_same_v<D, bfloat>) {
+        return D(to_odd_float(x));
     }
     if (is_float_t<D>()) {
         return D(float(x));

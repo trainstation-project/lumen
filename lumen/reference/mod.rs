@@ -199,6 +199,23 @@ fn round(x: f64, dtype: DType) -> f64 {
     }
 }
 
+/// Integer `x` as an f64 rounded to odd (truncated, its last bit set when inexact), so that rounding it again
+/// to a narrower float rounds `x` once.
+fn to_odd_f64(x: i128) -> f64 {
+    let f = x as f64;
+
+    if f as i128 == x {
+        return f;
+    }
+
+    let truncated = match (f as i128).unsigned_abs() > x.unsigned_abs() {
+        true => f64::from_bits(f.to_bits() - 1),
+        false => f,
+    };
+
+    f64::from_bits(truncated.to_bits() | 1)
+}
+
 /// Converts a float to integer `dtype` as a cast does: saturating, NaN to 0.
 fn saturate(x: f64, dtype: DType) -> i128 {
     use DType::*;
@@ -616,7 +633,15 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
             Float(x.iter().map(|&a| round(f(a), dtype)).collect())
         }
         Cast { .. } => match (args[0], dtype.is_float()) {
-            (Int(x), true) => Float(x.iter().map(|&a| round(a as f64, dtype)).collect()),
+            // Rounded once: an f64 target directly, a narrower one through an f64 rounded to odd.
+            (Int(x), true) => Float(
+                x.iter()
+                    .map(|&a| match dtype {
+                        DType::F64 => a as f64,
+                        _ => round(to_odd_f64(a), dtype),
+                    })
+                    .collect(),
+            ),
             (Int(x), false) => Int(x.iter().map(|&a| wrap(a, dtype)).collect()),
             (Float(x), true) => Float(x.iter().map(|&a| round(a, dtype)).collect()),
             (Float(x), false) => Int(x.iter().map(|&a| saturate(a, dtype)).collect()),
