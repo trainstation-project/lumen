@@ -38,7 +38,7 @@ def test_split_k_agrees(device, compiler, dtype):
     tiles is not split. Partials costing more than the operands split the
     same way: a product, then a sum."""
     rng = np.random.default_rng(0)
-    a, b = rng.standard_normal((4, 4096)).astype(np.float32), rng.standard_normal((4096, 256)).astype(np.float32)
+    a, b = rng.standard_normal((8, 4096)).astype(np.float32), rng.standard_normal((4096, 256)).astype(np.float32)
     x, w = _placed(device, dtype, a, b)
     f = lambda x, w: F.matmul(x, w, "float32", x.dtype)  # noqa: E731
     want = lumen.to_numpy(x.to(dtype="float32")).astype(np.float64) @ lumen.to_numpy(w.to(dtype="float32"))
@@ -75,7 +75,7 @@ def test_split_k_then_silu(device, compiler, dtype):
     partials (reading the sum twice), deterministic or not on MPS. Each
     agrees with SiLU of the exact product to rounding."""
     rng = np.random.default_rng(0)
-    a, b = rng.standard_normal((4, 4096)).astype(np.float32), rng.standard_normal((4096, 256)).astype(np.float32)
+    a, b = rng.standard_normal((8, 4096)).astype(np.float32), rng.standard_normal((4096, 256)).astype(np.float32)
     x, w = _placed(device, dtype, a, b)
 
     def f(x, w):
