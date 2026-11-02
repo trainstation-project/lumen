@@ -56,6 +56,7 @@ _SOURCES = [
     (r"^scatter_add_starts", "codegen/scatter_add/mps/kernel.metal", "kernel void scatter_add_starts"),
     (r"^scatter_add_place_", "codegen/scatter_add/mps/kernel.metal", "#define SCATTER_PLACE("),
     (r"^scatter_add_rows_", "codegen/scatter_add/mps/kernel.metal", "#define SCATTER_ROWS("),
+    (r"^scatter_add_atomic_", "codegen/scatter_add/mps/kernel.metal", "#define SCATTER_ATOMIC("),
     (r"^random_bits", "codegen/random/mps/kernel.metal", "kernel void random_bits"),
     (
         r"^matmul_(u64|i64)$",

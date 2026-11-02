@@ -165,14 +165,14 @@ def test_gather_checks_its_operands():
 @pytest.mark.parametrize("width, rows", [(64, 5), (7, 5)])
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16", "int32"])
 def test_scatter_add_is_deterministic(device, dtype, width, rows):
-    """A scatter_add adds each element's updates in index order (on MPS a
-    thread an element scanning the indices, its SIMD group's lanes 32 at a
-    time when they share a row: rows of 64; else one at a time: rows of 7;
-    of many rows and updates, a thread a column; on Triton a lane a column
-    walking the updates in order; no atomics): the CPU's result bit for bit,
-    for any dtype (bfloat16 too, each sum rounded as the reference rounds
-    it), the same each run; a lookup's gradient too (deterministic
-    training)."""
+    """A deterministic scatter_add (on MPS ``mps.deterministic``; by default
+    it adds by atomics, as torch's ``index_add``) adds each element's updates
+    in index order (on MPS a thread a column walking its row's sorted
+    updates; on Triton a lane a column walking the updates in order; no
+    atomics): the CPU's result bit for bit, for any dtype (bfloat16 too, each
+    sum rounded as the reference rounds it), the same each run; a lookup's
+    gradient too (deterministic training)."""
+    lumen.config.compiler.mps.deterministic = True
     rng = np.random.default_rng(4)
     x = (rng.standard_normal((rows, width)) * 4).astype(np.float32)
     ids = rng.integers(0, rows, (300,))
@@ -183,9 +183,12 @@ def test_scatter_add_is_deterministic(device, dtype, width, rows):
     ]  # noqa: E731
     want = lumen.to_numpy(lumen.compile(f, device="cpu")(*on("cpu")).to(dtype="float32"))
     compiled = lumen.compile(f, device=device)
-    for _ in range(3):
-        got = lumen.to_numpy(compiled(*on(device)).to(dtype="float32").to("cpu"))
-        np.testing.assert_array_equal(got, want)
+    try:
+        for _ in range(3):
+            got = lumen.to_numpy(compiled(*on(device)).to(dtype="float32").to("cpu"))
+            np.testing.assert_array_equal(got, want)
+    finally:
+        lumen.config.compiler.mps.deterministic = False
 
 
 def test_scatter_add_in_place():
