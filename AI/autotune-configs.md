@@ -18,7 +18,7 @@ the code that uses it, never inline in codegen, kernels or passes:
 
 | Backend | Kernels | File |
 |---|---|---|
-| Triton | GEMM, loops, reductions, flash attention | `lumen/codegen/{dot_general,elementwise,attention}/triton/config.rs` |
+| Triton | GEMM, loops, reductions, flash attention, scatter-adds | `lumen/codegen/{dot_general,elementwise,attention,scatter_add}/triton/config.rs` |
 | MPS | loop tunings, tuned sizes, flash-attention blocks | `lumen/codegen/{elementwise,attention}/mps/config.rs` |
 | MPS | GEMM tiles, one file per algorithm | `lumen/codegen/dot_general/mps/{tiled,skinny,gemv,mpp}/config.rs` |
 | TPU | flash-attention blocks | `lumen/codegen/attention/tpu/config.rs` |
