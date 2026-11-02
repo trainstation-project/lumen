@@ -2072,7 +2072,7 @@ fn skinny_dots_split_their_contraction() {
     };
 
     let build = |m: usize, n: usize, k: usize, dtype: DType| build_with(m, n, k, dtype, DType::F32);
-    let g = build(4, 256, 4096, DType::F32);
+    let g = build(8, 256, 4096, DType::F32);
     let split = super::split_k::split_k(&g);
     let names: Vec<&str> = split.nodes().iter().map(|n| n.primitive.name()).collect();
 
@@ -2083,8 +2083,8 @@ fn skinny_dots_split_their_contraction() {
     );
 
     // K per tile is long: MLX's rule's 32 chunks, held to chunks of at least 256 (16).
-    assert_eq!(split.type_of(split.nodes()[2].output).shape, [16, 4, 256]);
-    let inputs = [data(&[4, 4096], 1), data(&[4096, 256], 2)];
+    assert_eq!(split.type_of(split.nodes()[2].output).shape, [16, 8, 256]);
+    let inputs = [data(&[8, 4096], 1), data(&[4096, 256], 2)];
     let want = reference::run(&g, &inputs).unwrap();
     let got = reference::run(&split, &inputs).unwrap();
     let (want, got) = (want[0].to_vec::<f32>(), got[0].to_vec::<f32>());
@@ -2093,7 +2093,7 @@ fn skinny_dots_split_their_contraction() {
         assert!((w - g).abs() <= 4096.0 * 4.0 * f32::EPSILON, "{w} {g}");
     }
 
-    let split = super::split_k::split_k(&build(4, 256, 4096, DType::BF16));
+    let split = super::split_k::split_k(&build(8, 256, 4096, DType::BF16));
     let names: Vec<&str> = split.nodes().iter().map(|n| n.primitive.name()).collect();
 
     assert_eq!(
@@ -3013,7 +3013,8 @@ fn every_tuned_gemm_kernel_stores_every_epilogue() {
     }
 }
 
-/// Every GEMM candidate accumulates in the dot's accumulation dtype, checked by summing 2^16 ones.
+/// Every GEMM candidate accumulates in the dot's accumulation dtype, checked by summing 2^16 + 2^8 ones: a
+/// count bfloat16 cannot hold, whichever partial sums a candidate splits it into.
 #[test]
 fn every_gemm_candidate_accumulates_in_the_accum_dtype() {
     use super::autotune::{Gemms, matmul_of};
@@ -3026,7 +3027,7 @@ fn every_gemm_candidate_accumulates_in_the_accum_dtype() {
     let mut options = crate::graph_compiler::Options::default();
     options.config.mps.autotune = false;
     options.config.mps.split_k = false;
-    let k = 1 << 16;
+    let k = (1 << 16) + (1 << 8);
 
     for accum in [DType::F32, DType::BF16] {
         for (m, n) in [(4, 1024), (256, 256)] {
@@ -3085,7 +3086,7 @@ fn every_gemm_candidate_accumulates_in_the_accum_dtype() {
 
                 match accum {
                     DType::F32 => assert_eq!(sum, k as f32, "{config:?}"),
-                    _ => assert!(sum < k as f32, "{config:?}: {sum} of {k} ones in {accum}"),
+                    _ => assert_ne!(sum, k as f32, "{config:?}: {sum} of {k} ones in {accum}"),
                 }
             }
         }
