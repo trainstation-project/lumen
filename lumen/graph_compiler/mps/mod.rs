@@ -61,7 +61,9 @@ use canonicalize_dots::canonicalize_dots;
 use kernel_codegen::Codegen;
 use place_concats::PlaceConcats;
 use place_views::PlaceViews;
-pub(crate) use place_views::{attention_reads_strided, fusion_reads_strided, loads_strided};
+pub(crate) use place_views::{
+    attention_reads_strided, fusion_reads_strided, loads_strided, loads_views,
+};
 
 // Metal library loader implemented in the Objective-C shim.
 unsafe extern "C" {

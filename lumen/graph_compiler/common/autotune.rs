@@ -74,7 +74,7 @@ const BUDGET_SECONDS: f64 = 1e-3;
 /// Bounds on repetitions per measurement.
 const REPS: std::ops::RangeInclusive<usize> = 2..=256;
 
-/// Steps with the same kernel and operand types share one tuning result.
+/// Steps with the same kernel, operand types and views share one tuning result.
 fn key(step: &Step) -> String {
     let name = match &step.primitive {
         Primitive::Fusion { name, .. } => name.clone(),
@@ -82,7 +82,12 @@ fn key(step: &Step) -> String {
     };
 
     let types: Vec<String> = step.inputs.iter().map(|(_, ty)| ty.to_string()).collect();
-    format!("{name} {} -> {}", types.join(" "), step.output.1)
+    format!(
+        "{name} {} {:?} -> {}",
+        types.join(" "),
+        step.views,
+        step.output.1
+    )
 }
 
 static PICKS: LazyLock<Mutex<HashMap<String, usize>>> = LazyLock::new(Default::default);
@@ -91,10 +96,11 @@ fn pick<K>(device: Device, step: &Step) -> String {
     let types: Vec<String> = step.inputs.iter().map(|(_, ty)| ty.to_string()).collect();
 
     format!(
-        "{} {device} {} {} -> {}",
+        "{} {device} {} {} {:?} -> {}",
         std::any::type_name::<K>(),
         step.primitive,
         types.join(" "),
+        step.views,
         step.output.1
     )
 }

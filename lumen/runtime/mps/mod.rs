@@ -259,10 +259,11 @@ pub(crate) fn encode(
         ));
     }
 
-    // A step-specific encoder applies only when no input is read through a view.
+    // A step-specific (tuned) encoder applies unless an input is a view its kernel would load element by
+    // element; a GEMM strides through its dot's operand views.
     if let Some(encode) = step
         .launch::<Encode>()
-        .filter(|_| step.views.iter().all(Option::is_none))
+        .filter(|_| !crate::graph_compiler::mps::loads_views(step))
     {
         return encode(step, inputs, output, scratch, keep);
     }
