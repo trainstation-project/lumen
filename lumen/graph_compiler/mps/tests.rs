@@ -3093,6 +3093,98 @@ fn every_gemm_candidate_accumulates_in_the_accum_dtype() {
     }
 }
 
+/// Every GEMV candidate sums its lanes in a bfloat accumulator as bfloat: lane 0's 256 and the other 31
+/// lanes' 1s (each lane's partial exact) are 286 added pairwise in bfloat, not 287 added in float and
+/// rounded once (288).
+#[test]
+fn gemv_lanes_sum_in_a_bfloat_accumulator() {
+    use super::autotune::{Gemms, matmul_of};
+    use crate::graph_compiler::common::autotune::Kernels;
+
+    if !available() {
+        return;
+    }
+
+    let mut options = crate::graph_compiler::Options::default();
+    options.config.mps.autotune = false;
+    options.config.mps.split_k = false;
+
+    // A K-contiguous weight (`x · wᵀ`), so the dot is a GEMV. A lane reads `GEMV_WIDTH` elements at a time: lane `l` the ones from `l * GEMV_WIDTH`.
+    let (k, n) = (32 * gemm::GEMV_WIDTH, 64);
+    let mut g = Graph::new();
+    let a = g.input(ty(DType::BF16, &[1, k]));
+    let b = g.input(ty(DType::BF16, &[n, k]));
+
+    let dot = DotGeneral {
+        lhs_contracting: vec![1],
+        rhs_contracting: vec![1],
+        lhs_batch: vec![],
+        rhs_batch: vec![],
+        accum_dtype: DType::BF16,
+        output_dtype: DType::BF16,
+    };
+
+    let d = apply(&mut g, dot, &[a, b]);
+    g.set_outputs(&[d]).unwrap();
+
+    let mut vector = vec![0f32; k];
+    vector[0] = 256.0;
+
+    for lane in 1..32 {
+        vector[lane * gemm::GEMV_WIDTH] = 1.0;
+    }
+
+    let options_on = crate::TensorOptions::new()
+        .dtype(DType::F32)
+        .device(Device::Mps(0));
+
+    let on_mps = [
+        Tensor::from_slice(&vector, options_on)
+            .reshape(&[1, k])
+            .to_dtype(DType::BF16)
+            .unwrap(),
+        Tensor::ones(&[n, k], options_on.dtype(DType::BF16)),
+    ];
+
+    let mut plan = crate::graph_compiler::compile_with(&g, Device::Mps(0), &options).unwrap();
+
+    let at = plan
+        .steps()
+        .iter()
+        .position(|s| matmul_of(s).is_some())
+        .expect("a matmul step");
+
+    let step = plan.steps()[at].clone();
+    let mut gemms = Gemms::new(&MpsConfig::default());
+
+    let built: Vec<_> = gemms
+        .configs(&step)
+        .into_iter()
+        .map(|config| (config, gemms.build(&step, config)))
+        .collect();
+
+    assert!(!built.is_empty(), "GEMV candidates");
+    assert!(
+        built
+            .iter()
+            .all(|(c, _)| c.algorithm == gemm::Algorithm::Gemv)
+    );
+    gemms.compile().unwrap();
+
+    for (config, tuned) in built {
+        plan.steps_mut()[at].tuned = Some(tuned);
+        let got = plan.run(&on_mps).unwrap()[0]
+            .to_dtype(DType::F32)
+            .unwrap()
+            .to_vec::<f32>();
+        assert!(
+            got.iter().all(|&v| v == 286.0),
+            "{config:?}: {:?}",
+            &got[..4]
+        );
+    }
+}
+
 /// A dot written as multiply and sum, feeding an RMS norm over other rows, stays its own kernel: no fusion holds two sums.
 #[test]
 fn a_reduction_feeding_a_norm_of_other_rows_is_its_own_kernel() {
