@@ -1,8 +1,11 @@
 //! Backward counterpart of merge_dots: a sum of dots `g_i . a_i` over weights `a_i` that share a forward
 //! input becomes one dot of the concatenated cotangents and weights, and the weight gradients reading
-//! those cotangents become one dot sliced per weight.
+//! those cotangents become one dot sliced per weight. A dot with its rounding cast merges as the rounded
+//! product, the merged dot rounded by one cast.
 
-use crate::graph::{Graph, Node, Primitive, Var, intern};
+use super::simplify::roundings;
+use crate::DType;
+use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
 use crate::graph_compiler::elementwise;
 use crate::graph_compiler::pass::{CompilerPass, Module};
 
@@ -16,6 +19,8 @@ struct Group {
     dots: Vec<usize>,
     /// Transposes applied to each dot before the sum (all the same, or none).
     transposes: Vec<usize>,
+    /// The dtype the dots' rounding casts narrow them to, if they have one each.
+    rounding: Option<DType>,
     /// Cotangent operand of each dot.
     g: Vec<Var>,
     /// Weight operand of each dot.
@@ -27,8 +32,8 @@ struct Group {
     /// Contracting dim of the weights, which they are concatenated along.
     a_dim: usize,
     /// The weight-gradient dots reading each cotangent, their common primitive (as if reading the
-    /// untransposed cotangent) and whether the cotangent is their lhs.
-    weights: Option<(Vec<usize>, Primitive, bool)>,
+    /// untransposed cotangent), whether the cotangent is their lhs and their rounding casts' dtype.
+    weights: Option<(Vec<usize>, Primitive, bool, Option<DType>)>,
 }
 
 /// Finds sums of same-shaped dots against weights used by one forward input and merges each into a
@@ -60,7 +65,16 @@ fn merge_dots_backward(graph: &Graph) -> Graph {
         _ => None,
     };
 
+    let roundings = roundings(graph);
+    let rounding = |d: usize| roundings[d].map(|c| graph.type_of(nodes[c].output).dtype);
     let same = |a: usize, b: usize| nodes[a].primitive == nodes[b].primitive;
+
+    // The dot `e` is, or rounds with its cast: a term of a sum.
+    let term = |e: usize| match dot(e) {
+        Some(_) => Some(e),
+        None => producer[*nodes[e].inputs.first()?]
+            .filter(|&d| roundings[d] == Some(e) && dot(d).is_some()),
+    };
 
     // Whether `v` is a graph input up to single-operand elementwise ops (a weight).
     let weight = |mut v: Var| loop {
@@ -134,11 +148,11 @@ fn merge_dots_backward(graph: &Graph) -> Graph {
                 match producer[u] {
                     Some(e) if alone(e, adds[k]) && !taken[e] => match nodes[e].primitive {
                         Primitive::Add => adds.push(e),
-                        _ if dot(e).is_some() => terms.push(e),
+                        _ if term(e).is_some_and(|d| !taken[d]) => terms.extend(term(e)),
                         Primitive::Transpose { .. } => match producer[nodes[e].inputs[0]] {
-                            Some(d) if alone(d, e) && !taken[d] && dot(d).is_some() => {
+                            Some(d) if alone(d, e) && term(d).is_some_and(|d| !taken[d]) => {
                                 transposes.push(e);
-                                terms.push(d);
+                                terms.extend(term(d));
                             }
                             _ => sum = false,
                         },
@@ -155,7 +169,9 @@ fn merge_dots_backward(graph: &Graph) -> Graph {
             || (transposes.len() == terms.len()
                 && transposes.iter().all(|&t| same(t, transposes[0])));
 
-        if !sum || !transposed || terms.len() < 2 || terms.iter().any(|&e| !same(e, terms[0])) {
+        let like_first = |e: usize| same(e, terms[0]) && rounding(e) == rounding(terms[0]);
+
+        if !sum || !transposed || terms.len() < 2 || terms.iter().any(|&e| !like_first(e)) {
             continue;
         }
 
@@ -211,14 +227,14 @@ fn merge_dots_backward(graph: &Graph) -> Graph {
                 let mut fs = vec![f1];
 
                 for &gi in &g[1..] {
-                    let (f, ..) = reads_of(gi)
-                        .into_iter()
-                        .find(|(_, x2, dot2, lhs2)| *x2 == x && *dot2 == dot && *lhs2 == lhs)?;
+                    let (f, ..) = reads_of(gi).into_iter().find(|&(f, x2, ref dot2, lhs2)| {
+                        x2 == x && *dot2 == dot && lhs2 == lhs && rounding(f) == rounding(f1)
+                    })?;
 
                     fs.push(f);
                 }
 
-                (x1 == x).then_some((fs, dot, lhs))
+                (x1 == x).then_some((fs, dot, lhs, rounding(f1)))
             });
 
             let (g_dim, a_dim) = if g_first { (lc, rc) } else { (rc, lc) };
@@ -228,6 +244,7 @@ fn merge_dots_backward(graph: &Graph) -> Graph {
                 adds: adds[1..].to_vec(),
                 dots,
                 transposes: transposes.clone(),
+                rounding: rounding(terms[0]),
                 g,
                 a,
                 g_first,
@@ -271,15 +288,24 @@ fn rewrite(graph: &Graph, groups: &[Group]) -> Graph {
     }
 
     let producer = |v: Var| nodes.iter().find(|n| n.output == v);
+    let roundings = roundings(graph);
+    let product = |d: usize| nodes[roundings[d].unwrap_or(d)].output;
     let mut stacked: Vec<Option<Var>> = vec![None; groups.len()];
     let mut weights_dot: Vec<Option<Var>> = vec![None; groups.len()];
 
     // A node's role: 0 for a group's sum, 1 for a node it absorbs, 2 + h for its h-th weight gradient.
     let role = |i: usize| -> Option<(usize, usize)> {
         groups.iter().enumerate().find_map(|(k, p)| {
+            let weights = p.weights.iter().flat_map(|w| &w.0);
+            let rounds = |d: &usize| roundings[*d] == Some(i);
+
             if p.sum == i {
                 Some((k, 0))
-            } else if p.dots.contains(&i) || p.adds.contains(&i) || p.transposes.contains(&i) {
+            } else if p.dots.contains(&i)
+                || p.adds.contains(&i)
+                || p.transposes.contains(&i)
+                || p.dots.iter().chain(weights).any(rounds)
+            {
                 Some((k, 1))
             } else {
                 p.weights
@@ -307,20 +333,26 @@ fn rewrite(graph: &Graph, groups: &[Group]) -> Graph {
                         return true;
                     };
 
+                    // The dots' rounding casts are merged too.
+                    let rounded = |ds: &[usize]| -> Vec<usize> {
+                        ds.iter()
+                            .flat_map(|&d| std::iter::once(d).chain(roundings[d]))
+                            .collect()
+                    };
+
                     let merged: Vec<&Node> = match r {
                         0 => std::iter::once(node)
                             .chain(
                                 p.adds
                                     .iter()
-                                    .chain(&p.dots)
+                                    .chain(&rounded(&p.dots))
                                     .chain(&p.transposes)
                                     .map(|&e| &nodes[e]),
                             )
                             .collect(),
-                        _ => p
-                            .weights
-                            .as_ref()
-                            .map_or(vec![node], |w| w.0.iter().map(|&f| &nodes[f]).collect()),
+                        _ => p.weights.as_ref().map_or(vec![node], |w| {
+                            rounded(&w.0).iter().map(|&f| &nodes[f]).collect()
+                        }),
                     };
 
                     let stack = *stacked[k].get_or_insert_with(|| {
@@ -356,6 +388,12 @@ fn rewrite(graph: &Graph, groups: &[Group]) -> Graph {
                             .apply(nodes[p.dots[0]].primitive.clone(), &ins)
                             .expect("the dots' dimension numbers");
 
+                        if let Some(new_dtype) = p.rounding {
+                            merged = out
+                                .apply(Primitive::Cast { new_dtype }, &[merged])
+                                .expect("the merged dot, rounded");
+                        }
+
                         if let Some(&t) = p.transposes.first() {
                             merged = out
                                 .apply(nodes[t].primitive.clone(), &[merged])
@@ -366,7 +404,8 @@ fn rewrite(graph: &Graph, groups: &[Group]) -> Graph {
                         return false;
                     }
 
-                    let (w, dot, g_lhs) = p.weights.as_ref().expect("a weight's gradient");
+                    let (w, dot, g_lhs, rounding) =
+                        p.weights.as_ref().expect("a weight's gradient");
                     let (f, g_lhs) = (&nodes[w[0]], *g_lhs);
                     let x_rank = graph.type_of(f.inputs[usize::from(g_lhs)]).shape.len();
 
@@ -381,7 +420,21 @@ fn rewrite(graph: &Graph, groups: &[Group]) -> Graph {
                             .apply(dot.clone(), &ins)
                             .expect("the weights' gradients' dimension numbers");
 
-                        let label = out.label(out.nodes().last().expect("the dot"));
+                        let mut label = out.label(out.nodes().last().expect("the dot")).to_string();
+
+                        // Rounded, the cast carries the label, which the late fold keeps.
+                        let v = match *rounding {
+                            Some(new_dtype) => {
+                                let cast = Primitive::Cast { new_dtype };
+                                let c =
+                                    out.apply(cast, &[v]).expect("the merged gradient, rounded");
+                                let rounded = out.label(out.nodes().last().expect("the cast"));
+                                label = format!("{label}{FUSION_SEPARATOR}{rounded}");
+                                c
+                            }
+                            None => v,
+                        };
+
                         let n = p.g.len();
                         out.set_label(v, Some(intern(format!("{n}x {label}"))));
                         v
@@ -401,7 +454,7 @@ fn rewrite(graph: &Graph, groups: &[Group]) -> Graph {
                     };
 
                     out.set_origin(node);
-                    map[node.output] = Some(out.apply(slice, &[merged]).expect("its part"));
+                    map[product(i)] = Some(out.apply(slice, &[merged]).expect("its part"));
                     false
                 }
                 None => {

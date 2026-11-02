@@ -351,7 +351,7 @@ def test_narrowing_cast_of_a_matmul_is_its_output_dtype():
 def test_matmul_epilogue_reads_the_rounded_output(device, triton_on_cuda):
     """A fused epilogue reads the matmul's output as its dtype rounds it
     (bf16, then cast up for a silu in float32), as traced; silu of the
-    float32 accumulator is a dot_general with output_dtype float32."""
+    float32 accumulator is a dot_general with no cast after it."""
     rng = np.random.default_rng(0)
     try:
         x, w = (
@@ -362,9 +362,7 @@ def test_matmul_epilogue_reads_the_rounded_output(device, triton_on_cuda):
         pytest.skip(str(e))
     dims = (((1,), (0,)), ((), ()))
     rounded = lumen.compile(lambda x, w: _silu(F.matmul(x, w, "float32", x.dtype).float()).to(dtype=x.dtype))(x, w)
-    accum = lumen.compile(lambda x, w: _silu(prims.dot_general(x, w, dims, "float32", "float32")).to(dtype=x.dtype))(
-        x, w
-    )
+    accum = lumen.compile(lambda x, w: _silu(prims.dot_general(x, w, dims, "float32")).to(dtype=x.dtype))(x, w)
     h = lumen.to_numpy(lumen.compile(lambda x, w: F.matmul(x, w, "float32", x.dtype).float())(x, w)).astype(np.float64)
     rounded, accum = (lumen.to_numpy(t.to(dtype="float32")) for t in (rounded, accum))
     np.testing.assert_allclose(rounded, h / (1 + np.exp(-h)), rtol=1e-2, atol=1e-2)

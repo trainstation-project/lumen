@@ -697,7 +697,8 @@ fn hierarchical_reductions_keep_their_dtype() {
     }
 }
 
-/// Dots of weights scaled and cast elementwise merge when the elementwise ops match, sharing one cast.
+/// Dots of weights scaled and cast elementwise merge when the elementwise ops match, sharing one cast;
+/// their rounding casts to bfloat16 merge with them.
 #[test]
 fn dots_of_weights_computed_elementwise_merge() {
     let dot = DotGeneral {
@@ -706,7 +707,13 @@ fn dots_of_weights_computed_elementwise_merge() {
         lhs_batch: vec![],
         rhs_batch: vec![],
         accum_dtype: DType::F32,
-        output_dtype: DType::BF16,
+        output_dtype: DType::F32,
+    };
+
+    let rounded = |g: &mut Graph, x: Var, w: Var| {
+        let y = apply(g, dot.clone(), &[x, w]);
+        let new_dtype = DType::BF16;
+        apply(g, Cast { new_dtype }, &[y])
     };
 
     let build = |scales: [f64; 3]| {
@@ -742,7 +749,7 @@ fn dots_of_weights_computed_elementwise_merge() {
             );
 
             operands.push(cast);
-            let y = apply(&mut g, dot.clone(), &[x, cast]);
+            let y = rounded(&mut g, x, cast);
             outs.push(apply(&mut g, Neg, &[y]));
         }
 
@@ -766,7 +773,7 @@ fn dots_of_weights_computed_elementwise_merge() {
         outs.push(apply(&mut g, other, &[xt, x]));
 
         for k in [0, 2] {
-            let again = apply(&mut g, dot.clone(), &[x, operands[k]]);
+            let again = rounded(&mut g, x, operands[k]);
             outs.push(apply(&mut g, Neg, &[again]));
         }
 
@@ -779,12 +786,11 @@ fn dots_of_weights_computed_elementwise_merge() {
     let (merged, packs, _) = merge_dots(&g, &packable, &[], &MPS);
     assert_eq!(packs, [(vec![1, 2, 3], 0)], "{merged}");
 
-    let casts = names(&merged.prune().0)
-        .iter()
-        .filter(|&&n| n == "cast")
-        .count();
+    let pruned = names(&merged.prune().0);
+    let count = |name: &str| pruned.iter().filter(|&&n| n == name).count();
 
-    assert_eq!(casts, 1, "{merged}");
+    // One cast of the weights' block, and one rounding cast per dot but `other`: as many as dots.
+    assert_eq!(count("cast"), count("dot_general"), "{merged}");
 
     let mut inputs = vec![
         data(&[16, 32], 1).to_dtype(DType::BF16).unwrap(),

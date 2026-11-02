@@ -77,7 +77,7 @@ pub(crate) fn primitive(name: &str, params: &Bound<'_, PyDict>) -> PyResult<Prim
             lhs_batch: dims("lhs_batch")?,
             rhs_batch: dims("rhs_batch")?,
             accum_dtype: dtype("accum_dtype")?,
-            output_dtype: dtype("output_dtype")?,
+            output_dtype: dtype("accum_dtype")?,
         },
         "host_wait" => HostWait,
         "device_wait" => DeviceWait,
@@ -295,22 +295,24 @@ impl PyGraph {
         self.inner.set_scope(crate::graph::intern_scope(&ranges));
     }
 
-    /// The attention patterns the compiler recognises in the graph, one dict each: the q/k/v,
-    /// score and output values, the softmax max/sum, the score chain, causal mask, dropout and member nodes.
+    /// The attention patterns the compiler recognises in the graph, one dict each: the q/k/v, score,
+    /// second dot and output values (the output its rounding cast's when it narrows the dot), the softmax
+    /// max/sum, the score chain, causal mask, dropout and member nodes.
     fn attentions<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
         use crate::graph_compiler::common::attention::{Score, traced};
         let nodes = self.inner.nodes();
 
         traced(&self.inner)
             .into_iter()
-            .map(|(a, members)| {
+            .map(|(a, out, members)| {
                 let d = PyDict::new(py);
                 let (d1, d2) = (&nodes[a.dot1], &nodes[a.dot2]);
                 d.set_item("q", d1.inputs[0])?;
                 d.set_item("k", d1.inputs[1])?;
                 d.set_item("v", d2.inputs[1])?;
                 d.set_item("scores", d1.output)?;
-                d.set_item("out", d2.output)?;
+                d.set_item("dot", d2.output)?;
+                d.set_item("out", out)?;
                 d.set_item("max", a.max)?;
                 d.set_item("sum", a.sum)?;
 
@@ -449,7 +451,11 @@ fn params_of<'py>(py: Python<'py>, p: &Primitive) -> PyResult<Bound<'py, PyDict>
             d.set_item("lhs_batch", lhs_batch.clone())?;
             d.set_item("rhs_batch", rhs_batch.clone())?;
             d.set_item("accum_dtype", dtype(accum_dtype))?;
-            d.set_item("output_dtype", dtype(output_dtype))?;
+
+            // A compiled graph's dot may have its narrowing cast folded in.
+            if output_dtype != accum_dtype {
+                d.set_item("output_dtype", dtype(output_dtype))?;
+            }
         }
         Reshape { new_sizes } => d.set_item("new_sizes", new_sizes.clone())?,
         BroadcastInDim {

@@ -1080,6 +1080,20 @@ def _accum_dtype(dtype):
     return dtype if not _is_float(dtype) or dtype == "float64" else "float32"
 
 
+def _dot(lhs, rhs, dimension_numbers, accum_dtype, output_dtype):
+    """``dot_general`` of ``lhs`` and ``rhs`` accumulated in ``accum_dtype``,
+    then cast to ``output_dtype`` (the operands' or ``accum_dtype``) if it
+    differs: each element rounded to it once (the compiler folds the cast
+    into the dot's kernel)."""
+    if output_dtype not in (lhs.dtype, rhs.dtype, accum_dtype):
+        raise ValueError(
+            f"dot_general: outputs the operands' dtype or accum_dtype ({accum_dtype}): "
+            f"got output_dtype {output_dtype} for {lhs.dtype}"
+        )
+    out = prims.dot_general(lhs, rhs, dimension_numbers, accum_dtype)
+    return out if output_dtype == accum_dtype else prims.cast(out, output_dtype)
+
+
 def _require_float(x, op):
     """``x``, or a TypeError naming ``op`` if it is not floating-point."""
     if not _is_float(x.dtype):

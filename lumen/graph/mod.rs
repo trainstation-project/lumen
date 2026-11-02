@@ -337,14 +337,18 @@ impl Graph {
         }
     }
 
-    /// Finds accumulations (dots, sums) whose wide accumulator is rounded to a narrow output and then
-    /// cast back up downstream; returns `(accumulation, cast, message)` for each, at its nearest such cast
-    /// (a residual stream's later ones would repeat it once per layer).
+    /// Finds accumulations (dots, sums) whose wide accumulator is rounded to a narrow output (a sum's own,
+    /// a narrowing cast of a dot's) and then cast back up downstream; returns `(rounded value, cast,
+    /// message)` for each, at its nearest such cast (a residual stream's later ones would repeat it once
+    /// per layer).
     pub fn precision_warnings(&self) -> Vec<(Var, Var, String)> {
         use Primitive::*;
         let mut readers: Vec<Vec<usize>> = vec![Vec::new(); self.types.len()];
+        let mut producer: Vec<Option<usize>> = vec![None; self.types.len()];
 
         for (i, node) in self.nodes.iter().enumerate() {
+            producer[node.output] = Some(i);
+
             for &v in &node.inputs {
                 readers[v].push(i);
             }
@@ -353,9 +357,25 @@ impl Graph {
         let mut warnings = Vec::new();
 
         for node in &self.nodes {
-            let (DotGeneral { accum_dtype, .. } | ReduceSum { accum_dtype, .. }) = node.primitive
+            // A dot's result is its accumulator: the cast after it is where it is rounded.
+            let accumulation = match node.primitive {
+                ReduceSum { .. } => node,
+                Cast { .. } => match producer[node.inputs[0]].map(|p| &self.nodes[p]) {
+                    Some(
+                        dot @ Node {
+                            primitive: DotGeneral { .. },
+                            ..
+                        },
+                    ) => dot,
+                    _ => continue,
+                },
+                _ => continue,
+            };
+
+            let (DotGeneral { accum_dtype, .. } | ReduceSum { accum_dtype, .. }) =
+                accumulation.primitive
             else {
-                continue;
+                unreachable!("a dot or a sum")
             };
 
             let narrow = self.types[node.output].dtype;
@@ -377,7 +397,7 @@ impl Graph {
 
                     match reader.primitive {
                         Cast { .. } if wide.size_of() > narrow.size_of() => {
-                            let (name, fix) = match node.primitive {
+                            let (name, fix) = match accumulation.primitive {
                                 DotGeneral { .. } => (
                                     "dot_general",
                                     format!(
@@ -390,7 +410,7 @@ impl Graph {
                                 ),
                             };
 
-                            let operands: Vec<String> = node
+                            let operands: Vec<String> = accumulation
                                 .inputs
                                 .iter()
                                 .map(|&i| self.types[i].to_string())

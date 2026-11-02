@@ -216,13 +216,13 @@ def cumsum(x, axis, reverse, accum_dtype):
     return bind("cumsum", x, axis=int(axis), reverse=bool(reverse), accum_dtype=accum_dtype)
 
 
-def dot_general(lhs, rhs, dimension_numbers, accum_dtype, output_dtype):
+def dot_general(lhs, rhs, dimension_numbers, accum_dtype):
     """``dimension_numbers = ((lhs_contracting, rhs_contracting),
     (lhs_batch, rhs_batch))``; the result's dimensions are the batch
     dimensions, then the free ones of ``lhs``, then those of ``rhs``. It
     accumulates in ``accum_dtype`` (the operands', or ``float32`` for floats
-    narrower than it) and returns ``output_dtype`` (the operands' or
-    ``accum_dtype``), each element rounded to it once."""
+    narrower than it), the result's dtype: a narrower one is a ``cast``
+    after it."""
     (lhs_contracting, rhs_contracting), (lhs_batch, rhs_batch) = dimension_numbers
     return bind(
         "dot_general",
@@ -233,7 +233,6 @@ def dot_general(lhs, rhs, dimension_numbers, accum_dtype, output_dtype):
         lhs_batch=tuple(lhs_batch),
         rhs_batch=tuple(rhs_batch),
         accum_dtype=accum_dtype,
-        output_dtype=output_dtype,
     )
 
 

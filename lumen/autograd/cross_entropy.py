@@ -41,7 +41,6 @@ def substitute(tape):
             and tuple(p["lhs_contracting"]) == (1,)
             and rhs in ((0,), (1,))
             and p["accum_dtype"] == "float32"
-            and p["output_dtype"] == "float32"
         )
         if not fits:
             continue

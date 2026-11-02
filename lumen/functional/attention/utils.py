@@ -20,7 +20,7 @@ def _scores(q, k, scale, causal):
     """``q k^T * scale`` ``[B, N, Sq, Sk]`` in the accumulation dtype, the
     keys a causal mask hides ``-inf``."""
     accum = _accum_dtype(q.dtype)
-    s = prims.dot_general(q, k, (((3,), (3,)), ((0, 2), (0, 2))), accum, accum) * scale
+    s = prims.dot_general(q, k, (((3,), (3,)), ((0, 2), (0, 2))), accum) * scale
     if causal:
         sq, sk = s.shape[2], s.shape[3]
         rows = prims.iota("int64", s.shape, 2)

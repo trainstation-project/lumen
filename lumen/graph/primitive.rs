@@ -237,13 +237,16 @@ pub enum Primitive {
         reverse: bool,
         accum_dtype: DType,
     },
-    /// Generalized matmul: batch dims first, then lhs free dims, then rhs free dims.
+    /// Generalized matmul: batch dims first, then lhs free dims, then rhs free dims. Its result is
+    /// `accum_dtype`; a narrower result is a `cast` after it.
     DotGeneral {
         lhs_contracting: Vec<usize>,
         rhs_contracting: Vec<usize>,
         lhs_batch: Vec<usize>,
         rhs_batch: Vec<usize>,
         accum_dtype: DType,
+        /// Compiler-internal: the dtype each element is rounded to once, `accum_dtype` as traced. Only the
+        /// device pipelines' late fold of a narrowing `cast` into the dot (simplify) sets an operand's.
         output_dtype: DType,
     },
     /// Returns its operand once the device has finished all work queued before it: the host blocks.
@@ -1193,12 +1196,19 @@ impl fmt::Display for Primitive {
             } => {
                 write!(
                     f,
-                    "[dimension_numbers=(({}, {}), ({}, {})) accum_dtype={accum_dtype} output_dtype={output_dtype}]",
+                    "[dimension_numbers=(({}, {}), ({}, {})) accum_dtype={accum_dtype}",
                     Tuple(lhs_contracting),
                     Tuple(rhs_contracting),
                     Tuple(lhs_batch),
                     Tuple(rhs_batch)
-                )
+                )?;
+
+                // Only a folded cast rounds the result narrower than its accumulator.
+                if output_dtype != accum_dtype {
+                    write!(f, " output_dtype={output_dtype}")?;
+                }
+
+                write!(f, "]")
             }
             DynamicSlice { slice_sizes } => write!(f, "[slice_sizes={}]", Tuple(slice_sizes)),
             CustomCall {
