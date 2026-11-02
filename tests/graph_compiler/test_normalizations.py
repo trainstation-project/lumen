@@ -202,11 +202,12 @@ def test_wide_rows_are_one_row_kernel(device, n, f, triton_on_cuda):
 def test_rms_norm_backward_recomputes_its_normalized_input(device, triton_on_cuda):
     """A training step's RMS norm (its value read forward, its gradients
     taken): its forward row kernel writes its output and each row's
-    ``sqrt(mean + eps)``, not ``x / rms`` (``x̂``, w's gradient's): the
-    backward, reading ``x`` and ``rms`` anyway, divides again, a value of
-    the rows' shape less kept from the forward. The loss and gradients the
-    CPU's."""
-    x, w, c = rand(64, 300), rand(300, seed=1), rand(64, 300, seed=2)
+    ``1 / rms`` (``rms_norm``'s saved value), not ``x / rms`` (``x̂``, w's
+    gradient's): the backward, reading ``x`` and ``1 / rms`` anyway,
+    multiplies again, a value of the rows' shape less kept from the forward
+    (the forward may also write w's gradient's partial sums, here known
+    then, ``[64, 300]``). The loss and gradients the CPU's."""
+    x, w, c = rand(128, 300), rand(300, seed=1), rand(128, 300, seed=2)
 
     def step(x, w, c):
         """The loss and the gradients of `x` and `w`."""
@@ -220,7 +221,8 @@ def test_rms_norm_backward_recomputes_its_normalized_input(device, triton_on_cud
         pytest.skip(str(e))
     steps = lumen.graph_compiler.Plan(lumen.make_graph(step)(X, W, C), device).steps()
     (forward,) = [s for s in steps if "sqrt" in s["label"]]
-    assert [o[2] for o in forward["extra_outputs"]] == [[64, 1]], forward["label"]
+    written = [o[2] for o in forward["extra_outputs"]]
+    assert [128, 1] in written and [128, 300] not in written, (written, forward["label"])
     got = lumen.compile(step)(X, W, C)
     want = lumen.compile(step, device="cpu")(*(lumen.from_numpy(a) for a in (x, w, c)))
     for g, e in zip(got, want):

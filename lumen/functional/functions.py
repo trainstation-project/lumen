@@ -321,13 +321,50 @@ def log_softmax(input, dim):
     return shifted - log(sum(exp(shifted), dim, keepdim=True))
 
 
+class _RMSNorm(Function):
+    """:func:`rms_norm`, differentiated from each row's saved ``1 / rms``."""
+
+    @staticmethod
+    def forward(ctx, x, weight, eps):
+        """``x * rsqrt(mean(x^2) + eps)`` (in ``x``'s accumulation dtype, rounded
+        to ``x``'s), times ``weight`` if given; saves ``x``, ``weight`` and each
+        row's ``1 / rms``."""
+        h = x.to(_accum_dtype(x.dtype))
+        inv = prims.rsqrt(mean(h * h, -1, keepdim=True) + eps)
+        ctx.save_for_backward(x, weight, inv)
+        y = (h * inv).to(x.dtype)
+        return y if weight is None else y * weight
+
+    @staticmethod
+    def backward(ctx, g):
+        """Gradients of ``x`` and ``weight`` (none for ``eps``): with ``i = 1 / rms``
+        and ``d = g * weight``, ``dx = i * d - x * i^3 * mean(d * x)`` (one row
+        reduction) and ``dweight = Σ_rows g * i * x`` (the rows' column sum), from
+        ``x`` and ``i`` alone: never ``x * i``, the forward's, which would then be
+        kept for the backward instead of recomputed."""
+        x, weight, inv = ctx.saved_tensors
+        acc = _accum_dtype(x.dtype)
+        h = x.to(acc)
+        d = (g if weight is None else g * weight).to(acc)
+        dx = (inv * d - h * (inv * inv * inv * mean(d * h, -1, keepdim=True))).to(x.dtype)
+
+        if weight is None:
+            return dx, None, None
+
+        rows = tuple(range(x.ndim - 1))
+        dw = sum(g.to(acc) * inv * h, rows).to(weight.dtype)
+        return dx, dw, None
+
+
 def rms_norm(input, normalized_shape, weight=None, eps=None):
     """``torch.nn.functional.rms_norm``: ``input`` normalized by its root mean
     square over the last dimension (``normalized_shape``, its size),
-    ``input / sqrt(mean(input^2) + eps)``, times ``weight`` if given. ``eps``
-    defaults to the dtype's machine epsilon, as in torch. Traced as its
-    primitives, which the MPS compiler runs as one row kernel (a
-    normalization diamond), with the ops computing ``input`` fused in."""
+    ``input * rsqrt(mean(input^2) + eps)``, times ``weight`` if given.
+    ``eps`` defaults to the dtype's machine epsilon, as in torch. Its
+    forward saves each row's ``1 / rms`` and its backward reuses it (one row
+    reduction for the input's gradient, a column sum for the weight's); the
+    MPS compiler runs each as one row kernel (a normalization diamond), with
+    the ops computing ``input`` fused in."""
     x = _require_float(_lift(input), "rms_norm")
     shape = [normalized_shape] if isinstance(normalized_shape, int) else list(normalized_shape)
 
@@ -341,13 +378,7 @@ def rms_norm(input, normalized_shape, weight=None, eps=None):
     if eps is None:
         eps = {"float16": 2.0**-10, "bfloat16": 2.0**-7, "float64": 2.0**-52}.get(x.dtype, 2.0**-23)
 
-    h = x.to(_accum_dtype(x.dtype))
-    y = (h / sqrt(mean(h * h, -1, keepdim=True) + eps)).to(x.dtype)
-
-    if weight is not None:
-        y = y * weight
-
-    return y
+    return _RMSNorm.apply(x, weight, eps)
 
 
 def matmul(input, other, accum_dtype, output_dtype):
