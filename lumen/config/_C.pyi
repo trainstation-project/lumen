@@ -28,6 +28,7 @@ class CudaConfig(CompilerConfig):
     horizontal_fusion: bool = True
     multi_output_fusion: bool = True
     split_k: bool = True
+    gemm_linear_reordering: bool = True
     deterministic: bool = False
     normalization_diamonds: bool = True
     fused_linear_cross_entropy: bool = True
@@ -45,6 +46,7 @@ class MpsConfig(CompilerConfig):
     online_softmax: bool = True
     fused_linear_cross_entropy: bool = True
     split_k: bool = True
+    gemm_linear_reordering: bool = True
     deterministic: bool = False
     neural_engine: bool = False
     row_cache: int = 8
