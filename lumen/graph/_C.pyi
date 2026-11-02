@@ -23,6 +23,11 @@ class Graph:
         dot's operands, output, the softmax's max and sum, the score chain,
         the causal offset and the values it computes."""
 
+    def rms_norms(self) -> list[dict[str, Any]]:
+        """The RMS norms written out as primitives so far: each one's operand
+        ``x``, output ``out``, rows' ``rms`` (``1 / rms`` where ``inverse``)
+        and the values it computes (``members``)."""
+
     def prune(self) -> list[int | None]:
         """Remove the nodes no output depends on; each value's new number,
         or None if removed."""

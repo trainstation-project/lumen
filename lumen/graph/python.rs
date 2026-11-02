@@ -347,6 +347,25 @@ impl PyGraph {
             .collect()
     }
 
+    /// Each RMS norm written out as primitives, as dicts: its operand `x` (before a widening cast the norm
+    /// alone reads), `weight` (or None), output `out`, each row's `rms` (its `1 / rms` where `inverse`), and
+    /// the `members` computed between them.
+    fn rms_norms<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
+        crate::graph_compiler::common::rms_norm::rms_norms(&self.inner)
+            .into_iter()
+            .map(|r| {
+                let d = PyDict::new(py);
+                d.set_item("x", r.x)?;
+                d.set_item("out", r.out)?;
+                d.set_item("weight", r.weight)?;
+                d.set_item("rms", r.rms)?;
+                d.set_item("inverse", r.inverse)?;
+                d.set_item("members", r.members)?;
+                Ok(d)
+            })
+            .collect()
+    }
+
     /// `(accumulation, cast, message)` for each dot or sum rounded to a narrow output that is later cast back up.
     fn precision_warnings(&self) -> Vec<(Var, Var, String)> {
         self.inner.precision_warnings()

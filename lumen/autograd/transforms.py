@@ -3,7 +3,7 @@
 import functools
 
 # ``rules`` is imported for its side effect of registering every primitive's rules.
-from lumen.autograd import attention, cross_entropy, dots, rules
+from lumen.autograd import attention, cross_entropy, dots, rms_norm, rules
 from lumen.autograd.core import (
     UndefinedPrimal,
     _accumulate,
@@ -125,11 +125,13 @@ def _linearize_tape(tape, leaves):
     """The linear program of the nodes ``tape`` recorded, at ``leaves``:
     ``(seeds, linear, linear_vars, tangents)``, as :func:`linearize`. Each
     attention among them first becomes one node, whose backward is flash
-    attention's (``attention.substitute``); a cross entropy of a dot's
+    attention's (``attention.substitute``); each RMS norm written out,
+    one node differentiated from its rows' ``1 / rms``
+    (``rms_norm.substitute``); a cross entropy of a dot's
     logits, one node whose backward takes a chunk of rows at a time
     (``cross_entropy.substitute``); dots sharing an operand, one
     node differentiated as the one dot they run as (``dots.substitute``)."""
-    tape = dots.substitute(cross_entropy.substitute(attention.substitute(tape)), leaves)
+    tape = dots.substitute(cross_entropy.substitute(rms_norm.substitute(attention.substitute(tape))), leaves)
     # Each float leaf's seed is a zero placeholder whose var marks the start of the linear program.
     seeds = {p.var: _full(p, 0).var for p in leaves if _is_float(p.dtype)}
     tangents = dict(seeds)
