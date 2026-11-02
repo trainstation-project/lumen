@@ -302,3 +302,36 @@ def test_chunked_linear_cross_entropy(device, n, d, vocab, chunk, reduce, head, 
     np.testing.assert_allclose(got[0], want[0], rtol=1e-6)
     for g, e in zip(got[1:], want[1:]):
         np.testing.assert_allclose(g, e, rtol=2.0**-7, atol=2.0**-7 * np.abs(e).max())
+
+
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_chunked_gradients_alone_keep_no_logits(device, triton_on_cuda):
+    """The gradients alone of a chunked cross entropy (its loss not
+    returned, as the dashboard's backward): the forward's per-row
+    log-sum-exp, all the chunks read, is one linear cross entropy (its
+    class-0 losses unused), the whole logits never written; the
+    gradients the unchunked program's."""
+    rng = np.random.default_rng(0)
+    n, d, vocab, chunk = 256, 64, 1024, 64
+    h = (rng.standard_normal((n, d)) / np.sqrt(d)).astype(np.float32)
+    w = rng.standard_normal((vocab, d)).astype(np.float32)
+    t = rng.integers(0, vocab, n).astype(np.int32)
+    loss = lambda h, w, t: F.sum(F.cross_entropy(F.matmul(h, w.t(), "float32", "float32"), t))  # noqa: E731
+    grads = lumen.grad(loss, (0, 1))
+    try:
+        H, W, T = (lumen.from_numpy(a).to(device) for a in (h, w, t))
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    want = [lumen.to_numpy(g) for g in lumen.compile(grads)(H, W, T)]
+    config = getattr(lumen.config.compiler, device)
+    config.fused_linear_cross_entropy_chunk_size = chunk
+    try:
+        plan = lumen.graph_compiler.Plan(lumen.make_graph(grads)(H, W, T), device)
+        got = [lumen.to_numpy(g) for g in lumen.compile(grads)(H, W, T)]
+    finally:
+        config.fused_linear_cross_entropy_chunk_size = None
+    labels = [s["label"] for s in plan.steps()]
+    assert all(s["output"][2] != [n, vocab] for s in plan.steps()), labels
+    assert labels.count("linear_cross_entropy") == 1, labels
+    for g, e in zip(got, want):
+        np.testing.assert_allclose(g, e, rtol=1e-4, atol=1e-4 * np.abs(e).max())
