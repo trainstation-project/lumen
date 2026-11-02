@@ -28,7 +28,8 @@ pub(super) struct Found {
 }
 
 /// Replaces every matched cross entropy with a `LinearCrossEntropy` whose `[2, b]` result holds the
-/// loss row and the lse row.
+/// loss row and the lse row, and every logsumexp of logits nothing else reads (a gradient's, its loss
+/// unused) with one of class-0 targets, its lse row alone used.
 fn linear_cross_entropy(graph: &Graph) -> Graph {
     let nodes = graph.nodes();
     let (producer, readers) = uses(graph);
@@ -37,7 +38,12 @@ fn linear_cross_entropy(graph: &Graph) -> Graph {
         .filter_map(|i| matched(graph, &producer, &readers, i))
         .collect();
 
-    if found.is_empty() {
+    let alone: Vec<Logsumexp> = (0..nodes.len())
+        .filter_map(|i| logsumexp(graph, &producer, &readers, i))
+        .filter(|l| l.flat.is_none())
+        .collect();
+
+    if found.is_empty() && alone.is_empty() {
         return graph.clone();
     }
 
@@ -49,6 +55,26 @@ fn linear_cross_entropy(graph: &Graph) -> Graph {
     }
 
     for (i, node) in nodes.iter().enumerate() {
+        if let Some(l) = alone.iter().find(|l| l.members.contains(&i)) {
+            if i != l.lse {
+                continue;
+            }
+
+            let members: Vec<&Node> = l.members.iter().map(|&k| &nodes[k]).collect();
+            out.set_origins(&members);
+
+            let classes = Primitive::Full {
+                shape: vec![l.b],
+                fill_value: Scalar::Int(0),
+                dtype: DType::I32,
+            };
+
+            let target = out.apply(classes, &[]).expect("well typed");
+            let rows = emit(&mut out, map[l.h], map[l.w], l.transposed, target);
+            map[node.output] = row(&mut out, rows, 1, l.b);
+            continue;
+        }
+
         let Some(f) = found.iter().find(|f| f.members.contains(&i)) else {
             out.set_origin(node);
 
@@ -70,43 +96,48 @@ fn linear_cross_entropy(graph: &Graph) -> Graph {
         let members: Vec<&Node> = f.members.iter().map(|&k| &nodes[k]).collect();
         out.set_origins(&members);
 
-        let apply =
-            |out: &mut Graph, p: Primitive, ins: &[Var]| out.apply(p, ins).expect("well typed");
-
-        let w = match f.transposed {
-            true => apply(
-                &mut out,
-                Primitive::Transpose {
-                    permutation: vec![1, 0],
-                },
-                &[map[f.w]],
-            ),
-            false => map[f.w],
-        };
-
-        let rows = apply(
-            &mut out,
-            Primitive::LinearCrossEntropy,
-            &[map[f.h], w, map[f.target]],
-        );
-
+        let rows = emit(&mut out, map[f.h], map[f.w], f.transposed, map[f.target]);
         let b = graph.type_of(f.h).shape[0];
 
-        for (k, row) in [(f.loss, 0), (f.lse, 1)] {
-            let slice = Primitive::Slice {
-                start_indices: vec![row, 0],
-                limit_indices: vec![row + 1, b],
-                view: false,
-            };
-
-            let v = apply(&mut out, slice, &[rows]);
-            map[nodes[k].output] = apply(&mut out, Primitive::Reshape { new_sizes: vec![b] }, &[v]);
+        for (k, at) in [(f.loss, 0), (f.lse, 1)] {
+            map[nodes[k].output] = row(&mut out, rows, at, b);
         }
     }
 
     let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
     out.set_outputs(&outputs).expect("values of the graph");
     out
+}
+
+/// Emits the `LinearCrossEntropy` of `h`, weight `w` (`[d, v]` when `transposed`) and `target` into `out`.
+fn emit(out: &mut Graph, h: Var, w: Var, transposed: bool, target: Var) -> Var {
+    let w = match transposed {
+        true => {
+            let transpose = Primitive::Transpose {
+                permutation: vec![1, 0],
+            };
+
+            out.apply(transpose, &[w]).expect("well typed")
+        }
+        false => w,
+    };
+
+    out.apply(Primitive::LinearCrossEntropy, &[h, w, target])
+        .expect("well typed")
+}
+
+/// Row `at` (0: the loss, 1: the lse) of a `LinearCrossEntropy`'s `[2, b]` result `rows`, as a `[b]` value.
+fn row(out: &mut Graph, rows: Var, at: usize, b: usize) -> Var {
+    let slice = Primitive::Slice {
+        start_indices: vec![at, 0],
+        limit_indices: vec![at + 1, b],
+        view: false,
+    };
+
+    let v = out.apply(slice, &[rows]).expect("well typed");
+
+    out.apply(Primitive::Reshape { new_sizes: vec![b] }, &[v])
+        .expect("well typed")
 }
 
 /// Producer node of each value and the nodes reading it.
@@ -127,14 +158,33 @@ pub(super) fn uses(graph: &Graph) -> (Vec<Option<usize>>, Vec<Vec<usize>>) {
     (producer, readers)
 }
 
-/// Matches the cross entropy over logits `h @ w` computed by dot node `dot`: max-shifted
-/// `logsumexp` along the classes, and the target logits gathered from the flattened logits.
-pub(super) fn matched(
+/// The max-shifted logsumexp along the classes of logits `h @ w` computed by dot node `dot`.
+struct Logsumexp {
+    /// Hidden states `[b, d]`.
+    h: Var,
+    /// Weight, `[v, d]` or `[d, v]` when `transposed`.
+    w: Var,
+    /// The dot contracts dim 0 of the weight, so it is `[d, v]`.
+    transposed: bool,
+    /// Rows `b` and classes `v`.
+    b: usize,
+    v: usize,
+    /// The dot, the shift, its broadcast, exp, sum, log and the lse, then the row max and its reshapes.
+    members: Vec<usize>,
+    /// Node computing the per-row logsumexp.
+    lse: usize,
+    /// The reshape flattening the logits for the target gather, the logits' one other reader.
+    flat: Option<usize>,
+}
+
+/// Matches the logsumexp of logits `h @ w` computed by dot node `dot`: the logits read only by the
+/// row max, the shift and (for a loss's target gather) a flattening reshape.
+fn logsumexp(
     graph: &Graph,
     producer: &[Option<usize>],
     readers: &[Vec<usize>],
     dot: usize,
-) -> Option<Found> {
+) -> Option<Logsumexp> {
     use Primitive::*;
     let nodes = graph.nodes();
     let node = &nodes[dot];
@@ -174,15 +224,16 @@ pub(super) fn matched(
         _ => None,
     };
 
-    // The logits are read exactly by the row max, the shift and the flattening reshape.
-    if readers[x].len() != 3 || graph.outputs().contains(&x) {
-        return None;
-    }
-
     let find = |f: &dyn Fn(&Node) -> bool| readers[x].iter().copied().find(|&k| f(&nodes[k]));
     let max = find(&|n| matches!(&n.primitive, ReduceMax { axes } if axes == &[1]))?;
     let shift = find(&|n| matches!(n.primitive, Sub) && n.inputs[0] == x)?;
-    let flat = find(&|n| matches!(&n.primitive, Reshape { new_sizes } if new_sizes == &[b * v]))?;
+    let flat = find(&|n| matches!(&n.primitive, Reshape { new_sizes } if new_sizes == &[b * v]));
+
+    // The logits are read exactly by the row max, the shift and the flattening reshape, if any.
+    if readers[x].len() != 2 + usize::from(flat.is_some()) || graph.outputs().contains(&x) {
+        return None;
+    }
+
     // The row max and its reshapes may only feed the shift's broadcast and the final lse add.
     let mut views = vec![max];
     let mut k = 0;
@@ -232,37 +283,63 @@ pub(super) fn matched(
         return None;
     }
 
+    Some(Logsumexp {
+        h: node.inputs[0],
+        w: node.inputs[1],
+        transposed,
+        b,
+        v,
+        members: [vec![dot, shift, broadcast, exp, sum, log, lse], views].concat(),
+        lse,
+        flat,
+    })
+}
+
+/// Matches the cross entropy over logits `h @ w` computed by dot node `dot`: max-shifted
+/// `logsumexp` along the classes, and the target logits gathered from the flattened logits.
+pub(super) fn matched(
+    graph: &Graph,
+    producer: &[Option<usize>],
+    readers: &[Vec<usize>],
+    dot: usize,
+) -> Option<Found> {
+    use Primitive::*;
+    let nodes = graph.nodes();
+    let l = logsumexp(graph, producer, readers, dot)?;
+    let flat = l.flat?;
+
+    let only = |v: Var| match (&readers[v][..], graph.outputs().contains(&v)) {
+        (&[k], false) => Some(k),
+        _ => None,
+    };
+
     let pick = only(nodes[flat].output).filter(|&k| {
         matches!(nodes[k].primitive, Gather { axis: 0 }) && nodes[k].inputs[0] == nodes[flat].output
     })?;
 
-    let target = row_offsets_plus(graph, producer, nodes[pick].inputs[1], b, v)?;
+    let target = row_offsets_plus(graph, producer, nodes[pick].inputs[1], l.b, l.v)?;
 
     let loss = only(nodes[pick].output).filter(|&k| {
         matches!(nodes[k].primitive, Sub)
-            && nodes[k].inputs == [nodes[lse].output, nodes[pick].output]
+            && nodes[k].inputs == [nodes[l.lse].output, nodes[pick].output]
     })?;
 
     // The target must exist before the fused op is emitted.
-    let defined = producer[target].is_none_or(|k| k < lse.min(pick));
+    let defined = producer[target].is_none_or(|k| k < l.lse.min(pick));
 
     if !defined {
         return None;
     }
 
     Some(Found {
-        h: node.inputs[0],
-        w: node.inputs[1],
-        transposed,
+        h: l.h,
+        w: l.w,
+        transposed: l.transposed,
         target,
-        members: [
-            vec![dot, shift, broadcast, exp, sum, log, lse, flat, pick, loss],
-            views,
-        ]
-        .concat(),
+        members: [l.members, vec![flat, pick, loss]].concat(),
         loss,
-        lse,
-        first: lse.min(pick),
+        lse: l.lse,
+        first: l.lse.min(pick),
         pick,
     })
 }
