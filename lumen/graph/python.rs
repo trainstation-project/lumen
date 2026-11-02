@@ -303,14 +303,15 @@ impl PyGraph {
 
         traced(&self.inner)
             .into_iter()
-            .map(|(a, members)| {
+            .map(|(a, out, members)| {
                 let d = PyDict::new(py);
                 let (d1, d2) = (&nodes[a.dot1], &nodes[a.dot2]);
                 d.set_item("q", d1.inputs[0])?;
                 d.set_item("k", d1.inputs[1])?;
                 d.set_item("v", d2.inputs[1])?;
                 d.set_item("scores", d1.output)?;
-                d.set_item("out", d2.output)?;
+                d.set_item("out", out)?;
+                d.set_item("product", d2.output)?;
                 d.set_item("max", a.max)?;
                 d.set_item("sum", a.sum)?;
 

@@ -66,7 +66,7 @@ def naive_attention(query, key, value, scale=None, is_causal=False, dropout_p=0.
     if scale is None:
         scale = 1.0 / math.sqrt(h)
 
-    s = prims.dot_general(q, k, (((3,), (3,)), ((0, 2), (0, 2))), accum, accum)
+    s = prims.dot_general(q, k, (((3,), (3,)), ((0, 2), (0, 2))), accum)
     s = s * scale
 
     if is_causal:
@@ -75,6 +75,6 @@ def naive_attention(query, key, value, scale=None, is_causal=False, dropout_p=0.
         s = where(le(cols, rows + (sk - sq)), s, float("-inf"))
 
     p = dropout(softmax(s, -1).to(q.dtype), dropout_p)
-    o = prims.dot_general(p, v, (((3,), (1,)), ((0, 1), (0, 2))), accum, q.dtype)
+    o = prims.cast(prims.dot_general(p, v, (((3,), (1,)), ((0, 1), (0, 2))), accum), q.dtype)
 
     return o.permute(0, 2, 1, 3)

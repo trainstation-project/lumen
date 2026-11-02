@@ -321,6 +321,12 @@ def log_softmax(input, dim):
     return shifted - log(sum(exp(shifted), dim, keepdim=True))
 
 
+def _rounded(x, dtype):
+    """``x`` (a matmul's accumulator) cast to ``dtype``, its ``output_dtype``, where they differ: the
+    compiler rounds it in the matmul's kernel."""
+    return x if x.dtype == dtype else prims.cast(x, dtype)
+
+
 class _RMSNorm(Function):
     """:func:`rms_norm`, differentiated from each row's saved ``1 / rms``."""
 
@@ -406,7 +412,7 @@ def matmul(input, other, accum_dtype, output_dtype):
     if input.ndim > 2 and other.ndim == 2:
         k = input.shape[-1]
         rows = input.reshape(math.prod(input.shape[:-1]), k)
-        out = prims.dot_general(rows, other, (((1,), (0,)), ((), ())), accum_dtype, output_dtype)
+        out = _rounded(prims.dot_general(rows, other, (((1,), (0,)), ((), ())), accum_dtype), output_dtype)
         return out.reshape(*input.shape[:-1], other.shape[-1])
 
     x = input.unsqueeze(0) if input.ndim == 1 else input
@@ -419,7 +425,7 @@ def matmul(input, other, accum_dtype, output_dtype):
     b = tuple(range(len(batch)))
     dims = (((len(b) + 1,), (len(b),)), (b, b))
 
-    out = prims.dot_general(x, y, dims, accum_dtype, output_dtype)
+    out = _rounded(prims.dot_general(x, y, dims, accum_dtype), output_dtype)
     if input.ndim == 1:
         out = out.squeeze(-2)
 
@@ -712,7 +718,7 @@ def einsum(equation, *operands, accum_dtype, output_dtype):
         ([a.index(c) for c in contracting], [b.index(c) for c in contracting]),
         ([a.index(c) for c in batch], [b.index(c) for c in batch]),
     )
-    out = prims.dot_general(x, y, numbers, accum_dtype, output_dtype)
+    out = _rounded(prims.dot_general(x, y, numbers, accum_dtype), output_dtype)
     # dot_general's output order is batch, then lhs free, then rhs free; permute it into the equation's order.
     order = batch + [c for c in a if c not in b] + [c for c in b if c not in a]
     return out.permute(tuple(order.index(c) for c in output)) if order != list(output) else out

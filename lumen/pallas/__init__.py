@@ -718,7 +718,8 @@ def dot_general(x, y, dimension_numbers, preferred_element_type=None):
     accum = tracer._accum_dtype(x.dtype)
     if out == "int32" and x.dtype in ("int8", "int16", "uint8", "uint16"):
         accum = "int32"
-    return prims.dot_general(x, y, dimension_numbers, accum, out)
+    product = prims.dot_general(x, y, dimension_numbers, accum)
+    return product if out == accum else prims.cast(product, out)
 
 
 def multiple_of(x, m):
@@ -739,4 +740,6 @@ def dot(a, b, trans_b=False, preferred_element_type=None):
     if preferred_element_type is not None and not tracer._is_float(a.dtype):
         accum = preferred_element_type
     numbers = (([1], [1 if trans_b else 0]), ([], []))
-    return prims.dot_general(a, b, numbers, accum, preferred_element_type or accum)
+    product = prims.dot_general(a, b, numbers, accum)
+    out = preferred_element_type or accum
+    return product if out == accum else prims.cast(product, out)

@@ -234,13 +234,13 @@ def test_ops_are_functions():
 
 
 def test_matmul_takes_accum_and_output_dtypes():
-    """F.matmul takes ``accum_dtype`` and ``output_dtype`` (required); ``@``
-    infers them (float32 accumulation, the inputs' dtype)."""
+    """F.matmul takes ``accum_dtype`` and ``output_dtype`` (required): the
+    dot returns its accumulator, cast to ``output_dtype`` after it where
+    they differ."""
     x = lumen.empty([4, 8], dtype="bfloat16", device="meta")
     y = lumen.empty([8, 3], dtype="bfloat16", device="meta")
-    assert "accum_dtype=f32 output_dtype=bf16" in str(
-        lumen.make_graph(lambda x, y: F.matmul(x, y, "float32", x.dtype))(x, y)
-    )
+    narrow = str(lumen.make_graph(lambda x, y: F.matmul(x, y, "float32", x.dtype))(x, y))
+    assert "accum_dtype=f32 output_dtype=f32" in narrow and "cast[new_dtype=bf16]" in narrow
     g = lumen.make_graph(lambda x, y: F.matmul(x, y, "float32", "float32"))(x, y)
     assert "accum_dtype=f32 output_dtype=f32" in str(g)
     g = lumen.make_graph(lambda x, y: F.matmul(x, y, "bfloat16", "bfloat16"))(x, y)

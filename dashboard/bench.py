@@ -384,7 +384,7 @@ OPS = {
     "dot_general": Op(
         "contraction",
         "A · B, square, accumulated in float32",
-        lambda a, b: prims.dot_general(a, b, DOT, "float32", a.dtype),
+        lambda a, b: prims.dot_general(a, b, DOT, "float32").to(dtype=a.dtype),
         lambda a, b: a @ b,
         square,
         sizes=SQUARE_SIZES,

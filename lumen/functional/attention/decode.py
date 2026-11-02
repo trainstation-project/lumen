@@ -44,7 +44,7 @@ def attention_decode(query, key, value, start, scale=None):
 
     accum = _accum_dtype(q.dtype)
     # Scores are [B, N, Sq, Sk]: contract H, batch over B and the head axis.
-    s = prims.dot_general(q, _expand_heads(k, n), (((3,), (3,)), ((0, 2), (0, 2))), accum, accum) * scale
+    s = prims.dot_general(q, _expand_heads(k, n), (((3,), (3,)), ((0, 2), (0, 2))), accum) * scale
     index = start.dtype if isinstance(start, TracedTensor) else "int32"
     rows = prims.iota(index, s.shape, 2)
     cols = prims.iota(index, s.shape, 3)
@@ -53,5 +53,5 @@ def attention_decode(query, key, value, start, scale=None):
     e = exp(s - m)
     p = (e / sum(e, -1, keepdim=True)).to(q.dtype)
     # Contract Sk of p [B, N, Sq, Sk] with v [B, Sk, N, Hv], giving [B, N, Sq, Hv].
-    o = prims.dot_general(p, _expand_heads(v, n), (((3,), (1,)), ((0, 1), (0, 2))), accum, q.dtype)
+    o = prims.cast(prims.dot_general(p, _expand_heads(v, n), (((3,), (1,)), ((0, 1), (0, 2))), accum), q.dtype)
     return o.permute(0, 2, 1, 3)

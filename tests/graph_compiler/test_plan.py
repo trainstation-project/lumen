@@ -262,7 +262,7 @@ def test_mps_plans_put_copies_and_scratch_in_the_workspace():
         lumen.zeros([1], device="mps")
     except RuntimeError as e:
         pytest.skip(str(e))
-    dot = lambda a, b: prims.dot_general(a, b, (((0, 2), (2, 0)), ((), ())), a.dtype, a.dtype)  # noqa: E731
+    dot = lambda a, b: prims.dot_general(a, b, (((0, 2), (2, 0)), ((), ())), a.dtype)  # noqa: E731
     graph = lumen.make_graph(dot)(lumen.zeros([3, 2, 4]), lumen.zeros([4, 5, 3]))
     steps = [s["primitive"] for s in lumen.graph_compiler.Plan(graph, "mps", fuse=False).steps()]
     assert steps == ["transpose", "transpose", "dot_general"]
@@ -280,9 +280,9 @@ def test_programs_run_in_their_dtypes(device, triton_on_cuda):
     tanh, logistic, softmax) has no MPS or Triton kernel and raises there (the CPU's
     reference rounds it once); a dot accumulates in
     its required accum_dtype (float32 for 16-bit floats, written in the
-    program; `@` always float32; sum and mean in their input's dtype). A
-    dot returns its required output_dtype (`@`: its inputs'), a sum its
-    accum_dtype."""
+    program; sum and mean in their input's dtype) and returns it, a cast
+    after it rounding to F.matmul's output_dtype (folded into the dot); a
+    sum returns its accum_dtype."""
     try:
         x = lumen.from_numpy(rand(4, 8)).to(device).to(dtype="bfloat16")
     except RuntimeError as e:
@@ -298,7 +298,7 @@ def test_programs_run_in_their_dtypes(device, triton_on_cuda):
     with pytest.raises(TypeError):
         prims.dot_general(x, x, (((1,), (1,)), ((), ())))
     w = lumen.from_numpy(rand(8, 3, seed=1)).to(device).to(dtype="bfloat16")
-    dot = lambda a, b, d, o: prims.dot_general(a, b, (((1,), (0,)), ((), ())), d, o)  # noqa: E731
+    dot = lambda a, b, d, o: prims.dot_general(a, b, (((1,), (0,)), ((), ())), d).to(dtype=o)  # noqa: E731
     a, b = (lumen.to_numpy(t.to(dtype="float32")).astype(np.float64) for t in (x, w))
     wide = lumen.compile(lambda a, b: dot(a, b, "float32", "float32"))(x, w)
     assert wide.dtype == "float32"
@@ -311,10 +311,10 @@ def test_programs_run_in_their_dtypes(device, triton_on_cuda):
             lumen.compile(lambda a, b: dot(a, b, "bfloat16", "bfloat16"))(x, w)
     else:
         assert lumen.compile(lambda a, b: dot(a, b, "bfloat16", "bfloat16"))(x, w).dtype == "bfloat16"
-    with pytest.raises(ValueError, match="output_dtype"):
-        lumen.compile(lambda a, b: dot(a, b, "bfloat16", "float32"))(x, w)
-    graph = lumen.make_graph(lambda a, b: F.matmul(a, b, "float32", a.dtype))(x, w)
-    assert "accum_dtype=f32 output_dtype=bf16" in str(graph)
+    # Accumulating in bfloat16, then widening: a cast of the dot's result, as written.
+    assert lumen.compile(lambda a, b: dot(a, b, "bfloat16", "float32"))(x, w).dtype == "float32"
+    graph = str(lumen.make_graph(lambda a, b: F.matmul(a, b, "float32", a.dtype))(x, w))
+    assert "accum_dtype=f32 output_dtype=f32" in graph and "cast[new_dtype=bf16]" in graph
     assert lumen.compile(lambda a, b: F.matmul(a, b, "float32", a.dtype))(x, w).dtype == "bfloat16"
     graph = lumen.make_graph(lambda a: F.sum(a, -1))(x)
     assert [n["primitive"] for n in graph.nodes()] == ["reduce_sum"]

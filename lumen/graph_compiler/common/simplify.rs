@@ -9,9 +9,9 @@ use crate::graph_compiler::pass::{CompilerPass, Module};
 use crate::tensor::dtype::dispatch_dtype;
 use crate::{DType, Element, Scalar};
 
-/// Simplifies `graph` node by node, then prunes and deduplicates it. `matched` says pattern-matching
-/// passes have run, enabling the rewrites that restructure (cast-into-dot, moved casts and layouts,
-/// transposed dots); otherwise only transposes of graph inputs fold into dots.
+/// Simplifies `graph` node by node, then prunes and deduplicates it; a dot's narrowing cast always folds
+/// into it. `matched` says pattern-matching passes have run, enabling the rewrites that restructure
+/// (moved casts and layouts, transposed dots); otherwise only transposes of graph inputs fold into dots.
 pub(crate) fn simplify_with(graph: &Graph, matched: bool) -> Graph {
     let nodes = graph.nodes();
     // Distinct readers of each value, counting graph outputs.
@@ -148,9 +148,9 @@ fn rewrite(
                 inputs: x,
                 output,
                 ..
-            // A narrowing cast of a dot's sole use becomes the dot's output dtype.
-            }) if matched
-                && accum_dtype == output_dtype
+            // A narrowing cast of a dot's sole use becomes the dot's output dtype: a traced matmul's rounding
+            // (F.matmul's output_dtype), fused from the start so every pass sees the dot that rounds.
+            }) if accum_dtype == output_dtype
                 && accum_dtype.is_float()
                 && new_dtype.size_of() < output_dtype.size_of()
                 && out.type_of(x[0]).dtype == *new_dtype

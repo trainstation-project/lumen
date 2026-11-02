@@ -460,13 +460,20 @@ fn attentions_in(m: Matcher<'_>, runtime_offsets: bool) -> Vec<Attention> {
     found
 }
 
-/// Each attention traced in `graph` with the values computed between its operands and output.
-pub(crate) fn traced(graph: &Graph) -> Vec<(Attention, Vec<Var>)> {
+/// Each attention traced in `graph` with its output (the second dot's, or the cast rounding it to a
+/// narrower dtype where that is its only reader, F.matmul's output_dtype) and the values computed between
+/// its operands and that output.
+pub(crate) fn traced(graph: &Graph) -> Vec<(Attention, Var, Vec<Var>)> {
     let nodes = graph.nodes();
     let mut producer = vec![None; graph.types.len()];
+    let mut readers: Vec<Vec<usize>> = vec![Vec::new(); graph.types.len()];
 
     for (i, node) in nodes.iter().enumerate() {
         producer[node.output] = Some(i);
+
+        for &v in &node.inputs {
+            readers[v].push(i);
+        }
     }
 
     attentions(graph, false)
@@ -474,8 +481,22 @@ pub(crate) fn traced(graph: &Graph) -> Vec<(Attention, Vec<Var>)> {
         .map(|a| {
             let (d1, d2) = (&nodes[a.dot1], &nodes[a.dot2]);
             let operands = [d1.inputs[0], d1.inputs[1], d2.inputs[1]];
+            let wide = graph.type_of(d2.output).dtype;
+
+            let out = match &readers[d2.output][..] {
+                &[r] if !graph.outputs().contains(&d2.output) => match nodes[r].primitive {
+                    Primitive::Cast { new_dtype }
+                        if new_dtype.is_float() && new_dtype.size_of() < wide.size_of() =>
+                    {
+                        nodes[r].output
+                    }
+                    _ => d2.output,
+                },
+                _ => d2.output,
+            };
+
             let mut members: Vec<Var> = Vec::new();
-            let mut stack = vec![d2.output];
+            let mut stack = vec![out];
 
             while let Some(v) = stack.pop() {
                 if operands.contains(&v) || members.contains(&v) {
@@ -488,7 +509,7 @@ pub(crate) fn traced(graph: &Graph) -> Vec<(Attention, Vec<Var>)> {
             }
 
             members.sort_unstable();
-            (a, members)
+            (a, out, members)
         })
         .collect()
 }
@@ -572,7 +593,7 @@ pub(crate) fn fuse(
             let through = epilogues.is_some_and(|e| e.transposed) && a.root == a.dot2;
 
             let shared = through
-                .then(|| m.written(a.dot2, a.batch.len(), false, true))
+                .then(|| m.written(a.dot2, a.batch.len(), false, true, true))
                 .flatten()
                 .filter(|&(root, _)| root != a.dot2);
 
@@ -717,24 +738,24 @@ pub(crate) fn fuse(
                     .expect("the attention's value");
             }
 
-            let Primitive::Transpose { permutation } = &nodes[a.root].primitive else {
-                unreachable!("the attention's one transpose")
-            };
+            // Its value before the transpose (the dot's, or its rounding cast's), heads first; a root that
+            // is the rounding cast itself has no other readers to restore for.
+            if let Primitive::Transpose { permutation } = &nodes[a.root].primitive {
+                let mut inverse = vec![0; permutation.len()];
 
-            let mut inverse = vec![0; permutation.len()];
+                for (d, &p) in permutation.iter().enumerate() {
+                    inverse[p] = d;
+                }
 
-            for (d, &p) in permutation.iter().enumerate() {
-                inverse[p] = d;
+                map[nodes[a.root].inputs[0]] = out
+                    .apply(
+                        Primitive::Transpose {
+                            permutation: inverse,
+                        },
+                        &[map[root]],
+                    )
+                    .expect("the attention's value, heads first");
             }
-
-            map[nodes[a.dot2].output] = out
-                .apply(
-                    Primitive::Transpose {
-                        permutation: inverse,
-                    },
-                    &[map[root]],
-                )
-                .expect("the attention's value, heads first");
         }
     }
 
@@ -1309,7 +1330,7 @@ impl<'a> Matcher<'a> {
         }
 
         let out = |d: Option<usize>, chain: bool| match d {
-            Some(d) => self.written(d, nb, chain, false).map(Some),
+            Some(d) => self.written(d, nb, chain, false, false).map(Some),
             None => Some(None),
         };
 
@@ -1336,10 +1357,18 @@ impl<'a> Matcher<'a> {
         })
     }
 
-    /// Follows dot `i` through transposes (and with `chain`, reshapes and one float cast) to where it
-    /// is written; returns that node and the write as an [`Access`] over the dot's dims. With `shared`,
-    /// the dot's one transpose is followed though others read the dot too.
-    fn written(&self, i: usize, nb: usize, chain: bool, shared: bool) -> Option<(usize, Access)> {
+    /// Follows dot `i` through transposes (and with `chain`, reshapes and one float cast; without, with
+    /// `rounding`, a cast narrowing the accumulator, the forward matmul's rounding to its output dtype, not
+    /// counted as a step) to where it is written; returns that node and the write as an [`Access`] over the
+    /// dot's dims. With `shared`, the dot's one transpose is followed though others read the dot too.
+    fn written(
+        &self,
+        i: usize,
+        nb: usize,
+        chain: bool,
+        shared: bool,
+        rounding: bool,
+    ) -> Option<(usize, Access)> {
         use Primitive::*;
         let nodes = self.graph.nodes();
         let mut path = vec![i];
@@ -1354,16 +1383,27 @@ impl<'a> Matcher<'a> {
                 .filter(|&r| matches!(nodes[r].primitive, Transpose { .. }))
                 .collect();
 
+            // Steps taken past the dot, its rounding cast aside.
+            let first = path.len() - usize::from(cast) == 1;
+
             let r = match (&self.readers[o][..], &transposes[..]) {
-                (&[r], _) if !self.output[o] && (chain || path.len() == 1) => r,
-                (_, &[r]) if shared && !self.output[o] && path.len() == 1 => r,
+                (&[r], _) if !self.output[o] && (chain || first) => r,
+                (_, &[r]) if shared && !self.output[o] && first => r,
                 _ => break,
             };
+
+            let narrows = |to: DType| to.size_of() < self.graph.type_of(o).dtype.size_of();
 
             match &nodes[r].primitive {
                 Transpose { .. } => {}
                 Reshape { .. } if chain => {}
-                Cast { new_dtype } if chain && !cast && new_dtype.is_float() => cast = true,
+                Cast { new_dtype }
+                    if !cast
+                        && new_dtype.is_float()
+                        && (chain || rounding && narrows(*new_dtype)) =>
+                {
+                    cast = true
+                }
                 _ => break,
             }
 
@@ -1668,7 +1708,7 @@ impl<'a> Matcher<'a> {
             return None;
         }
 
-        let (root, out) = self.written(i, nb, false, false)?;
+        let (root, out) = self.written(i, nb, false, false, true)?;
 
         Some(Attention {
             root,

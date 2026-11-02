@@ -337,9 +337,10 @@ impl Graph {
         }
     }
 
-    /// Finds accumulations (dots, sums) whose wide accumulator is rounded to a narrow output and then
-    /// cast back up downstream; returns `(accumulation, cast, message)` for each, at its nearest such cast
-    /// (a residual stream's later ones would repeat it once per layer).
+    /// Finds accumulations (dots, sums) whose wide accumulator is rounded to a narrow output (their own,
+    /// or a cast of it, a matmul's `output_dtype`) and then cast back up downstream; returns
+    /// `(accumulation, cast, message)` for each, at its nearest such cast (a residual stream's later ones
+    /// would repeat it once per layer).
     pub fn precision_warnings(&self) -> Vec<(Var, Var, String)> {
         use Primitive::*;
         let mut readers: Vec<Vec<usize>> = vec![Vec::new(); self.types.len()];
@@ -358,15 +359,30 @@ impl Graph {
                 continue;
             };
 
-            let narrow = self.types[node.output].dtype;
+            let own = self.types[node.output].dtype;
 
-            if accum_dtype.size_of() <= narrow.size_of() {
+            // The rounding: to the accumulation's own narrower output, or by a cast to a narrower float, the
+            // accumulator's only reader.
+            let rounding = match &readers[node.output][..] {
+                _ if accum_dtype.size_of() > own.size_of() => Some((node.output, own, Vec::new())),
+                &[r] if !self.outputs.contains(&node.output) => match self.nodes[r].primitive {
+                    Cast { new_dtype }
+                        if new_dtype.is_float() && new_dtype.size_of() < accum_dtype.size_of() =>
+                    {
+                        Some((self.nodes[r].output, new_dtype, Vec::new()))
+                    }
+                    _ => None,
+                },
+                _ => None,
+            };
+
+            let Some((rounded, narrow, start)) = rounding else {
                 continue;
-            }
+            };
 
-            // Follow same-dtype readers from the narrow output, breadth first, until a widening cast; another
+            // Follow same-dtype readers from the narrow value, breadth first, until a widening cast; another
             // reduction stops the search.
-            let mut queue = std::collections::VecDeque::from([(node.output, Vec::new())]);
+            let mut queue = std::collections::VecDeque::from([(rounded, start)]);
             let mut seen = vec![false; self.types.len()];
 
             'search: while let Some((v, path)) = queue.pop_front() {
@@ -401,7 +417,7 @@ impl Graph {
                                  {name} {sep} {} casts it back to {wide}: the rounding loses precision; {fix} \
                                  for a more accurate graph",
                                 operands.join(", "),
-                                self.types[node.output],
+                                self.types[rounded],
                                 path.join(FUSION_SEPARATOR),
                                 sep = FUSION_SEPARATOR.trim(),
                             );

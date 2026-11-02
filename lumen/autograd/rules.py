@@ -41,8 +41,6 @@ def _widened(v, dtype):
     if name == "add":
         x, y = (_widened(i, dtype) for i in ins)
         return None if x is None or y is None else prims.add(x, y)
-    if name == "dot_general" and p["accum_dtype"] == dtype and p["output_dtype"] != dtype:
-        return _dot(_value(ins[0]), _value(ins[1]), _dot_dims(p), p, dtype)
     if name == "cast" and _value(ins[0]).dtype == dtype:
         return _value(ins[0])
     return None
@@ -396,9 +394,10 @@ defjvp(prims.reduce_max, _reduce_max_jvp)
 
 
 def _dot(x, y, dims, params, output_dtype):
-    """``dot_general`` of ``x`` and ``y`` with ``dims``, ``params``' accumulator and ``output_dtype``."""
+    """``dot_general`` of ``x`` and ``y`` with ``dims`` in ``params``' accumulator, cast to ``output_dtype``."""
     (lc, rc), (lb, rb) = dims
-    return prims.dot_general(x, y, ((lc, rc), (lb, rb)), params["accum_dtype"], output_dtype)
+    out = prims.dot_general(x, y, ((lc, rc), (lb, rb)), params["accum_dtype"])
+    return out if out.dtype == output_dtype else prims.cast(out, output_dtype)
 
 
 def _dot_dims(params):
@@ -409,8 +408,8 @@ def _dot_dims(params):
 
 defjvp(
     prims.dot_general,
-    lambda t, out, x, y, **p: _dot(t, y, _dot_dims(p), p, p["output_dtype"]),
-    lambda t, out, x, y, **p: _dot(x, t, _dot_dims(p), p, p["output_dtype"]),
+    lambda t, out, x, y, **p: _dot(t, y, _dot_dims(p), p, p["accum_dtype"]),
+    lambda t, out, x, y, **p: _dot(x, t, _dot_dims(p), p, p["accum_dtype"]),
 )
 
 
@@ -420,6 +419,19 @@ def _ranges_like(*xs):
     for x in xs:
         yield list(range(start, start + len(x)))
         start += len(x)
+
+
+def _narrowed(ct, dtype):
+    """``ct`` cast to ``dtype``: a cotangent widened exactly from a ``dtype`` value (the transpose of a
+    matmul's rounding cast, to its accumulator) is that value, not a round trip back."""
+    if ct.dtype == dtype:
+        return ct
+    node = tracer.producer(ct.var)
+    if node is not None and node[0] == "cast":
+        x = _value(node[1][0])
+        if x.dtype == dtype and tracer._accum_dtype(dtype) == ct.dtype:
+            return x
+    return prims.cast(ct, dtype)
 
 
 def _dot_transpose_lhs(ct, x, y, dims, params, swap_ans=False):
@@ -435,7 +447,7 @@ def _dot_transpose_lhs(ct, x, y, dims, params, swap_ans=False):
     order = sorted(range(len(y_contract)), key=lambda i: y_contract[i])
     unsorted = list(x_batch) + x_kept + [x_contract[i] for i in order]
     out_axes = sorted(range(len(unsorted)), key=unsorted.__getitem__)
-    ct = prims.cast(ct, y.dtype) if ct.dtype != y.dtype else ct
+    ct = _narrowed(ct, y.dtype)
     x_bar = _dot(ct, y, ((ans_y, y_kept), (ans_batch, y_batch)), params, x.dtype)
     return x_bar if out_axes == list(range(len(out_axes))) else prims.transpose(x_bar, out_axes)
 

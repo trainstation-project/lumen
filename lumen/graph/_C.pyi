@@ -20,8 +20,9 @@ class Graph:
     def outputs(self) -> list[int]: ...
     def attentions(self) -> list[dict[str, Any]]:
         """The attentions traced so far, as the compiler matches them: each
-        dot's operands, output, the softmax's max and sum, the score chain,
-        the causal offset and the values it computes."""
+        dot's operands, the second's product and the attention's output (its
+        rounding cast where F.matmul narrows it), the softmax's max and sum,
+        the score chain, the causal offset and the values it computes."""
 
     def rms_norms(self) -> list[dict[str, Any]]:
         """The RMS norms written out as primitives so far: each one's operand
