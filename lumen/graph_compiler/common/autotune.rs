@@ -158,6 +158,21 @@ impl<T: Timer> Autotuner<T> {
                 continue;
             };
 
+            // A lone candidate has nothing to be timed against: one run checks that it works.
+            if let [only] = &candidates[..] {
+                trial.tuned = Some(only.clone());
+
+                if time(&self.timer, &buffers, &trial, 1).is_ok() {
+                    picks().insert(picked, 0);
+
+                    for i in steps {
+                        plan.steps_mut()[i].tuned = Some(only.clone());
+                    }
+                }
+
+                continue;
+            }
+
             eprintln!(
                 "{}: autotuning {} ({}) on {}: {} candidates",
                 crate::LIBRARY_NAME,

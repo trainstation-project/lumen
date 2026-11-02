@@ -25,9 +25,9 @@ class Linear(lumen.nn.Module):
 
     weight: lumen.Tensor
 
-    def __call__(self, x):
-        """Projects `x` through the transposed weight."""
-        return F.matmul(x, self.weight.t(), "float32", "bfloat16")
+    def __call__(self, x, output="bfloat16"):
+        """Projects `x` through the transposed weight, accumulating in float32 and rounding to `output`."""
+        return F.matmul(x, self.weight.t(), "float32", output)
 
 
 class RMSNorm(lumen.nn.Module):
@@ -94,10 +94,9 @@ class MLP(lumen.nn.Module):
     down_proj: Linear
 
     def __call__(self, x):
-        """Applies `down(silu(gate(x)) * up(x))` in float32 and casts back to bfloat16."""
-        gate = self.gate_proj(x)
-        up = self.up_proj(x)
-        gate, up = gate.float(), up.float()
+        """Applies `down(silu(gate(x)) * up(x))` in float32 (the projections output it) and casts back to bfloat16."""
+        gate = self.gate_proj(x, "float32")
+        up = self.up_proj(x, "float32")
         return self.down_proj((gate * F.sigmoid(gate) * up).bfloat16())
 
 

@@ -24,8 +24,8 @@ settings = dict(
     deterministic=True,
     split_k=False,
     fuse=True,
-    fused_linear_cross_entropy_chunk_size=64,
-    fused_linear_cross_entropy=True,
+    fused_linear_cross_entropy_chunk_size=None,
+    fused_linear_cross_entropy=False,
 )
 for name, value in settings.items():
     if hasattr(config, name):
