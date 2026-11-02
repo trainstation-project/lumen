@@ -33,6 +33,8 @@ _SCOPE_OF = []
 _CALLS = itertools.count()
 _SOURCES = []
 _PRODUCERS = []
+# Precision warnings shown so far, so one at the same source line with the same text shows once (per layer it repeats).
+_WARNED = {}
 
 
 _PACKAGE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -469,7 +471,7 @@ def _trace(fn, args, device, runtime=_runtime(()), portable=False, split=False):
         if cast_at and cast_at != where:
             message += f" (cast at {cast_at[0]}:{cast_at[1]})"
         if where:
-            warnings.warn_explicit(message, UserWarning, *where)
+            warnings.warn_explicit(message, UserWarning, *where, registry=_WARNED)
         else:
             warnings.warn(message)
     drawn = rng["drawn"] if rng["state"] is not None else None

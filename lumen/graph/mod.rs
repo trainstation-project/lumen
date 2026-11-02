@@ -338,7 +338,8 @@ impl Graph {
     }
 
     /// Finds accumulations (dots, sums) whose wide accumulator is rounded to a narrow output and then
-    /// cast back up downstream; returns `(accumulation, cast, message)` for each.
+    /// cast back up downstream; returns `(accumulation, cast, message)` for each, at its nearest such cast
+    /// (a residual stream's later ones would repeat it once per layer).
     pub fn precision_warnings(&self) -> Vec<(Var, Var, String)> {
         use Primitive::*;
         let mut readers: Vec<Vec<usize>> = vec![Vec::new(); self.types.len()];
@@ -363,11 +364,12 @@ impl Graph {
                 continue;
             }
 
-            // Follow same-dtype readers from the narrow output until a widening cast; another reduction stops the search.
-            let mut stack = vec![(node.output, Vec::new())];
+            // Follow same-dtype readers from the narrow output, breadth first, until a widening cast; another
+            // reduction stops the search.
+            let mut queue = std::collections::VecDeque::from([(node.output, Vec::new())]);
             let mut seen = vec![false; self.types.len()];
 
-            while let Some((v, path)) = stack.pop() {
+            'search: while let Some((v, path)) = queue.pop_front() {
                 for &r in &readers[v] {
                     let (reader, wide) = (&self.nodes[r], self.types[self.nodes[r].output].dtype);
                     let mut path = path.clone();
@@ -405,12 +407,13 @@ impl Graph {
                             );
 
                             warnings.push((node.output, reader.output, message));
+                            break 'search;
                         }
                         DotGeneral { .. } | ReduceSum { .. } | ReduceMax { .. } | Fusion { .. } => {
                         }
                         _ if wide == narrow && !seen[reader.output] => {
                             seen[reader.output] = true;
-                            stack.push((reader.output, path));
+                            queue.push_back((reader.output, path));
                         }
                         _ => {}
                     }
