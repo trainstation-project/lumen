@@ -347,8 +347,34 @@ template <typename A> inline A reduce_precision_op(A a, uint exponent_bits, uint
 template <typename A> inline A min_op(A x, A y) { return x != x || y != y ? x + y : (y < x ? y : x); }
 
 /// Power in float, as torch's MPS `pow`: `precise::pow` already gives a negative base with an integral exponent
-/// the exponent's parity.
-template <typename A, typename B> inline A pow_op(A a, B b) { return A(precise::pow(float(a), float(b))); }
+/// the exponent's parity. An integer exponent float doesn't hold (over 2^24) is `hi + lo`, `lo = n % 128` of `n`'s
+/// sign, both exact in float: `a^hi * a^lo`, its parts on one side of 1 (no inf times 0), `hi` even. Beyond int32
+/// (where only `|a| = 1` is finite and nonzero) it is held at `±(2^31 - 2)` keeping its parity, as Triton's is.
+template <typename A, typename B> inline A pow_op(A a, B b) {
+    const float x = float(a);
+
+    if constexpr (is_integral_v<B>) {
+        constexpr long most = (1L << 31) - 2;
+        long n;
+
+        if constexpr (is_signed_v<B>) {
+            const long v = long(b);
+            n = v > most ? most + (v & 1) : v < -most ? -most - (v & 1) : v;
+        } else {
+            const ulong v = ulong(b);
+            n = v > ulong(most) ? most + long(v & 1) : long(v);
+        }
+
+        if (n >= -(1L << 24) && n <= (1L << 24)) {
+            return A(precise::pow(x, float(n)));
+        }
+
+        const long lo = n % 128, hi = n - lo;
+        return A(precise::pow(x, float(hi)) * precise::pow(x, float(lo)));
+    } else {
+        return A(precise::pow(x, float(b)));
+    }
+}
 
 /// Remainder with the sign of the dividend; integer `x % 0` is `x` and signed `x % -1` is 0 (XLA semantics).
 inline float rem_op(float x, float y) { return fmod(x, y); }

@@ -296,16 +296,34 @@ def test_exact_bfloat16_functions_agree_with_the_cpu(device, triton_on_cuda):
             on(device, f, a, dtype=dtype)
 
 
-@pytest.mark.parametrize("device", [CUDA])
+@pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("exponent", ["int64", "uint32", "uint64"])
 def test_pow_keeps_wide_integer_exponents(device, exponent, triton_on_cuda):
     """A float raised to an integer exponent too wide for int32 is the CPU's,
-    not that of the exponent wrapped to 32 bits."""
+    not that of the exponent wrapped to 32 bits (float64 where the device
+    has it)."""
     bases = np.array([2.0, 0.5, -1.0, -1.0, 1.0001, 0.9999], np.float32)
     exponents = np.array([1 << 31, 3 << 30, (1 << 31) + 1, (1 << 32) - 2, 1 << 31, (1 << 31) + 1], exponent)
-    for dtype in ["float32", "float64"]:
+    for dtype in ["float32"] + (["float64"] if device != "mps" else []):
         got, expected = on(device, prims.pow, bases.astype(dtype), exponents)
         np.testing.assert_array_equal(got, expected)
+
+
+@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("exponent", ["int32", "int64"])
+def test_pow_of_integer_exponents_past_float(device, exponent, triton_on_cuda):
+    """A float raised to an integer exponent float32 can't hold (over 2^24),
+    of a base near 1 (the only ones finite and nonzero there) or -1: the
+    CPU's to a few ulps (2^30 + 65 rounded to float32, 2^30 + 128, is 60
+    ulps off), its sign the exponent's parity, not that of the exponent
+    rounded to float32."""
+    one_up, one_down = np.nextafter(np.float32(1), np.float32(2)), np.nextafter(np.float32(1), np.float32(0))
+    bases = np.array([one_up, one_down, -one_up, -one_down, one_up, one_down, -1.0, -1.0], np.float32)
+    big = (1 << 24) + 1
+    exponents = np.array([big, big + 2, big, -big, -(big + 6), (1 << 30) + 65, big, 1 << 30], exponent)
+    got, expected = on(device, prims.pow, bases, exponents)
+    np.testing.assert_array_equal(np.sign(got), np.sign(expected))
+    np.testing.assert_allclose(got, expected, rtol=4 * 2.0**-23)
 
 
 @pytest.mark.parametrize("device", [MPS, CUDA])
