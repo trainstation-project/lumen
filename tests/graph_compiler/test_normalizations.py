@@ -198,6 +198,18 @@ def test_wide_rows_are_one_row_kernel(device, n, f, triton_on_cuda):
         np.testing.assert_allclose(lumen.to_numpy(g.to("cpu")), e, rtol=1e-4, atol=1e-4 * np.abs(e).max())
 
 
+def assert_rows_not_kept(steps, shape):
+    """Asserts no value of the rows' ``shape`` a step writes besides its
+    output is read by a step whose output has that shape (the backward's
+    ``dx``): such a value is ``x̂`` kept from the forward, whereas w's
+    gradient's operand or partial sums are read only by w's column sums."""
+    kept = {b for s in steps for b, _, t in s.get("extra_outputs", []) if t == shape}
+    for s in steps:
+        if s["output"][2] == shape:
+            read = kept & {b for b, _, _ in s["inputs"]}
+            assert not read, (read, s["label"])
+
+
 @pytest.mark.parametrize("device", [MPS, CUDA])
 def test_rms_norm_backward_recomputes_its_normalized_input(device, triton_on_cuda):
     """A training step's RMS norm (its value read forward, its gradients
@@ -205,8 +217,9 @@ def test_rms_norm_backward_recomputes_its_normalized_input(device, triton_on_cud
     ``1 / rms`` (``rms_norm``'s saved value), not ``x / rms`` (``x̂``, w's
     gradient's): the backward, reading ``x`` and ``1 / rms`` anyway,
     multiplies again, a value of the rows' shape less kept from the forward
-    (the forward may also write w's gradient's partial sums, here known
-    then, ``[64, 300]``). The loss and gradients the CPU's."""
+    (the forward may also write w's gradient's operand or its partial sums,
+    here known then, ``[64, 300]`` on MPS, ``[128, 300]`` on Triton, read
+    only by w's column sums). The loss and gradients the CPU's."""
     x, w, c = rand(128, 300), rand(300, seed=1), rand(128, 300, seed=2)
 
     def step(x, w, c):
@@ -222,7 +235,8 @@ def test_rms_norm_backward_recomputes_its_normalized_input(device, triton_on_cud
     steps = lumen.graph_compiler.Plan(lumen.make_graph(step)(X, W, C), device).steps()
     (forward,) = [s for s in steps if "sqrt" in s["label"]]
     written = [o[2] for o in forward["extra_outputs"]]
-    assert [128, 1] in written and [128, 300] not in written, (written, forward["label"])
+    assert [128, 1] in written, (written, forward["label"])
+    assert_rows_not_kept(steps, [128, 300])
     got = lumen.compile(step)(X, W, C)
     want = lumen.compile(step, device="cpu")(*(lumen.from_numpy(a) for a in (x, w, c)))
     for g, e in zip(got, want):
@@ -434,7 +448,8 @@ def test_written_out_rms_norm_is_differentiated_as_rms_norm(device, spelling, tr
     if device != "cpu":
         steps = lumen.graph_compiler.Plan(lumen.make_graph(step)(X, W, C), device).steps()
         written = [o[2] for s in steps for o in s.get("extra_outputs", [])]
-        assert [rows, 1] in written and [rows, n] not in written, written
+        assert [rows, 1] in written, written
+        assert_rows_not_kept(steps, [rows, n])
 
     def kept(x):
         """The norm and its rows' rms, which then stay as written."""
