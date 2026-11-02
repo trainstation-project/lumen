@@ -506,3 +506,40 @@ def test_matmul_epilogue_writes_values_the_backward_reads(device, triton_on_cuda
             lumen.config.compiler.reset()
     for a, b in zip(*results):
         np.testing.assert_array_equal(a, b)
+
+
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_gemm_linear_reordering_keeps_the_values(device, triton_on_cuda):
+    """With ``gemm_linear_reordering`` on, a factor of a matmul's operand
+    constant along the contracted axis moves to its output: an RMS norm's
+    ``1 / rms`` before a bfloat16 projection (rounded unscaled, so to
+    bfloat16's precision) and a weight's per-channel dequantization scale
+    (to float32's). Off by default."""
+    rng = np.random.default_rng(0)
+    x, g, w, q, s = (
+        rng.standard_normal(shape).astype(np.float32) for shape in ((64, 256), (256,), (128, 256), (256, 96), (96,))
+    )
+
+    def block(x, g, w, q, s):
+        """An RMS norm then a bfloat16 projection, and a matmul of a per-channel scaled weight."""
+        h = F.rms_norm(x, 256, g).bfloat16()
+        return F.matmul(h, w.bfloat16().t(), "float32", "float32"), F.matmul(x, q * s, "float32", "float32")
+
+    try:
+        args = [lumen.from_numpy(a).to(device) for a in (x, g, w, q, s)]
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    config = getattr(lumen.config.compiler, device)
+    assert not config.gemm_linear_reordering
+    exact = [lumen.to_numpy(t) for t in lumen.compile(block)(*args)]
+    config.gemm_linear_reordering = True
+    try:
+        moved = [lumen.to_numpy(t) for t in lumen.compile(block)(*args)]
+        steps = lumen.graph_compiler.Plan(lumen.make_graph(block)(*args), device).steps()
+    finally:
+        config.gemm_linear_reordering = False
+    dots = [s["label"] for s in steps if s["label"].startswith("dot_general")]
+    # Each matmul applies its moved factor in its epilogue.
+    assert len(dots) == 2 and all(d.endswith("broadcast_in_dim → mul") for d in dots), dots
+    for got, want, tol in zip(moved, exact, (2.0**-7, 1e-5)):
+        np.testing.assert_allclose(got, want, atol=tol * np.abs(want).max())

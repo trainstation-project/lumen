@@ -562,3 +562,192 @@ fn attention_strides_record_only_strided_operands() {
         Strides::default()
     );
 }
+
+/// `x` (`[8, 32]`) scaled per row by `r` (`[8]`), rounded to bfloat16, times a bfloat16 `w` (`[32, 16]`)
+/// accumulated in float32 and rounded to bfloat16: a norm's `1 / rms` before the next matmul.
+fn row_scaled_matmul(extra_output: bool) -> Graph {
+    let mut g = Graph::new();
+    let x = g.input(ty(&[8, 32]));
+    let r = g.input(ty(&[8]));
+    let w = g.input(TensorType::new(DType::BF16, &[32, 16]));
+
+    let spread = BroadcastInDim {
+        shape: vec![8, 32],
+        broadcast_dimensions: vec![0],
+    };
+
+    let r = apply(&mut g, spread, &[r]);
+    let scaled = apply(&mut g, Mul, &[x, r]);
+    let rounded = apply(
+        &mut g,
+        Cast {
+            new_dtype: DType::BF16,
+        },
+        &[scaled],
+    );
+
+    let dot = DotGeneral {
+        lhs_contracting: vec![1],
+        rhs_contracting: vec![0],
+        lhs_batch: vec![],
+        rhs_batch: vec![],
+        accum_dtype: DType::F32,
+        output_dtype: DType::BF16,
+    };
+
+    let y = apply(&mut g, dot, &[rounded, w]);
+    let outputs = if extra_output {
+        vec![y, rounded]
+    } else {
+        vec![y]
+    };
+    g.set_outputs(&outputs).unwrap();
+    g
+}
+
+/// A per-row scale of a matmul's lhs, through a rounding cast, moves to its output: the matmul of the
+/// rounded unscaled rows in float32, times the scale, rounded once to bfloat16; the values the traced
+/// program's to bfloat16 rounding.
+#[test]
+fn row_scale_moves_past_its_matmul() {
+    use super::common::gemm_linear_reordering::gemm_linear_reordering;
+
+    let g = row_scaled_matmul(false);
+    let out = gemm_linear_reordering(&g);
+    let nodes = out.nodes();
+    let dot = nodes
+        .iter()
+        .position(|n| n.primitive.name() == "dot_general")
+        .unwrap();
+
+    assert_eq!(out.type_of(nodes[dot].output).dtype, DType::F32, "{out}");
+    assert!(!nodes[..dot].iter().any(|n| n.primitive == Mul), "{out}");
+    assert_eq!(
+        names(&out)[dot + 1..],
+        ["broadcast_in_dim", "mul", "cast"],
+        "{out}"
+    );
+
+    let inputs = [
+        data(&[8, 32], 1),
+        data(&[8], 2),
+        data(&[32, 16], 3).to_dtype(DType::BF16).unwrap(),
+    ];
+
+    let values = |g: &Graph| {
+        reference::run(g, &inputs).unwrap()[0]
+            .to_dtype(DType::F32)
+            .unwrap()
+            .to_vec::<f32>()
+    };
+
+    let (want, got) = (values(&g), values(&out));
+    let scale = want.iter().fold(0f32, |m, v| m.max(v.abs()));
+
+    for (w, v) in want.iter().zip(&got) {
+        assert!((w - v).abs() <= scale * 2f32.powi(-6), "{w} {v}");
+    }
+}
+
+/// A per-row division of a matmul's lhs (`x / rms`, the rms kept `[rows, 1]`) moves to its output as a
+/// division; the values the traced program's to float32 rounding.
+#[test]
+fn row_division_moves_past_its_matmul() {
+    use super::common::gemm_linear_reordering::gemm_linear_reordering;
+
+    let mut g = Graph::new();
+    let x = g.input(ty(&[8, 32]));
+    let rms = g.input(ty(&[8, 1]));
+    let w = g.input(ty(&[32, 16]));
+
+    let spread = BroadcastInDim {
+        shape: vec![8, 32],
+        broadcast_dimensions: vec![0, 1],
+    };
+
+    let rms = apply(&mut g, spread, &[rms]);
+    let normalized = apply(&mut g, Div, &[x, rms]);
+    let y = apply(&mut g, matmul(), &[normalized, w]);
+    g.set_outputs(&[y]).unwrap();
+    let out = gemm_linear_reordering(&g);
+
+    assert_eq!(
+        names(&out),
+        ["dot_general", "broadcast_in_dim", "div"],
+        "{out}"
+    );
+
+    let inputs = [data(&[8, 32], 1), data(&[8, 1], 2), data(&[32, 16], 3)];
+    let want = reference::run(&g, &inputs).unwrap()[0].to_vec::<f32>();
+    let got = reference::run(&out, &inputs).unwrap()[0].to_vec::<f32>();
+
+    for (w, v) in want.iter().zip(&got) {
+        assert!((w - v).abs() <= 1e-4 * w.abs().max(1.0), "{w} {v}");
+    }
+}
+
+/// A matmul's lhs read elsewhere too (the rounded rows returned) keeps its scale: removing it would
+/// compute the rows twice. A per-column scale (over the contracted axis) does not commute with the matmul
+/// and stays.
+#[test]
+fn shared_lhs_and_column_scales_stay() {
+    use super::common::gemm_linear_reordering::gemm_linear_reordering;
+
+    let g = row_scaled_matmul(true);
+    assert_eq!(names(&gemm_linear_reordering(&g)), names(&g));
+
+    let mut g = Graph::new();
+    let x = g.input(ty(&[8, 32]));
+    let gamma = g.input(ty(&[32]));
+    let w = g.input(ty(&[32, 16]));
+
+    let spread = BroadcastInDim {
+        shape: vec![8, 32],
+        broadcast_dimensions: vec![1],
+    };
+
+    let gamma = apply(&mut g, spread, &[gamma]);
+    let scaled = apply(&mut g, Mul, &[x, gamma]);
+    let y = apply(&mut g, matmul(), &[scaled, w]);
+    g.set_outputs(&[y]).unwrap();
+
+    assert_eq!(names(&gemm_linear_reordering(&g)), names(&g));
+}
+
+/// A weight's per-output-channel scale (`x · (q · s)`, a dequantized weight's) moves to the matmul's
+/// output columns: the scaled weight is never computed; the values the traced program's to float32
+/// rounding.
+#[test]
+fn column_scale_of_the_weight_moves_past_its_matmul() {
+    use super::common::gemm_linear_reordering::gemm_linear_reordering;
+
+    let mut g = Graph::new();
+    let x = g.input(ty(&[8, 32]));
+    let q = g.input(ty(&[32, 16]));
+    let s = g.input(ty(&[16]));
+
+    let spread = BroadcastInDim {
+        shape: vec![32, 16],
+        broadcast_dimensions: vec![1],
+    };
+
+    let s = apply(&mut g, spread, &[s]);
+    let w = apply(&mut g, Mul, &[q, s]);
+    let y = apply(&mut g, matmul(), &[x, w]);
+    g.set_outputs(&[y]).unwrap();
+    let out = gemm_linear_reordering(&g);
+
+    assert_eq!(
+        names(&out),
+        ["dot_general", "broadcast_in_dim", "mul"],
+        "{out}"
+    );
+
+    let inputs = [data(&[8, 32], 1), data(&[32, 16], 2), data(&[16], 3)];
+    let want = reference::run(&g, &inputs).unwrap()[0].to_vec::<f32>();
+    let got = reference::run(&out, &inputs).unwrap()[0].to_vec::<f32>();
+
+    for (w, v) in want.iter().zip(&got) {
+        assert!((w - v).abs() <= 1e-4 * w.abs().max(1.0), "{w} {v}");
+    }
+}
