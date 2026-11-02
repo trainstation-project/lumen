@@ -15,7 +15,7 @@ mod split_k;
 mod tests;
 
 use std::collections::{BTreeMap, HashMap};
-use std::ffi::{CString, c_char};
+use std::ffi::{CString, c_char, c_void};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
@@ -69,6 +69,8 @@ pub(crate) use place_views::{
 unsafe extern "C" {
     /// Compiles `source` and adds its kernels to the shared library; returns nonzero on failure.
     fn lumen_mps_compile_kernels(source: *const c_char) -> i32;
+    /// Returns the compute pipeline for kernel `name`, or null if no such kernel exists.
+    fn lumen_mps_pipeline(name: *const c_char) -> *mut c_void;
 }
 
 /// Kernel templates and helpers every generated Metal source is compiled against.
@@ -519,15 +521,17 @@ fn compile_with(prelude: &str, sources: BTreeMap<String, String>) -> Result<(), 
 /// Every compiled kernel source by name.
 static SOURCES: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
 
-/// Whether this Metal toolchain supports Metal Performance Primitives, probed once.
+/// Whether this Metal toolchain supports Metal Performance Primitives, probed once: a kernel defined only
+/// under `LUMEN_MPP`, compiling (and logging) no error either way.
 fn mpp_available() -> bool {
     static AVAILABLE: OnceLock<bool> = OnceLock::new();
 
     *AVAILABLE.get_or_init(|| {
-        let probe =
-            "#ifndef LUMEN_MPP\n#error Metal Performance Primitives are unavailable\n#endif\n";
+        let probe = "#ifdef LUMEN_MPP\nkernel void mpp_probe(device int *out [[buffer(0)]]) { out[0] = 1; }\n#endif\n";
+        let sources = BTreeMap::from([("mpp_probe".to_owned(), probe.to_owned())]);
+        let name = CString::new("mpp_probe").expect("no NUL");
 
-        compile_mpp_kernels(BTreeMap::from([("mpp_probe".to_owned(), probe.to_owned())])).is_ok()
+        compile_mpp_kernels(sources).is_ok() && !unsafe { lumen_mps_pipeline(name.as_ptr()) }.is_null()
     })
 }
 

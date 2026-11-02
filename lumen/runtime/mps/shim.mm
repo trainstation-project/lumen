@@ -21,6 +21,13 @@ static id<MTLLibrary> compile(NSString *source, NSError **error) {
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
     options.fastMathEnabled = NO;
 #pragma clang diagnostic pop
+    // Metal 4 where the OS has it: the default follows the SDK the host executable (Python) was built with,
+    // which may predate it, leaving `if constexpr` a C++17 extension and Metal Performance Primitives out.
+#if __MAC_OS_X_VERSION_MAX_ALLOWED >= 260000
+    if (@available(macOS 26.0, *)) {
+        options.languageVersion = MTLLanguageVersion4_0;
+    }
+#endif
     return [queue.device newLibraryWithSource:source options:options error:error];
 }
 
