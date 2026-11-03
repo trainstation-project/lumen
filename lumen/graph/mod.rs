@@ -357,7 +357,8 @@ impl Graph {
         let mut warnings = Vec::new();
 
         for node in &self.nodes {
-            // A dot's result is its accumulator: the cast after it is where it is rounded.
+            // A dot's result is its accumulator: a cast that is its sole reader is where it is rounded (a
+            // dot also read wide keeps its accumulator, the cast a later choice).
             let accumulation = match node.primitive {
                 ReduceSum { .. } => node,
                 Cast { .. } => match producer[node.inputs[0]].map(|p| &self.nodes[p]) {
@@ -366,7 +367,9 @@ impl Graph {
                             primitive: DotGeneral { .. },
                             ..
                         },
-                    ) => dot,
+                    ) if readers[dot.output].len() == 1 && !self.outputs.contains(&dot.output) => {
+                        dot
+                    }
                     _ => continue,
                 },
                 _ => continue,
