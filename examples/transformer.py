@@ -165,11 +165,11 @@ class Block(lumen.nn.Module):
         r = x
         with lumen.profiler.record_function("attention rmsnorm"):
             x = F.rms_norm(x.float(), x.size(-1), self.attn.norm).bfloat16()
-        x = r + self.attn(x, batch, dropout_p).bfloat16()
+        x = (r.float() + self.attn(x, batch, dropout_p)).bfloat16()
         r = x
         with lumen.profiler.record_function("mlp rmsnorm"):
             x = F.rms_norm(x.float(), x.size(-1), self.mlp.norm).bfloat16()
-        x = r + self.mlp(x).bfloat16()
+        x = (r.float() + self.mlp(x)).bfloat16()
         return x
 
 

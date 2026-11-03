@@ -294,9 +294,9 @@ def test_attention_computes_its_scores_as_traced():
             q.dtype,
         ),
         lambda q, k, v: F.matmul(
-            F.softmax(
-                prims.dot_general(q, k, (((3,), (3,)), ((0, 1), (0, 1))), "bfloat16", "bfloat16").float(), -1
-            ).to(dtype=q.dtype),
+            F.softmax(prims.dot_general(q, k, (((3,), (3,)), ((0, 1), (0, 1))), "bfloat16").float(), -1).to(
+                dtype=q.dtype
+            ),
             v,
             "float32",
             q.dtype,

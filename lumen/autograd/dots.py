@@ -2,7 +2,7 @@
 
 from lumen.autograd.core import UndefinedPrimal, _value
 from lumen.autograd.function import _FUNCTION, Function, FunctionCtx
-from lumen.autograd.rules import _dot_dims, _dot_general_transpose
+from lumen.autograd.rules import _dot_dims, _dot_general_transpose, _narrowed
 from lumen.graph import prims, tracer
 
 __all__ = ["substitute"]
@@ -67,7 +67,8 @@ class _MergedDot(Function):
         (_, rc), (_, rb) = _dot_dims(p)
         (dim,) = _free(ws[0].ndim, rc, rb)
         w = prims.concatenate(ws, dim)
-        g = prims.concatenate(list(grads), grads[0].ndim - 1)
+        # Each dot's cotangent in the weights' dtype, so the concatenation is not cast back down.
+        g = prims.concatenate([_narrowed(g, w.dtype) for g in grads], grads[0].ndim - 1)
         dx = _dot_general_transpose(g, UndefinedPrimal(x.shape, x.dtype), w, **p)[0]
         dw = _dot_general_transpose(g, x, UndefinedPrimal(w.shape, w.dtype), **p)[1]
         out, start = [dx], 0

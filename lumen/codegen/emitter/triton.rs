@@ -145,24 +145,39 @@ impl<'a> Emitter<'a> {
             let (a, _) = self.computed(&x, operand);
 
             let value = match op {
-                // Integer exponents: libdevice.pow takes int32, so i64/u64 exponents are clamped
-                // to int32 range keeping their parity (sign of the result for negative bases).
-                Pow if !other.is_float() && (other.bits() < 32 || other == DType::I32) => {
-                    format!("libdevice.pow({a}, {y}.to(tl.int32))")
-                }
                 Pow if !other.is_float() && operand == DType::F64 => {
                     format!("libdevice.pow({a}, {y}.to(tl.float64))")
                 }
+                // Integer exponents, as MPS's `pow_op`: held within int32 keeping their parity (i64/u64
+                // past it are 0, inf or 1 but for |a| = 1), then a float pow, exact in float32 up to
+                // 2^24 (libdevice's integer pow squares, compounding its rounding); past it `a^hi * a^lo`
+                // with `lo = n % 128` of n's sign, both exact in float32.
                 Pow if !other.is_float() => {
                     let most = (1u32 << 31) - 2;
 
-                    let low = match other {
-                        DType::I64 => format!("tl.where({y} < -{most}, -{most} - ({y} & 1), {y})"),
-                        _ => y.clone(),
+                    let n = match other.bits() < 32 || other == DType::I32 {
+                        true => format!("{y}.to(tl.int32)"),
+                        false => {
+                            let low = match other {
+                                DType::I64 => {
+                                    format!("tl.where({y} < -{most}, -{most} - ({y} & 1), {y})")
+                                }
+                                _ => y.clone(),
+                            };
+
+                            format!(
+                                "tl.where({y} > {most}, {most} + ({y} & 1), {low}).to(tl.int32)"
+                            )
+                        }
                     };
 
+                    let exact = 1u32 << 24;
+
                     format!(
-                        "libdevice.pow({a}, tl.where({y} > {most}, {most} + ({y} & 1), {low}).to(tl.int32))"
+                        "tl.where((({n}) <= {exact}) & (({n}) >= -{exact}), \
+                         libdevice.pow({a}, ({n}).to(tl.float32)), \
+                         libdevice.pow({a}, (({n}) - ({n}) % 128).to(tl.float32)) \
+                         * libdevice.pow({a}, (({n}) % 128).to(tl.float32)))"
                     )
                 }
                 Pow => format!("libdevice.pow({a}, {})", self.computed(&y, operand).0),

@@ -26,11 +26,10 @@ deflinear(prims.neg, lambda ct, x: [prims.neg(ct)])
 
 
 def _widened(v, dtype):
-    """Value ``v``, a gradient's dots rounding their accumulator (``dtype``)
-    narrower, maybe transposed or summed (``x @ w.bfloat16()``'s gradient,
-    ``w``'s dot's ``x``; ``x``'s of several dots), or their sum in it cast
-    narrower, computed with the dots writing their accumulator instead;
-    None if it is not one."""
+    """Value ``v``, a cast narrower of a ``dtype`` value (a gradient's dot's
+    accumulator), maybe transposed or summed (``x @ w.bfloat16()``'s
+    gradient, ``w``'s dot's ``x``; ``x``'s of several dots), as that value
+    instead; None if it is not one."""
     node = tracer.producer(v)
     if node is None:
         return None
@@ -41,8 +40,6 @@ def _widened(v, dtype):
     if name == "add":
         x, y = (_widened(i, dtype) for i in ins)
         return None if x is None or y is None else prims.add(x, y)
-    if name == "dot_general" and p["accum_dtype"] == dtype and p["output_dtype"] != dtype:
-        return _dot(_value(ins[0]), _value(ins[1]), _dot_dims(p), p, dtype)
     if name == "cast" and _value(ins[0]).dtype == dtype:
         return _value(ins[0])
     return None
@@ -53,9 +50,21 @@ def _cast_transpose(ct, x, new_dtype):
     accumulator to the narrower dtype only for this (``x @ w.bfloat16()``,
     ``w`` float32: its gradient, its dot's), summed or transposed: those
     dots writing their accumulator, ``x``'s dtype, instead (one rounding
-    fewer: Megatron-LM's weight gradients accumulated in float32)."""
-    widened = _widened(ct.var, x.dtype) if x.dtype != ct.dtype else None
+    fewer: Megatron-LM's weight gradients accumulated in float32). Not for
+    a dot's rounding (``x`` its tangent): the dot's transpose narrows the
+    cotangent back, as it reads it."""
+    widen = x.dtype != ct.dtype and not _dot_tangent(x.var)
+    widened = _widened(ct.var, x.dtype) if widen else None
     return [prims.cast(ct, x.dtype) if widened is None else widened]
+
+
+def _dot_tangent(var):
+    """Whether linear value ``var`` is a dot's tangent: a ``dot_general``,
+    or the sum of one per linear operand."""
+    node = tracer.producer(var) if var is not None else None
+    if node is None or node[0] not in ("dot_general", "add"):
+        return False
+    return node[0] == "dot_general" or all((tracer.producer(v) or ("",))[0] == "dot_general" for v in node[1])
 
 
 deflinear(prims.cast, _cast_transpose)
@@ -396,9 +405,20 @@ defjvp(prims.reduce_max, _reduce_max_jvp)
 
 
 def _dot(x, y, dims, params, output_dtype):
-    """``dot_general`` of ``x`` and ``y`` with ``dims``, ``params``' accumulator and ``output_dtype``."""
+    """``dot_general`` of ``x`` and ``y`` with ``dims`` and ``params``' accumulator, cast to ``output_dtype``."""
     (lc, rc), (lb, rb) = dims
-    return prims.dot_general(x, y, ((lc, rc), (lb, rb)), params["accum_dtype"], output_dtype)
+    return tracer._dot(x, y, ((lc, rc), (lb, rb)), params["accum_dtype"], output_dtype)
+
+
+def _narrowed(ct, dtype):
+    """``ct`` in ``dtype``: the value a widening cast made it from (a
+    narrowing dot's cotangent cast back up), else ``ct`` cast to it."""
+    if ct.dtype == dtype:
+        return ct
+    node = tracer.producer(ct.var)
+    if node is not None and node[0] == "cast" and _value(node[1][0]).dtype == dtype:
+        return _value(node[1][0])
+    return prims.cast(ct, dtype)
 
 
 def _dot_dims(params):
@@ -409,8 +429,8 @@ def _dot_dims(params):
 
 defjvp(
     prims.dot_general,
-    lambda t, out, x, y, **p: _dot(t, y, _dot_dims(p), p, p["output_dtype"]),
-    lambda t, out, x, y, **p: _dot(x, t, _dot_dims(p), p, p["output_dtype"]),
+    lambda t, out, x, y, **p: _dot(t, y, _dot_dims(p), p, p["accum_dtype"]),
+    lambda t, out, x, y, **p: _dot(x, t, _dot_dims(p), p, p["accum_dtype"]),
 )
 
 
@@ -435,7 +455,7 @@ def _dot_transpose_lhs(ct, x, y, dims, params, swap_ans=False):
     order = sorted(range(len(y_contract)), key=lambda i: y_contract[i])
     unsorted = list(x_batch) + x_kept + [x_contract[i] for i in order]
     out_axes = sorted(range(len(unsorted)), key=unsorted.__getitem__)
-    ct = prims.cast(ct, y.dtype) if ct.dtype != y.dtype else ct
+    ct = _narrowed(ct, y.dtype)
     x_bar = _dot(ct, y, ((ans_y, y_kept), (ans_batch, y_batch)), params, x.dtype)
     return x_bar if out_axes == list(range(len(out_axes))) else prims.transpose(x_bar, out_axes)
 

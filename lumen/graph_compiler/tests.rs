@@ -243,6 +243,53 @@ fn transposes_of_dots_swap_their_operands() {
     assert_eq!(names(&twice), ["dot_general", "transpose"], "{twice}");
 }
 
+/// The late fold: a bfloat16 dot's float32 accumulator, cast to bfloat16 (after a reshape too), becomes
+/// one dot rounding to bfloat16 once pattern matching has run; read twice, or before, it stays a cast.
+#[test]
+fn rounding_casts_fold_into_their_dots() {
+    let build = |reshaped: bool, read_twice: bool| {
+        let mut g = Graph::new();
+        let a = g.input(TensorType::new(DType::BF16, &[4, 6]));
+        let b = g.input(TensorType::new(DType::BF16, &[6, 5]));
+        let mut d = apply(&mut g, matmul(), &[a, b]);
+        let product = d;
+
+        if reshaped {
+            d = apply(
+                &mut g,
+                Reshape {
+                    new_sizes: vec![20],
+                },
+                &[d],
+            );
+        }
+
+        let new_dtype = DType::BF16;
+        let c = apply(&mut g, Cast { new_dtype }, &[d]);
+        let outputs = if read_twice {
+            vec![c, product]
+        } else {
+            vec![c]
+        };
+        g.set_outputs(&outputs).unwrap();
+        g
+    };
+
+    for reshaped in [false, true] {
+        let g = build(reshaped, false);
+        let folded = super::common::simplify::simplify_with(&g, true);
+        let dot = &folded.nodes()[0];
+        assert_eq!(folded.type_of(dot.output).dtype, DType::BF16, "{folded}");
+        assert_eq!(names(&folded).len(), 1 + usize::from(reshaped), "{folded}");
+
+        let unfolded = super::common::simplify::simplify_with(&g, false);
+        assert!(names(&unfolded).contains(&"cast"), "{unfolded}");
+    }
+
+    let twice = super::common::simplify::simplify_with(&build(false, true), true);
+    assert_eq!(names(&twice), ["dot_general", "cast"], "{twice}");
+}
+
 /// With rearranging enabled, operand transposes move after the elementwise ops into one transpose.
 #[test]
 fn rearranges_move_past_elementwise_primitives() {

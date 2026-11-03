@@ -55,7 +55,9 @@ pub(crate) fn simplify_with(graph: &Graph, matched: bool) -> Graph {
                     .collect();
 
                 out.set_origins(&replaced.iter().collect::<Vec<_>>());
-                out.apply(p, &ins).expect("a rewrite is typed as the node")
+                let v = out.apply(p, &ins).expect("a rewrite is typed as the node");
+                out.set_label(v, node.label);
+                v
             }
             None => match &node.primitive {
                 Primitive::DotGeneral { .. } => {
@@ -137,24 +139,20 @@ fn rewrite(
         Cast { new_dtype } => match node(inputs[0]) {
             Some(Node {
                 primitive:
-                    DotGeneral {
+                    dot @ DotGeneral {
                         lhs_contracting,
                         rhs_contracting,
                         lhs_batch,
                         rhs_batch,
                         accum_dtype,
-                        output_dtype,
+                        ..
                     },
                 inputs: x,
                 output,
                 ..
-            // A narrowing cast of a dot's sole use becomes the dot's output dtype.
-            }) if matched
-                && accum_dtype == output_dtype
-                && accum_dtype.is_float()
-                && new_dtype.size_of() < output_dtype.size_of()
-                && out.type_of(x[0]).dtype == *new_dtype
-                && once.get(output) == Some(&true) =>
+            // The late fold: a dot's sole reader, a cast narrowing it to an operand's dtype, becomes
+            // the dot's rounding, so its kernel writes the narrow result and no wide one.
+            }) if matched && once.get(output) == Some(&true) && rounds(out, dot, x, *new_dtype) =>
             {
                 let dot = DotGeneral {
                     lhs_contracting: lhs_contracting.clone(),
@@ -242,6 +240,60 @@ fn rewrite(
         },
         _ => None,
     }
+}
+
+/// Whether a cast to `dtype` of `dot` (on `operands` of `graph`), its sole reader, is the dot's rounding:
+/// the dot writes its accumulator and the cast narrows it to an operand's dtype, which the late fold
+/// makes the dot's output.
+pub(crate) fn rounds(graph: &Graph, dot: &Primitive, operands: &[Var], dtype: DType) -> bool {
+    let Primitive::DotGeneral {
+        accum_dtype,
+        output_dtype,
+        ..
+    } = dot
+    else {
+        return false;
+    };
+
+    accum_dtype == output_dtype
+        && dtype.size_of() < accum_dtype.size_of()
+        && operands.iter().any(|&v| graph.type_of(v).dtype == dtype)
+}
+
+/// Per node of `graph`, for a dot whose sole reader is its rounding cast ([`rounds`]): that cast's
+/// index. Passes before the late fold read such a dot and its cast as one rounded product.
+pub(crate) fn roundings(graph: &Graph) -> Vec<Option<usize>> {
+    let nodes = graph.nodes();
+    let mut reads = vec![0usize; graph.types.len()];
+    let mut producer = vec![None; graph.types.len()];
+
+    for &v in nodes.iter().flat_map(|n| &n.inputs).chain(graph.outputs()) {
+        reads[v] += 1;
+    }
+
+    for (i, n) in nodes.iter().enumerate() {
+        producer[n.output] = Some(i);
+    }
+
+    let mut roundings = vec![None; nodes.len()];
+
+    for (c, n) in nodes.iter().enumerate() {
+        let Primitive::Cast { new_dtype } = &n.primitive else {
+            continue;
+        };
+
+        let Some(d) = producer[n.inputs[0]] else {
+            continue;
+        };
+
+        let dot = &nodes[d];
+
+        if reads[dot.output] == 1 && rounds(graph, &dot.primitive, &dot.inputs, *new_dtype) {
+            roundings[d] = Some(c);
+        }
+    }
+
+    roundings
 }
 
 /// Node in `out` producing `v`.
@@ -383,7 +435,8 @@ fn moved(
     Some(out.apply(then, &[x]).expect("the primitive moved past"))
 }
 
-/// `v` cast to `dtype`, pushing the cast through single-use layout ops to their operands.
+/// `v` cast to `dtype`, pushing the cast through single-use layout ops to their operands (and into a dot
+/// it rounds).
 fn cast_up(
     out: &mut Graph,
     producer: &HashMap<Var, usize>,
@@ -413,7 +466,16 @@ fn cast_up(
             out.apply(p, &ins)
                 .expect("a layout primitive of its operands cast")
         }
-        None => out.apply(Cast { new_dtype: dtype }, &[v]).expect("a cast"),
+        None => {
+            let cast = Cast { new_dtype: dtype };
+
+            // A dot's rounding pushed up to it folds into it, as the cast's own rewrite would.
+            match rewrite(out, producer, once, true, &cast, &[v]) {
+                Some(Rewrite::Node(p, ins)) => out.apply(p, &ins).expect("the dot, rounded"),
+                Some(Rewrite::Value(x)) => x,
+                None => out.apply(cast, &[v]).expect("a cast"),
+            }
+        }
     }
 }
 
