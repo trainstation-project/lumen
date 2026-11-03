@@ -10,6 +10,7 @@ mod fusion;
 mod gemm;
 mod horizontal;
 mod place_concats;
+mod scatter_add;
 mod split_k;
 mod wide_rows;
 
@@ -28,6 +29,7 @@ use fusion::{Fusion, PlaceViews};
 pub(crate) use gemm::{Epilogue, set_gemm};
 use horizontal::HorizontalFusion;
 use place_concats::PlaceConcats;
+use scatter_add::Scatter;
 use split_k::SplitK;
 use wide_rows::WideRows;
 
@@ -100,12 +102,14 @@ pub enum Template {
     /// `cross_entropy_combine_kernel` (lumen.codegen.dot_general.triton.linear_cross_entropy_kernel): one row a
     /// program, its `tiles` partials `BLOCK_SIZE` at a time.
     CrossEntropyCombine { tiles: usize },
-    /// `scatter_add_kernel` (lumen.codegen.scatter_add.triton): blocks of the positions off the `length`-long
-    /// axis (`after` inner ones per outer), adding `picks` updates at each.
+    /// `kernel`, one of the scatter-add kernels (lumen.codegen.scatter_add.triton.kernel), of a scatter-add
+    /// of `picks` updates along an operand viewed as `[outer, length, after]`.
     ScatterAdd {
+        outer: usize,
         length: usize,
         after: usize,
         picks: usize,
+        kernel: Scatter,
     },
     /// `scan_kernel` (lumen.codegen.scan.triton.kernel): a tile of the lines a program, scanned as `Scan`
     /// tiles them.
@@ -132,8 +136,8 @@ impl Template {
                 "lumen.codegen.dot_general.triton.linear_cross_entropy_kernel",
                 "cross_entropy_combine_kernel",
             ),
-            Template::ScatterAdd { .. } => {
-                ("lumen.codegen.scatter_add.triton", "scatter_add_kernel")
+            Template::ScatterAdd { kernel, .. } => {
+                ("lumen.codegen.scatter_add.triton.kernel", kernel.name())
             }
             Template::Scan(_) => ("lumen.codegen.scan.triton.kernel", "scan_kernel"),
         }
@@ -141,8 +145,8 @@ impl Template {
 
     /// The kernel's constexprs for a launch over `n` outputs in `segments` (empty for one segment): a
     /// loop's segments' element counts, a transpose's output sides and tile, an update's element count, a
-    /// cross entropy's rows and tiles, a scatter-add's positions off the axis and its sizes, a scan's lines
-    /// and tiling.
+    /// cross entropy's rows and tiles, a scatter-add's count (update elements, picks, positions or rows
+    /// programs) and sizes, a scan's lines and tiling.
     pub fn constexprs(self, n: usize, segments: &[usize]) -> Vec<(&'static str, Constexpr)> {
         match self {
             Template::Elementwise => {
@@ -163,11 +167,14 @@ impl Template {
                 vec![("N", Constexpr::Int(n)), ("TILES", Constexpr::Int(tiles))]
             }
             Template::ScatterAdd {
+                outer,
                 length,
                 after,
                 picks,
+                ..
             } => vec![
                 ("N", Constexpr::Int(n)),
+                ("OUTER", Constexpr::Int(outer)),
                 ("LENGTH", Constexpr::Int(length)),
                 ("AFTER", Constexpr::Int(after)),
                 ("PICKS", Constexpr::Int(picks)),
@@ -394,17 +401,21 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
     let mut plan = Plan::compile_with(&fused, &plan);
     plan.packed = packed;
     plan.interleaved = interleaved;
-    let kernels = plan.steps().iter().map(loop_kernel);
+    let deterministic = config.deterministic;
+    let kernels = plan.steps().iter().map(|s| loop_kernel(s, deterministic));
     plan.triton = Some(kernels.collect());
 
     if options.config.cuda.autotune {
         let tuner = Autotuner {
-            timer: Events { device },
+            timer: Events {
+                device,
+                deterministic,
+            },
         };
 
         tuner.tune(&mut gemm::Gemms, &mut plan)?;
         tuner.tune(&mut Tiles, &mut plan)?;
-        tuner.tune(&mut Loops, &mut plan)?;
+        tuner.tune(&mut Loops { deterministic }, &mut plan)?;
     }
 
     Ok(plan)
@@ -420,13 +431,34 @@ fn templated(kind: &str, key: &str) -> String {
     format!("{kind}_{:016x}", hasher.finish())
 }
 
-/// Generates the loop kernel for `step`, or `None` for GEMMs and steps without a Triton loop kernel.
-fn loop_kernel(step: &Step) -> Option<Kernel> {
+/// Whether Triton's `tl.atomic_add` adds elements of `dtype`: floats from 16 to 64 bits and 32- or 64-bit
+/// integers, not bool, float8 or narrower integers.
+fn atomic_add(dtype: DType) -> bool {
+    matches!(
+        dtype,
+        DType::F16
+            | DType::BF16
+            | DType::F32
+            | DType::F64
+            | DType::I32
+            | DType::I64
+            | DType::U32
+            | DType::U64
+    )
+}
+
+/// Generates the loop kernel for `step`, or `None` for GEMMs and steps without a Triton loop kernel;
+/// unless `deterministic`, a scatter-add of a dtype with atomic adds adds each update element atomically,
+/// otherwise it sorts its picks by position and adds a row's in order.
+fn loop_kernel(step: &Step, deterministic: bool) -> Option<Kernel> {
     let by_value: Vec<bool> = step
         .inputs
         .iter()
         .map(|(b, _)| matches!(b, Buffer::Scalar(_)))
         .collect();
+
+    // Whether a scatter-add adds atomically; any other step ignores it.
+    let atomic = !deterministic && atomic_add(step.output.1.dtype);
 
     let (name, source, lanes, splits) = match &step.primitive {
         // A chain of updates runs in the dynamic-update-slice template, its `BODY` generated at launch.
@@ -481,8 +513,13 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
         Primitive::ScatterAdd { .. } => {
             let types: Vec<String> = step.inputs.iter().map(|(_, t)| t.to_string()).collect();
 
+            let kind = match atomic {
+                true => "scatter_add_atomic",
+                false => "scatter_add_sorted",
+            };
+
             (
-                templated("scatter_add", &format!("{:?} {types:?}", step.primitive)),
+                templated(kind, &format!("{:?} {types:?}", step.primitive)),
                 String::new(),
                 1,
                 1,
@@ -513,9 +550,14 @@ fn loop_kernel(step: &Step) -> Option<Kernel> {
             let x = &step.inputs[0].1.shape;
 
             Some(Template::ScatterAdd {
+                outer: x[..*axis].iter().product(),
                 length: x[*axis],
                 after: x[axis + 1..].iter().product(),
                 picks: step.inputs[1].1.numel(),
+                kernel: match atomic {
+                    true => Scatter::Atomic,
+                    false => Scatter::Rows,
+                },
             })
         }
         Primitive::Fusion { name, body, .. }
@@ -559,17 +601,25 @@ fn scan(step: &Step) -> Option<Scan> {
     Some(scan.expect("a Triton scan of every cumsum"))
 }
 
-/// Autotuning candidates for loop kernels.
-struct Loops;
+/// Autotuning candidates for loop kernels, of the plan's `cuda.deterministic`.
+struct Loops {
+    deterministic: bool,
+}
 
 impl Kernels for Loops {
     type Config = LoopConfig;
 
-    /// Loop configs whose block covers the kernel's lanes and splits.
+    /// Loop configs whose block covers the kernel's lanes and splits; none for a scatter-add.
     fn configs(&self, step: &Step) -> Vec<LoopConfig> {
-        let Some(kernel) = loop_kernel(step) else {
+        let Some(kernel) = loop_kernel(step, self.deterministic) else {
             return Vec::new();
         };
+
+        // Timed on zeroed indices, every update would add into one position, measuring contention on it
+        // rather than the kernels: a scatter-add's launch with the configs in its config.rs.
+        if let Some(Template::ScatterAdd { .. }) = kernel.template {
+            return Vec::new();
+        }
 
         loop_configs(kernel.lanes.max(kernel.splits.next_power_of_two()))
     }
@@ -580,9 +630,10 @@ impl Kernels for Loops {
     }
 }
 
-/// Times steps on `device` with CUDA events.
+/// Times steps on `device` with CUDA events, their loop kernels those of the plan's `cuda.deterministic`.
 struct Events {
     device: Device,
+    deterministic: bool,
 }
 
 impl Timer for Events {
@@ -622,7 +673,12 @@ impl Timer for Events {
             .map(|(_, ty)| zeros(ty, self.device))
             .collect();
 
-        Ok(Some((loop_kernel(step), inputs, out, outs)))
+        Ok(Some((
+            loop_kernel(step, self.deterministic),
+            inputs,
+            out,
+            outs,
+        )))
     }
 
     /// One run of the step.
@@ -717,7 +773,7 @@ pub(crate) fn run(
             };
 
             // Grid size: outputs, or a row fusion's rows (its row groups with partials), or a tiled
-            // transpose's tiles, or lines for a scan, or picks for a scatter.
+            // transpose's tiles, or lines for a scan (a scatter-add sizes its own launches).
             let n = match &step.primitive {
                 Primitive::Fusion { name, body, .. } if name == ROW => {
                     Some(row_groups(body).unwrap_or(row_count(body)))
@@ -728,7 +784,6 @@ pub(crate) fn run(
                 Primitive::Cumsum { axis, .. } => out.numel().checked_div(out.shape()[*axis]),
                 Primitive::DynamicUpdateSlice => Some(inputs[1].numel()),
                 Primitive::Fusion { name, .. } if name == UPDATES => Some(inputs[1].numel()),
-                Primitive::ScatterAdd { axis } => out.numel().checked_div(out.shape()[*axis]),
                 _ => Some(out.numel()),
             };
 
@@ -744,6 +799,10 @@ pub(crate) fn run(
                 && out.data_ptr() != inputs[0].data_ptr()
             {
                 copy(out, &inputs[0])?;
+            }
+
+            if let Some(Template::ScatterAdd { .. }) = kernel.template {
+                return scatter_add::run(kernel, launches, inputs, out);
             }
 
             let n = n.unwrap_or(0);
