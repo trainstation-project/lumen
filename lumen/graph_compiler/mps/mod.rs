@@ -23,6 +23,7 @@ use super::common::alone::{Alone, Lone};
 use super::common::chunked_cross_entropy::ChunkedCrossEntropy;
 use super::common::clamp_indices::ClampIndices;
 use super::common::dot_strength::DotStrength;
+use super::common::gemm_linear_reordering::GemmLinearReordering;
 use super::common::linear_cross_entropy::LinearCrossEntropy;
 use super::common::merge_dots::{Blocks, MergeDots, Packs, Target};
 use super::common::merge_dots_backward::MergeDotsBackward;
@@ -275,6 +276,11 @@ fn pipeline<'a>(config: &MpsConfig) -> Pipeline<MpsModule<'a>> {
 
     if config.neural_engine {
         p.add(ane::NeuralEngine);
+    }
+
+    // A matmul operand's factor along the kept axes (a norm's 1 / rms, a weight's per-channel scale) moves to its output, for its epilogue.
+    if config.gemm_linear_reordering {
+        p.add(GemmLinearReordering);
     }
 
     if config.split_k {
