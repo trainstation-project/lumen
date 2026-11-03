@@ -39,7 +39,8 @@ struct Uses {
 }
 
 /// Whether `node` is a matmul this pass can reorder: an unbatched float matmul of a rank-2+ lhs contracted
-/// on its last axis with a 2-D rhs contracted on one axis.
+/// on its last axis (or a 2-D lhs on either, `x` or `x.T`) with a 2-D rhs contracted on one axis (`W` or
+/// `W.T`).
 fn plain(graph: &Graph, node: &Node) -> bool {
     let Primitive::DotGeneral {
         lhs_contracting,
@@ -54,27 +55,35 @@ fn plain(graph: &Graph, node: &Node) -> bool {
 
     let (l, r) = (graph.type_of(node.inputs[0]), graph.type_of(node.inputs[1]));
 
+    let lhs = match l.shape.len() {
+        2 => lhs_contracting.len() == 1,
+        n => n > 2 && *lhs_contracting == [n - 1],
+    };
+
     node.inputs[0] != node.inputs[1]
         && lhs_batch.is_empty()
-        && l.shape.len() >= 2
-        && *lhs_contracting == [l.shape.len() - 1]
+        && lhs
         && r.shape.len() == 2
         && rhs_contracting.len() == 1
         && accum_dtype.is_float()
 }
 
-/// The axes of `node`'s operand `side` (0 the lhs, 1 the rhs) the matmul keeps: the lhs's rows, or the
-/// rhs's columns.
+/// The axes of `node`'s operand `side` (0 the lhs, 1 the rhs) the matmul keeps: the lhs's uncontracted
+/// axes (the output's rows), or the rhs's uncontracted one (its columns).
 fn kept(graph: &Graph, node: &Node, side: usize) -> Vec<usize> {
     let Primitive::DotGeneral {
-        rhs_contracting, ..
+        lhs_contracting,
+        rhs_contracting,
+        ..
     } = &node.primitive
     else {
         unreachable!("a matmul")
     };
 
     match side {
-        0 => (0..graph.type_of(node.inputs[0]).shape.len() - 1).collect(),
+        0 => (0..graph.type_of(node.inputs[0]).shape.len())
+            .filter(|a| !lhs_contracting.contains(a))
+            .collect(),
         _ => vec![1 - rhs_contracting[0]],
     }
 }
@@ -196,13 +205,13 @@ fn stripped(graph: &Graph, uses: &Uses, k: usize, side: usize) -> Option<Strippe
     only_matmuls.then(|| strip(graph, uses, v, &axes)).flatten()
 }
 
-/// `factor` (of operand `side`'s kept axes, or its rank with 1s) broadcast over a matmul output of
-/// `shape`, in `dtype`: a row factor along the output's leading axes, a column factor along its last.
+/// `factor` (of operand `side`'s `kept` axes, or the operand's rank with 1s) broadcast over a matmul output
+/// of `shape`, in `dtype`: a row factor along the output's leading axes, a column factor along its last.
 fn spread(
     out: &mut Graph,
     graph: &Graph,
     map: &[Var],
-    (factor, side): (Var, usize),
+    (factor, side, kept): (Var, usize, &[usize]),
     shape: &[usize],
     dtype: DType,
 ) -> Var {
@@ -215,16 +224,23 @@ fn spread(
         f = apply(out, Primitive::Cast { new_dtype: dtype }, &[f]);
     }
 
-    // A row factor kept `[rows..., 1]` (a keepdim sum) broadcasts as it is, as a program writing `x W / s`
-    // would; a column factor kept with the rhs's rank becomes its column vector first.
-    let dims: Vec<usize> = match (side, source.shape.len()) {
-        (0, n) if n == rows => (0..rows).collect(),
-        (0, _) => (0..=rows).collect(),
-        (_, 1) => vec![rows],
-        _ => {
-            let new_sizes = vec![shape[rows]];
+    let at: Vec<usize> = match side {
+        0 => (0..rows).collect(),
+        _ => vec![rows],
+    };
+
+    // A row factor kept `[rows..., 1]` (a keepdim sum of `x`'s rows) broadcasts as it is, as a program
+    // writing `x W / s` would; one kept with the operand's rank otherwise (`[1, m]` of `x.T`, `[1, n]` or
+    // `[n, 1]` of a weight) becomes the vector of its kept axes first.
+    let leading = side == 0 && kept.iter().copied().eq(0..rows);
+
+    let dims = match source.shape.len() == kept.len() {
+        true => at,
+        false if leading => (0..=rows).collect(),
+        false => {
+            let new_sizes = at.iter().map(|&a| shape[a]).collect();
             f = apply(out, Primitive::Reshape { new_sizes }, &[f]);
-            vec![rows]
+            at
         }
     };
 
@@ -312,7 +328,15 @@ pub(crate) fn gemm_linear_reordering(graph: &Graph) -> Graph {
 
         for (side, s) in reordered[k].iter().enumerate() {
             let Some((_, (f, divide))) = s else { continue };
-            let f = spread(&mut out, graph, &map, (*f, side), &shape, *accum_dtype);
+            let axes = kept(graph, node, side);
+            let f = spread(
+                &mut out,
+                graph,
+                &map,
+                (*f, side, &axes),
+                &shape,
+                *accum_dtype,
+            );
             let op = if *divide {
                 Primitive::Div
             } else {

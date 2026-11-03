@@ -531,20 +531,25 @@ def test_gemm_linear_reordering_keeps_the_values(device, triton_on_cuda):
     """With ``gemm_linear_reordering`` on, a factor of a matmul's operand
     constant along the contracted axis moves to its output: an RMS norm's
     ``1 / rms`` before a bfloat16 projection (rounded unscaled, so to
-    bfloat16's precision) and a weight's per-channel dequantization scale
-    (to float32's). Off by default."""
+    bfloat16's precision), a weight's per-channel dequantization scale
+    (to float32's), and both factors at once of transposed operands
+    (``(z · c).T @ (v · u).T``). Off by default."""
     rng = np.random.default_rng(0)
-    x, g, w, q, s = (
-        rng.standard_normal(shape).astype(np.float32) for shape in ((64, 256), (256,), (128, 256), (256, 96), (96,))
-    )
+    shapes = ((64, 256), (256,), (128, 256), (256, 96), (96,), (256, 64), (64,), (96, 256), (96,))
+    x, g, w, q, s, z, c, v, u = (rng.standard_normal(shape).astype(np.float32) for shape in shapes)
 
-    def block(x, g, w, q, s):
-        """An RMS norm then a bfloat16 projection, and a matmul of a per-channel scaled weight."""
+    def block(x, g, w, q, s, z, c, v, u):
+        """An RMS norm then a bfloat16 projection, a matmul of a per-channel scaled weight, and one of
+        transposed operands scaled along their kept axes."""
         h = F.rms_norm(x, 256, g).bfloat16()
-        return F.matmul(h, w.bfloat16().t(), "float32", "float32"), F.matmul(x, q * s, "float32", "float32")
+        return (
+            F.matmul(h, w.bfloat16().t(), "float32", "float32"),
+            F.matmul(x, q * s, "float32", "float32"),
+            F.matmul((z * c).t(), (v * u.reshape(96, 1)).t(), "float32", "float32"),
+        )
 
     try:
-        args = [lumen.from_numpy(a).to(device) for a in (x, g, w, q, s)]
+        args = [lumen.from_numpy(a).to(device) for a in (x, g, w, q, s, z, c, v, u)]
     except RuntimeError as e:
         pytest.skip(str(e))
     config = getattr(lumen.config.compiler, device)
@@ -558,6 +563,7 @@ def test_gemm_linear_reordering_keeps_the_values(device, triton_on_cuda):
         config.gemm_linear_reordering = False
     dots = [s["label"] for s in steps if s["label"].startswith("dot_general")]
     # Each matmul applies its moved factor in its epilogue.
-    assert len(dots) == 2 and all(d.endswith("broadcast_in_dim → mul") for d in dots), dots
-    for got, want, tol in zip(moved, exact, (2.0**-7, 1e-5)):
+    assert len(dots) == 3 and all(d.endswith("broadcast_in_dim → mul") for d in dots), dots
+    assert any(d.count("mul") == 2 for d in dots), dots
+    for got, want, tol in zip(moved, exact, (2.0**-7, 1e-5, 1e-5)):
         np.testing.assert_allclose(got, want, atol=tol * np.abs(want).max())
