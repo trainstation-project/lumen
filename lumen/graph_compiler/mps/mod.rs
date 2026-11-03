@@ -1083,8 +1083,43 @@ pub(super) fn encode_with(
                 _ => Grid::Groups([n.div_ceil(gemm::ROW_TILE), m.div_ceil(gemm::ROW_TILE), 1]),
             };
 
+            // The profiler sees each pass's own reads and writes: the partials pass writes the dot's
+            // value and the tiles' partials, which the combine reads back.
+            let passes = gemm::tile_passes(body).expect("a multi-tile row matmul");
+            let strides = step.input_strides();
+
+            let io = |reads: &[usize], scratch: &[TensorType]| {
+                let types = reads.iter().map(|&i| step.inputs[i].1.clone());
+                let read_strides = reads.iter().map(|&i| strides[i].clone());
+
+                (
+                    types.chain(scratch.iter().cloned()).collect(),
+                    read_strides
+                        .chain(scratch.iter().map(|t| contiguous_strides(&t.shape)))
+                        .collect(),
+                )
+            };
+
+            crate::profiler::next_launch(
+                crate::graph::intern(format!("{} (partials)", step.label)),
+                || {
+                    let (inputs, input_strides) = io(&passes.partials, &[]);
+
+                    crate::profiler::IoTypes {
+                        inputs,
+                        outputs: passes.scratch.clone(),
+                        input_strides,
+                        output_strides: passes
+                            .scratch
+                            .iter()
+                            .map(|t| contiguous_strides(&t.shape))
+                            .collect(),
+                    }
+                },
+            );
+
             launch(
-                &format!("{name}_tiles"),
+                &format!("{name}_partials"),
                 &first,
                 &args,
                 grid,
@@ -1092,13 +1127,29 @@ pub(super) fn encode_with(
                 step.label,
             )?;
 
+            crate::profiler::next_launch(
+                crate::graph::intern(format!("{} (combine)", step.label)),
+                || {
+                    let (inputs, input_strides) = io(&passes.combine, &passes.scratch);
+                    let outputs = std::iter::once(&step.output).chain(&step.extra_outputs);
+
+                    crate::profiler::IoTypes {
+                        inputs,
+                        outputs: outputs.map(|(_, ty)| ty.clone()).collect(),
+                        input_strides,
+                        output_strides: step.output_strides(),
+                    }
+                },
+            );
+
             let mut rows = inputs.to_vec();
             rows.push(dotv);
             rows.push(output.cast_const());
             rows.extend(extra);
             rows.extend(&tiles);
             let grid = Grid::Groups([row_groups(body), 1, 1]);
-            return launch(name, &rows, &scalars, grid, keep, step.label);
+            let combine = format!("{name}_combine");
+            return launch(&combine, &rows, &scalars, grid, keep, step.label);
         }
 
         let (kernel, grid) = match gemm::row_dot(body) {

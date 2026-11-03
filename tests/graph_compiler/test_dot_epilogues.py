@@ -120,6 +120,41 @@ def _softmax_block(x, wo, r, norm, w1):
     return F.matmul(F.softmax(x * norm, dim=-1).bfloat16(), w1.t().bfloat16(), "float32", "float32")
 
 
+@pytest.mark.mps
+def test_wide_row_matmul_profiles_its_partials_and_combine():
+    """An RMS norm of a matmul's rows wider than its 64-wide tiles runs as two
+    launches, profiled as LCE's are: ``(partials)``, reading the matmul's
+    operands and the residual and writing the product and each 64-wide
+    tile's sums of squares (``[rows, 10]``), then ``(combine)``, reading
+    those, the residual and the norm's weight, not the matmul's operands,
+    and writing the step's outputs."""
+    from lumen.profiler import ProfilerActivity, profile
+
+    m, d = 256, 640
+    rng = np.random.default_rng(0)
+    shapes = [(m, d), (d, d), (m, d), (d,), (96, d)]
+    try:
+        args = [lumen.from_numpy(rng.standard_normal(s).astype(np.float32)).to("mps") for s in shapes]
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    f = lumen.compile(_rms_block)
+    f(*args)
+    steps = lumen.graph_compiler.Plan(lumen.make_graph(_rms_block)(*args), "mps").steps()
+    (step,) = [s for s in steps if "rsqrt" in s["label"]]
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS], record_shapes=True) as prof:
+        f(*args)
+        lumen.mps.synchronize()
+    partials, combine = [e for e in prof.events() if e["kind"] == "gpu" and "rsqrt" in e["name"]]
+    assert partials["name"] == step["label"] + " (partials)", partials["name"]
+    assert combine["name"] == step["label"] + " (combine)", combine["name"]
+    assert partials["kernel"].endswith("_partials") and combine["kernel"].endswith("_combine")
+    scratch = [("float32", [m, d]), ("float32", [m, d // 64])]
+    residual, weight, operands = ("float32", [m, d]), ("float32", [d]), [("bfloat16", [m, d]), ("bfloat16", [d, d])]
+    assert partials["inputs"] == [residual, *operands] and partials["outputs"] == scratch, partials
+    assert combine["inputs"] == [residual, weight, *scratch], combine
+    assert combine["outputs"] == [tuple(step["output"][1:]), *(tuple(o[1:]) for o in step["extra_outputs"])]
+
+
 @pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("f", [_rms_block, _layer_norm_block, _softmax_block], ids=["rms", "layer", "softmax"])
 @pytest.mark.parametrize("m, d", [(1024, 64), (1000, 48), (37, 64), (512, 128), (300, 200), (1000, 1000), (256, 4096)])

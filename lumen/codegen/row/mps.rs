@@ -586,7 +586,9 @@ pub(crate) fn row_kernel(
     };
 
     let (params, _) = io_params(body, by_value, metal_type(out_type.dtype), &extra);
-    let signature = format!("kernel void NAME({params}{THREAD_ARGS})");
+    // A wide row matmul's row kernel combines the partials pass's tiles.
+    let kernel = if wide { "NAME_combine" } else { "NAME" };
+    let signature = format!("kernel void {kernel}({params}{THREAD_ARGS})");
     let staged = body.inputs().len() - 1;
 
     // A fused matmul either stages the whole row block in one kernel or, for wide rows, adds a

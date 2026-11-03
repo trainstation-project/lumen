@@ -14,7 +14,7 @@ use crate::codegen::kinds::gemm_dot;
 use crate::codegen::row::mps::*;
 use crate::codegen::store::mps::load;
 use crate::codegen::utils::mps::*;
-use crate::graph::{Graph, Node, Primitive, Var};
+use crate::graph::{Graph, Node, Primitive, TensorType, Var};
 use crate::graph_compiler::MpsConfig;
 
 /// Output columns one threadgroup tile covers; wider rows are reduced across tiles.
@@ -111,7 +111,83 @@ pub(crate) fn tile_scratch(body: &Graph) -> Option<(Vec<usize>, usize)> {
     Some((offsets, at))
 }
 
-/// Generates `NAME_tiles`, the first pass of a multi-tile row matmul: computes the dot, stores
+/// A multi-tile row matmul's two launches, as the profiler shows them: the body inputs each reads (by
+/// position) and the scratch values between them.
+pub(crate) struct TilePasses {
+    /// Inputs the partials pass reads: the dot's operands and what its tile reductions read.
+    pub(crate) partials: Vec<usize>,
+    /// Inputs the combine pass reads: what the outputs read past the dot's value and the partials.
+    pub(crate) combine: Vec<usize>,
+    /// The dot's value (`[rows, n]`) and each tile reduction's partials (`[rows, tiles]`), as the
+    /// partials pass writes them and the combine reads them.
+    pub(crate) scratch: Vec<TensorType>,
+}
+
+/// [`TilePasses`] of `body`, a multi-tile row matmul, or `None` when its rows fit one tile.
+pub(crate) fn tile_passes(body: &Graph) -> Option<TilePasses> {
+    let dot = row_dot(body)?;
+    let (rows, n) = row_shape(body);
+
+    if n <= ROW_TILE {
+        return None;
+    }
+
+    let reductions = row_reductions(body);
+    let tiled: Vec<Var> = tile_reductions(body)?
+        .iter()
+        .map(|&k| reductions[k].output)
+        .collect();
+    let tiles = n.div_ceil(ROW_TILE);
+    let mut producer = vec![None; body.types.len()];
+
+    for node in body.nodes() {
+        producer[node.output] = Some(node);
+    }
+
+    // The inputs reached walking back from `roots`, not past the values in `stops` (read from scratch).
+    let reads = |roots: Vec<Var>, stops: &[Var]| {
+        let mut seen = vec![false; body.types.len()];
+        let mut stack = roots;
+
+        while let Some(v) = stack.pop() {
+            if std::mem::replace(&mut seen[v], true) || stops.contains(&v) {
+                continue;
+            }
+
+            if let Some(node) = producer[v] {
+                stack.extend(&node.inputs);
+            }
+        }
+
+        (0..body.inputs().len())
+            .filter(|&i| seen[body.inputs()[i]])
+            .collect::<Vec<_>>()
+    };
+
+    let mut stops = vec![dot.output];
+    stops.extend(&tiled);
+
+    let scratch = std::iter::once(TensorType::new(body.type_of(dot.output).dtype, &[rows, n]))
+        .chain(
+            tiled
+                .iter()
+                .map(|&v| TensorType::new(body.type_of(v).dtype, &[rows, tiles])),
+        )
+        .collect();
+
+    Some(TilePasses {
+        partials: reads(
+            std::iter::once(dot.output)
+                .chain(tiled.iter().copied())
+                .collect(),
+            &[],
+        ),
+        combine: reads(body.outputs().to_vec(), &stops),
+        scratch,
+    })
+}
+
+/// Generates `NAME_partials`, the first pass of a multi-tile row matmul: computes the dot, stores
 /// its value to `dotv` and each per-tile partial of the `first` reductions to `tiles{k}`.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn gemm_tiles(
@@ -224,7 +300,7 @@ pub(crate) fn gemm_tiles(
         return formatdoc!(
             "
             [[max_total_threads_per_threadgroup({threads})]]
-            kernel void NAME_tiles({params}constant ulong *p [[buffer({first_arg})]],
+            kernel void NAME_partials({params}constant ulong *p [[buffer({first_arg})]],
                                    {THREAD_ARGS}) {{
                 {product}
                 threadgroup_barrier(mem_flags::mem_device);
@@ -253,7 +329,7 @@ pub(crate) fn gemm_tiles(
 
     formatdoc!(
         "
-        struct NAME_tiles_staging {{
+        struct NAME_partials_staging {{
             threadgroup {o} *staged;
             device {o} *dotv;
             ulong M, N;
@@ -285,16 +361,16 @@ pub(crate) fn gemm_tiles(
                 threadgroup_barrier(mem_flags::mem_threadgroup);
             }}
         }};
-        kernel void NAME_tiles({params}constant ulong *p [[buffer({first_arg})]],
+        kernel void NAME_partials({params}constant ulong *p [[buffer({first_arg})]],
                                {THREAD_ARGS}) {{
             threadgroup {t} lt[SG_LT({tile}, SG_BK, {t}, {accum})], rt[SG_RT(SG_BK, {tile}, {t})];
             threadgroup {o} staged[{tile} * {tile}];
             matmul_sg_impl<{t}, {accum}, {o}, {tile}, {tile}, SG_BK, {o},
-                           NAME_tiles_staging, false, false, true>(
+                           NAME_partials_staging, false, false, true>(
                 {lhs}, {rhs}, (device {o} *)nullptr, p,
                 lt, rt,
                 group, tid.y * 16 + tid.x, sg, lane,
-                NAME_tiles_staging{{staged, dotv, p[0], p[1]}});
+                NAME_partials_staging{{staged, dotv, p[0], p[1]}});
             const ulong m0 = ulong(group.y) * {tile}, n0 = ulong(group.x) * {tile};
             for (uint rr = sg; rr < {tile}u; rr += {SIMD_ROWS}u) {{
                 uint row = uint(m0) + rr;

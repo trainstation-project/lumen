@@ -10,7 +10,7 @@ import lumen
 import lumen.functional as F
 from lumen.profiler import ProfilerActivity, profile, record_function, supported_activities
 
-VOCAB, SEQ, DIM, HEADS, HIDDEN, LAYERS = 1984, 32, 64, 4, 256, 1
+VOCAB, SEQ, DIM, HEADS, HIDDEN, LAYERS = 1984, 32, 640, 4, 256, 2
 BATCH, STEPS, DROPOUT = 32, 300, 0
 ACCUM = 1
 PROFILED_STEPS = 10
