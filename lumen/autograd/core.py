@@ -13,9 +13,10 @@ class UndefinedPrimal:
     """A linear operand of a node being transposed: only its type is known
     (JAX's ``ad.UndefinedPrimal``)."""
 
-    def __init__(self, shape, dtype):
-        """Records the operand's shape and dtype."""
-        self.shape, self.dtype = tuple(shape), dtype
+    def __init__(self, shape, dtype, var=None):
+        """Records the operand's shape and dtype, and its value in the
+        linear program (``var``) if known."""
+        self.shape, self.dtype, self.var = tuple(shape), dtype, var
 
     @property
     def ndim(self):

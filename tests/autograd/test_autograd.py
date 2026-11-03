@@ -39,7 +39,7 @@ CASES = {
     "matmul": (lambda x, y: F.sum(F.tanh(F.matmul(x, y, x.dtype, x.dtype))), [(3, 4), (4, 5)]),
     "batched matmul": (lambda x, y: F.sum(F.tanh(F.matmul(x, y, x.dtype, x.dtype))), [(2, 3, 4), (4, 5)]),
     "dot_general": (
-        lambda x, y: F.sum(F.tanh(prims.dot_general(x, y, (((2, 0), (2, 1)), ((1,), (0,))), "float64", "float64"))),
+        lambda x, y: F.sum(F.tanh(prims.dot_general(x, y, (((2, 0), (2, 1)), ((1,), (0,))), "float64"))),
         [(4, 2, 3), (2, 4, 3, 5)],
     ),
     "sum mean amax": (lambda x, y: F.sum(F.sum(x, -1) * F.mean(y, 0)[:3] + F.amax(x * y, -1)), [(3, 4), (3, 4)]),

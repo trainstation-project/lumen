@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 
+use super::simplify::rounds;
 use crate::DType;
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var};
 use crate::graph_compiler::constant;
@@ -460,8 +461,9 @@ fn attentions_in(m: Matcher<'_>, runtime_offsets: bool) -> Vec<Attention> {
     found
 }
 
-/// Each attention traced in `graph` with the values computed between its operands and output.
-pub(crate) fn traced(graph: &Graph) -> Vec<(Attention, Vec<Var>)> {
+/// Each attention traced in `graph` with its output (the second dot's, or its rounding cast's) and the
+/// values computed between its operands and output.
+pub(crate) fn traced(graph: &Graph) -> Vec<(Attention, Var, Vec<Var>)> {
     let nodes = graph.nodes();
     let mut producer = vec![None; graph.types.len()];
 
@@ -469,13 +471,16 @@ pub(crate) fn traced(graph: &Graph) -> Vec<(Attention, Vec<Var>)> {
         producer[node.output] = Some(i);
     }
 
+    let m = Matcher::new(graph);
+
     attentions(graph, false)
         .into_iter()
         .map(|a| {
             let (d1, d2) = (&nodes[a.dot1], &nodes[a.dot2]);
             let operands = [d1.inputs[0], d1.inputs[1], d2.inputs[1]];
             let mut members: Vec<Var> = Vec::new();
-            let mut stack = vec![d2.output];
+            let out = nodes[m.rounding(a.dot2).unwrap_or(a.dot2)].output;
+            let mut stack = vec![out];
 
             while let Some(v) = stack.pop() {
                 if operands.contains(&v) || members.contains(&v) {
@@ -488,7 +493,7 @@ pub(crate) fn traced(graph: &Graph) -> Vec<(Attention, Vec<Var>)> {
             }
 
             members.sort_unstable();
-            (a, members)
+            (a, out, members)
         })
         .collect()
 }
@@ -568,13 +573,14 @@ pub(crate) fn fuse(
             // Written through the dot's one transpose, its other readers read it transposed back: they
             // must come after the fusion, and the chain must leave the written value to transpose.
             let nodes = graph.nodes();
-            let dot = nodes[a.dot2].output;
-            let through = epilogues.is_some_and(|e| e.transposed) && a.root == a.dot2;
+            let start = m.rounding(a.dot2).unwrap_or(a.dot2);
+            let dot = nodes[start].output;
+            let through = epilogues.is_some_and(|e| e.transposed) && a.root == start;
 
             let shared = through
-                .then(|| m.written(a.dot2, a.batch.len(), false, true))
+                .then(|| m.written(start, a.batch.len(), false, true))
                 .flatten()
-                .filter(|&(root, _)| root != a.dot2);
+                .filter(|&(root, _)| root != start);
 
             if let Some((root, out)) = shared {
                 let out_dtype = graph.type_of(nodes[root].output).dtype;
@@ -708,7 +714,9 @@ pub(crate) fn fuse(
         }
 
         // Written through its transpose, the attention's other readers read it transposed back.
-        if a.root != a.dot2 {
+        let start = m.rounding(a.dot2).unwrap_or(a.dot2);
+
+        if a.root != start {
             if raw.is_none() && i != a.root {
                 let new_sizes = graph.type_of(root).shape.clone();
 
@@ -727,7 +735,7 @@ pub(crate) fn fuse(
                 inverse[p] = d;
             }
 
-            map[nodes[a.dot2].output] = out
+            map[nodes[start].output] = out
                 .apply(
                     Primitive::Transpose {
                         permutation: inverse,
@@ -938,6 +946,22 @@ impl<'a> Matcher<'a> {
                 n.inputs[0]
             }
             _ => v,
+        }
+    }
+
+    /// Dot `i`'s sole reader when it is the dot's rounding cast ([`rounds`]), which the kernel does as it
+    /// stores; `None` when the dot writes its accumulator.
+    fn rounding(&self, i: usize) -> Option<usize> {
+        let (nodes, dot) = (self.graph.nodes(), &self.graph.nodes()[i]);
+
+        match self.readers[dot.output][..] {
+            [r] if !self.output[dot.output]
+                && matches!(nodes[r].primitive, Primitive::Cast { new_dtype }
+                    if rounds(self.graph, &dot.primitive, &dot.inputs, new_dtype)) =>
+            {
+                Some(r)
+            }
+            _ => None,
         }
     }
 
@@ -1475,7 +1499,13 @@ impl<'a> Matcher<'a> {
             return None;
         }
 
-        scores.push(Score::Round(ty(self.graph.nodes()[s].output).dtype));
+        // A dot writing its float32 accumulator is rounded by the cast right after it, if any.
+        let dtype = ty(self.graph.nodes()[s].output).dtype;
+
+        if dtype != DType::F32 || !matches!(scores.last(), Some(Score::Round(_))) {
+            scores.push(Score::Round(dtype));
+        }
+
         scores.reverse();
         Some((s, scores, causal))
     }
@@ -1668,7 +1698,7 @@ impl<'a> Matcher<'a> {
             return None;
         }
 
-        let (root, out) = self.written(i, nb, false, false)?;
+        let (root, out) = self.written(self.rounding(i).unwrap_or(i), nb, false, false)?;
 
         Some(Attention {
             root,

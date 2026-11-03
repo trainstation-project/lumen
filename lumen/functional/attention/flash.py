@@ -10,6 +10,7 @@ from lumen.graph.tracer import (
     TracedTensor,
     _accum_dtype,
     _common_dtype,
+    _dot,
     _lift,
     _require_float,
 )
@@ -40,7 +41,7 @@ class _FlashAttention(Function):
         if ctx.dropped is not None:
             p = where(ctx.dropped, 0.0, p * ctx.keep)
         # Contract Sk of p [B, N, Sq, Sk] with v [B, Sk, N, Hv]; the result is [B, N, Sq, Hv].
-        o = prims.dot_general(p, _expand_heads(v, n), (((3,), (1,)), ((0, 1), (0, 2))), accum, q.dtype)
+        o = _dot(p, _expand_heads(v, n), (((3,), (1,)), ((0, 1), (0, 2))), accum, q.dtype)
         o = o.permute(0, 2, 1, 3)
         ctx.scale, ctx.causal = scale, causal
         ctx.save_for_backward(q, k, v, o, lse=m + log(total))
@@ -56,16 +57,16 @@ class _FlashAttention(Function):
         dtype, accum = q.dtype, _accum_dtype(q.dtype)
         ke, ve = _expand_heads(k, n), _expand_heads(v, n)
         # Work in the transposed [B, N, Sk, Sq] layout so dK and dV contract over the query axis directly.
-        st = prims.dot_general(ke, q, (((3,), (3,)), ((0, 2), (0, 2))), accum, accum) * ctx.scale
+        st = prims.dot_general(ke, q, (((3,), (3,)), ((0, 2), (0, 2))), accum) * ctx.scale
         if ctx.causal:
             keys = prims.iota("int64", st.shape, 2)
             queries = prims.iota("int64", st.shape, 3)
             st = where(le(keys, queries + (sk - sq)), st, float("-inf"))
         pt = exp(st - lse.reshape(b, n, 1, sq))
         # D_i = rowsum(dO_i * O_i), the softmax backward's correction term, as [B, N, 1, Sq].
-        d = prims.dot_general(do, o, (((3,), (3,)), ((0, 1, 2), (0, 1, 2))), accum, accum)
+        d = prims.dot_general(do, o, (((3,), (3,)), ((0, 1, 2), (0, 1, 2))), accum)
         d = d.permute(0, 2, 1).reshape(b, n, 1, sq)
-        dpt = prims.dot_general(ve, do, (((3,), (3,)), ((0, 2), (0, 2))), accum, accum)
+        dpt = prims.dot_general(ve, do, (((3,), (3,)), ((0, 2), (0, 2))), accum)
         if ctx.dropped is not None:
             dropped = ctx.dropped.permute(0, 1, 3, 2)
             dpt = where(dropped, 0.0, dpt * ctx.keep)
@@ -73,9 +74,9 @@ class _FlashAttention(Function):
         if ctx.dropped is not None:
             pt = where(dropped, 0.0, pt * ctx.keep)
         pt = pt.to(dtype)
-        dv = prims.dot_general(pt, do, (((3,), (1,)), ((0, 1), (0, 2))), accum, accum)
-        dk = prims.dot_general(dst, q, (((3,), (1,)), ((0, 1), (0, 2))), accum, accum)
-        dq = prims.dot_general(dst, ke, (((2,), (1,)), ((0, 1), (0, 2))), accum, accum)
+        dv = prims.dot_general(pt, do, (((3,), (1,)), ((0, 1), (0, 2))), accum)
+        dk = prims.dot_general(dst, q, (((3,), (1,)), ((0, 1), (0, 2))), accum)
+        dq = prims.dot_general(dst, ke, (((2,), (1,)), ((0, 1), (0, 2))), accum)
         dq, dk, dv = (t.permute(0, 2, 1, 3) for t in (dq, dk, dv))
         # Grouped-query attention: sum the gradients of the query heads sharing each key/value head.
         if nkv != n:

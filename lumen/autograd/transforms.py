@@ -185,7 +185,7 @@ def _transpose_node(graph, name, inputs, params, out, linear_vars, cts):
     if ct is None:
         return
     operands = [
-        UndefinedPrimal(graph.type_of(v)[1], graph.type_of(v)[0]) if v in linear_vars else _value(v) for v in inputs
+        UndefinedPrimal(graph.type_of(v)[1], graph.type_of(v)[0], v) if v in linear_vars else _value(v) for v in inputs
     ]
     primitive = getattr(prims, name, None)
     if primitive not in primitive_transposes:
