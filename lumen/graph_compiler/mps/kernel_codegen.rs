@@ -4,8 +4,7 @@
 
 use std::collections::HashMap;
 
-use super::place_concats::in_place_concats;
-use super::{Kernel, MpsModule, PENDING, request};
+use super::{Kernel, MpsModule, PENDING, fusion, request};
 use crate::autotune::mps::Tunable;
 use crate::codegen::attention::AttentionCodegen;
 use crate::codegen::dot_general::mps::{gemm_kernel, gemm_row_kernel, gemv_config, row_dot};
@@ -17,10 +16,11 @@ use crate::codegen::layout::{LayoutCodegen, transpose_tiling};
 use crate::codegen::reduction::ReductionCodegen;
 use crate::codegen::row::RowCodegen;
 use crate::codegen::utils::mps::Mps;
-use crate::graph::{Graph, Primitive, Var};
+use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::common::alone::wrapped;
 use crate::graph_compiler::common::attention::{self, Strides};
+use crate::graph_compiler::common::place_concats::in_place_concats;
 use crate::graph_compiler::pass::CompilerPass;
 
 /// Compiler pass turning pending kernel requests into generated kernels.
@@ -36,7 +36,9 @@ impl<'a> CompilerPass<MpsModule<'a>> for Codegen {
     fn apply(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
         let config = &m.options.config;
         // Concatenations no longer valid in place get copied by their own elementwise kernel.
-        let valid = in_place_concats(&m.graph, &m.kernels, false);
+        let valid = in_place_concats(&m.graph, |c, k, p, index| {
+            slot_writes(&m.kernels, &m.graph, c, k, p, index, false)
+        });
         let mut unmarked = false;
 
         for (i, node) in m.graph.nodes.iter_mut().enumerate() {
@@ -209,4 +211,54 @@ pub(crate) fn kernel(
 /// Whether the kernel chosen for `body` can write its outputs through strided views.
 pub(super) fn writes_views(body: &Graph) -> bool {
     gemm_dot(body).is_none() && row_reductions(body).is_empty() && reduction_root(body).is_none()
+}
+
+/// Whether the kernel making operand `k` of `concat` (`producer`, its output `index`) can write it into its slot,
+/// as `common::place_concats` asks: the attention backward kernel (worth placing for), or a fusion writing views,
+/// or before fusion a fusible layout or elementwise node.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn slot_writes(
+    kernels: &[Kernel],
+    graph: &Graph,
+    concat: &Node,
+    k: usize,
+    producer: &Node,
+    index: usize,
+    before_fusion: bool,
+) -> Option<bool> {
+    // The kernel request behind a still-pending fusion.
+    let kernel = match &producer.primitive {
+        Primitive::Fusion { name, .. } => name
+            .strip_prefix(PENDING)
+            .and_then(|k| k.parse::<usize>().ok())
+            .map(|k| &kernels[k]),
+        _ => None,
+    };
+
+    match (kernel, &producer.primitive) {
+        (Some(Kernel::AttentionBackward), Primitive::Fusion { body, .. }) => {
+            // The atomically accumulated dQ output can't target a strided slot.
+            let atomic = body.outputs().len() == 3 && index == 2;
+            let at = graph.slot(concat, k);
+            let views = HashMap::from([(index, (at.offset, at.strides))]);
+            let writes = !atomic && attention::backward_of_body_into(body, views).is_some();
+            writes.then_some(true)
+        }
+        (Some(Kernel::Fusion(_)), Primitive::Fusion { body, .. }) => {
+            writes_views(body).then_some(false)
+        }
+        (None, p) if before_fusion => {
+            let layout = matches!(
+                p,
+                Primitive::Reshape { .. }
+                    | Primitive::Transpose { .. }
+                    | Primitive::BroadcastInDim { .. }
+                    | Primitive::Slice { .. }
+            );
+
+            let fuses = fusion::fusible(graph, producer) && (layout || fusion::elementwise(p));
+            fuses.then_some(false)
+        }
+        _ => None,
+    }
 }

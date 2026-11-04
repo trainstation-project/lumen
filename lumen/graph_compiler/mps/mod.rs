@@ -4,7 +4,6 @@
 pub(crate) mod ane;
 pub(crate) mod fusion;
 pub(crate) mod kernel_codegen;
-mod place_concats;
 mod place_views;
 mod split_k;
 #[cfg(test)]
@@ -25,6 +24,7 @@ use super::common::linear_cross_entropy::LinearCrossEntropy;
 use super::common::linear_reordering::LinearReordering;
 use super::common::merge_dots::{Blocks, MergeDots, Packs, Target};
 use super::common::merge_dots_backward::MergeDotsBackward;
+use super::common::place_concats::{PlaceConcats, Slots};
 use super::common::simplify::Simplify;
 use super::common::take_along_axis::TakeAlongAxis;
 use super::pass::{Module, Pipeline};
@@ -55,7 +55,6 @@ use crate::runtime::mps::{
 use crate::tensor::contiguous_strides;
 use crate::{DType, Scalar, Tensor};
 use kernel_codegen::Codegen;
-use place_concats::PlaceConcats;
 use place_views::PlaceViews;
 pub(crate) use place_views::{
     attention_reads_strided, fusion_reads_strided, loads_strided, loads_views,
@@ -187,6 +186,13 @@ impl Lone for MpsModule<'_> {
     /// Requests a fusion kernel with the by-value flags, returning its pending name.
     fn kernel(&mut self, _: &Graph, by_value: &[bool]) -> String {
         request(&mut self.kernels, Kernel::Fusion(by_value.to_vec()))
+    }
+}
+
+impl Slots for MpsModule<'_> {
+    /// Before fusion: what `kernel_codegen::slot_writes` accepts, fusible nodes counting as kernels.
+    fn writes(&self, concat: &Node, k: usize, producer: &Node, index: usize) -> Option<bool> {
+        kernel_codegen::slot_writes(&self.kernels, &self.graph, concat, k, producer, index, true)
     }
 }
 

@@ -1,9 +1,9 @@
 //! Fuses each TPU matmul with the slices that split it, the concat stacking its lhs and its elementwise epilogues.
 use std::collections::HashMap;
 
-use super::super::place_concats::placeable;
 use super::super::{LANES, TpuModule};
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
+use crate::graph_compiler::common::place_concats::in_place_concats;
 use crate::graph_compiler::elementwise;
 use crate::graph_compiler::pass::CompilerPass;
 
@@ -101,7 +101,10 @@ fn stacked(
     });
 
     let fits = dots
-        && !placeable(graph, producer, users, &graph.nodes()[k])
+        && !in_place_concats(graph, |c, i, p, _| {
+            super::slot_writes(graph, c, i, p).then_some(true)
+        })
+        .contains(&k)
         && !graph.outputs().contains(&lhs)
         && dimension + 2 >= rank
         && graph.nodes()[k]

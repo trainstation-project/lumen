@@ -1,7 +1,6 @@
 //! TPU graph compiler: the pass pipeline that rewrites a traced graph into TPU kernels and plans its buffers.
 mod flash_attention_backward;
 mod fusion;
-mod place_concats;
 #[cfg(test)]
 mod tests;
 
@@ -9,9 +8,9 @@ use super::common::updates::Updates;
 use crate::graph_compiler::common::canonicalize_dots::CanonicalizeDots;
 use crate::graph_compiler::common::diamonds::FusedDiamonds;
 use crate::graph_compiler::common::horizontal::{Grouping, HorizontalFusion};
+use crate::graph_compiler::common::place_concats::{PlaceConcats, Slots};
 use flash_attention_backward::FlashAttentionBackward;
 use fusion::{DotRows, FuseDots, Fusion};
-use place_concats::PlaceConcats;
 
 use super::common::attention;
 use super::common::clamp_indices::ClampIndices;
@@ -23,7 +22,7 @@ use super::common::merge_dots_backward::MergeDotsBackward;
 use super::common::simplify::Simplify;
 use super::pass::{Module, Pipeline};
 use super::{CompilerConfig, Options, plan_options, positions};
-use crate::graph::{Graph, Primitive, TensorType, Var};
+use crate::graph::{Graph, Node, Primitive, TensorType, Var};
 use crate::graph_compiler::{Plan, PlanOptions};
 use crate::plan::DeviceLayout;
 
@@ -52,6 +51,13 @@ struct TpuModule<'a> {
 }
 
 /// Exposes the graph and the TPU compiler config to the shared pass framework.
+impl Slots for TpuModule<'_> {
+    /// What `fusion::slot_writes` accepts.
+    fn writes(&self, concat: &Node, k: usize, producer: &Node, _: usize) -> Option<bool> {
+        fusion::slot_writes(&self.graph, concat, k, producer).then_some(true)
+    }
+}
+
 impl Module for TpuModule<'_> {
     fn graph(&self) -> &Graph {
         &self.graph

@@ -13,6 +13,7 @@ pub(crate) mod fusion;
 pub(crate) mod horizontal;
 pub(crate) mod linear_reordering;
 pub(crate) mod multi_output;
+pub(crate) mod place_concats;
 pub(crate) mod place_views;
 pub(crate) mod preserve_precision;
 #[cfg_attr(not(feature = "python"), allow(dead_code))]
