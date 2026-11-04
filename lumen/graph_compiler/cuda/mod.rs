@@ -1,4 +1,4 @@
-//! The CUDA backend, CUDA's default (`config.compiler.cuda.use_triton_backend` off): kernels in
+//! The CUDA backend, CUDA's default (`config.compiler.use_triton_backend` off): kernels in
 //! NVIDIA's CuTe DSL, generated per step and compiled at their first launch. It runs elementwise fusions (any layout: broadcasts, transposes, slices and strided inputs
 //! read through index math) and errors on graphs needing any other kernel.
 
@@ -81,7 +81,7 @@ fn backend(m: &CudaModule<'_>) -> Backend {
         fusible,
         max_inputs: usize::MAX,
         max_aux: 0,
-        multi_output_fusion: m.options.config.cuda.multi_output_fusion,
+        multi_output_fusion: m.options.config.multi_output_fusion,
         reduction_epilogues: false,
         contraction_epilogues: false,
         expansion: |_, _, _| false,
@@ -108,8 +108,8 @@ impl Module for CudaModule<'_> {
         self.options
     }
 
-    fn config(&self) -> &dyn CompilerConfig {
-        &self.options.config.cuda
+    fn config(&self) -> &CompilerConfig {
+        &self.options.config
     }
 }
 
@@ -159,7 +159,7 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
 
     let mut pipeline = Pipeline::new("cuda");
 
-    if options.config.cuda.fuse {
+    if options.config.fuse {
         pipeline.add(Fusion);
     }
 
@@ -176,12 +176,12 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
     }) {
         return Err(format!(
             "{}: the CUDA (CuTe DSL) backend has no kernel for it yet; turn \
-             config.compiler.cuda.use_triton_backend on to run it on Triton",
+             config.compiler.use_triton_backend on to run it on Triton",
             node.primitive.name()
         ));
     }
 
-    let config = &options.config.cuda;
+    let config = &options.config;
     let plan = plan_options(&fused, options, config, &Vec::new(), Vec::new());
     let mut plan = Plan::compile_with(&fused, &plan);
     plan.cuda = true;

@@ -15,7 +15,7 @@ use crate::codegen::emitter::Emit;
 use crate::codegen::emitter::mps::Emitter;
 use crate::codegen::utils::mps::*;
 use crate::graph::{Graph, Node, Primitive, Var};
-use crate::graph_compiler::MpsConfig;
+use crate::graph_compiler::CompilerConfig;
 use crate::tensor::contiguous_strides;
 
 pub(crate) use crate::codegen::kinds::gemm_dot;
@@ -458,7 +458,7 @@ pub(crate) fn gemm_regions_kernel(
         let call = match c.algorithm {
             Algorithm::Tiled => formatdoc!(
                 "
-                threadgroup {t} lt[SG_LT_OF({bm}, {bk}, {t}, {a}, {simds})], rt[{bk} * {bn}];
+                threadgroup {t} lt[SG_LT_OF({bm}, {bk}, {t}, {a}, {simds})], rt[SG_RT({bk}, {bn}, {t})];
                 matmul_sg_impl<{t}, {a}, {o}, {bm}, {bn}, {bk}, {w},
                                NAME_epi, false, false, false, {interleaved}, {ROW_COLUMNS}, {flag},
                                {threads}, {cols}, {prefetch}>(
@@ -526,7 +526,7 @@ pub(crate) fn gemm_variant(
     body: &Graph,
     by_value: &[bool],
     config: GemmConfig,
-    mps: &MpsConfig,
+    mps: &CompilerConfig,
 ) -> (String, String) {
     if tile_scratch(body).is_some() {
         let dot = row_dot(body).expect("a matmul with row reductions");
@@ -694,7 +694,7 @@ impl GemmCodegen for Mps {
             let call = match c.algorithm {
                 Algorithm::Tiled => formatdoc!(
                     "
-                    threadgroup {t} lt[SG_LT_OF({bm}, {bk}, {t}, {a}, {simds})], rt[{bk} * {bn}];
+                    threadgroup {t} lt[SG_LT_OF({bm}, {bk}, {t}, {a}, {simds})], rt[SG_RT({bk}, {bn}, {t})];
                     matmul_sg_impl<{t}, {a}, {o}, {bm}, {bn}, {bk}, {w},
                     {flags},
                     {threads}, {cols}, {prefetch}>(

@@ -70,12 +70,14 @@ fmt-check:
 	cargo fmt --all -- --check
 
 # The C++/Objective-C++/Metal sources (the .mm shims and .metal kernels);
-# style is the shared .clang-format (from lm-engine). Needs clang-format
-# 21.1.6 on PATH (`pip install clang-format==21.1.6`).
+# style is the shared .clang-format (from lm-engine). clang-format 21.1.6 (the
+# pre-commit hook's): the one on PATH (CI pip-installs it), else through uvx,
+# outside the project's environment.
 CPP_SOURCES := $(shell find lumen -name '*.mm' -o -name '*.metal' -o -name '*.h')
+CLANG_FORMAT := $(or $(shell command -v clang-format),uvx --from clang-format==21.1.6 clang-format)
 
 clang-format-check:
-	clang-format --dry-run --Werror --style=file:.clang-format $(CPP_SOURCES)
+	$(CLANG_FORMAT) --dry-run --Werror --style=file:.clang-format $(CPP_SOURCES)
 
 clippy:
 	cargo clippy --all-targets --all-features
@@ -98,5 +100,5 @@ update-precommit:
 
 style:
 	uv run --extra dev --no-default-groups pre-commit run --all-files
-	clang-format -i --style=file:.clang-format $(CPP_SOURCES)
+	$(CLANG_FORMAT) -i --style=file:.clang-format $(CPP_SOURCES)
 	cargo fmt --all

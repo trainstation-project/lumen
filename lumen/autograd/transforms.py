@@ -3,7 +3,7 @@
 import functools
 
 # ``rules`` is imported for its side effect of registering every primitive's rules.
-from lumen.autograd import attention, cross_entropy, dots, rules
+from lumen.autograd import attention, cross_entropy, dots, rms_norm, rules
 from lumen.autograd.core import (
     UndefinedPrimal,
     _accumulate,
@@ -125,11 +125,13 @@ def _linearize_tape(tape, leaves):
     """The linear program of the nodes ``tape`` recorded, at ``leaves``:
     ``(seeds, linear, linear_vars, tangents)``, as :func:`linearize`. Each
     attention among them first becomes one node, whose backward is flash
-    attention's (``attention.substitute``); a cross entropy of a dot's
+    attention's (``attention.substitute``); each RMS norm written out,
+    one node differentiated from its rows' ``1 / rms``
+    (``rms_norm.substitute``); a cross entropy of a dot's
     logits, one node whose backward takes a chunk of rows at a time
     (``cross_entropy.substitute``); dots sharing an operand, one
     node differentiated as the one dot they run as (``dots.substitute``)."""
-    tape = dots.substitute(cross_entropy.substitute(attention.substitute(tape)), leaves)
+    tape = dots.substitute(cross_entropy.substitute(rms_norm.substitute(attention.substitute(tape))), leaves)
     # Each float leaf's seed is a zero placeholder whose var marks the start of the linear program.
     seeds = {p.var: _full(p, 0).var for p in leaves if _is_float(p.dtype)}
     tangents = dict(seeds)
@@ -166,10 +168,11 @@ def backward_pass(linear, linear_vars, cts):
     ``ad.backward_pass``)."""
     graph = tracer.current_graph()
     base = list(tracer._SCOPES[-1])
-    for name, inputs, params, out in reversed(linear):
-        made = tracer._SCOPE_OF[-1].get(out[0] if name == _FUNCTION else out)
-        with tracer._scope(list(made) if made else base):
-            _transpose_node(graph, name, inputs, params, out, linear_vars, cts)
+    with tracer._gradients():
+        for name, inputs, params, out in reversed(linear):
+            made = tracer._SCOPE_OF[-1].get(out[0] if name == _FUNCTION else out)
+            with tracer._scope(list(made) if made else base):
+                _transpose_node(graph, name, inputs, params, out, linear_vars, cts)
     return cts
 
 
@@ -183,7 +186,7 @@ def _transpose_node(graph, name, inputs, params, out, linear_vars, cts):
     if ct is None:
         return
     operands = [
-        UndefinedPrimal(graph.type_of(v)[1], graph.type_of(v)[0]) if v in linear_vars else _value(v) for v in inputs
+        UndefinedPrimal(graph.type_of(v)[1], graph.type_of(v)[0], v) if v in linear_vars else _value(v) for v in inputs
     ]
     primitive = getattr(prims, name, None)
     if primitive not in primitive_transposes:

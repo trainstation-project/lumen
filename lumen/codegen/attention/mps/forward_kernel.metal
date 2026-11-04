@@ -10,10 +10,33 @@ struct NoDropout {
 #define ATTN_GROUPS 8
 #define ATTN_BQ (ATTN_ROWS * ATTN_GROUPS)
 #define ATTN_UNROLL _Pragma("clang loop unroll(full)")
+/// Elements a threadgroup tile's rows are padded by (16 bytes), so simdgroup loads of eight rows fall in
+/// different banks.
+#define ATTN_PAD(T) (16 / sizeof(T))
 
-/// Computes attention for block `BLOCK_ID_M` of BLOCK_SIZE_M (ATTN_BQ) queries of head `BLOCK_ID_H` of batch
-/// `BLOCK_ID_B` with 8x8 simdgroup matrices, streaming BLOCK_SIZE_N keys at a time through threadgroup memory with
-/// an online softmax.
+/// Loads rows `r0 ..` `r0 + ROWS` of a `D`-wide operand at `src` (rows `ROW` apart, columns `COL`) into the
+/// `LD`-wide rows of `dst`, zero past row `n`, with the threadgroup's `THREADS` threads: 16-byte vectors when
+/// the columns are contiguous and the rows and `src` aligned, one element at a time otherwise.
+template <typename T, uint ROWS, uint D, uint LD, uint ROW, uint COL, uint THREADS = 256>
+inline void load_tile(threadgroup T *dst, device const T *src, uint r0, uint n, uint t) {
+    constexpr uint W = 16 / sizeof(T);
+    if (COL == 1 && D % W == 0 && ROW % W == 0 && ulong(src) % 16 == 0) {
+        for (uint e = t; e < ROWS * D / W; e += THREADS) {
+            uint j = e / (D / W), d = e % (D / W) * W;
+            *(threadgroup uint4 *)(dst + j * LD + d) = r0 + j < n ? *(device const uint4 *)(src + (r0 + j) * ROW + d)
+                                                                  : uint4(0);
+        }
+    } else {
+        for (uint e = t; e < ROWS * D; e += THREADS) {
+            uint j = e / D, d = e % D;
+            dst[j * LD + d] = r0 + j < n ? src[(r0 + j) * ROW + d * COL] : T(0);
+        }
+    }
+}
+
+/// Computes attention for block `BLOCK_ID_M` of BLOCK_SIZE_M (`GROUPS` simdgroups of ATTN_ROWS) queries of head
+/// `BLOCK_ID_H` of batch `BLOCK_ID_B` with 8x8 simdgroup matrices, streaming BLOCK_SIZE_N keys at a time through
+/// threadgroup memory with an online softmax.
 /// Writes `epi` of the output, optionally the raw output (`RAW`) and the row log-sum-exp (`LSE`).
 /// `offset` shifts the causal diagonal so query `i` sees keys up to `i + offset`.
 template <typename T,
@@ -21,6 +44,7 @@ template <typename T,
           uint D,
           uint DV,
           uint BLOCK_SIZE_N,
+          uint GROUPS,
           bool CAUSAL,
           bool RAW,
           bool LSE,
@@ -51,7 +75,7 @@ inline void flash_attention(device const T *q,
                             uint t,
                             Epi epi = Epi(),
                             Drop drop = Drop()) {
-    constexpr uint BLOCK_SIZE_M = ATTN_BQ;
+    constexpr uint BLOCK_SIZE_M = ATTN_ROWS * GROUPS;
     // The flat batch index, as dropout's stream and the log-sum-exp's row count it.
     const uint bh = BLOCK_ID_B * NUM_BLOCKS_H + BLOCK_ID_H;
     q += ix.q(BLOCK_ID_B, BLOCK_ID_H);
@@ -78,17 +102,13 @@ inline void flash_attention(device const T *q,
         long hi = long(min(BLOCK_ID_M * BLOCK_SIZE_M + BLOCK_SIZE_M, sq)) + long(offset);
         last = uint(clamp(hi, 0l, long(sk)));
     }
-    // All 256 threads stage the next BLOCK_SIZE_N keys and values; rows past `sk` are zero-filled.
+    // The key and value tiles' padded row lengths.
+    constexpr uint LK = D + ATTN_PAD(T), LV = DV + ATTN_PAD(T);
+    // All the threads stage the next BLOCK_SIZE_N keys and values; rows past `sk` are zero-filled.
     for (uint k0 = 0; k0 < last; k0 += BLOCK_SIZE_N) {
         threadgroup_barrier(mem_flags::mem_threadgroup);
-        for (uint e = t; e < BLOCK_SIZE_N * D; e += 256) {
-            uint j = e / D, d = e % D;
-            ks[e] = k0 + j < sk ? k[(k0 + j) * Ix::K_ROW + d * Ix::K_COL] : T(0);
-        }
-        for (uint e = t; e < BLOCK_SIZE_N * DV; e += 256) {
-            uint j = e / DV, d = e % DV;
-            vs[e] = k0 + j < sk ? v[(k0 + j) * Ix::V_ROW + d * Ix::V_COL] : T(0);
-        }
+        load_tile<T, BLOCK_SIZE_N, D, LK, Ix::K_ROW, Ix::K_COL, GROUPS * 32>(ks, k, k0, sk, t);
+        load_tile<T, BLOCK_SIZE_N, DV, LV, Ix::V_ROW, Ix::V_COL, GROUPS * 32>(vs, v, k0, sk, t);
         threadgroup_barrier(mem_flags::mem_threadgroup);
         simdgroup_matrix<float, 8, 8> s[BLOCK_SIZE_N / 8];
         float mx = -INFINITY;
@@ -96,7 +116,7 @@ inline void flash_attention(device const T *q,
             s[jc] = simdgroup_matrix<float, 8, 8>(0);
             ATTN_UNROLL for (uint c = 0; c < D / 8; ++c) {
                 simdgroup_matrix<T, 8, 8> kt;
-                simdgroup_load(kt, ks + jc * 8 * D + c * 8, D, ulong2(0, 0), true);
+                simdgroup_load(kt, ks + jc * 8 * LK + c * 8, LK, ulong2(0, 0), true);
                 simdgroup_multiply_accumulate(s[jc], qm[c], kt, s[jc]);
             }
             thread auto &e = frag(s[jc]);
@@ -131,7 +151,7 @@ inline void flash_attention(device const T *q,
         ATTN_UNROLL for (uint jc = 0; jc < BLOCK_SIZE_N / 8; ++jc) {
             ATTN_UNROLL for (uint c = 0; c < DV / 8; ++c) {
                 simdgroup_matrix<T, 8, 8> vm;
-                simdgroup_load(vm, vs + jc * 8 * DV + c * 8, DV);
+                simdgroup_load(vm, vs + jc * 8 * LV + c * 8, LV);
                 simdgroup_multiply_accumulate(om[c], pm[jc], vm, om[c]);
             }
         }

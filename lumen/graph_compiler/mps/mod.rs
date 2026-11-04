@@ -15,7 +15,7 @@ mod split_k;
 mod tests;
 
 use std::collections::{BTreeMap, HashMap};
-use std::ffi::{CString, c_char};
+use std::ffi::{CString, c_char, c_void};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
@@ -24,12 +24,13 @@ use super::common::chunked_cross_entropy::ChunkedCrossEntropy;
 use super::common::clamp_indices::ClampIndices;
 use super::common::dot_strength::DotStrength;
 use super::common::linear_cross_entropy::LinearCrossEntropy;
+use super::common::linear_reordering::LinearReordering;
 use super::common::merge_dots::{Blocks, MergeDots, Packs, Target};
 use super::common::merge_dots_backward::MergeDotsBackward;
 use super::common::simplify::Simplify;
 use super::common::take_along_axis::TakeAlongAxis;
 use super::pass::{Module, Pipeline};
-use super::{CompilerConfig, MpsConfig, Options};
+use super::{CompilerConfig, Options};
 use crate::codegen::attention::AttentionCodegen;
 use crate::codegen::attention::mps::{backward_block_with_dq, decodes};
 use crate::codegen::dot_general::mps as gemm;
@@ -61,12 +62,16 @@ use canonicalize_dots::canonicalize_dots;
 use kernel_codegen::Codegen;
 use place_concats::PlaceConcats;
 use place_views::PlaceViews;
-pub(crate) use place_views::{attention_reads_strided, fusion_reads_strided, loads_strided};
+pub(crate) use place_views::{
+    attention_reads_strided, fusion_reads_strided, loads_strided, loads_views,
+};
 
 // Metal library loader implemented in the Objective-C shim.
 unsafe extern "C" {
     /// Compiles `source` and adds its kernels to the shared library; returns nonzero on failure.
     fn lumen_mps_compile_kernels(source: *const c_char) -> i32;
+    /// Returns the compute pipeline for kernel `name`, or null if no such kernel exists.
+    fn lumen_mps_pipeline(name: *const c_char) -> *mut c_void;
 }
 
 /// Kernel templates and helpers every generated Metal source is compiled against.
@@ -84,7 +89,6 @@ const PRELUDE: &str = concat!(
     include_str!("../../codegen/dot_general/mps/integer/matmul_kernel.metal"),
     include_str!("../../codegen/dot_general/mps/integer/matmul_wide_kernel.metal"),
     include_str!("../../codegen/dot_general/mps/tiled/matmul_sg_kernel.metal"),
-    include_str!("../../codegen/dot_general/mps/tiled/matmul_atomic_kernel.metal"),
     include_str!("../../codegen/dot_general/mps/skinny/kernel.metal"),
     include_str!("../../codegen/dot_general/mps/gemv/kernel.metal"),
     include_str!("../../codegen/dot_general/mps/linear_cross_entropy/kernel.metal"),
@@ -116,7 +120,7 @@ struct MpsModule<'a> {
 impl Attentions for MpsModule<'_> {
     /// Whether attention may absorb elementwise epilogues.
     fn contraction_epilogues(&self) -> bool {
-        self.options.config.mps.contraction_epilogues
+        self.options.config.contraction_epilogues
     }
 
     /// Graph values of the by-value scalar inputs.
@@ -136,7 +140,7 @@ impl Attentions for MpsModule<'_> {
 impl AttentionBackwards for MpsModule<'_> {
     /// Backwards whose dQ fits the dK/dV kernel, unless deterministic mode forbids its atomic dQ accumulation.
     fn together(&self) -> impl Fn(&Backward) -> bool + 'static {
-        let deterministic = self.options.config.mps.deterministic;
+        let deterministic = self.options.config.deterministic;
         move |b| !deterministic && backward_block_with_dq(b).is_some()
     }
 
@@ -204,8 +208,8 @@ impl Module for MpsModule<'_> {
         self.options
     }
 
-    fn config(&self) -> &dyn CompilerConfig {
-        &self.options.config.mps
+    fn config(&self) -> &CompilerConfig {
+        &self.options.config
     }
 }
 
@@ -232,7 +236,7 @@ fn request(kernels: &mut Vec<Kernel>, kernel: Kernel) -> String {
 }
 
 /// The MPS pass pipeline, with optional passes enabled by `config`.
-fn pipeline<'a>(config: &MpsConfig) -> Pipeline<MpsModule<'a>> {
+fn pipeline<'a>(config: &CompilerConfig) -> Pipeline<MpsModule<'a>> {
     let mut p = Pipeline::new("mps");
     p.add(TakeAlongAxis);
 
@@ -272,6 +276,13 @@ fn pipeline<'a>(config: &MpsConfig) -> Pipeline<MpsModule<'a>> {
 
     if config.neural_engine {
         p.add(ane::NeuralEngine);
+    }
+
+    // A matmul operand's factor along the kept axes (a norm's 1 / rms, a weight's per-channel scale) moves to its output, for its epilogue.
+    if config.linear_reordering {
+        p.add(LinearReordering {
+            tile: crate::codegen::dot_general::mps::ROW_TILE,
+        });
     }
 
     if config.split_k {
@@ -334,7 +345,7 @@ fn unsupported(graph: &Graph) -> Result<(), String> {
 /// Compiles `graph` for MPS: runs the passes, compiles the kernels, plans buffers and optionally autotunes.
 pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> {
     unsupported(graph)?;
-    let config = &options.config.mps;
+    let config = &options.config;
 
     let mut module = MpsModule {
         graph: graph.clone(),
@@ -518,15 +529,17 @@ fn compile_with(prelude: &str, sources: BTreeMap<String, String>) -> Result<(), 
 /// Every compiled kernel source by name.
 static SOURCES: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
 
-/// Whether this Metal toolchain supports Metal Performance Primitives, probed once.
+/// Whether this Metal toolchain supports Metal Performance Primitives, probed once: a kernel defined only
+/// under `LUMEN_MPP`, compiling (and logging) no error either way.
 fn mpp_available() -> bool {
     static AVAILABLE: OnceLock<bool> = OnceLock::new();
 
     *AVAILABLE.get_or_init(|| {
-        let probe =
-            "#ifndef LUMEN_MPP\n#error Metal Performance Primitives are unavailable\n#endif\n";
+        let probe = "#ifdef LUMEN_MPP\nkernel void mpp_probe(device int *out [[buffer(0)]]) { out[0] = 1; }\n#endif\n";
+        let sources = BTreeMap::from([("mpp_probe".to_owned(), probe.to_owned())]);
+        let name = CString::new("mpp_probe").expect("no NUL");
 
-        compile_mpp_kernels(BTreeMap::from([("mpp_probe".to_owned(), probe.to_owned())])).is_ok()
+        compile_mpp_kernels(sources).is_ok() && !unsafe { lumen_mps_pipeline(name.as_ptr()) }.is_null()
     })
 }
 
@@ -537,8 +550,6 @@ enum Launch {
     Attention,
     /// Flash attention backward.
     AttentionBackward,
-    /// Split-K matmul accumulating with atomics.
-    AtomicDot,
     /// GEMM with a fused epilogue.
     Gemm,
     /// Row-wise reductions in one threadgroup per row group.
@@ -576,8 +587,6 @@ fn launch_of(body: &Graph) -> Launch {
         Launch::Attention
     } else if attention::backward_of_body(body).is_some() {
         Launch::AttentionBackward
-    } else if split_k::atomic_dot(body).is_some() {
-        Launch::AtomicDot
     } else if gemm_dot(body).is_some() {
         Launch::Gemm
     } else if !row_reductions(body).is_empty() {
@@ -681,7 +690,7 @@ fn run_loop(
         false => HashMap::from([(0, (0, dst.strides().to_vec()))]),
     };
 
-    let config = super::config::configs().mps;
+    let config = super::config::config();
     let (name, source) = kernel_codegen::kernel(&body, &[by_value], &config, &views, None);
 
     let compiled = SOURCES
@@ -966,14 +975,19 @@ pub(super) fn encode_with(
         let a = attention::of_body(body).expect("an attention");
         let (outer, heads) = attention::grid_batch(&a.batch);
 
-        // Decode attention runs one threadgroup per query, otherwise one per 64 queries.
-        let queries = match decodes(&a) {
-            true => a.sq,
-            false => a.sq.div_ceil(64),
+        // Decode attention runs one threadgroup per query, otherwise one of `forward_groups`
+        // simdgroups per 8 of them.
+        let groups = crate::codegen::attention::mps::forward_groups(&a);
+
+        let grid = match decodes(&a) {
+            true => Grid::Groups([a.sq, heads, outer]),
+            false => Grid::GroupsOf {
+                groups: [a.sq.div_ceil(8 * groups), heads, outer],
+                threads: 32 * groups,
+            },
         };
 
         let buffers = attention_buffers(a.dropout.is_some())?;
-        let grid = Grid::Groups([queries, heads, outer]);
         return launch(name, &buffers, &scalars, grid, keep, step.label);
     }
 
@@ -998,60 +1012,6 @@ pub(super) fn encode_with(
 
         let grid = Grid::Groups([rows.div_ceil(64), heads, outer]);
         return launch(name, &buffers, &scalars, grid, keep, step.label);
-    }
-
-    if kind == Launch::AtomicDot {
-        let dot = split_k::atomic_dot(body).expect("a split-K dot");
-        let ty = |v: Var| body.type_of(v);
-        let (lhs, rhs) = (ty(dot.inputs[0]), ty(dot.inputs[1]));
-
-        let plan = crate::codegen::dot_general::mps::plan_matmul(
-            &dot.primitive,
-            lhs,
-            rhs,
-            ty(dot.output),
-            &contiguous_strides(&lhs.shape),
-            &contiguous_strides(&rhs.shape),
-            step.label,
-            None,
-        )?;
-
-        let Grid::Groups([_, _, chunks]) = plan.grid else {
-            unreachable!("a matmul's grid")
-        };
-
-        let [m, n] = [plan.p[0], plan.p[1]];
-
-        // Atomic split-K adds chunk partials into the output, so it starts at zero.
-        let zero = [
-            element_arg(DType::F32, Scalar::Float(0.0)),
-            u32_arg((m * n) as u32),
-        ];
-
-        let fill = elementwise_grid(m * n, DType::F32);
-        let label = "full (split-K output)";
-
-        launch(
-            "fill_4",
-            &[output.cast_const()],
-            &zero,
-            fill,
-            Vec::new(),
-            label,
-        )?;
-
-        let kernel = format!("matmul_atomic_{}", lhs.dtype);
-        let grid = Grid::Groups([n.div_ceil(64), m.div_ceil(64), chunks]);
-        let buffers = [inputs[0], inputs[1], output.cast_const()];
-
-        return launch(
-            &kernel,
-            &buffers,
-            &[dims_arg(plan.p)],
-            grid,
-            keep,
-            step.label,
-        );
     }
 
     if kind == Launch::Gemm {
@@ -1104,6 +1064,8 @@ pub(super) fn encode_with(
         if let Some((offsets, _)) = gemm::tile_scratch(body) {
             let at = |o: usize| scratch.wrapping_add(o).cast_const();
 
+            // The dot's value, then each tile reduction's partials and a cut kept in scratch, bound in
+            // that order after both kernels' outputs.
             let (dotv, tiles): (*const u8, Vec<*const u8>) = (
                 at(offsets[0]),
                 offsets[1..].iter().map(|&o| at(o)).collect(),
@@ -1125,8 +1087,59 @@ pub(super) fn encode_with(
                 _ => Grid::Groups([n.div_ceil(gemm::ROW_TILE), m.div_ceil(gemm::ROW_TILE), 1]),
             };
 
+            // The profiler sees each pass's own reads and writes: the partials pass writes the dot's
+            // value and the tiles' partials, which the combine reads back.
+            let passes = gemm::tile_passes(body).expect("a multi-tile row matmul");
+            let strides = step.input_strides();
+
+            // The step's outputs the partials pass writes (`early`), or the combine the rest.
+            let written = |early: bool| -> (Vec<TensorType>, Vec<Vec<usize>>) {
+                let outputs = std::iter::once(&step.output).chain(&step.extra_outputs);
+
+                outputs
+                    .zip(step.output_strides())
+                    .enumerate()
+                    .filter(|(k, _)| passes.early.contains(k) == early)
+                    .map(|(_, ((_, ty), strides))| (ty.clone(), strides))
+                    .unzip()
+            };
+
+            let io = |reads: &[usize], scratch: &[TensorType]| {
+                let types = reads.iter().map(|&i| step.inputs[i].1.clone());
+                let read_strides = reads.iter().map(|&i| strides[i].clone());
+
+                (
+                    types.chain(scratch.iter().cloned()).collect(),
+                    read_strides
+                        .chain(scratch.iter().map(|t| contiguous_strides(&t.shape)))
+                        .collect(),
+                )
+            };
+
+            crate::profiler::next_launch(
+                crate::graph::intern(format!("{} (partials)", step.label)),
+                || {
+                    let (inputs, input_strides) = io(&passes.partials, &[]);
+                    let (outputs, output_strides) = written(true);
+                    let scratch = passes.scratch.iter();
+
+                    crate::profiler::IoTypes {
+                        inputs,
+                        outputs: outputs
+                            .into_iter()
+                            .chain(scratch.clone().cloned())
+                            .collect(),
+                        input_strides,
+                        output_strides: output_strides
+                            .into_iter()
+                            .chain(scratch.map(|t| contiguous_strides(&t.shape)))
+                            .collect(),
+                    }
+                },
+            );
+
             launch(
-                &format!("{name}_tiles"),
+                &format!("{name}_partials"),
                 &first,
                 &args,
                 grid,
@@ -1134,19 +1147,43 @@ pub(super) fn encode_with(
                 step.label,
             )?;
 
+            crate::profiler::next_launch(
+                crate::graph::intern(format!("{} (combine)", step.label)),
+                || {
+                    let (mut inputs, mut input_strides) = io(&passes.combine, &passes.scratch);
+                    let (outputs, output_strides) = written(false);
+
+                    // A cut that is an output, written by the partials pass, read back here.
+                    if let Some(k) = passes.read {
+                        let all = std::iter::once(&step.output).chain(&step.extra_outputs);
+                        let (_, ty) = all.clone().nth(k).expect("the cut output");
+                        inputs.push(ty.clone());
+                        input_strides.push(step.output_strides()[k].clone());
+                    }
+
+                    crate::profiler::IoTypes {
+                        inputs,
+                        outputs,
+                        input_strides,
+                        output_strides,
+                    }
+                },
+            );
+
             let mut rows = inputs.to_vec();
             rows.push(dotv);
             rows.push(output.cast_const());
             rows.extend(extra);
             rows.extend(&tiles);
             let grid = Grid::Groups([row_groups(body), 1, 1]);
-            return launch(name, &rows, &scalars, grid, keep, step.label);
+            let combine = format!("{name}_combine");
+            return launch(&combine, &rows, &scalars, grid, keep, step.label);
         }
 
         let (kernel, grid) = match gemm::row_dot(body) {
             Some(_) => (
                 name.to_owned(),
-                Grid::Groups([1, plan.p[0].div_ceil(gemm::ROW_TILE), 1]),
+                Grid::Groups([1, plan.p[0].div_ceil(gemm::single_rows(plan.p[0]).0), 1]),
             ),
             None => match (config, plan.grid) {
                 (Some(c), Grid::Groups(groups)) => (
@@ -1242,10 +1279,6 @@ pub(super) fn encode_with(
 pub(crate) fn fusion_scratch_bytes(body: &Graph) -> usize {
     if let Some((_, bytes)) = gemm::tile_scratch(body) {
         return bytes;
-    }
-
-    if split_k::atomic_dot(body).is_some() {
-        return 0;
     }
 
     match reduction_root(body).filter(|r| {

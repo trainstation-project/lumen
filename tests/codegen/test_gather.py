@@ -1,5 +1,8 @@
 """Tests for gather, scatter_add and take_along_axis: values with clamped indices, fusion, gradients, determinism and operand checks."""
 
+import pathlib
+import tempfile
+
 import numpy as np
 import pytest
 from helpers import CUDA, MPS, TPU
@@ -16,11 +19,9 @@ def safe_kernels():
     """Each test with its indices clamped (out of range here too), CUDA's
     programs on the Triton backend."""
     compiler = lumen.config.compiler
-    compiler.mps.safe_kernels = compiler.tpu.safe_kernels = compiler.cuda.safe_kernels = True
-    compiler.cuda.use_triton_backend = True
+    compiler.safe_kernels = compiler.use_triton_backend = True
     yield
-    compiler.mps.safe_kernels = compiler.tpu.safe_kernels = compiler.cuda.safe_kernels = False
-    compiler.cuda.use_triton_backend = False
+    compiler.safe_kernels = compiler.use_triton_backend = False
 
 
 def _tensor(a, device, dtype=None):
@@ -162,30 +163,87 @@ def test_gather_checks_its_operands():
 
 
 @pytest.mark.parametrize("device", [MPS, CUDA])
-@pytest.mark.parametrize("width, rows", [(64, 5), (7, 5)])
-@pytest.mark.parametrize("dtype", ["float32", "bfloat16", "int32"])
-def test_scatter_add_is_deterministic(device, dtype, width, rows):
-    """A scatter_add adds each element's updates in index order (on MPS a
-    thread an element scanning the indices, its SIMD group's lanes 32 at a
-    time when they share a row: rows of 64; else one at a time: rows of 7;
-    of many rows and updates, a thread a column; on Triton a lane a column
-    walking the updates in order; no atomics): the CPU's result bit for bit,
-    for any dtype (bfloat16 too, each sum rounded as the reference rounds
-    it), the same each run; a lookup's gradient too (deterministic
-    training)."""
+@pytest.mark.parametrize("width, rows, picks", [(64, 5, 300), (7, 5, 300), (7, 1, 2500)])
+@pytest.mark.parametrize("dtype", ["float32", "float16", "bfloat16", "int32", "int8"])
+def test_scatter_add_is_deterministic(device, dtype, width, rows, picks):
+    """A deterministic scatter_add (``deterministic``;
+    by default it adds by atomics, as torch's ``index_add``) adds each element's
+    updates in index order (MPS and Triton sort the picks by position, then a
+    thread a column adds its row's in order; no atomics on the values): the
+    CPU's result bit for bit, for any dtype (bfloat16 too, each sum rounded as
+    the reference rounds it), the same each run; a lookup's gradient too
+    (deterministic training). 2500 picks at one row are more than either sorts
+    at once (1024), so that row walks every index in order instead."""
+    lumen.config.compiler.deterministic = True
     rng = np.random.default_rng(4)
     x = (rng.standard_normal((rows, width)) * 4).astype(np.float32)
-    ids = rng.integers(0, rows, (300,))
-    u = (rng.standard_normal((300, width)) * 4).astype(np.float32)
+    ids = rng.integers(0, rows, (picks,))
+    u = (rng.standard_normal((picks, width)) * 4).astype(np.float32)
     f = lambda x, i, u: prims.scatter_add(x, i, u, 0)  # noqa: E731
     on = lambda device: [
         _tensor(a, device, dtype) if a.dtype == np.float32 else _tensor(a, device) for a in (x, ids, u)
     ]  # noqa: E731
     want = lumen.to_numpy(lumen.compile(f, device="cpu")(*on("cpu")).to(dtype="float32"))
     compiled = lumen.compile(f, device=device)
-    for _ in range(3):
-        got = lumen.to_numpy(compiled(*on(device)).to(dtype="float32").to("cpu"))
-        np.testing.assert_array_equal(got, want)
+    try:
+        for _ in range(3):
+            got = lumen.to_numpy(compiled(*on(device)).to(dtype="float32").to("cpu"))
+            np.testing.assert_array_equal(got, want)
+    finally:
+        lumen.config.compiler.deterministic = False
+
+
+# Unit roundoff of each float dtype: the largest relative error of rounding one result.
+ROUNDOFF = {"float64": 2.0**-53, "float32": 2.0**-24, "float16": 2.0**-11, "bfloat16": 2.0**-8}
+
+
+@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize(
+    "dtype", ["float64", "float32", "float16", "bfloat16", "int64", "uint64", "int32", "uint32", "int16", "int8"]
+)
+def test_scatter_add_atomic(device, dtype):
+    """By default (not deterministic) a scatter_add adds each update element
+    atomically where its dtype has atomic adds, as torch's ``index_add`` (MPS:
+    float32, float16, bfloat16, int32 and uint32; Triton: those, float64, int64
+    and uint64), the others as deterministic: with about 60 updates at each of
+    5 rows, integers match the CPU bit for bit, and floats, summed in an
+    arbitrary order, are within twice the worst-case rounding error of any
+    order of their sum (``gamma(k) * sum|terms|`` for ``k`` adds) of the CPU's
+    result. MPS has no float64."""
+    if device == "mps" and dtype == "float64":
+        pytest.skip("MPS has no float64")
+    rng = np.random.default_rng(5)
+    rows, width = 5, 67
+    ids = rng.integers(0, rows, (300,))
+    if dtype in ROUNDOFF:
+        x, u = ((rng.standard_normal(shape) * 4).astype(np.float32) for shape in ((rows, width), (300, width)))
+    else:
+        low = -3 if dtype.startswith("int") else 0
+        x, u = (rng.integers(low, 4, shape).astype(np.int32) for shape in ((rows, width), (300, width)))
+    f = lambda x, i, u: prims.scatter_add(x, i, u, 0)  # noqa: E731
+    on = lambda device: [_tensor(x, device, dtype), _tensor(ids, device), _tensor(u, device, dtype)]  # noqa: E731
+    want = lumen.compile(f, device="cpu")(*on("cpu"))
+    compiled = lumen.compile(f, device=device)
+    args = on(device)
+    got = compiled(*args).to("cpu")
+    if dtype not in ROUNDOFF:
+        np.testing.assert_array_equal(lumen.to_numpy(got), lumen.to_numpy(want))
+    else:
+        exact = lambda t: lumen.to_numpy(t.to("cpu").to(dtype="float64"))  # noqa: E731
+        xs, us = exact(args[0]), exact(args[2])
+        # Per element: the adds into it, and the sum of its terms' magnitudes.
+        adds = np.bincount(ids, minlength=rows)[:, None]
+        magnitude = np.abs(xs).copy()
+        np.add.at(magnitude, ids, np.abs(us))
+        k = adds * ROUNDOFF[dtype]
+        bound = k / (1 - k) * magnitude
+        np.testing.assert_array_less(np.abs(exact(got) - exact(want)), 2 * bound + 1e-300)
+    if device == "cuda":
+        with tempfile.TemporaryDirectory() as d:
+            compiled.dump_code(d, *args)
+            code = "".join(p.read_text() for p in pathlib.Path(d).rglob("*") if p.is_file())
+        kernel = "scatter_add_rows_kernel" if dtype in ("int16", "int8") else "scatter_add_atomic_kernel"
+        assert f"'s {kernel}," in code, code
 
 
 def test_scatter_add_in_place():

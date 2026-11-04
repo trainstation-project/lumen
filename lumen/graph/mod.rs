@@ -64,6 +64,9 @@ pub struct Node {
     pub sources: Lines,
     /// Display name overriding the primitive's own, set for fused or renamed nodes.
     pub label: Option<&'static str>,
+    /// Whether the node computes gradients: traced by autograd's backward pass (a transpose rule, a
+    /// `Function`'s `backward`), or rebuilt from such a node.
+    pub backward: bool,
 }
 
 /// Interned stack of named ranges a node was traced in.
@@ -92,6 +95,8 @@ pub struct Graph {
     pub(crate) scope: Scope,
     /// Source lines stamped on nodes appended next.
     pub(crate) sources: Lines,
+    /// Whether nodes appended next compute gradients ([`Node::backward`]).
+    pub(crate) backward: bool,
 }
 
 /// Where a value lives inside another value's buffer: element offset and strides.
@@ -119,15 +124,25 @@ impl Graph {
         self.scope = scope;
     }
 
-    /// Makes nodes appended from now on inherit `node`'s scope and source lines.
+    /// Sets whether nodes appended from now on compute gradients ([`Node::backward`]).
+    #[cfg_attr(not(feature = "python"), allow(dead_code))]
+    pub(crate) fn set_backward(&mut self, backward: bool) {
+        self.backward = backward;
+    }
+
+    /// Makes nodes appended from now on inherit `node`'s scope, source lines and whether it computes
+    /// gradients.
     pub fn set_origin(&mut self, node: &Node) {
         self.scope = node.scope;
         self.sources = node.sources;
+        self.backward = node.backward;
     }
 
-    /// Makes nodes appended from now on inherit the first node's scope and the union of all their source lines.
+    /// Makes nodes appended from now on inherit the first node's scope and whether it computes gradients,
+    /// and the union of all their source lines.
     pub fn set_origins(&mut self, nodes: &[&Node]) {
         self.scope = nodes.first().map_or(&[], |n| n.scope);
+        self.backward = nodes.first().is_some_and(|n| n.backward);
         let mut lines = Vec::new();
 
         for &line in nodes.iter().flat_map(|n| n.sources) {
@@ -154,6 +169,7 @@ impl Graph {
             scope: self.scope,
             sources: self.sources,
             label: None,
+            backward: self.backward,
         });
 
         Ok(output)
@@ -337,13 +353,18 @@ impl Graph {
         }
     }
 
-    /// Finds accumulations (dots, sums) whose wide accumulator is rounded to a narrow output and then
-    /// cast back up downstream; returns `(accumulation, cast, message)` for each.
+    /// Finds accumulations (dots, sums) whose wide accumulator is rounded to a narrow output (a sum's own,
+    /// a narrowing cast of a dot's) and then cast back up downstream; returns `(rounded value, cast,
+    /// message)` for each, at its nearest such cast (a residual stream's later ones would repeat it once
+    /// per layer).
     pub fn precision_warnings(&self) -> Vec<(Var, Var, String)> {
         use Primitive::*;
         let mut readers: Vec<Vec<usize>> = vec![Vec::new(); self.types.len()];
+        let mut producer: Vec<Option<usize>> = vec![None; self.types.len()];
 
         for (i, node) in self.nodes.iter().enumerate() {
+            producer[node.output] = Some(i);
+
             for &v in &node.inputs {
                 readers[v].push(i);
             }
@@ -352,9 +373,28 @@ impl Graph {
         let mut warnings = Vec::new();
 
         for node in &self.nodes {
-            let (DotGeneral { accum_dtype, .. } | ReduceSum { accum_dtype, .. }) = node.primitive
+            // A dot's result is its accumulator: a cast that is its sole reader is where it is rounded (a
+            // dot also read wide keeps its accumulator, the cast a later choice).
+            let accumulation = match node.primitive {
+                ReduceSum { .. } => node,
+                Cast { .. } => match producer[node.inputs[0]].map(|p| &self.nodes[p]) {
+                    Some(
+                        dot @ Node {
+                            primitive: DotGeneral { .. },
+                            ..
+                        },
+                    ) if readers[dot.output].len() == 1 && !self.outputs.contains(&dot.output) => {
+                        dot
+                    }
+                    _ => continue,
+                },
+                _ => continue,
+            };
+
+            let (DotGeneral { accum_dtype, .. } | ReduceSum { accum_dtype, .. }) =
+                accumulation.primitive
             else {
-                continue;
+                unreachable!("a dot or a sum")
             };
 
             let narrow = self.types[node.output].dtype;
@@ -363,11 +403,12 @@ impl Graph {
                 continue;
             }
 
-            // Follow same-dtype readers from the narrow output until a widening cast; another reduction stops the search.
-            let mut stack = vec![(node.output, Vec::new())];
+            // Follow same-dtype readers from the narrow output, breadth first, until a widening cast; another
+            // reduction stops the search.
+            let mut queue = std::collections::VecDeque::from([(node.output, Vec::new())]);
             let mut seen = vec![false; self.types.len()];
 
-            while let Some((v, path)) = stack.pop() {
+            'search: while let Some((v, path)) = queue.pop_front() {
                 for &r in &readers[v] {
                     let (reader, wide) = (&self.nodes[r], self.types[self.nodes[r].output].dtype);
                     let mut path = path.clone();
@@ -375,7 +416,7 @@ impl Graph {
 
                     match reader.primitive {
                         Cast { .. } if wide.size_of() > narrow.size_of() => {
-                            let (name, fix) = match node.primitive {
+                            let (name, fix) = match accumulation.primitive {
                                 DotGeneral { .. } => (
                                     "dot_general",
                                     format!(
@@ -388,7 +429,7 @@ impl Graph {
                                 ),
                             };
 
-                            let operands: Vec<String> = node
+                            let operands: Vec<String> = accumulation
                                 .inputs
                                 .iter()
                                 .map(|&i| self.types[i].to_string())
@@ -405,12 +446,13 @@ impl Graph {
                             );
 
                             warnings.push((node.output, reader.output, message));
+                            break 'search;
                         }
                         DotGeneral { .. } | ReduceSum { .. } | ReduceMax { .. } | Fusion { .. } => {
                         }
                         _ if wide == narrow && !seen[reader.output] => {
                             seen[reader.output] = true;
-                            stack.push((reader.output, path));
+                            queue.push_back((reader.output, path));
                         }
                         _ => {}
                     }

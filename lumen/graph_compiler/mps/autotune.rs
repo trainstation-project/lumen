@@ -11,7 +11,7 @@ use crate::codegen::elementwise::mps::TUNED_ELEMENTS;
 use crate::codegen::kinds::gemm_dot;
 use crate::device::Device;
 use crate::graph::{Primitive, TensorType, View};
-use crate::graph_compiler::MpsConfig;
+use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::common::autotune::{Kernels, Timer};
 use crate::graph_compiler::plan::{Buffer, Step, Tuned};
 use crate::runtime::mps::Encode;
@@ -31,7 +31,7 @@ const ALIGNMENT: usize = 256;
 pub(super) struct Elementwise<'a> {
     /// Fusions that may be retuned, by name.
     pub tunable: &'a BTreeMap<String, Tunable>,
-    pub config: &'a MpsConfig,
+    pub config: &'a CompilerConfig,
     /// Kernel sources built so far, compiled together by `compile`.
     pub sources: BTreeMap<String, String>,
 }
@@ -91,12 +91,12 @@ impl Kernels for Elementwise<'_> {
 #[derive(Default)]
 pub(super) struct Gemms {
     sources: BTreeMap<String, String>,
-    config: MpsConfig,
+    config: CompilerConfig,
 }
 
 /// Creates an empty GEMM tuner for `config`.
 impl Gemms {
-    pub(super) fn new(config: &MpsConfig) -> Self {
+    pub(super) fn new(config: &CompilerConfig) -> Self {
         Gemms {
             sources: BTreeMap::new(),
             config: config.clone(),
@@ -137,10 +137,11 @@ pub(super) fn matmul_of(
     ))
 }
 
-/// Whether `step` is a float GEMM fusion over whole buffers that the tiled GEMM kernels can run.
+/// Whether `step` is a float GEMM fusion that the tiled GEMM kernels can run, with views only on its dot's
+/// operands (read through their strides).
 fn tiled_gemm(step: &Step) -> bool {
     let float = step.output.1.dtype.is_float();
-    let whole = step.views.iter().all(Option::is_none);
+    let views = !super::loads_views(step);
 
     let tiled = match &step.primitive {
         Primitive::Fusion { name, body, .. } => {
@@ -151,7 +152,7 @@ fn tiled_gemm(step: &Step) -> bool {
         _ => false,
     };
 
-    float && whole && tiled
+    float && views && tiled
 }
 
 impl Kernels for Gemms {
@@ -176,7 +177,11 @@ impl Kernels for Gemms {
         let dual = gemm::gemm_mpp_pair(body, d);
         let staged = !epilogue.plain() && !dual;
 
-        if tiled_gemm(step) && gemm::gemv_config(body).is_some() {
+        // Operand views tune only the tiled kernels, which take the views' strides; the GEMV, skinny and MPP
+        // kernels are picked for whole operands.
+        let viewed = step.views.iter().any(Option::is_some);
+
+        if !viewed && tiled_gemm(step) && gemm::gemv_config(body).is_some() {
             let (vector_lhs, _) = gemm::gemv_of(body, d).expect("a matrix-vector dot");
             let tiles = gemm::tile_scratch(body).is_some();
 
@@ -193,6 +198,22 @@ impl Kernels for Gemms {
 
         if !tiled_gemm(step) || !(large || skinny) {
             return Vec::new();
+        }
+
+        if viewed {
+            let tiled =
+                !skinny && gemm::gemv_config(body).is_none() && gemm::tile_scratch(body).is_none();
+
+            return match tiled {
+                true => gemm::config()
+                    .iter()
+                    .filter(|c| {
+                        group.is_none_or(|(g, rows)| (if rows { c.bm } else { c.bn }) % g == 0)
+                    })
+                    .copied()
+                    .collect(),
+                false => Vec::new(),
+            };
         }
 
         // Threadgroup bytes for the per-simdgroup epilogue staging area.
@@ -249,7 +270,7 @@ impl Kernels for Gemms {
             false => Vec::new(),
         };
 
-        gemm::configs()
+        gemm::config()
             .iter()
             .chain(&mpp)
             .chain(&skinny)
@@ -273,21 +294,17 @@ impl Kernels for Gemms {
         let (kernel, source) = gemm::gemm_variant(body, &by_value, config, &self.config);
         self.sources.insert(kernel.clone(), source);
         let name = kernel.clone();
+        let views = step.views.clone();
 
+        // Tuned for the step's views: other views (an input bound strided at run time) take the default kernel.
         let encode: Encode = Box::new(move |step, inputs, output, scratch, keep| {
             let Primitive::Fusion { name: fusion, .. } = &step.primitive else {
                 unreachable!("a GEMM fusion")
             };
 
-            super::encode_with(
-                step,
-                fusion,
-                Some((&name, config)),
-                inputs,
-                output,
-                scratch,
-                keep,
-            )
+            let tuned = (step.views == views).then_some((name.as_str(), config));
+
+            super::encode_with(step, fusion, tuned, inputs, output, scratch, keep)
         });
 
         Tuned::new(kernel, encode)

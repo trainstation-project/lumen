@@ -151,7 +151,7 @@ def test_attention_as_traced_without_flash_attention(device, triton_on_cuda):
         """Causal flash attention."""
         return F.flash_attention(q, k, v, is_causal=True)
 
-    config = lumen.config.compiler.of(device)
+    config = lumen.config.compiler
     assert config.flash_attention is True
     assert steps(f, q, k, v, device=device) == ["flash_attention"]
     flash = lumen.to_numpy(lumen.compile(f)(q, k, v).to(dtype="float32").to("cpu"))
@@ -255,7 +255,7 @@ def test_attention_epilogues_fuse(f, sq, device, triton_on_cuda):
     assert label.startswith("flash_attention → reshape → "), label
     if device != "mps":
         return
-    lumen.config.compiler.mps.contraction_epilogues = False
+    lumen.config.compiler.contraction_epilogues = False
     try:
         assert len(steps(f, *ts)) == 2
         unfused = lumen.to_numpy(lumen.compile(f)(*ts).to(dtype="float32"))
@@ -294,9 +294,9 @@ def test_attention_computes_its_scores_as_traced():
             q.dtype,
         ),
         lambda q, k, v: F.matmul(
-            F.softmax(
-                prims.dot_general(q, k, (((3,), (3,)), ((0, 1), (0, 1))), "bfloat16", "bfloat16").float(), -1
-            ).to(dtype=q.dtype),
+            F.softmax(prims.dot_general(q, k, (((3,), (3,)), ((0, 1), (0, 1))), "bfloat16").float(), -1).to(
+                dtype=q.dtype
+            ),
             v,
             "float32",
             q.dtype,
@@ -354,7 +354,7 @@ def test_attention_backward_is_flash_attention(device, case, dtype, deterministi
         return F.sum((F.flash_attention(q, k, v, is_causal=causal) * w).float())
 
     grad = lumen.grad(loss, (0, 1, 2))
-    config = lumen.config.compiler.of(device)
+    config = lumen.config.compiler
     config.deterministic = deterministic
     try:
         labels = steps(grad, q, k, v, w, device=device)
@@ -396,7 +396,7 @@ def test_attention_dropout_is_in_its_kernels(case, attention, dtype, determinist
         return F.sum((attention(q, k, v, is_causal=causal, dropout_p=0.25) * w).float())
 
     step = lumen.value_and_grad(loss, (0, 1, 2))
-    lumen.config.compiler.mps.deterministic = deterministic
+    lumen.config.compiler.deterministic = deterministic
     try:
         labels = steps(step, q, k, v, w)
         kernels = [label.split(" → ")[0] for label in labels]
@@ -608,7 +608,7 @@ def test_attention_epilogue_fuses_in_training(sq):
     residual) and by the backward: the epilogue still runs in its kernel,
     which writes the attention's value too; the step agrees exactly with
     the unfused one (``deterministic``: dQ in a fixed order)."""
-    lumen.config.compiler.mps.deterministic = True
+    lumen.config.compiler.deterministic = True
     shapes = [(1, sq, 4, 32), (1, 40, 2, 32), (1, 40, 2, 32), (sq, 128)]
     ts, _ = tensors("mps", "float32", *shapes)
 
@@ -622,7 +622,7 @@ def test_attention_epilogue_fuses_in_training(sq):
     assert "flash_attention_backward(dk, dv)" in labels and "flash_attention_backward(dq)" in labels
     loss, grads = lumen.compile(step)(*ts)
     got = [lumen.to_numpy(t) for t in (loss, *grads)]
-    lumen.config.compiler.mps.contraction_epilogues = False
+    lumen.config.compiler.contraction_epilogues = False
     try:
         loss, grads = lumen.compile(step)(*ts)
     finally:

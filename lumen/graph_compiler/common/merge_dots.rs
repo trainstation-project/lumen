@@ -3,6 +3,8 @@
 
 use std::collections::HashMap;
 
+use super::simplify::roundings;
+use crate::DType;
 use crate::graph::primitive::free_dims;
 use crate::graph::{Graph, Node, Primitive, TensorType, Var};
 use crate::graph_compiler::pass::{CompilerPass, Module};
@@ -28,6 +30,8 @@ struct Group {
     side: usize,
     /// The dots' common primitive.
     primitive: Primitive,
+    /// The dtype the dots' rounding casts narrow them to, if they have one each.
+    rounding: Option<DType>,
     /// Type of the other operand with the concatenation dim zeroed, which members must match.
     other: TensorType,
     /// Dim of the other operand the weights are concatenated along.
@@ -100,6 +104,11 @@ pub(crate) fn merge_dots(
         producer[node.output] = Some(i);
     }
 
+    // A dot with its rounding cast merges as the rounded product: the cast's value is its result.
+    let roundings = roundings(graph);
+    let product = |i: usize| nodes[roundings[i].unwrap_or(i)].output;
+    let rounding = |i: usize| roundings[i].map(|c| graph.type_of(nodes[c].output).dtype);
+
     let splat = |v: Var| -> Option<Primitive> {
         let b = &nodes[producer[v]?];
 
@@ -168,7 +177,7 @@ pub(crate) fn merge_dots(
     let mut groups: Vec<Group> = Vec::new();
 
     for (i, node) in nodes.iter().enumerate() {
-        if !matches!(node.primitive, Primitive::DotGeneral { .. }) || !read_in_place[node.output] {
+        if !matches!(node.primitive, Primitive::DotGeneral { .. }) || !read_in_place[product(i)] {
             continue;
         }
 
@@ -217,6 +226,7 @@ pub(crate) fn merge_dots(
                 g.shared == node.inputs[*side]
                     && g.side == *side
                     && g.primitive == node.primitive
+                    && g.rounding == rounding(i)
                     && g.other == *key
                     && g.dimension == *dimension
                     && g.chain == *chain
@@ -240,6 +250,7 @@ pub(crate) fn merge_dots(
                     shared: node.inputs[side],
                     side,
                     primitive: node.primitive.clone(),
+                    rounding: rounding(i),
                     other,
                     dimension,
                     chain,
@@ -253,12 +264,14 @@ pub(crate) fn merge_dots(
     // Groups whose results only partly interleave are split into the interleaved part and the rest.
     let mut groups: Vec<Group> = groups
         .into_iter()
-        .flat_map(|g| match interleaves(graph, &g, target.columns) {
-            Some((order, rest, ..)) if target.views && !rest.is_empty() => {
-                vec![g.subset(&order), g.subset(&rest)]
-            }
-            _ => vec![g],
-        })
+        .flat_map(
+            |g| match interleaves(graph, &roundings, &g, target.columns) {
+                Some((order, rest, ..)) if target.views && !rest.is_empty() => {
+                    vec![g.subset(&order), g.subset(&rest)]
+                }
+                _ => vec![g],
+            },
+        )
         .collect();
 
     let mut merged = vec![false; nodes.len()];
@@ -308,7 +321,8 @@ pub(crate) fn merge_dots(
             }
 
             if target.views
-                && let Some((order, rest, layout, rewrites)) = interleaves(graph, g, target.columns)
+                && let Some((order, rest, layout, rewrites)) =
+                    interleaves(graph, &roundings, g, target.columns)
                 && rest.is_empty()
             {
                 g.nodes = order.iter().map(|&j| g.nodes[j]).collect();
@@ -325,6 +339,13 @@ pub(crate) fn merge_dots(
             }
 
             first_of[g.nodes[0]] = Some(k);
+        }
+    }
+
+    // A merged dot's rounding cast goes with it.
+    for i in 0..nodes.len() {
+        if let (true, Some(c)) = (merged[i], roundings[i]) {
+            merged[c] = true;
         }
     }
 
@@ -353,7 +374,15 @@ pub(crate) fn merge_dots(
 
         if let Some(k) = first_of[i] {
             let g = &groups[k];
-            out.set_origins(&g.nodes.iter().map(|&m| &nodes[m]).collect::<Vec<_>>());
+
+            let members: Vec<&Node> = g
+                .nodes
+                .iter()
+                .flat_map(|&m| std::iter::once(m).chain(roundings[m]))
+                .map(|m| &nodes[m])
+                .collect();
+
+            out.set_origins(&members);
             let mut operands = [map[g.shared]; 2];
 
             let value = match reuses[k] {
@@ -463,6 +492,13 @@ pub(crate) fn merge_dots(
                 .apply(g.primitive.clone(), &operands)
                 .expect("the dots' dimension numbers");
 
+            let result = match g.rounding {
+                Some(new_dtype) => out
+                    .apply(Primitive::Cast { new_dtype }, &[result])
+                    .expect("the merged dot, rounded"),
+                None => result,
+            };
+
             // The result dim the members' outputs are concatenated along.
             let rank = out.type_of(result).shape.len();
 
@@ -481,7 +517,7 @@ pub(crate) fn merge_dots(
                     out.set_origin(&nodes[m]);
                     let member = &graph.type_of(nodes[m].output).shape;
 
-                    map[nodes[m].output] =
+                    map[product(m)] =
                         member_of(&mut out, &mut tupled, result, dimension, layout, j, member);
                 }
 
@@ -502,7 +538,7 @@ pub(crate) fn merge_dots(
                 };
 
                 out.set_origin(&nodes[m]);
-                map[nodes[m].output] = out.apply(slice, &[result]).expect("within the result");
+                map[product(m)] = out.apply(slice, &[result]).expect("within the result");
                 start += size;
             }
 
@@ -575,6 +611,7 @@ impl Group {
             shared: self.shared,
             side: self.side,
             primitive: self.primitive.clone(),
+            rounding: self.rounding,
             other: self.other.clone(),
             dimension: self.dimension,
             chain: self.chain.clone(),
@@ -739,18 +776,21 @@ struct Interleaving {
     slices: Vec<(usize, usize, usize)>,
 }
 
-/// Orders the group's members so those whose results are combined elementwise share interleaved
-/// regions aligned to `columns`. Returns the order, members left out, the layout, and backward rewrites;
-/// `None` when nothing interleaves or the backward can't follow the layout.
+/// Orders the group's members so those whose results (their rounding casts', per `roundings`) are
+/// combined elementwise share interleaved regions aligned to `columns`. Returns the order, members left
+/// out, the layout, and backward rewrites; `None` when nothing interleaves or the backward can't follow
+/// the layout.
 fn interleaves(
     graph: &Graph,
+    roundings: &[Option<usize>],
     g: &Group,
     columns: usize,
 ) -> Option<(Vec<usize>, Vec<usize>, Layout, Interleaving)> {
     let nodes = graph.nodes();
     let operand = |i: usize| nodes[i].inputs[1 - g.side];
     let size = |w: Var| graph.type_of(w).shape[g.dimension];
-    let results: Vec<Var> = g.nodes.iter().map(|&i| nodes[i].output).collect();
+    let value = |i: usize| nodes[roundings[i].unwrap_or(i)].output;
+    let results: Vec<Var> = g.nodes.iter().map(|&i| value(i)).collect();
     let sets = combined(graph, &results);
     let mut by_set: Vec<(usize, Vec<usize>)> = Vec::new();
 
@@ -804,14 +844,16 @@ fn interleaves(
     };
 
     let operands: Vec<Var> = order.iter().map(|&j| operand(g.nodes[j])).collect();
-    let rewrites = backward(graph, g.dimension, &weights, &operands, &layout)?;
+    let rewrites = backward(graph, roundings, g.dimension, &weights, &operands, &layout)?;
     Some((order, rest, layout, rewrites))
 }
 
 /// Checks every dot reading a concatenation of the `weights` or `operands` contracts it against a
-/// concatenation of per-member gradients, and finds those and the slices of their products.
+/// concatenation of per-member gradients, and finds those and the slices of their products (rounded
+/// by their casts, per `roundings`).
 fn backward(
     graph: &Graph,
+    roundings: &[Option<usize>],
     dimension: usize,
     weights: &[Var],
     operands: &[Var],
@@ -927,15 +969,16 @@ fn backward(
             };
 
             let result_axis = lhs_batch.len() + before + pos;
-            let result = graph.type_of(reader.output);
+            let product = nodes[roundings[r].unwrap_or(r)].output;
+            let result = graph.type_of(product);
 
-            if outputs.contains(&reader.output) {
+            if outputs.contains(&product) {
                 return None;
             }
 
             let mut members = vec![false; k];
 
-            for (s, slice) in readers(reader.output) {
+            for (s, slice) in readers(product) {
                 let Primitive::Slice {
                     start_indices,
                     limit_indices,

@@ -57,10 +57,30 @@ template <typename D> inline D from_float(float f) {
     return D(f);
 }
 
-/// Converts an integer to `D`: nonzero is true for bool, otherwise a plain value conversion.
+/// `x` as a float rounded to odd: its 24 leading bits, the last one set when any dropped bit is, so that
+/// rounding it again to a narrower float (bfloat's 8 bits) rounds `x` once.
+template <typename S> inline float to_odd_float(S x) {
+    const bool negative = x < S(0);
+    const ulong m = negative ? ulong(-(x + S(1))) + 1 : ulong(x);
+
+    if (m < (1UL << 24)) {
+        return float(x);
+    }
+
+    const int shift = 40 - int(clz(m));
+    const ulong kept = (m >> shift) | ulong((m & ((1UL << shift) - 1)) != 0);
+    const float f = ldexp(float(kept), shift);
+    return negative ? -f : f;
+}
+
+/// Converts an integer to `D`: nonzero is true for bool, a bfloat rounded once (through a float rounded to
+/// odd), otherwise a plain value conversion.
 template <typename D, typename S> inline D from_int(S x) {
     if (is_bool_t<D>()) {
         return D(x != S(0));
+    }
+    if (is_same_v<D, bfloat>) {
+        return D(to_odd_float(x));
     }
     if (is_float_t<D>()) {
         return D(float(x));
@@ -346,14 +366,34 @@ template <typename A> inline A reduce_precision_op(A a, uint exponent_bits, uint
 /// Minimum that propagates NaN from either operand.
 template <typename A> inline A min_op(A x, A y) { return x != x || y != y ? x + y : (y < x ? y : x); }
 
-/// Power in float; a negative base with an integral exponent gets the sign from the exponent's parity.
+/// Power in float, as torch's MPS `pow`: `precise::pow` already gives a negative base with an integral exponent
+/// the exponent's parity. An integer exponent float doesn't hold (over 2^24) is `hi + lo`, `lo = n % 128` of `n`'s
+/// sign, both exact in float: `a^hi * a^lo`, its parts on one side of 1 (no inf times 0), `hi` even. Beyond int32
+/// (where only `|a| = 1` is finite and nonzero) it is held at `±(2^31 - 2)` keeping its parity, as Triton's is.
 template <typename A, typename B> inline A pow_op(A a, B b) {
-    float x = float(a), y = float(b);
-    if (x < 0.0f && y == trunc(y)) {
-        float r = pow(-x, y);
-        return A(fmod(fabs(y), 2.0f) == 1.0f ? -r : r);
+    const float x = float(a);
+
+    if constexpr (is_integral_v<B>) {
+        constexpr long most = (1L << 31) - 2;
+        long n;
+
+        if constexpr (is_signed_v<B>) {
+            const long v = long(b);
+            n = v > most ? most + (v & 1) : v < -most ? -most - (v & 1) : v;
+        } else {
+            const ulong v = ulong(b);
+            n = v > ulong(most) ? most + long(v & 1) : long(v);
+        }
+
+        if (n >= -(1L << 24) && n <= (1L << 24)) {
+            return A(precise::pow(x, float(n)));
+        }
+
+        const long lo = n % 128, hi = n - lo;
+        return A(precise::pow(x, float(hi)) * precise::pow(x, float(lo)));
+    } else {
+        return A(precise::pow(x, float(b)));
     }
-    return A(pow(x, y));
 }
 
 /// Remainder with the sign of the dividend; integer `x % 0` is `x` and signed `x % -1` is 0 (XLA semantics).

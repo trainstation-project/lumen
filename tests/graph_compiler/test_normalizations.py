@@ -77,6 +77,29 @@ def test_upcast_rms_norm_is_one_kernel(device, n, triton_on_cuda):
     np.testing.assert_allclose(out[device], out["cpu"], rtol=2**-7, atol=2**-7)
 
 
+@pytest.mark.parametrize("device", [MPS, CUDA])
+def test_a_weight_cast_in_a_square_norm_is_per_column(device, triton_on_cuda):
+    """An RMS norm in float32 of a bfloat16 input whose weight is cast to
+    float32 too, with as many rows as columns: the cast weight has one
+    element per row, but it scales each column, so it is read per column,
+    not once a row. The CPU's result, to a bfloat16 rounding."""
+
+    def f(x, w):
+        """The norm of `x` in float32, scaled by `w` in float32, cast back to bfloat16."""
+        h = x.float()
+        return (h / F.sqrt(F.mean(h * h, -1, keepdim=True) + 1e-6) * w.float()).to(dtype="bfloat16")
+
+    x, w = rand(64, 64), rand(64, seed=1)
+    out = {}
+    for target in ("cpu", device):
+        try:
+            X, W = (lumen.from_numpy(a).to(target).to(dtype="bfloat16") for a in (x, w))
+        except RuntimeError as e:
+            pytest.skip(str(e))
+        out[target] = lumen.to_numpy(lumen.compile(f)(X, W).to(dtype="float32"))
+    np.testing.assert_allclose(out[device], out["cpu"], rtol=2**-7, atol=2**-7)
+
+
 def _layer_norm(a, w):
     """Layer norm of `a` over its last dim, scaled by `w`."""
     xc = a - F.mean(a, -1, keepdim=True)
@@ -175,15 +198,29 @@ def test_wide_rows_are_one_row_kernel(device, n, f, triton_on_cuda):
         np.testing.assert_allclose(lumen.to_numpy(g.to("cpu")), e, rtol=1e-4, atol=1e-4 * np.abs(e).max())
 
 
+def assert_rows_not_kept(steps, shape):
+    """Asserts no value of the rows' ``shape`` a step writes besides its
+    output is read by a step whose output has that shape (the backward's
+    ``dx``): such a value is ``x̂`` kept from the forward, whereas w's
+    gradient's operand or partial sums are read only by w's column sums."""
+    kept = {b for s in steps for b, _, t in s.get("extra_outputs", []) if t == shape}
+    for s in steps:
+        if s["output"][2] == shape:
+            read = kept & {b for b, _, _ in s["inputs"]}
+            assert not read, (read, s["label"])
+
+
 @pytest.mark.parametrize("device", [MPS, CUDA])
 def test_rms_norm_backward_recomputes_its_normalized_input(device, triton_on_cuda):
     """A training step's RMS norm (its value read forward, its gradients
     taken): its forward row kernel writes its output and each row's
-    ``sqrt(mean + eps)``, not ``x / rms`` (``x̂``, w's gradient's): the
-    backward, reading ``x`` and ``rms`` anyway, divides again, a value of
-    the rows' shape less kept from the forward. The loss and gradients the
-    CPU's."""
-    x, w, c = rand(64, 300), rand(300, seed=1), rand(64, 300, seed=2)
+    ``1 / rms`` (``rms_norm``'s saved value), not ``x / rms`` (``x̂``, w's
+    gradient's): the backward, reading ``x`` and ``1 / rms`` anyway,
+    multiplies again, a value of the rows' shape less kept from the forward
+    (the forward may also write w's gradient's operand or its partial sums,
+    here known then, ``[64, 300]`` on MPS, ``[128, 300]`` on Triton, read
+    only by w's column sums). The loss and gradients the CPU's."""
+    x, w, c = rand(128, 300), rand(300, seed=1), rand(128, 300, seed=2)
 
     def step(x, w, c):
         """The loss and the gradients of `x` and `w`."""
@@ -197,7 +234,9 @@ def test_rms_norm_backward_recomputes_its_normalized_input(device, triton_on_cud
         pytest.skip(str(e))
     steps = lumen.graph_compiler.Plan(lumen.make_graph(step)(X, W, C), device).steps()
     (forward,) = [s for s in steps if "sqrt" in s["label"]]
-    assert [o[2] for o in forward["extra_outputs"]] == [[64, 1]], forward["label"]
+    written = [o[2] for o in forward["extra_outputs"]]
+    assert [128, 1] in written, (written, forward["label"])
+    assert_rows_not_kept(steps, [128, 300])
     got = lumen.compile(step)(X, W, C)
     want = lumen.compile(step, device="cpu")(*(lumen.from_numpy(a) for a in (x, w, c)))
     for g, e in zip(got, want):
@@ -363,3 +402,59 @@ def test_normalization_backwards_sum_weight_gradients_as_they_go(device, f, sums
     for g, a, e in zip(got, again, want):
         np.testing.assert_array_equal(g, a)
         np.testing.assert_allclose(g, lumen.to_numpy(e), rtol=1e-4, atol=1e-4)
+
+
+@pytest.mark.parametrize("device", ["cpu", MPS, CUDA])
+@pytest.mark.parametrize("spelling", ["div", "rsqrt", "sum"])
+def test_written_out_rms_norm_is_differentiated_as_rms_norm(device, spelling, triton_on_cuda):
+    """An RMS norm written out as math (``h / sqrt(mean(h * h) + eps)``,
+    ``h * rsqrt(mean(h ** 2) + eps)`` or ``sum / n``), of a bfloat16 input
+    widened and rounded back, times a weight, is differentiated as
+    ``F.rms_norm`` (``lumen/autograd/rms_norm.py``): its forward keeps each
+    row's ``rms`` and no value of the rows' shape for the backward (its
+    weight's gradient's partial sums aside, ``[64, n]``), and its gradients
+    are the float64 ones to bfloat16's precision. A norm whose ``rms`` is
+    also returned keeps its plain gradient, as written."""
+    from lumen import prims
+
+    rows, n = 128, 256
+    x, w, c = rand(rows, n), rand(n, seed=1), rand(rows, n, seed=2)
+    spellings = {
+        "div": lambda h: h / F.sqrt(F.mean(h * h, -1, keepdim=True) + 1e-6),
+        "rsqrt": lambda h: h * prims.rsqrt(F.mean(h**2, -1, keepdim=True) + 1e-6),
+        "sum": lambda h: h / F.sqrt(F.sum(h * h, -1, keepdim=True) / n + 1e-6),
+    }
+    norm = spellings[spelling]
+
+    def loss(x, w, c):
+        """The norm of ``x`` widened, rounded back and weighted, against ``c``."""
+        return F.sum((norm(x.float()).bfloat16() * w * c).float())
+
+    def step(x, w, c):
+        """The loss and the gradients of ``x`` and ``w``."""
+        return (loss(x, w, c), *lumen.grad(loss, (0, 1))(x, w, c))
+
+    try:
+        X, W, C = (lumen.from_numpy(a).to(device).to(dtype="bfloat16") for a in (x, w, c))
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    xs, ws, cs = (lumen.to_numpy(t.to(dtype="float32").to("cpu")).astype(np.float64) for t in (X, W, C))
+    inv = 1 / np.sqrt((xs * xs).mean(-1, keepdims=True) + 1e-6)
+    d = cs * ws
+    want = [inv * (d - xs * inv * (d * xs * inv).mean(-1, keepdims=True)), (cs * xs * inv).sum(0)]
+    got = [lumen.to_numpy(g.to(dtype="float32").to("cpu")) for g in lumen.compile(step, device=device)(X, W, C)[1:]]
+    for g, e in zip(got, want):
+        np.testing.assert_allclose(g, e, atol=2e-2 * np.abs(e).max())
+    if device != "cpu":
+        steps = lumen.graph_compiler.Plan(lumen.make_graph(step)(X, W, C), device).steps()
+        written = [o[2] for s in steps for o in s.get("extra_outputs", [])]
+        assert [rows, 1] in written, written
+        assert_rows_not_kept(steps, [rows, n])
+
+    def kept(x):
+        """The norm and its rows' rms, which then stay as written."""
+        h = x.float()
+        rms = F.sqrt(F.mean(h * h, -1, keepdim=True) + 1e-6)
+        return h / rms, rms
+
+    assert lumen.make_graph(lambda x: kept(x))(X).rms_norms() == []

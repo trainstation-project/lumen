@@ -25,6 +25,8 @@ __all__ = [
 
 # Stacks with one entry per open ``tracing`` context, innermost last.
 _TRACES = []
+# One entry per backward pass being traced: nodes appended meanwhile compute gradients.
+_BACKWARD = []
 _RNG = []
 _DEVICES = []
 _HOSTS = []
@@ -33,6 +35,8 @@ _SCOPE_OF = []
 _CALLS = itertools.count()
 _SOURCES = []
 _PRODUCERS = []
+# Precision warnings shown so far, so one at the same source line with the same text shows once (per layer it repeats).
+_WARNED = {}
 
 
 _PACKAGE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -141,6 +145,21 @@ def _backward_scope(var, base):
 
 
 @contextlib.contextmanager
+def _gradients():
+    """Trace autograd's backward pass: the nodes appended meanwhile are
+    marked as computing gradients (``Node::backward``), which tells the
+    compiler what a forward value's gradient readers are (the activations
+    saved for backward)."""
+    _BACKWARD.append(True)
+    _TRACES[-1]._set_backward(True)
+    try:
+        yield
+    finally:
+        _BACKWARD.pop()
+        _TRACES[-1]._set_backward(bool(_BACKWARD))
+
+
+@contextlib.contextmanager
 def _scope(ranges):
     """Trace inside the ``record_function`` ranges ``ranges`` (outermost
     first, each ``(name, call)``), the open ones back after."""
@@ -200,12 +219,6 @@ def keep(x):
     """Keeps traced ``x`` (a send's token) computed though nothing reads it: the trace outputs it after
     every other output, and a compiled function drops it."""
     _EFFECTS[-1].append(x)
-
-
-def compiler_config():
-    """The compiler settings of the device being traced for
-    (``lumen.config.compiler.of``)."""
-    return config.compiler.of(_DEVICES[-1] if _DEVICES and _DEVICES[-1] is not None else "cpu")
 
 
 def current_graph():
@@ -469,7 +482,7 @@ def _trace(fn, args, device, runtime=_runtime(()), portable=False, split=False):
         if cast_at and cast_at != where:
             message += f" (cast at {cast_at[0]}:{cast_at[1]})"
         if where:
-            warnings.warn_explicit(message, UserWarning, *where)
+            warnings.warn_explicit(message, UserWarning, *where, registry=_WARNED)
         else:
             warnings.warn(message)
     drawn = rng["drawn"] if rng["state"] is not None else None
@@ -584,10 +597,10 @@ _SCALARS = ("scalar", "hoisted", "rng")
 
 
 def _graphed(target):
-    """Whether calls on ``target`` replay as CUDA graphs: ``config.compiler.cuda.cuda_graphs`` on CUDA with
+    """Whether calls on ``target`` replay as CUDA graphs: ``config.compiler.cuda_graphs`` on CUDA with
     the Triton backend (without it, CUDA plans run on the CPU)."""
-    cuda = config.compiler.cuda
-    return _device_type(target) == "cuda" and cuda.cuda_graphs and cuda.use_triton_backend
+    compiler = config.compiler
+    return _device_type(target) == "cuda" and compiler.cuda_graphs and compiler.use_triton_backend
 
 
 def _compiler_flags():
@@ -662,7 +675,7 @@ def compile(fn, device=None):
     plan (the latest call's signature's) and ``compiled.allocate_memory()``
     allocates it again; the plan stays compiled.
 
-    With ``lumen.config.compiler.mps.neural_engine``, an MPS plan runs the large
+    With ``lumen.config.compiler.neural_engine``, an MPS plan runs the large
     float16 dots of the weights the function does not write (and the
     float16 work after them) on the Apple Neural Engine, their values baked
     into Core ML programs: compiled again once a weight is written
@@ -690,7 +703,7 @@ class Compiled:
         self._baked = {}
         self._hosts, self._pending = {}, []
         self._fast = {}
-        # CUDA graphs by plan (``config.compiler.cuda.cuda_graphs``): each plan's graph, its staged
+        # CUDA graphs by plan (``config.compiler.cuda_graphs``): each plan's graph, its staged
         # arguments, the addresses it was captured at and its outputs, or None once it cannot capture.
         self._graphs, self._warm = {}, set()
         # The signatures whose plans' workspaces `deallocate_memory` freed: their calls wait for `allocate_memory`.
@@ -870,7 +883,7 @@ class Compiled:
 
     def _run(self, key, plan, workspace, inputs):
         """``plan.run_in(workspace, inputs)`` for signature ``key``; on CUDA with
-        ``config.compiler.cuda.cuda_graphs``, a plan a graph can capture
+        ``config.compiler.cuda_graphs``, a plan a graph can capture
         (``_capturable``) runs as usual on its first call, is captured on its
         second, its arguments copied into device buffers of its own and its
         runtime scalars into a device vector per dtype, and from then on
@@ -1076,6 +1089,20 @@ def _accum_dtype(dtype):
     """The dtype a matmul of ``dtype`` accumulates in: float32 for floats,
     or their own if wider (float64); integers their own."""
     return dtype if not _is_float(dtype) or dtype == "float64" else "float32"
+
+
+def _dot(lhs, rhs, dimension_numbers, accum_dtype, output_dtype):
+    """``dot_general`` of ``lhs`` and ``rhs`` accumulated in ``accum_dtype``,
+    then cast to ``output_dtype`` (the operands' or ``accum_dtype``) if it
+    differs: each element rounded to it once (the compiler folds the cast
+    into the dot's kernel)."""
+    if output_dtype not in (lhs.dtype, rhs.dtype, accum_dtype):
+        raise ValueError(
+            f"dot_general: outputs the operands' dtype or accum_dtype ({accum_dtype}): "
+            f"got output_dtype {output_dtype} for {lhs.dtype}"
+        )
+    out = prims.dot_general(lhs, rhs, dimension_numbers, accum_dtype)
+    return out if output_dtype == accum_dtype else prims.cast(out, output_dtype)
 
 
 def _require_float(x, op):

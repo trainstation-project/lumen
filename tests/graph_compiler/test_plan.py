@@ -19,7 +19,7 @@ def test_autotuned_elementwise_fusions_match_untuned(device, dtype, tmp_path, tr
     one does, at lengths no block size divides. A Triton one's dumped source names its
     template kernel and the ``BLOCK_SIZE`` and warps it picked, then its
     generated ``BODY``."""
-    compiler = getattr(lumen.config.compiler, device)
+    compiler = lumen.config.compiler
     try:
         for n in ((1 << 16) + 7, 1 << 20, (3 << 20) + 1):
             try:
@@ -262,7 +262,7 @@ def test_mps_plans_put_copies_and_scratch_in_the_workspace():
         lumen.zeros([1], device="mps")
     except RuntimeError as e:
         pytest.skip(str(e))
-    dot = lambda a, b: prims.dot_general(a, b, (((0, 2), (2, 0)), ((), ())), a.dtype, a.dtype)  # noqa: E731
+    dot = lambda a, b: prims.dot_general(a, b, (((0, 2), (2, 0)), ((), ())), a.dtype)  # noqa: E731
     graph = lumen.make_graph(dot)(lumen.zeros([3, 2, 4]), lumen.zeros([4, 5, 3]))
     steps = [s["primitive"] for s in lumen.graph_compiler.Plan(graph, "mps", fuse=False).steps()]
     assert steps == ["transpose", "transpose", "dot_general"]
@@ -298,23 +298,22 @@ def test_programs_run_in_their_dtypes(device, triton_on_cuda):
     with pytest.raises(TypeError):
         prims.dot_general(x, x, (((1,), (1,)), ((), ())))
     w = lumen.from_numpy(rand(8, 3, seed=1)).to(device).to(dtype="bfloat16")
-    dot = lambda a, b, d, o: prims.dot_general(a, b, (((1,), (0,)), ((), ())), d, o)  # noqa: E731
     a, b = (lumen.to_numpy(t.to(dtype="float32")).astype(np.float64) for t in (x, w))
-    wide = lumen.compile(lambda a, b: dot(a, b, "float32", "float32"))(x, w)
+    wide = lumen.compile(lambda a, b: F.matmul(a, b, "float32", "float32"))(x, w)
     assert wide.dtype == "float32"
     np.testing.assert_allclose(lumen.to_numpy(wide), a @ b, rtol=1e-6, atol=1e-6)
-    narrow = lumen.compile(lambda a, b: dot(a, b, "float32", "bfloat16"))(x, w)
+    narrow = lumen.compile(lambda a, b: F.matmul(a, b, "float32", "bfloat16"))(x, w)
     assert narrow.dtype == "bfloat16"
     np.testing.assert_allclose(lumen.to_numpy(narrow.to(dtype="float32")), a @ b, rtol=2**-8, atol=2**-8)
     if device == "cuda":
         with pytest.raises(Exception, match="accumulates in float32 or float16"):
-            lumen.compile(lambda a, b: dot(a, b, "bfloat16", "bfloat16"))(x, w)
+            lumen.compile(lambda a, b: F.matmul(a, b, "bfloat16", "bfloat16"))(x, w)
     else:
-        assert lumen.compile(lambda a, b: dot(a, b, "bfloat16", "bfloat16"))(x, w).dtype == "bfloat16"
+        assert lumen.compile(lambda a, b: F.matmul(a, b, "bfloat16", "bfloat16"))(x, w).dtype == "bfloat16"
     with pytest.raises(ValueError, match="output_dtype"):
-        lumen.compile(lambda a, b: dot(a, b, "bfloat16", "float32"))(x, w)
+        lumen.compile(lambda a, b: F.matmul(a, b, "bfloat16", "float32"))(x, w)
     graph = lumen.make_graph(lambda a, b: F.matmul(a, b, "float32", a.dtype))(x, w)
-    assert "accum_dtype=f32 output_dtype=bf16" in str(graph)
+    assert "accum_dtype=f32] %0 %1" in str(graph) and "cast[new_dtype=bf16]" in str(graph)
     assert lumen.compile(lambda a, b: F.matmul(a, b, "float32", a.dtype))(x, w).dtype == "bfloat16"
     graph = lumen.make_graph(lambda a: F.sum(a, -1))(x)
     assert [n["primitive"] for n in graph.nodes()] == ["reduce_sum"]

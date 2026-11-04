@@ -296,16 +296,34 @@ def test_exact_bfloat16_functions_agree_with_the_cpu(device, triton_on_cuda):
             on(device, f, a, dtype=dtype)
 
 
-@pytest.mark.parametrize("device", [CUDA])
+@pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("exponent", ["int64", "uint32", "uint64"])
 def test_pow_keeps_wide_integer_exponents(device, exponent, triton_on_cuda):
     """A float raised to an integer exponent too wide for int32 is the CPU's,
-    not that of the exponent wrapped to 32 bits."""
+    not that of the exponent wrapped to 32 bits (float64 where the device
+    has it)."""
     bases = np.array([2.0, 0.5, -1.0, -1.0, 1.0001, 0.9999], np.float32)
     exponents = np.array([1 << 31, 3 << 30, (1 << 31) + 1, (1 << 32) - 2, 1 << 31, (1 << 31) + 1], exponent)
-    for dtype in ["float32", "float64"]:
+    for dtype in ["float32"] + (["float64"] if device != "mps" else []):
         got, expected = on(device, prims.pow, bases.astype(dtype), exponents)
         np.testing.assert_array_equal(got, expected)
+
+
+@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("exponent", ["int32", "int64"])
+def test_pow_of_integer_exponents_past_float(device, exponent, triton_on_cuda):
+    """A float raised to an integer exponent float32 can't hold (over 2^24),
+    of a base near 1 (the only ones finite and nonzero there) or -1: the
+    CPU's to a few ulps (2^30 + 65 rounded to float32, 2^30 + 128, is 60
+    ulps off), its sign the exponent's parity, not that of the exponent
+    rounded to float32."""
+    one_up, one_down = np.nextafter(np.float32(1), np.float32(2)), np.nextafter(np.float32(1), np.float32(0))
+    bases = np.array([one_up, one_down, -one_up, -one_down, one_up, one_down, -1.0, -1.0], np.float32)
+    big = (1 << 24) + 1
+    exponents = np.array([big, big + 2, big, -big, -(big + 6), (1 << 30) + 65, big, 1 << 30], exponent)
+    got, expected = on(device, prims.pow, bases, exponents)
+    np.testing.assert_array_equal(np.sign(got), np.sign(expected))
+    np.testing.assert_allclose(got, expected, rtol=4 * 2.0**-23)
 
 
 @pytest.mark.parametrize("device", [MPS, CUDA])
@@ -553,3 +571,24 @@ def test_elementwise_primitives_agree_with_numpy(device, shape, triton_on_cuda):
         assert out.device == f"{device}:0"
         np.testing.assert_allclose(host(out), expected, rtol=1e-5, atol=1e-5)
     np.testing.assert_array_equal(host(lumen.compile(lambda x, y: x < y)(x, y)), a < b)
+
+
+@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("dtype", ["int32", "uint32", "int64"])
+def test_integers_round_once_to_bfloat16(device, dtype, triton_on_cuda):
+    """An integer cast to bfloat16 is rounded once, the CPU's: not to
+    float32 first (2^24 + 2^16 + 1 is 2^24 + 2^17, not 2^24: float32 drops
+    its 1, leaving a tie bfloat16 breaks to even), nor on the CPU to
+    float64 first (-(2^62 + 2^54 + 1) is -(2^62 + 2^55)), extremes and
+    negatives too."""
+    info = np.iinfo(dtype)
+    values = [(1 << 24) + (1 << 16) + 1, (1 << 24) + 1, (1 << 25) + (1 << 17) + 3, 1 << 24, 255, info.max, info.min]
+    if info.min < 0:
+        values += [-((1 << 24) + (1 << 16) + 1), -((1 << 25) + (1 << 17) + 3)]
+    if info.bits == 64:
+        values += [(1 << 40) + (1 << 32) + 1, -((1 << 62) + (1 << 54) + 1)]
+    got, expected = on(device, lambda x: prims.cast(x, "bfloat16"), np.array(values, dtype))
+    np.testing.assert_array_equal(got.astype(np.float32), expected.astype(np.float32))
+    assert expected.astype(np.float32)[0] == (1 << 24) + (1 << 17)
+    if info.bits == 64:
+        assert expected.astype(np.float32)[-1] == -float((1 << 62) + (1 << 55))

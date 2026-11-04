@@ -1,7 +1,12 @@
-/// Sums `x` across the simdgroup, in float for bfloat accumulators.
+/// Sums `x` across the simdgroup in `A`: bfloat accumulators (no `simd_sum` of their own) add their lanes
+/// pairwise, each sum rounded to bfloat, the lanes exchanged through float exactly.
 template <typename A> inline A gemv_sum(A x) {
     if constexpr (is_same_v<A, bfloat>) {
-        return A(simd_sum(float(x)));
+        for (ushort m = 16; m > 0; m >>= 1) {
+            x += bfloat(simd_shuffle_xor(float(x), m));
+        }
+
+        return x;
     } else {
         return simd_sum(x);
     }

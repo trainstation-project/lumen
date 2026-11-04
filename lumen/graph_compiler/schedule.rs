@@ -328,6 +328,7 @@ impl Graph {
             outputs: self.outputs.clone(),
             scope: self.scope,
             sources: self.sources,
+            backward: self.backward,
         }
     }
 }

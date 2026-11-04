@@ -98,7 +98,7 @@ def test_matmul_tiles_fit_its_rows(m, tiles):
         return F.relu(plain(a, b))
 
     for tuned in (False, True):
-        lumen.config.compiler.mps.autotune = tuned
+        lumen.config.compiler.autotune = tuned
         try:
             for f, want in ((plain, product), (fused, np.maximum(product, 0))):
                 with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS]) as prof:
@@ -133,6 +133,6 @@ def test_tuned_matmul_matches_numpy_in_every_layout(device, dtype, lhs_k, rhs_k,
     x, y = (lumen.to_numpy(t.to(dtype="float32")).astype(np.float64) for t in (a, b))
     want = (x if lhs_k == 1 else x.T) @ (y if rhs_k == 0 else y.T)
     dims = (((lhs_k,), (rhs_k,)), ((), ()))
-    got = lumen.compile(lambda a, b: prims.dot_general(a, b, dims, "float32", dtype))(a, b)
+    got = lumen.compile(lambda a, b: prims.dot_general(a, b, dims, "float32").to(dtype=dtype))(a, b)
     rtol = 1e-4 if dtype == "float32" else 2**-6
     np.testing.assert_allclose(lumen.to_numpy(got.to(dtype="float32")), want, rtol=rtol, atol=rtol * 16)

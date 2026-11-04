@@ -2,6 +2,7 @@
 
 from lumen.autograd.core import _value
 from lumen.autograd.function import _FUNCTION, Function, FunctionCtx
+from lumen.config._C import config
 from lumen.graph import prims, tracer
 
 __all__ = ["substitute"]
@@ -10,9 +11,10 @@ __all__ = ["substitute"]
 def substitute(tape):
     """``tape`` with each attention whose nodes it recorded replaced by one
     node, an ``_Attention`` of the dots' operands: its output the second
-    dot's, its log-sum-exp (``max + log(sum)``, from the softmax's own max
-    and sum) added to the graph for its backward."""
-    if not tracer.compiler_config().flash_attention:
+    dot's (or its cast to the operands' dtype), its log-sum-exp
+    (``max + log(sum)``, from the softmax's own max and sum) added to the
+    graph for its backward."""
+    if not config.compiler.flash_attention:
         return tape
     graph = tracer.current_graph()
     for m in graph.attentions():
@@ -22,7 +24,7 @@ def substitute(tape):
             continue
         members = set(m["members"])
         ctx = FunctionCtx()
-        ctx.dot1, ctx.dot2 = tape[at[m["scores"]]][2], tape[at[m["out"]]][2]
+        ctx.dot1, ctx.dot2 = tape[at[m["scores"]]][2], tape[at[m["dot"]]][2]
         ctx.chain, ctx.causal, ctx.dropout = m["chain"], m["causal"], m["dropout"]
         q, k, v, o = (_value(m[name]) for name in ("q", "k", "v", "out"))
         mx, total = _value(m["max"]), _value(m["sum"])
@@ -69,11 +71,11 @@ class _Attention(Function):
         batch, sq, sk = list(o.shape[:nb]), o.shape[nb], k.shape[kf]
         every = tuple(range(nb))
         # Scores are computed transposed as ``[batch..., sk, sq]`` and replay the forward's scale/round chain.
-        st = prims.dot_general(k, q, ((rc1, lc1), (rb1, lb1)), accum, p1["output_dtype"])
+        st = prims.dot_general(k, q, ((rc1, lc1), (rb1, lb1)), accum)
         scale = 1.0
-        for step in ctx.chain[1:]:
+        for step in ctx.chain:
             if step[0] == "round":
-                st = prims.cast(st, step[1])
+                st = st if st.dtype == step[1] else prims.cast(st, step[1])
             else:
                 st = prims.mul(st, prims.full(st.shape, step[1], step[2]))
                 scale *= step[1]
@@ -87,9 +89,9 @@ class _Attention(Function):
         g = do if do.dtype == dtype else prims.cast(do, dtype)
         rows = tuple(range(nb + 1))
         # ``d = rowsum(do * o)``, the softmax backward's per-query correction term.
-        d = prims.dot_general(do, o, (((nb + 1,), (nb + 1,)), (rows, rows)), accum, accum)
+        d = prims.dot_general(do, o, (((nb + 1,), (nb + 1,)), (rows, rows)), accum)
         d = prims.broadcast_in_dim(prims.reshape(d, batch + [1, sq]), batch + [sk, sq], per_query)
-        dpt = prims.dot_general(v, g, (((vf,), (nb + 1,)), (rb2, every)), accum, accum)
+        dpt = prims.dot_general(v, g, (((vf,), (nb + 1,)), (rb2, every)), accum)
         if ctx.dropout is not None:
             swap = list(range(nb)) + [nb + 1, nb]
             dropped, keep = prims.transpose(_value(ctx.dropout["mask"]), swap), ctx.dropout["scale"]
@@ -98,9 +100,9 @@ class _Attention(Function):
         if ctx.dropout is not None:
             pt = F.where(dropped, 0.0, pt * keep)
         ds, pt = (t if dtype == accum else prims.cast(t, dtype) for t in (ds, pt))
-        dv = prims.dot_general(pt, g, (((nb + 1,), (nb,)), (every, every)), accum, accum)
-        dk = prims.dot_general(ds, q, (((nb + 1,), (qf,)), (every, lb1)), accum, accum)
-        dq = prims.dot_general(ds, k, (((nb,), (kf,)), (every, rb1)), accum, accum)
+        dv = prims.dot_general(pt, g, (((nb + 1,), (nb,)), (every, every)), accum)
+        dk = prims.dot_general(ds, q, (((nb + 1,), (qf,)), (every, lb1)), accum)
+        dq = prims.dot_general(ds, k, (((nb,), (kf,)), (every, rb1)), accum)
 
         def operand(grad, x, batch_dims, row, col):
             """Permutes ``grad`` from ``[batch..., row, col]`` into ``x``'s layout and dtype."""

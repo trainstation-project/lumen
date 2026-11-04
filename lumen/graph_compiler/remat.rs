@@ -81,6 +81,7 @@ fn recompute(graph: &Graph, i: usize, k: usize, depth: usize) -> Graph {
                 scope: node.scope,
                 sources: node.sources,
                 label: node.label,
+                backward: node.backward,
             },
         );
 

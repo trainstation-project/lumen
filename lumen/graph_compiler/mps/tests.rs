@@ -19,7 +19,7 @@ const MPS: Target = Target {
 use super::fusion;
 use crate::graph::Primitive::*;
 use crate::graph::{Graph, Primitive, TensorType, Var};
-use crate::graph_compiler::MpsConfig;
+use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::plan_tests::mps::{
     available, check, check_within, exact_values, values,
 };
@@ -34,7 +34,7 @@ fn ty(dtype: DType, shape: &[usize]) -> TensorType {
 
 /// Runs MPS fusion with default config and normalization rows on `g`.
 fn fuse(g: &Graph) -> Graph {
-    let config = MpsConfig::default();
+    let config = CompilerConfig::default();
 
     fusion::fuse(
         g,
@@ -85,7 +85,14 @@ fn gathers_from_tables_past_u32_index_in_ulong() {
         let index = g.input(ty(DType::I32, &[8]));
         let out = apply(&mut g, Gather { axis: 0 }, &[table, index]);
         g.set_outputs(&[out]).unwrap();
-        kernel_codegen::kernel(&g, &[], &MpsConfig::default(), &Default::default(), None).1
+        kernel_codegen::kernel(
+            &g,
+            &[],
+            &CompilerConfig::default(),
+            &Default::default(),
+            None,
+        )
+        .1
     };
 
     let (narrow, wide) = (source(1000), source(1 << 31));
@@ -512,9 +519,14 @@ fn transposes_in_fusions_are_tiled() {
 
             assert_eq!(fused.nodes().len(), 1, "{fused}");
 
-            let source =
-                kernel_codegen::kernel(body, &[], &MpsConfig::default(), &Default::default(), None)
-                    .1;
+            let source = kernel_codegen::kernel(
+                body,
+                &[],
+                &CompilerConfig::default(),
+                &Default::default(),
+                None,
+            )
+            .1;
 
             assert_eq!(transpose_tiling(body).is_some(), tiled, "{shape:?}");
 
@@ -562,8 +574,14 @@ fn reductions_are_normalized() {
             panic!("{fused}")
         };
 
-        let source =
-            kernel_codegen::kernel(body, &[], &MpsConfig::default(), &Default::default(), None).1;
+        let source = kernel_codegen::kernel(
+            body,
+            &[],
+            &CompilerConfig::default(),
+            &Default::default(),
+            None,
+        )
+        .1;
 
         assert!(
             source.contains(&format!("{kernel}<")),
@@ -625,7 +643,7 @@ fn hierarchical_reductions_keep_their_dtype() {
                 let source = kernel_codegen::kernel(
                     body,
                     &[],
-                    &MpsConfig::default(),
+                    &CompilerConfig::default(),
                     &Default::default(),
                     None,
                 )
@@ -688,16 +706,22 @@ fn hierarchical_reductions_keep_their_dtype() {
 
     for node in fused.nodes() {
         if let Fusion { body, .. } = &node.primitive {
-            let source =
-                kernel_codegen::kernel(body, &[], &MpsConfig::default(), &Default::default(), None)
-                    .1;
+            let source = kernel_codegen::kernel(
+                body,
+                &[],
+                &CompilerConfig::default(),
+                &Default::default(),
+                None,
+            )
+            .1;
 
             assert!(!mentions(&source, "float"), "{source}");
         }
     }
 }
 
-/// Dots of weights scaled and cast elementwise merge when the elementwise ops match, sharing one cast.
+/// Dots of weights scaled and cast elementwise merge when the elementwise ops match, sharing one cast;
+/// their rounding casts to bfloat16 merge with them.
 #[test]
 fn dots_of_weights_computed_elementwise_merge() {
     let dot = DotGeneral {
@@ -706,7 +730,13 @@ fn dots_of_weights_computed_elementwise_merge() {
         lhs_batch: vec![],
         rhs_batch: vec![],
         accum_dtype: DType::F32,
-        output_dtype: DType::BF16,
+        output_dtype: DType::F32,
+    };
+
+    let rounded = |g: &mut Graph, x: Var, w: Var| {
+        let y = apply(g, dot.clone(), &[x, w]);
+        let new_dtype = DType::BF16;
+        apply(g, Cast { new_dtype }, &[y])
     };
 
     let build = |scales: [f64; 3]| {
@@ -742,7 +772,7 @@ fn dots_of_weights_computed_elementwise_merge() {
             );
 
             operands.push(cast);
-            let y = apply(&mut g, dot.clone(), &[x, cast]);
+            let y = rounded(&mut g, x, cast);
             outs.push(apply(&mut g, Neg, &[y]));
         }
 
@@ -766,7 +796,7 @@ fn dots_of_weights_computed_elementwise_merge() {
         outs.push(apply(&mut g, other, &[xt, x]));
 
         for k in [0, 2] {
-            let again = apply(&mut g, dot.clone(), &[x, operands[k]]);
+            let again = rounded(&mut g, x, operands[k]);
             outs.push(apply(&mut g, Neg, &[again]));
         }
 
@@ -779,12 +809,11 @@ fn dots_of_weights_computed_elementwise_merge() {
     let (merged, packs, _) = merge_dots(&g, &packable, &[], &MPS);
     assert_eq!(packs, [(vec![1, 2, 3], 0)], "{merged}");
 
-    let casts = names(&merged.prune().0)
-        .iter()
-        .filter(|&&n| n == "cast")
-        .count();
+    let pruned = names(&merged.prune().0);
+    let count = |name: &str| pruned.iter().filter(|&&n| n == name).count();
 
-    assert_eq!(casts, 1, "{merged}");
+    // One cast of the weights' block, and one rounding cast per dot but `other`: as many as dots.
+    assert_eq!(count("cast"), count("dot_general"), "{merged}");
 
     let mut inputs = vec![
         data(&[16, 32], 1).to_dtype(DType::BF16).unwrap(),
@@ -1228,8 +1257,14 @@ fn dots_fuse_their_epilogue() {
     };
 
     assert!(label.starts_with("dot_general"), "{label}");
-    let source =
-        kernel_codegen::kernel(body, &[], &MpsConfig::default(), &Default::default(), None).1;
+    let source = kernel_codegen::kernel(
+        body,
+        &[],
+        &CompilerConfig::default(),
+        &Default::default(),
+        None,
+    )
+    .1;
 
     assert!(
         source.contains("matmul_sg_impl") && source.contains("_small("),
@@ -1241,9 +1276,9 @@ fn dots_fuse_their_epilogue() {
         ["fusion", "fusion_output"]
     );
 
-    let config = MpsConfig {
+    let config = CompilerConfig {
         contraction_epilogues: false,
-        ..MpsConfig::default()
+        ..CompilerConfig::default()
     };
 
     let unfused = fusion::fuse(
@@ -1462,9 +1497,14 @@ fn reductions_apply_their_epilogue() {
 
             assert!(has_epilogue(body));
 
-            let source =
-                kernel_codegen::kernel(body, &[], &MpsConfig::default(), &Default::default(), None)
-                    .1;
+            let source = kernel_codegen::kernel(
+                body,
+                &[],
+                &CompilerConfig::default(),
+                &Default::default(),
+                None,
+            )
+            .1;
 
             assert!(source.contains("operator()(float r)"), "{source}");
             assert_eq!(source.contains("_final("), split, "{source}");
@@ -1500,8 +1540,14 @@ fn reductions_apply_an_epilogue_reading_them_twice() {
         };
 
         assert!(has_epilogue(body));
-        let source =
-            kernel_codegen::kernel(body, &[], &MpsConfig::default(), &Default::default(), None).1;
+        let source = kernel_codegen::kernel(
+            body,
+            &[],
+            &CompilerConfig::default(),
+            &Default::default(),
+            None,
+        )
+        .1;
         assert_eq!(source.contains("_final("), split, "{source}");
 
         if available() {
@@ -1837,8 +1883,14 @@ fn division_by_sqrt_is_as_traced() {
         panic!("{fused}")
     };
 
-    let source =
-        kernel_codegen::kernel(body, &[], &MpsConfig::default(), &Default::default(), None).1;
+    let source = kernel_codegen::kernel(
+        body,
+        &[],
+        &CompilerConfig::default(),
+        &Default::default(),
+        None,
+    )
+    .1;
 
     assert!(
         !source.contains("rsqrt(") && source.contains("Div::") && source.contains("Sqrt::"),
@@ -1871,8 +1923,14 @@ fn division_by_sqrt_is_as_traced() {
         panic!("{fused}")
     };
 
-    let source =
-        kernel_codegen::kernel(body, &[], &MpsConfig::default(), &Default::default(), None).1;
+    let source = kernel_codegen::kernel(
+        body,
+        &[],
+        &CompilerConfig::default(),
+        &Default::default(),
+        None,
+    )
+    .1;
 
     assert!(
         !source.contains("rsqrt(") && source.contains("Div::") && source.contains("Sqrt::"),
@@ -2072,8 +2130,8 @@ fn skinny_dots_split_their_contraction() {
     };
 
     let build = |m: usize, n: usize, k: usize, dtype: DType| build_with(m, n, k, dtype, DType::F32);
-    let g = build(4, 256, 4096, DType::F32);
-    let split = super::split_k::split_k(&g, false, false);
+    let g = build(8, 256, 4096, DType::F32);
+    let split = super::split_k::split_k(&g);
     let names: Vec<&str> = split.nodes().iter().map(|n| n.primitive.name()).collect();
 
     assert_eq!(
@@ -2082,8 +2140,9 @@ fn skinny_dots_split_their_contraction() {
         "{split}"
     );
 
-    assert_eq!(split.type_of(split.nodes()[2].output).shape, [8, 4, 256]);
-    let inputs = [data(&[4, 4096], 1), data(&[4096, 256], 2)];
+    // K per tile is long: MLX's rule's 32 chunks, held to chunks of at least 256 (16).
+    assert_eq!(split.type_of(split.nodes()[2].output).shape, [16, 8, 256]);
+    let inputs = [data(&[8, 4096], 1), data(&[4096, 256], 2)];
     let want = reference::run(&g, &inputs).unwrap();
     let got = reference::run(&split, &inputs).unwrap();
     let (want, got) = (want[0].to_vec::<f32>(), got[0].to_vec::<f32>());
@@ -2092,7 +2151,7 @@ fn skinny_dots_split_their_contraction() {
         assert!((w - g).abs() <= 4096.0 * 4.0 * f32::EPSILON, "{w} {g}");
     }
 
-    let split = super::split_k::split_k(&build(4, 256, 4096, DType::BF16), false, false);
+    let split = super::split_k::split_k(&build(8, 256, 4096, DType::BF16));
     let names: Vec<&str> = split.nodes().iter().map(|n| n.primitive.name()).collect();
 
     assert_eq!(
@@ -2100,25 +2159,18 @@ fn skinny_dots_split_their_contraction() {
         ["reshape", "reshape", "dot_general", "reduce_sum", "cast"]
     );
 
-    let split = super::split_k::split_k(&g, true, false);
-    assert_eq!(split.nodes().len(), 4, "{split}");
-    let g = build(352, 352, 2048, DType::BF16);
-    let split = super::split_k::split_k(&g, true, false);
+    // Partials outweighing the operands split the same way: a product, then a sum.
+    let split = super::split_k::split_k(&build(352, 352, 2048, DType::BF16));
     let names: Vec<&str> = split.nodes().iter().map(|n| n.primitive.name()).collect();
 
     assert_eq!(
         names,
-        ["reshape", "reshape", "dot_general (split-K)", "cast"],
+        ["reshape", "reshape", "dot_general", "reduce_sum", "cast"],
         "{split}"
     );
 
-    let Primitive::Fusion { body, .. } = &split.nodes()[2].primitive else {
-        unreachable!("a fusion")
-    };
-
-    assert!(super::split_k::atomic_dot(body).is_some(), "{body}");
     let g = build_with(352, 352, 2048, DType::BF16, DType::BF16);
-    let split = super::split_k::split_k(&g, true, false);
+    let split = super::split_k::split_k(&g);
     let names: Vec<&str> = split.nodes().iter().map(|n| n.primitive.name()).collect();
 
     assert_eq!(
@@ -2166,7 +2218,7 @@ fn skinny_dots_split_their_contraction() {
         build(4, 256, 2049, DType::F32),
         build(4, 256, 1024, DType::F32),
     ] {
-        let split = super::split_k::split_k(&g, false, false);
+        let split = super::split_k::split_k(&g);
         assert_eq!(split.nodes().len(), 1, "{split}");
     }
 }
@@ -2201,7 +2253,7 @@ fn every_gemm_candidate_matches_the_reference() {
     ];
 
     let mut options = crate::graph_compiler::Options::default();
-    options.config.mps.autotune = false;
+    options.config.autotune = false;
 
     for dtype in [DType::F32, DType::BF16] {
         for (lhs, rhs, lc, rc) in cases {
@@ -2260,7 +2312,7 @@ fn every_gemm_candidate_matches_the_reference() {
 
                 let mut gemms = Gemms::default();
 
-                let built: Vec<_> = gemm::configs()
+                let built: Vec<_> = gemm::config()
                     .iter()
                     .chain(mpp)
                     .chain(skinny)
@@ -2314,7 +2366,7 @@ fn every_tiled_gemm_stores_regions_halves_and_expansions_along_rows_and_columns(
     let (pairs, plain, other, k) = (40, 24, 69, 96);
     let extent = 2 * pairs + plain;
     let mut options = crate::graph_compiler::Options::default();
-    options.config.mps.autotune = false;
+    options.config.autotune = false;
 
     let along = |g: &mut Graph, v: Var, shape: &[usize], at: usize, start: usize, end: usize| {
         let mut limit = shape.to_vec();
@@ -2449,7 +2501,7 @@ fn every_tiled_gemm_stores_regions_halves_and_expansions_along_rows_and_columns(
         assert!(matmul_of(&step).is_some(), "{case}: {plan}");
         let mut gemms = Gemms::default();
 
-        let built: Vec<_> = gemm::configs()
+        let built: Vec<_> = gemm::config()
             .iter()
             .map(|&config| (config, gemms.build(&step, config)))
             .collect();
@@ -2607,7 +2659,7 @@ fn every_tuned_paired_and_wide_norm_gemm_matches_the_reference() {
     };
 
     let mut options = crate::graph_compiler::Options::default();
-    options.config.mps.autotune = false;
+    options.config.autotune = false;
 
     for k in [96, 256] {
         let cases = [
@@ -2645,7 +2697,7 @@ fn every_tuned_paired_and_wide_norm_gemm_matches_the_reference() {
                 .expect("a matmul step");
 
             let step = plan.steps()[at].clone();
-            let mut gemms = Gemms::new(&MpsConfig::default());
+            let mut gemms = Gemms::new(&CompilerConfig::default());
 
             let configs: Vec<_> = gemms
                 .configs(&step)
@@ -2929,8 +2981,8 @@ fn every_tuned_gemm_kernel_stores_every_epilogue() {
     ];
 
     let mut options = crate::graph_compiler::Options::default();
-    options.config.mps.autotune = false;
-    options.config.mps.split_k = false;
+    options.config.autotune = false;
+    options.config.split_k = false;
 
     for (algorithm, cases) in [(Algorithm::Mpp, large), (Algorithm::Skinny, skinny)] {
         let tried = |c: &GemmConfig| c.algorithm == algorithm;
@@ -2968,7 +3020,7 @@ fn every_tuned_gemm_kernel_stores_every_epilogue() {
 
             let got = gemm::gemm_flags(body, gemm_dot(body).unwrap());
             assert_eq!(got, want, "{case} {algorithm:?}: {body}");
-            let mut gemms = Gemms::new(&MpsConfig::default());
+            let mut gemms = Gemms::new(&CompilerConfig::default());
 
             let configs: Vec<_> = gemms
                 .configs(&step)
@@ -3019,7 +3071,8 @@ fn every_tuned_gemm_kernel_stores_every_epilogue() {
     }
 }
 
-/// Every GEMM candidate accumulates in the dot's accumulation dtype, checked by summing 2^16 ones.
+/// Every GEMM candidate accumulates in the dot's accumulation dtype, checked by summing 2^16 + 2^8 ones: a
+/// count bfloat16 cannot hold, whichever partial sums a candidate splits it into.
 #[test]
 fn every_gemm_candidate_accumulates_in_the_accum_dtype() {
     use super::autotune::{Gemms, matmul_of};
@@ -3030,9 +3083,9 @@ fn every_gemm_candidate_accumulates_in_the_accum_dtype() {
     }
 
     let mut options = crate::graph_compiler::Options::default();
-    options.config.mps.autotune = false;
-    options.config.mps.split_k = false;
-    let k = 1 << 16;
+    options.config.autotune = false;
+    options.config.split_k = false;
+    let k = (1 << 16) + (1 << 8);
 
     for accum in [DType::F32, DType::BF16] {
         for (m, n) in [(4, 1024), (256, 256)] {
@@ -3072,7 +3125,7 @@ fn every_gemm_candidate_accumulates_in_the_accum_dtype() {
                 .expect("a matmul step");
 
             let step = plan.steps()[at].clone();
-            let mut gemms = Gemms::new(&MpsConfig::default());
+            let mut gemms = Gemms::new(&CompilerConfig::default());
 
             let built: Vec<_> = gemms
                 .configs(&step)
@@ -3091,10 +3144,102 @@ fn every_gemm_candidate_accumulates_in_the_accum_dtype() {
 
                 match accum {
                     DType::F32 => assert_eq!(sum, k as f32, "{config:?}"),
-                    _ => assert!(sum < k as f32, "{config:?}: {sum} of {k} ones in {accum}"),
+                    _ => assert_ne!(sum, k as f32, "{config:?}: {sum} of {k} ones in {accum}"),
                 }
             }
         }
+    }
+}
+
+/// Every GEMV candidate sums its lanes in a bfloat accumulator as bfloat: lane 0's 256 and the other 31
+/// lanes' 1s (each lane's partial exact) are 286 added pairwise in bfloat, not 287 added in float and
+/// rounded once (288).
+#[test]
+fn gemv_lanes_sum_in_a_bfloat_accumulator() {
+    use super::autotune::{Gemms, matmul_of};
+    use crate::graph_compiler::common::autotune::Kernels;
+
+    if !available() {
+        return;
+    }
+
+    let mut options = crate::graph_compiler::Options::default();
+    options.config.autotune = false;
+    options.config.split_k = false;
+
+    // A K-contiguous weight (`x · wᵀ`), so the dot is a GEMV. A lane reads `GEMV_WIDTH` elements at a time: lane `l` the ones from `l * GEMV_WIDTH`.
+    let (k, n) = (32 * gemm::GEMV_WIDTH, 64);
+    let mut g = Graph::new();
+    let a = g.input(ty(DType::BF16, &[1, k]));
+    let b = g.input(ty(DType::BF16, &[n, k]));
+
+    let dot = DotGeneral {
+        lhs_contracting: vec![1],
+        rhs_contracting: vec![1],
+        lhs_batch: vec![],
+        rhs_batch: vec![],
+        accum_dtype: DType::BF16,
+        output_dtype: DType::BF16,
+    };
+
+    let d = apply(&mut g, dot, &[a, b]);
+    g.set_outputs(&[d]).unwrap();
+
+    let mut vector = vec![0f32; k];
+    vector[0] = 256.0;
+
+    for lane in 1..32 {
+        vector[lane * gemm::GEMV_WIDTH] = 1.0;
+    }
+
+    let options_on = crate::TensorOptions::new()
+        .dtype(DType::F32)
+        .device(Device::Mps(0));
+
+    let on_mps = [
+        Tensor::from_slice(&vector, options_on)
+            .reshape(&[1, k])
+            .to_dtype(DType::BF16)
+            .unwrap(),
+        Tensor::ones(&[n, k], options_on.dtype(DType::BF16)),
+    ];
+
+    let mut plan = crate::graph_compiler::compile_with(&g, Device::Mps(0), &options).unwrap();
+
+    let at = plan
+        .steps()
+        .iter()
+        .position(|s| matmul_of(s).is_some())
+        .expect("a matmul step");
+
+    let step = plan.steps()[at].clone();
+    let mut gemms = Gemms::new(&CompilerConfig::default());
+
+    let built: Vec<_> = gemms
+        .configs(&step)
+        .into_iter()
+        .map(|config| (config, gemms.build(&step, config)))
+        .collect();
+
+    assert!(!built.is_empty(), "GEMV candidates");
+    assert!(
+        built
+            .iter()
+            .all(|(c, _)| c.algorithm == gemm::Algorithm::Gemv)
+    );
+    gemms.compile().unwrap();
+
+    for (config, tuned) in built {
+        plan.steps_mut()[at].tuned = Some(tuned);
+        let got = plan.run(&on_mps).unwrap()[0]
+            .to_dtype(DType::F32)
+            .unwrap()
+            .to_vec::<f32>();
+        assert!(
+            got.iter().all(|&v| v == 286.0),
+            "{config:?}: {:?}",
+            &got[..4]
+        );
     }
 }
 
@@ -3456,7 +3601,7 @@ fn every_gemv_candidate_stores_every_epilogue() {
     ];
 
     let mut options = crate::graph_compiler::Options::default();
-    options.config.mps.autotune = false;
+    options.config.autotune = false;
 
     for (case, g, tol) in cases {
         let inputs: Vec<Tensor> = g
@@ -3486,7 +3631,7 @@ fn every_gemv_candidate_stores_every_epilogue() {
 
         let untuned = plan.run(&on_mps).unwrap();
         let step = plan.steps()[at].clone();
-        let mut gemms = Gemms::new(&MpsConfig::default());
+        let mut gemms = Gemms::new(&CompilerConfig::default());
         let configs = gemms.configs(&step);
 
         assert!(

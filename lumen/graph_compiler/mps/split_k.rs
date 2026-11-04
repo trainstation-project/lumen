@@ -1,41 +1,47 @@
-//! MPS split-K: the shared pass (`common::split_k`) with MPS's tiles, its GEMV kept whole, and
-//! atomic accumulation unless deterministic.
+//! MPS split-K: the shared pass (`common::split_k`) with MPS's tiles, its GEMV and skinny (few-row)
+//! products kept whole.
 
-use super::fusion::fusible;
-use crate::codegen::dot_general::mps::{float_groups, gemv};
-use crate::graph::{Graph, Node, Primitive};
+use crate::codegen::dot_general::mps::{float_groups, gemv, skinny_rows};
+use crate::graph::Graph;
 use crate::graph_compiler::common::split_k::Rules;
 use crate::graph_compiler::pass::{CompilerPass, Module};
 
-/// Splits `graph`'s matmuls by MPS's rules; `atomic` and `fuse` as in `Rules`.
-pub(super) fn split_k(graph: &Graph, atomic: bool, fuse: bool) -> Graph {
+/// Most rows of a skinny product kept whole: its lanes already split K, while split, each chunk runs on a
+/// tiled GEMM of mostly-padding 32-row tiles. On an M4 Pro, bf16 [4, 4096] · [4096, 1024] runs 59 µs split
+/// and 27.5 µs whole; at 16 and 32 rows splitting wins (bf16 [16, 16384] · [16384, 1024]: 178 vs 302 µs).
+const WHOLE_ROWS: usize = 4;
+
+/// The chunks MLX's split-K picks (`steel_gemm_splitk_axpby`): an output of at most 2048 32 x 32 tiles
+/// with `k` at least 128 and at least `m` and `n` splits into `next_pow2((k / 16) / tiles)` chunks, 2 to
+/// 32, more as K per tile grows. The pass takes it where it beats the 256-threadgroup target: on an M4
+/// Pro, small outputs of long K run 6-38% faster (bf16 [64, 16384] · [16384, 64]: 32 chunks 29 µs, 8
+/// chunks 40 µs), larger ones keep their count.
+fn chunks(m: usize, n: usize, k: usize) -> Option<usize> {
+    let tiles = m.div_ceil(32) * n.div_ceil(32);
+
+    if tiles > 2048 || k / 16 < 8 || k < m.max(n) {
+        return None;
+    }
+
+    Some((k / 16 / tiles).next_power_of_two().clamp(2, 32))
+}
+
+/// Splits `graph`'s matmuls by MPS's rules.
+pub(super) fn split_k(graph: &Graph) -> Graph {
     let rules = Rules {
         tiles: &|m, n| float_groups(1, m, n),
         target: 256,
-        unsplit: &|dot, lhs, rhs, out| gemv(dot, lhs, rhs, out).is_some(),
-        fusible: &fusible,
-        atomic,
-        fuse,
+        unsplit: &|dot, lhs, rhs, out| {
+            gemv(dot, lhs, rhs, out).is_some()
+                || skinny_rows(dot, lhs, rhs, out).is_some_and(|m| m <= WHOLE_ROWS)
+        },
+        chunks: Some(&chunks),
     };
 
     crate::graph_compiler::common::split_k::split_k(graph, &rules)
 }
 
-/// The dot of a `split_k` fusion body (a dot followed by a sum over its leading axis).
-pub(super) fn atomic_dot(body: &Graph) -> Option<&Node> {
-    match body.nodes() {
-        [dot, sum] => {
-            let split = matches!(dot.primitive, Primitive::DotGeneral { .. })
-                && matches!(&sum.primitive, Primitive::ReduceSum { axes, .. } if axes == &[0])
-                && sum.inputs == [dot.output];
-
-            split.then_some(dot)
-        }
-        _ => None,
-    }
-}
-
-/// Compiler pass running `split_k`, atomically unless deterministic mode is on.
+/// Compiler pass running `split_k`.
 pub(super) struct SplitK;
 
 impl<M: Module> CompilerPass<M> for SplitK {
@@ -45,8 +51,7 @@ impl<M: Module> CompilerPass<M> for SplitK {
 
     /// Splits the module's matmuls.
     fn apply(&mut self, m: &mut M) -> Result<(), String> {
-        let config = &m.options().config.mps;
-        *m.graph_mut() = split_k(m.graph(), !config.deterministic, config.fuse);
+        *m.graph_mut() = split_k(m.graph());
         Ok(())
     }
 }

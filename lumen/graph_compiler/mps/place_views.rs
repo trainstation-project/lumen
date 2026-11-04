@@ -7,6 +7,7 @@ use crate::graph::{Graph, Primitive};
 use crate::graph_compiler::common::attention;
 use crate::graph_compiler::common::place_views::{self, place_views};
 use crate::graph_compiler::pass::CompilerPass;
+use crate::graph_compiler::plan::Step;
 
 /// Compiler pass marking slices as views where their readers allow it.
 pub(super) struct PlaceViews;
@@ -37,6 +38,19 @@ pub(crate) fn loads_strided(body: &Graph, k: usize) -> bool {
             .nodes()
             .iter()
             .any(|n| template(&n.primitive) && n.inputs.contains(&v))
+}
+
+/// Whether some input of `step` is a view its kernel loads element by element (a strided variant of the
+/// kernel), which tuned kernels don't; views a GEMM's dot strides through need none.
+pub(crate) fn loads_views(step: &Step) -> bool {
+    let Primitive::Fusion { body, .. } = &step.primitive else {
+        return step.views.iter().any(Option::is_some);
+    };
+
+    step.views
+        .iter()
+        .enumerate()
+        .any(|(k, view)| view.is_some() && loads_strided(body, k))
 }
 
 /// Whether an attention fusion reads its inputs at `strides`: any, with a contiguous last dim (its

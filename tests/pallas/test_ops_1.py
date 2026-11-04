@@ -1220,7 +1220,7 @@ def test_dot_dims_batched_simple_dot_general(dtype):
 
     def kernel(x_ref, y_ref, out_ref):
         """Computes the batched `dot_general`."""
-        out_ref[...] = prims.dot_general(x_ref[...], y_ref[...], numbers, "float32", "float32")
+        out_ref[...] = prims.dot_general(x_ref[...], y_ref[...], numbers, "float32")
 
     out = _run(kernel, pl.ShapeDtypeStruct((11, 16, 128), "float32"), _tensor(x, dtype), _tensor(y, dtype))
     np.testing.assert_allclose(out, _dot_general(x, y, numbers), rtol=5e-3 if dtype == "bfloat16" else 1e-5, atol=1e-5)
@@ -1272,7 +1272,7 @@ def test_dot_general_multiple_non_contracting_dims(batch_size, shapes_and_dims_n
 
     def kernel(x_ref, y_ref, out_ref):
         """Computes the `dot_general` with float32 accumulation."""
-        out_ref[...] = prims.dot_general(x_ref[...], y_ref[...], dims_numbers, "float32", "float32")
+        out_ref[...] = prims.dot_general(x_ref[...], y_ref[...], dims_numbers, "float32")
 
     out = _run(kernel, pl.ShapeDtypeStruct(expected.shape, "float32"), _tensor(x), _tensor(y))
     np.testing.assert_allclose(out, expected, rtol=1e-5, atol=1e-5)
@@ -1299,7 +1299,7 @@ def test_dot_general_non_front_batch_dims(shapes_and_dims_numbers):
 
     def kernel(x_ref, y_ref, out_ref):
         """Computes the `dot_general` with float32 accumulation."""
-        out_ref[...] = prims.dot_general(x_ref[...], y_ref[...], dims_numbers, "float32", "float32")
+        out_ref[...] = prims.dot_general(x_ref[...], y_ref[...], dims_numbers, "float32")
 
     out = _run(kernel, pl.ShapeDtypeStruct(expected.shape, "float32"), _tensor(x), _tensor(y))
     np.testing.assert_allclose(out, expected, atol=1e-5, rtol=1e-5)

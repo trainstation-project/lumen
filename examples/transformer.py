@@ -10,21 +10,22 @@ import lumen
 import lumen.functional as F
 from lumen.profiler import ProfilerActivity, profile, record_function, supported_activities
 
-VOCAB, SEQ, DIM, HEADS, HIDDEN, LAYERS = 1984, 32, 64, 4, 256, 1
+VOCAB, SEQ, DIM, HEADS, HIDDEN, LAYERS = 1984, 32, 640, 4, 256, 2
 BATCH, STEPS, DROPOUT = 32, 300, 0
 ACCUM = 1
 PROFILED_STEPS = 10
 
 DEVICE = sys.argv[1] if len(sys.argv) > 1 else "mps"
+lumen.config.compiler.linear_reordering = True
 
 # The device's compiler settings, each where it has one; CUDA runs through the Triton backend.
-config = getattr(lumen.config.compiler, DEVICE)
+config = lumen.config.compiler
 settings = dict(
     use_triton_backend=True,
     deterministic=True,
     split_k=False,
     fuse=True,
-    fused_linear_cross_entropy_chunk_size=64,
+    fused_linear_cross_entropy_chunk_size=None,
     fused_linear_cross_entropy=True,
 )
 for name, value in settings.items():
@@ -164,12 +165,12 @@ class Block(lumen.nn.Module):
         """Applies the attention and MLP sub-blocks, each after an RMSNorm, to ``x`` of ``batch`` sequences."""
         r = x
         with lumen.profiler.record_function("attention rmsnorm"):
-            x = F.rms_norm(x.bfloat16().float(), x.size(-1), self.attn.norm).bfloat16()
-        x = r + self.attn(x, batch, dropout_p)
+            x = F.rms_norm(x.float(), x.size(-1), self.attn.norm).bfloat16()
+        x = (r.float() + self.attn(x, batch, dropout_p)).bfloat16()
         r = x
         with lumen.profiler.record_function("mlp rmsnorm"):
-            x = F.rms_norm(x.bfloat16().float(), x.size(-1), self.mlp.norm).bfloat16()
-        x = r + self.mlp(x)
+            x = F.rms_norm(x.float(), x.size(-1), self.mlp.norm).bfloat16()
+        x = (r.float() + self.mlp(x)).bfloat16()
         return x
 
 
@@ -186,7 +187,7 @@ class Transformer(lumen.nn.Module):
         """Each position's final hidden state, ``[batch * seq, dim]``,
         bfloat16 (its next token's logits the head's, which the loss
         computes), from token ids ``[batch, seq]``."""
-        h = self.embed(ids)
+        h = self.embed(ids).bfloat16()
         for layer in self.layers:
             h = layer(h, ids.shape[0], dropout_p)
         with lumen.profiler.record_function("rmsnorm"):
@@ -217,7 +218,7 @@ def train_step(model, opt, x, y):
     # Normalise every gradient by the sum of all gradient entries.
     c = 0
     for p in model.parameters():
-        c += F.sum(p.grad)
+        c += F.sum(p.grad.float())
 
     for p in model.parameters():
         p.grad = p.grad / c

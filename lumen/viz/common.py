@@ -39,7 +39,6 @@ def type_text(dtype, shape):
 
 # (kernel name pattern, source file under lumen/, line prefix where its code starts); first match wins.
 _SOURCES = [
-    (r"^matmul_atomic_", "codegen/dot_general/mps/tiled/matmul_atomic_kernel.metal", "#define MATMUL_ATOMIC"),
     (
         r"^lce_partials",
         "codegen/dot_general/mps/linear_cross_entropy/kernel.metal",
@@ -53,8 +52,11 @@ _SOURCES = [
     (r"^dynamic_slice_copy_", "codegen/dynamic_slice/mps/kernel.metal", "#define DS_COPY"),
     (r"^dynamic_update_slice_", "codegen/dynamic_slice/mps/kernel.metal", "#define DYNAMIC_UPDATE_SLICE"),
     (r"^dynamic_slice_", "codegen/dynamic_slice/mps/kernel.metal", "#define DYNAMIC_SLICE"),
-    (r"^scatter_add_scan_", "codegen/scatter_add/mps/kernel.metal", "#define SCATTER_ADD_SCAN"),
-    (r"^scatter_add_", "codegen/scatter_add/mps/kernel.metal", "#define SCATTER_ADD("),
+    (r"^scatter_add_count_", "codegen/scatter_add/mps/kernel.metal", "#define SCATTER_COUNT("),
+    (r"^scatter_add_starts", "codegen/scatter_add/mps/kernel.metal", "kernel void scatter_add_starts"),
+    (r"^scatter_add_place_", "codegen/scatter_add/mps/kernel.metal", "#define SCATTER_PLACE("),
+    (r"^scatter_add_rows_", "codegen/scatter_add/mps/kernel.metal", "#define SCATTER_ROWS("),
+    (r"^scatter_add_atomic_", "codegen/scatter_add/mps/kernel.metal", "#define SCATTER_ATOMIC("),
     (r"^random_bits", "codegen/random/mps/kernel.metal", "kernel void random_bits"),
     (
         r"^matmul_(u64|i64)$",

@@ -18,7 +18,7 @@ use crate::codegen::reduction::ReductionCodegen;
 use crate::codegen::row::RowCodegen;
 use crate::codegen::utils::mps::Mps;
 use crate::graph::{Graph, Primitive, Var};
-use crate::graph_compiler::MpsConfig;
+use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::common::alone::wrapped;
 use crate::graph_compiler::common::attention::{self, Strides};
 use crate::graph_compiler::pass::CompilerPass;
@@ -34,7 +34,7 @@ impl<'a> CompilerPass<MpsModule<'a>> for Codegen {
     /// Unmarks in-place concatenations that fusion invalidated, then generates each pending fusion's kernel
     /// with the strided output views it writes into.
     fn apply(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
-        let config = &m.options.config.mps;
+        let config = &m.options.config;
         // Concatenations no longer valid in place get copied by their own elementwise kernel.
         let valid = in_place_concats(&m.graph, &m.kernels, false);
         let mut unmarked = false;
@@ -174,7 +174,7 @@ fn is_elementwise(body: &Graph) -> bool {
 pub(super) fn kernel(
     body: &Graph,
     by_value: &[bool],
-    config: &MpsConfig,
+    config: &CompilerConfig,
     views: &HashMap<usize, (usize, Vec<usize>)>,
     tuning: Option<Tuning>,
 ) -> (String, String) {

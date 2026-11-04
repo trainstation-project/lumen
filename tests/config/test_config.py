@@ -1,4 +1,4 @@
-"""Tests of the per-device compiler settings in `lumen.config.compiler` and the passes each flag controls."""
+"""Tests of the compiler settings in `lumen.config.compiler` and the passes each flag controls."""
 
 import numpy as np
 import pytest
@@ -6,14 +6,14 @@ from helpers import CUDA, MPS
 
 import lumen
 import lumen.functional as F
-from lumen.config._C import CompilerConfig
+from lumen.graph_compiler.config import CompilerConfig
 
 
 @pytest.fixture
 def compiler():
-    """``lumen.config.compiler.mps``, every device's settings reset to their
-    defaults after the test."""
-    yield lumen.config.compiler.mps
+    """``lumen.config.compiler``, its settings reset to their defaults after
+    the test."""
+    yield lumen.config.compiler
     lumen.config.compiler.reset()
 
 
@@ -32,16 +32,13 @@ def _labels(f, *args, device="mps"):
 
 
 def test_compiler_flags_defaults(compiler):
-    """Each device's compiler has its own settings (``lumen.config.compiler``
-    holds one per device; ``of`` picks a device's, the meta device's the
-    CPU's): every program runs as traced, but for online softmax, flash
-    attention, fused linear cross entropy and split-K (on). A device's
-    settings hold only the flags its compiler reads, the ones every device
-    has from their base class (``CompilerConfig``)."""
-    configs = lumen.config.compiler
-    for device in (configs.cpu, configs.cuda, configs.mps, configs.tpu):
-        assert (device.merge_dots, device.flash_attention, device.memory_limit) == (True, True, 0)
-        assert device.fused_linear_cross_entropy_chunk_size is None and device.dump_to is None
+    """The compiler has one set of settings (``lumen.config.compiler``),
+    every device's compiler reading the flags it has a use for: every
+    program runs as traced, but for online softmax, flash attention, fused
+    linear cross entropy and split-K (on)."""
+    assert isinstance(compiler, CompilerConfig)
+    assert (compiler.merge_dots, compiler.flash_attention, compiler.memory_limit) == (True, True, 0)
+    assert compiler.fused_linear_cross_entropy_chunk_size is None and compiler.dump_to is None
     assert (compiler.fuse, compiler.normalization_diamonds) == (True, True)
     assert (compiler.reduction_epilogues, compiler.multi_output_fusion) == (True, True)
     assert compiler.contraction_epilogues is True and compiler.horizontal_fusion is True
@@ -49,23 +46,14 @@ def test_compiler_flags_defaults(compiler):
     assert compiler.split_k is True and compiler.deterministic is False
     assert compiler.fused_linear_cross_entropy is True and compiler.safe_kernels is False
     assert compiler.autotune is True and compiler.neural_engine is False
-    assert (configs.cuda.use_triton_backend, configs.cuda.autotune) == (False, True)
-    assert configs.cuda.deterministic is False and configs.cuda.normalization_diamonds is True
-    tpu = configs.tpu
-    assert (tpu.normalization_diamonds, tpu.contraction_epilogues, tpu.horizontal_fusion) == (True, True, True)
-    assert tpu.safe_kernels is False
-    assert repr(compiler).startswith("lumen.config.compiler.mps(merge_dots=True, flash_attention=True")
-    assert all(isinstance(c, CompilerConfig) for c in (configs.cpu, configs.cuda, compiler, tpu))
+    assert (compiler.use_triton_backend, compiler.cuda_graphs) == (False, True)
+    assert compiler.linear_reordering is False and compiler.preserve_precision is False
+    assert repr(compiler).startswith("lumen.config.compiler(merge_dots=True, flash_attention=True")
     assert "online_softmax=True" in repr(compiler)
-    assert type(configs.of("mps")).__name__ == "MpsConfig" and type(configs.of("meta")).__name__ == "CpuConfig"
     compiler.online_softmax, compiler.row_cache = False, 4
-    assert not configs.of("mps").online_softmax and configs.mps.row_cache == 4
-    configs.cpu.merge_dots = False
-    assert configs.mps.merge_dots and not configs.of("cpu").merge_dots
+    assert not lumen.config.compiler.online_softmax and lumen.config.compiler.row_cache == 4
     compiler.reset()
-    assert configs.mps.online_softmax and configs.mps.row_cache == 8 and not configs.cpu.merge_dots
-    configs.reset()
-    assert configs.cpu.merge_dots
+    assert compiler.online_softmax and compiler.row_cache == 8
     compiler.fused_linear_cross_entropy_chunk_size = 128
     assert "fused_linear_cross_entropy_chunk_size=128" in repr(compiler)
     compiler.fused_linear_cross_entropy_chunk_size = None
@@ -77,32 +65,23 @@ def test_compiler_flags_defaults(compiler):
     with pytest.raises(AttributeError):
         compiler.fast = True
     with pytest.raises(AttributeError):
-        configs.cpu.split_k = False
+        _ = compiler.mps
 
 
 def test_stub_defaults_are_the_compilers(compiler):
-    """The defaults ``lumen/config/_C.pyi`` shows for each device's flags
-    (``split_k: bool = True``) are the ones its compiler starts from: each
-    device's flags its own and its base class's (``CompilerConfig``), every
-    flag given one."""
+    """The defaults ``lumen/graph_compiler/config/_C.pyi`` shows for the compiler's flags
+    (``split_k: bool = True``) are the ones it starts from, every flag given
+    one."""
     import ast
     import pathlib
 
-    stub = ast.parse((pathlib.Path(lumen.__file__).parent / "config" / "_C.pyi").read_text())
-    classes = {c.name: c for c in stub.body if isinstance(c, ast.ClassDef)}
-
-    def flags(name):
-        """Flag defaults the stub declares for class `name`, its base class's included."""
-        fields = {a.target.id: ast.literal_eval(a.value) for a in classes[name].body if isinstance(a, ast.AnnAssign)}
-        return {**(flags(classes[name].bases[0].id) if classes[name].bases else {}), **fields}
-
-    lumen.config.compiler.reset()
-    for device in ("cpu", "cuda", "mps", "tpu"):
-        config = getattr(lumen.config.compiler, device)
-        documented = flags(type(config).__name__)
-        actual = {k for k in dir(config) if not k.startswith("_") and k != "reset"}
-        assert set(documented) == actual, device
-        assert {k: getattr(config, k) for k in documented} == documented, device
+    stub = ast.parse((pathlib.Path(lumen.__file__).parent / "graph_compiler" / "config" / "_C.pyi").read_text())
+    (cls,) = [c for c in stub.body if isinstance(c, ast.ClassDef) and c.name == "CompilerConfig"]
+    documented = {a.target.id: ast.literal_eval(a.value) for a in cls.body if isinstance(a, ast.AnnAssign)}
+    compiler.reset()
+    actual = {k for k in dir(compiler) if not k.startswith("_") and k != "reset"}
+    assert set(documented) == actual
+    assert {k: getattr(compiler, k) for k in documented} == documented
 
 
 @pytest.mark.mps
@@ -177,7 +156,7 @@ def test_dump_to_writes_each_pass(compiler, tmp_path, device, triton_on_cuda):
     kernels; the Triton pipeline's fuses."""
     f = lambda x: F.exp(x) * 2.0 + 1.0  # noqa: E731
     graph = lumen.make_graph(f)(lumen.empty([8], device="meta"))
-    lumen.config.compiler.cpu.dump_to = lumen.config.compiler.of(device).dump_to = str(tmp_path)
+    lumen.config.compiler.dump_to = str(tmp_path)
     available = getattr(lumen, device).is_available()
     devices = ["cpu"] + ([device] if available else [])
     for d in devices:
@@ -220,7 +199,7 @@ def test_memory_limit_recomputes(compiler, device, triton_on_cuda):
         """Number of dot steps in plan `p`."""
         return sum("dot_general" in s["label"] for s in p.steps())
 
-    config = lumen.config.compiler.of(device)
+    config = lumen.config.compiler
     kept = plan()
     config.memory_limit = 1
     recomputed = plan()

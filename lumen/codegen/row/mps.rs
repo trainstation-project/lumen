@@ -8,14 +8,16 @@ use indoc::{formatdoc, writedoc};
 
 use crate::DType;
 use crate::codegen::dot_general::mps::GemmConfig;
-use crate::codegen::dot_general::mps::{ROW_TILE, gemm_rows, gemm_tiles, read_staged};
+use crate::codegen::dot_general::mps::{
+    Cut, ROW_TILE, cut, early_outputs, gemm_rows, gemm_tiles, read_staged,
+};
 use crate::codegen::emitter::Emit;
 use crate::codegen::emitter::mps::Emitter;
 pub(crate) use crate::codegen::kinds::{row_partials, row_reductions};
 use crate::codegen::reduction::mps as reduce;
 use crate::codegen::utils::mps::*;
 use crate::graph::{Graph, Node, Primitive, Var};
-use crate::graph_compiler::MpsConfig;
+use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::common::diamonds::{depends_on, softmax_pair};
 use crate::graph_compiler::mps::fusion;
 
@@ -25,6 +27,28 @@ pub(crate) fn row_shape(body: &Graph) -> (usize, usize) {
     let x = body.type_of(reductions.first().expect("a row reduction").inputs[0]);
     let n = x.shape.last().copied().unwrap_or(1).max(1);
     (x.numel() / n, n)
+}
+
+/// Whether `v`, or an elementwise op or reshape of it of `rows` elements, is broadcast along the
+/// last axis.
+fn spread_along_rows(body: &Graph, rows: usize, v: Var) -> bool {
+    body.nodes()
+        .iter()
+        .filter(|node| node.inputs.contains(&v))
+        .any(|node| match &node.primitive {
+            Primitive::BroadcastInDim {
+                shape,
+                broadcast_dimensions,
+            } => broadcast_dimensions
+                .iter()
+                .zip(&body.type_of(v).shape)
+                .any(|(&d, &size)| d + 1 == shape.len() && size > 1),
+            p => {
+                (fusion::elementwise(p) || matches!(p, Primitive::Reshape { .. }))
+                    && body.type_of(node.output).numel() == rows
+                    && spread_along_rows(body, rows, node.output)
+            }
+        })
 }
 
 /// Threadgroups the row kernel launches: the partials' leading dim, one per `SIMD_ROWS` rows, or
@@ -67,7 +91,7 @@ pub(crate) fn row_kernel(
     body: &Graph,
     by_value: &[bool],
     reductions: &[&Node],
-    config: &MpsConfig,
+    config: &CompilerConfig,
     tile: Option<(&Graph, &[bool], &Node, Option<GemmConfig>)>,
 ) -> (String, String) {
     let out = body.outputs()[0];
@@ -75,7 +99,9 @@ pub(crate) fn row_kernel(
     let (rows, n) = row_shape(body);
     let mut e = Emitter::new(body, by_value);
 
-    // A value is per-row when it has one element per row and is never broadcast along the last axis.
+    // A value is per-row when it has one element per row and is never broadcast along the last axis,
+    // nor is an elementwise op of it (a `[n]` weight cast, then broadcast, scales columns even when
+    // `n == rows`).
     let per_row = |v: Var| {
         body.type_of(v).numel() == rows
             && body
@@ -93,6 +119,7 @@ pub(crate) fn row_kernel(
                     p => {
                         (fusion::elementwise(p) || matches!(p, Primitive::Reshape { .. }))
                             && body.type_of(node.output).numel() == rows
+                            && !spread_along_rows(body, rows, node.output)
                     }
                 })
     };
@@ -172,10 +199,35 @@ pub(crate) fn row_kernel(
         })
         .collect();
 
+    // Wide matmul rows write outputs that read no reduction in the partials pass, not here.
+    let early = match tile.is_some() && n > ROW_TILE {
+        true => early_outputs(body),
+        false => Vec::new(),
+    };
+
+    let root_early = early.contains(&0);
+
+    // A wide combine reads its rows from the partials pass's cut, never past it (the dot, the inputs
+    // before it): an output written there, or a value kept in scratch.
+    let cut = match tile.is_some() && n > ROW_TILE {
+        true => cut(body, body.inputs()[body.inputs().len() - 1]),
+        false => Cut::Dot,
+    };
+
+    let loaded: Option<(Var, String)> = match cut {
+        Cut::Output(0) => Some((out, "out[j]".to_owned())),
+        Cut::Output(k) => Some((body.outputs()[k], format!("out{k}[j]"))),
+        Cut::Scratch(u) => Some((u, "cutv[j]".to_owned())),
+        Cut::Dot | Cut::Nothing => None,
+    };
+
     let roots: Vec<Vec<Var>> = passes
         .iter()
         .map(|pass| pass.iter().map(|&(k, _)| reductions[k].inputs[0]).collect())
-        .chain([std::iter::once(out).chain(summed.iter().copied()).collect()])
+        .chain([std::iter::once(out)
+            .filter(|_| !root_early)
+            .chain(summed.iter().copied())
+            .collect()])
         .collect();
 
     let simd = simd_rows(body);
@@ -245,6 +297,10 @@ pub(crate) fn row_kernel(
 
         for (m, &(v, _)) in kept.iter().enumerate().filter(|(_, (_, p))| *p < k) {
             e.values.insert((v, "j".into()), format!("kept{m}[e]"));
+        }
+
+        if let Some((v, load)) = &loaded {
+            e.values.insert((*v, "j".into()), load.clone());
         }
 
         let values: Vec<String> = roots[k].iter().map(|&v| e.value(v, "j".into())).collect();
@@ -412,13 +468,17 @@ pub(crate) fn row_kernel(
     }
 
     let (values, _) = pass(&mut e, passes.len());
-    let value = &values[0];
+    let value = values.first().cloned().unwrap_or_default();
     let (mut once, mut each) = (String::new(), String::new());
     let (mut init, mut written) = (String::new(), String::new());
 
     // Column partial outputs accumulate per thread across the group's rows, then sum across SIMD
     // groups before the store.
     for (k, &v) in body.outputs()[1..].iter().enumerate() {
+        if early.contains(&(k + 1)) {
+            continue;
+        }
+
         if let Some(p) = partials.iter().position(|p| p.output == v) {
             let a = metal_type(body.type_of(v).dtype);
             let value = e.value(summed[p], "j".into());
@@ -524,6 +584,7 @@ pub(crate) fn row_kernel(
         }
         false => {
             let write = match out_type.numel() == rows {
+                _ if root_early => String::new(),
                 true => formatdoc!(
                     "
                     if (c == 0u) {{
@@ -555,13 +616,20 @@ pub(crate) fn row_kernel(
         format!("device const {a} *tiles{k}")
     };
 
-    let extra: Vec<String> = match wide {
+    let mut extra: Vec<String> = match wide {
         true => passes[0].iter().map(partials_of).collect(),
         false => Vec::new(),
     };
 
+    if let Cut::Scratch(u) = cut {
+        let ty = metal_type(body.type_of(u).dtype);
+        extra.push(format!("device const {ty} *cutv"));
+    }
+
     let (params, _) = io_params(body, by_value, metal_type(out_type.dtype), &extra);
-    let signature = format!("kernel void NAME({params}{THREAD_ARGS})");
+    // A wide row matmul's row kernel combines the partials pass's tiles.
+    let kernel = if wide { "NAME_combine" } else { "NAME" };
+    let signature = format!("kernel void {kernel}({params}{THREAD_ARGS})");
     let staged = body.inputs().len() - 1;
 
     // A fused matmul either stages the whole row block in one kernel or, for wide rows, adds a
@@ -707,13 +775,13 @@ pub(crate) fn functor_of_reduction(p: &Primitive) -> &'static str {
 impl RowCodegen for Mps {
     /// The kernel's name and source.
     type Code = (String, String);
-    type Options = MpsConfig;
+    type Options = CompilerConfig;
 
     /// The row kernel of `body` for `config`.
     fn row(
         body: &Graph,
         by_value: &[bool],
-        config: &MpsConfig,
+        config: &CompilerConfig,
     ) -> Result<(String, String), String> {
         Ok(row_kernel(
             body,

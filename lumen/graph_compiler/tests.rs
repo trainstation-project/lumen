@@ -243,6 +243,53 @@ fn transposes_of_dots_swap_their_operands() {
     assert_eq!(names(&twice), ["dot_general", "transpose"], "{twice}");
 }
 
+/// The late fold: a bfloat16 dot's float32 accumulator, cast to bfloat16 (after a reshape too), becomes
+/// one dot rounding to bfloat16 once pattern matching has run; read twice, or before, it stays a cast.
+#[test]
+fn rounding_casts_fold_into_their_dots() {
+    let build = |reshaped: bool, read_twice: bool| {
+        let mut g = Graph::new();
+        let a = g.input(TensorType::new(DType::BF16, &[4, 6]));
+        let b = g.input(TensorType::new(DType::BF16, &[6, 5]));
+        let mut d = apply(&mut g, matmul(), &[a, b]);
+        let product = d;
+
+        if reshaped {
+            d = apply(
+                &mut g,
+                Reshape {
+                    new_sizes: vec![20],
+                },
+                &[d],
+            );
+        }
+
+        let new_dtype = DType::BF16;
+        let c = apply(&mut g, Cast { new_dtype }, &[d]);
+        let outputs = if read_twice {
+            vec![c, product]
+        } else {
+            vec![c]
+        };
+        g.set_outputs(&outputs).unwrap();
+        g
+    };
+
+    for reshaped in [false, true] {
+        let g = build(reshaped, false);
+        let folded = super::common::simplify::simplify_with(&g, true);
+        let dot = &folded.nodes()[0];
+        assert_eq!(folded.type_of(dot.output).dtype, DType::BF16, "{folded}");
+        assert_eq!(names(&folded).len(), 1 + usize::from(reshaped), "{folded}");
+
+        let unfolded = super::common::simplify::simplify_with(&g, false);
+        assert!(names(&unfolded).contains(&"cast"), "{unfolded}");
+    }
+
+    let twice = super::common::simplify::simplify_with(&build(false, true), true);
+    assert_eq!(names(&twice), ["dot_general", "cast"], "{twice}");
+}
+
 /// With rearranging enabled, operand transposes move after the elementwise ops into one transpose.
 #[test]
 fn rearranges_move_past_elementwise_primitives() {
@@ -461,7 +508,7 @@ fn ops_on_host_and_device_values_raise() {
 fn a_pipeline_runs_its_passes_in_order_and_dumps_each() {
     use super::common::cse::Cse;
     use super::pass::{CompilerPass, GraphModule, Pipeline};
-    use super::{CpuConfig, Options};
+    use super::{CompilerConfig, Options};
 
     /// Test pass that negates the graph's first output.
     struct Negate;
@@ -488,19 +535,15 @@ fn a_pipeline_runs_its_passes_in_order_and_dumps_each() {
     let dir = std::env::temp_dir().join(format!("lumen-passes-{}", std::process::id()));
 
     let options = Options {
-        config: super::Configs {
-            cpu: CpuConfig {
-                dump_to: Some(dir.to_string_lossy().into_owned()),
-                ..CpuConfig::default()
-            },
-            ..Default::default()
+        config: CompilerConfig {
+            dump_to: Some(dir.to_string_lossy().into_owned()),
+            ..CompilerConfig::default()
         },
         ..Options::default()
     };
 
     let mut module = GraphModule {
         graph: g,
-        device: crate::Device::Cpu(0),
         options: &options,
     };
 
@@ -560,5 +603,500 @@ fn attention_strides_record_only_strided_operands() {
             &[(0, vec![3, 1]), (0, vec![3, 1])]
         ),
         Strides::default()
+    );
+}
+
+/// `x` (`[8, 32]`) scaled per row by `r` (`[8]`), rounded to bfloat16, times a bfloat16 `w` (`[32, 16]`)
+/// accumulated in float32 and rounded to bfloat16: a norm's `1 / rms` before the next matmul.
+fn row_scaled_matmul(extra_output: bool) -> Graph {
+    let mut g = Graph::new();
+    let x = g.input(ty(&[8, 32]));
+    let r = g.input(ty(&[8]));
+    let w = g.input(TensorType::new(DType::BF16, &[32, 16]));
+
+    let spread = BroadcastInDim {
+        shape: vec![8, 32],
+        broadcast_dimensions: vec![0],
+    };
+
+    let r = apply(&mut g, spread, &[r]);
+    let scaled = apply(&mut g, Mul, &[x, r]);
+    let rounded = apply(
+        &mut g,
+        Cast {
+            new_dtype: DType::BF16,
+        },
+        &[scaled],
+    );
+
+    let dot = DotGeneral {
+        lhs_contracting: vec![1],
+        rhs_contracting: vec![0],
+        lhs_batch: vec![],
+        rhs_batch: vec![],
+        accum_dtype: DType::F32,
+        output_dtype: DType::BF16,
+    };
+
+    let y = apply(&mut g, dot, &[rounded, w]);
+    let outputs = if extra_output {
+        vec![y, rounded]
+    } else {
+        vec![y]
+    };
+    g.set_outputs(&outputs).unwrap();
+    g
+}
+
+/// A per-row scale of a matmul's lhs, through a rounding cast, moves to its output: the matmul of the
+/// rounded unscaled rows in float32, times the scale, rounded once to bfloat16; the values the traced
+/// program's to bfloat16 rounding.
+#[test]
+fn row_scale_moves_past_its_matmul() {
+    use super::common::linear_reordering::linear_reordering;
+
+    let g = row_scaled_matmul(false);
+    let out = linear_reordering(&g, None);
+    let nodes = out.nodes();
+    let dot = nodes
+        .iter()
+        .position(|n| n.primitive.name() == "dot_general")
+        .unwrap();
+
+    assert_eq!(out.type_of(nodes[dot].output).dtype, DType::F32, "{out}");
+    assert!(!nodes[..dot].iter().any(|n| n.primitive == Mul), "{out}");
+    assert_eq!(
+        names(&out)[dot + 1..],
+        ["broadcast_in_dim", "mul", "cast"],
+        "{out}"
+    );
+
+    let inputs = [
+        data(&[8, 32], 1),
+        data(&[8], 2),
+        data(&[32, 16], 3).to_dtype(DType::BF16).unwrap(),
+    ];
+
+    let values = |g: &Graph| {
+        reference::run(g, &inputs).unwrap()[0]
+            .to_dtype(DType::F32)
+            .unwrap()
+            .to_vec::<f32>()
+    };
+
+    let (want, got) = (values(&g), values(&out));
+    let scale = want.iter().fold(0f32, |m, v| m.max(v.abs()));
+
+    for (w, v) in want.iter().zip(&got) {
+        assert!((w - v).abs() <= scale * 2f32.powi(-6), "{w} {v}");
+    }
+}
+
+/// A per-row division of a matmul's lhs (`x / rms`, the rms kept `[rows, 1]`) moves to its output as a
+/// division; the values the traced program's to float32 rounding.
+#[test]
+fn row_division_moves_past_its_matmul() {
+    use super::common::linear_reordering::linear_reordering;
+
+    let mut g = Graph::new();
+    let x = g.input(ty(&[8, 32]));
+    let rms = g.input(ty(&[8, 1]));
+    let w = g.input(ty(&[32, 16]));
+
+    let spread = BroadcastInDim {
+        shape: vec![8, 32],
+        broadcast_dimensions: vec![0, 1],
+    };
+
+    let rms = apply(&mut g, spread, &[rms]);
+    let normalized = apply(&mut g, Div, &[x, rms]);
+    let y = apply(&mut g, matmul(), &[normalized, w]);
+    g.set_outputs(&[y]).unwrap();
+    let out = linear_reordering(&g, None);
+
+    assert_eq!(
+        names(&out),
+        ["dot_general", "broadcast_in_dim", "div"],
+        "{out}"
+    );
+
+    let inputs = [data(&[8, 32], 1), data(&[8, 1], 2), data(&[32, 16], 3)];
+    let want = reference::run(&g, &inputs).unwrap()[0].to_vec::<f32>();
+    let got = reference::run(&out, &inputs).unwrap()[0].to_vec::<f32>();
+
+    for (w, v) in want.iter().zip(&got) {
+        assert!((w - v).abs() <= 1e-4 * w.abs().max(1.0), "{w} {v}");
+    }
+}
+
+/// A matmul's lhs read elsewhere too (the rounded rows returned) keeps its scale: removing it would
+/// compute the rows twice. A per-column scale (over the contracted axis) does not commute with the matmul
+/// and stays.
+#[test]
+fn shared_lhs_and_column_scales_stay() {
+    use super::common::linear_reordering::linear_reordering;
+
+    let g = row_scaled_matmul(true);
+    assert_eq!(names(&linear_reordering(&g, None)), names(&g));
+
+    let mut g = Graph::new();
+    let x = g.input(ty(&[8, 32]));
+    let gamma = g.input(ty(&[32]));
+    let w = g.input(ty(&[32, 16]));
+
+    let spread = BroadcastInDim {
+        shape: vec![8, 32],
+        broadcast_dimensions: vec![1],
+    };
+
+    let gamma = apply(&mut g, spread, &[gamma]);
+    let scaled = apply(&mut g, Mul, &[x, gamma]);
+    let y = apply(&mut g, matmul(), &[scaled, w]);
+    g.set_outputs(&[y]).unwrap();
+
+    assert_eq!(names(&linear_reordering(&g, None)), names(&g));
+}
+
+/// A weight's per-output-channel scale (`x · (q · s)`, a dequantized weight's) moves to the matmul's
+/// output columns: the scaled weight is never computed; the values the traced program's to float32
+/// rounding.
+#[test]
+fn column_scale_of_the_weight_moves_past_its_matmul() {
+    use super::common::linear_reordering::linear_reordering;
+
+    let mut g = Graph::new();
+    let x = g.input(ty(&[8, 32]));
+    let q = g.input(ty(&[32, 16]));
+    let s = g.input(ty(&[16]));
+
+    let spread = BroadcastInDim {
+        shape: vec![32, 16],
+        broadcast_dimensions: vec![1],
+    };
+
+    let s = apply(&mut g, spread, &[s]);
+    let w = apply(&mut g, Mul, &[q, s]);
+    let y = apply(&mut g, matmul(), &[x, w]);
+    g.set_outputs(&[y]).unwrap();
+    let out = linear_reordering(&g, None);
+
+    assert_eq!(
+        names(&out),
+        ["dot_general", "broadcast_in_dim", "mul"],
+        "{out}"
+    );
+
+    let inputs = [data(&[8, 32], 1), data(&[32, 16], 2), data(&[16], 3)];
+    let want = reference::run(&g, &inputs).unwrap()[0].to_vec::<f32>();
+    let got = reference::run(&out, &inputs).unwrap()[0].to_vec::<f32>();
+
+    for (w, v) in want.iter().zip(&got) {
+        assert!((w - v).abs() <= 1e-4 * w.abs().max(1.0), "{w} {v}");
+    }
+}
+
+/// `factor` (an input of the kept axes' sizes, or `full`'s rank with 1s on the others when `keepdim`)
+/// broadcast to `full` along `kept`.
+fn broadcast_factor(g: &mut Graph, full: &[usize], kept: &[usize], keepdim: bool) -> Var {
+    let sizes: Vec<usize> = match keepdim {
+        true => (0..full.len())
+            .map(|a| if kept.contains(&a) { full[a] } else { 1 })
+            .collect(),
+        false => kept.iter().map(|&a| full[a]).collect(),
+    };
+
+    let f = g.input(ty(&sizes));
+
+    let broadcast_dimensions = match keepdim {
+        true => (0..full.len()).collect(),
+        false => kept.to_vec(),
+    };
+
+    let spread = BroadcastInDim {
+        shape: full.to_vec(),
+        broadcast_dimensions,
+    };
+
+    apply(g, spread, &[f])
+}
+
+/// An `[8, 32] x [32, 16]` matmul of `x` stored `[32, 8]` when `xt` and `w` stored `[16, 32]` when `wt`,
+/// its lhs scaled per output row when `row` and its rhs per output column when `col` (each factor of its
+/// kept axis's size, or the operand's rank with 1s when `keepdim`); the graph and its inputs' shapes.
+fn factored_matmul(
+    xt: bool,
+    wt: bool,
+    keepdim: bool,
+    row: bool,
+    col: bool,
+) -> (Graph, Vec<Vec<usize>>) {
+    let mut g = Graph::new();
+    let (xs, ws) = (
+        if xt { [32, 8] } else { [8, 32] },
+        if wt { [16, 32] } else { [32, 16] },
+    );
+    let (lc, rc) = (usize::from(!xt), usize::from(wt));
+    let x = g.input(ty(&xs));
+    let w = g.input(ty(&ws));
+
+    let lhs = match row {
+        true => {
+            let r = broadcast_factor(&mut g, &xs, &[1 - lc], keepdim);
+            apply(&mut g, Mul, &[x, r])
+        }
+        false => x,
+    };
+
+    let rhs = match col {
+        true => {
+            let s = broadcast_factor(&mut g, &ws, &[1 - rc], keepdim);
+            apply(&mut g, Mul, &[s, w])
+        }
+        false => w,
+    };
+
+    let dot = DotGeneral {
+        lhs_contracting: vec![lc],
+        rhs_contracting: vec![rc],
+        lhs_batch: vec![],
+        rhs_batch: vec![],
+        accum_dtype: DType::F32,
+        output_dtype: DType::F32,
+    };
+
+    let y = apply(&mut g, dot, &[lhs, rhs]);
+    g.set_outputs(&[y]).unwrap();
+    let shapes = g
+        .inputs()
+        .iter()
+        .map(|&v| g.type_of(v).shape.clone())
+        .collect();
+    (g, shapes)
+}
+
+/// Asserts `out`, `g` reordered, multiplies only after its matmul, `moved` times (one a factor), and
+/// computes `g`'s values to float32 rounding; `case` names the graph.
+fn assert_reordered(g: &Graph, out: &Graph, shapes: &[Vec<usize>], moved: usize, case: &str) {
+    let nodes = out.nodes();
+    let dot = nodes
+        .iter()
+        .position(|n| n.primitive.name() == "dot_general")
+        .unwrap();
+
+    assert!(
+        !nodes[..dot].iter().any(|n| n.primitive == Mul),
+        "{case}: {out}"
+    );
+    let after = nodes[dot..].iter().filter(|n| n.primitive == Mul).count();
+    assert_eq!(after, moved, "{case}: {out}");
+
+    let inputs: Vec<_> = shapes
+        .iter()
+        .zip(1..)
+        .map(|(s, seed)| data(s, seed))
+        .collect();
+
+    let want = reference::run(g, &inputs).unwrap()[0].to_vec::<f32>();
+    let got = reference::run(out, &inputs).unwrap()[0].to_vec::<f32>();
+
+    for (w, v) in want.iter().zip(&got) {
+        assert!((w - v).abs() <= 1e-4 * w.abs().max(1.0), "{case}: {w} {v}");
+    }
+}
+
+/// A per-row factor of the lhs and a per-column factor of the rhs, alone or together, move to the
+/// matmul's output in every layout (`x W`, `x W.T`, `x.T W`, `x.T W.T`), each factor of its kept axis's
+/// size or kept with its operand's rank; the values the traced program's to float32 rounding.
+#[test]
+fn factors_move_past_their_matmul_in_every_layout() {
+    use super::common::linear_reordering::linear_reordering;
+
+    for (xt, wt) in [(false, false), (false, true), (true, false), (true, true)] {
+        for keepdim in [false, true] {
+            for (row, col) in [(true, false), (false, true), (true, true)] {
+                let case = format!("xt {xt} wt {wt} keepdim {keepdim} row {row} col {col}");
+                let (g, shapes) = factored_matmul(xt, wt, keepdim, row, col);
+                let out = linear_reordering(&g, None);
+                let moved = usize::from(row) + usize::from(col);
+                assert_reordered(&g, &out, &shapes, moved, &case);
+            }
+        }
+    }
+}
+
+/// A factor along the contracted axis (the lhs's per-column `x · γ` of `x W`, the rhs's per-row
+/// `W · t` of `x W`) does not commute with the matmul and stays, on either side in every layout.
+#[test]
+fn contracted_axis_factors_stay_in_every_layout() {
+    use super::common::linear_reordering::linear_reordering;
+
+    for (xt, wt) in [(false, false), (false, true), (true, false), (true, true)] {
+        for side in 0..2 {
+            let mut g = Graph::new();
+            let (xs, ws) = (
+                if xt { [32, 8] } else { [8, 32] },
+                if wt { [16, 32] } else { [32, 16] },
+            );
+            let (lc, rc) = (usize::from(!xt), usize::from(wt));
+            let mut operands = [g.input(ty(&xs)), g.input(ty(&ws))];
+            let (shape, contracted) = if side == 0 { (xs, lc) } else { (ws, rc) };
+            let f = broadcast_factor(&mut g, &shape, &[contracted], false);
+            operands[side] = apply(&mut g, Mul, &[operands[side], f]);
+
+            let dot = DotGeneral {
+                lhs_contracting: vec![lc],
+                rhs_contracting: vec![rc],
+                lhs_batch: vec![],
+                rhs_batch: vec![],
+                accum_dtype: DType::F32,
+                output_dtype: DType::F32,
+            };
+
+            let y = apply(&mut g, dot, &operands);
+            g.set_outputs(&[y]).unwrap();
+
+            let case = format!("xt {xt} wt {wt} side {side}");
+            assert_eq!(names(&linear_reordering(&g, None)), names(&g), "{case}");
+        }
+    }
+}
+
+/// A batched lhs (`[2, 4, 32] x [32, 16]`, `W` or `W.T`) moves its per-token factor (`[2, 4]` or
+/// `[2, 4, 1]`) to the output's rows, with the weight's per-column factor too; the values the traced
+/// program's to float32 rounding.
+#[test]
+fn batched_rows_move_past_their_matmul() {
+    use super::common::linear_reordering::linear_reordering;
+
+    for wt in [false, true] {
+        for keepdim in [false, true] {
+            let mut g = Graph::new();
+            let ws = if wt { [16, 32] } else { [32, 16] };
+            let rc = usize::from(wt);
+            let x = g.input(ty(&[2, 4, 32]));
+            let w = g.input(ty(&ws));
+            let r = broadcast_factor(&mut g, &[2, 4, 32], &[0, 1], keepdim);
+            let s = broadcast_factor(&mut g, &ws, &[1 - rc], keepdim);
+            let lhs = apply(&mut g, Mul, &[x, r]);
+            let rhs = apply(&mut g, Mul, &[w, s]);
+
+            let dot = DotGeneral {
+                lhs_contracting: vec![2],
+                rhs_contracting: vec![rc],
+                lhs_batch: vec![],
+                rhs_batch: vec![],
+                accum_dtype: DType::F32,
+                output_dtype: DType::F32,
+            };
+
+            let y = apply(&mut g, dot, &[lhs, rhs]);
+            g.set_outputs(&[y]).unwrap();
+            let shapes: Vec<_> = g
+                .inputs()
+                .iter()
+                .map(|&v| g.type_of(v).shape.clone())
+                .collect();
+            let out = linear_reordering(&g, None);
+            assert_reordered(&g, &out, &shapes, 2, &format!("wt {wt} keepdim {keepdim}"));
+        }
+    }
+}
+
+/// `x` (`[8, 128]`) scaled per row by `1 / sqrt(sum(x²))` over its 128-wide rows (a norm's), times `w`
+/// (`[128, 16]`).
+fn norm_scaled_matmul() -> Graph {
+    let mut g = Graph::new();
+    let x = g.input(ty(&[8, 128]));
+    let w = g.input(ty(&[128, 16]));
+
+    let squares = apply(&mut g, Mul, &[x, x]);
+
+    let sum = ReduceSum {
+        axes: vec![1],
+        accum_dtype: DType::F32,
+    };
+
+    let sum = apply(&mut g, sum, &[squares]);
+    let r = apply(&mut g, Unary(crate::graph::UnaryOp::Rsqrt), &[sum]);
+
+    let spread = BroadcastInDim {
+        shape: vec![8, 128],
+        broadcast_dimensions: vec![0],
+    };
+
+    let r = apply(&mut g, spread, &[r]);
+    let scaled = apply(&mut g, Mul, &[x, r]);
+    let y = apply(&mut g, matmul(), &[scaled, w]);
+    g.set_outputs(&[y]).unwrap();
+    g
+}
+
+/// With a tile width, the pass moves only a factor of a reduction over rows wider than the tile (a
+/// norm's `1 / rms` over 128-wide rows past 64-wide tiles), whose rows would otherwise take a pass of
+/// their own after the GEMM; not over rows a tile holds whole (256-wide tiles), nor a factor that is an
+/// input (a per-row scale, a weight's dequantization scale); without one, any factor moves.
+#[test]
+fn reordering_moves_only_factors_of_cross_tile_reductions() {
+    use super::common::linear_reordering::linear_reordering;
+
+    let g = norm_scaled_matmul();
+    let moved = |out: &Graph| names(out).ends_with(&["dot_general", "broadcast_in_dim", "mul"]);
+
+    assert!(moved(&linear_reordering(&g, Some(64))), "{g}");
+    assert_eq!(names(&linear_reordering(&g, Some(256))), names(&g));
+    assert!(moved(&linear_reordering(&g, None)));
+
+    let (g, _) = factored_matmul(false, false, false, true, true);
+    assert_eq!(names(&linear_reordering(&g, Some(64))), names(&g));
+    assert_ne!(names(&linear_reordering(&g, None)), names(&g));
+}
+
+/// With `preserve_precision`, a forward reader of a round trip through bfloat16 (`f32(bf16(x))`) reads
+/// `x`; a gradient's reader keeps the round trip (the activation saved in bfloat16); a round trip
+/// through a wider dtype (`bf16(f32(y))`) is dropped for both.
+#[test]
+fn preserve_precision_drops_forward_round_trips() {
+    use super::common::preserve_precision::preserve_precision;
+
+    let mut g = Graph::new();
+    let x = g.input(ty(&[4]));
+    let y = g.input(TensorType::new(DType::BF16, &[4]));
+    let bf16 = Cast {
+        new_dtype: DType::BF16,
+    };
+    let f32 = Cast {
+        new_dtype: DType::F32,
+    };
+
+    let narrowed = apply(&mut g, bf16.clone(), &[x]);
+    let trip = apply(&mut g, f32.clone(), &[narrowed]);
+    let forward = apply(&mut g, Exp, &[trip]);
+    let widened = apply(&mut g, f32, &[y]);
+    let exact = apply(&mut g, bf16, &[widened]);
+
+    g.set_backward(true);
+    let gradient = apply(&mut g, Mul, &[trip, trip]);
+    let other = apply(&mut g, Neg, &[exact]);
+    g.set_backward(false);
+
+    g.set_outputs(&[forward, gradient, other]).unwrap();
+    let out = preserve_precision(&g);
+    let nodes = out.nodes();
+    let reads = |name: &str| nodes.iter().find(|n| n.primitive.name() == name).unwrap();
+
+    // The forward exp reads x; the gradient's mul reads the round trip; neg reads y.
+    assert_eq!(reads("exp").inputs, [out.inputs()[0]], "{out}");
+    let mul = reads("mul");
+    assert!(mul.backward, "{out}");
+    assert_eq!(out.type_of(mul.inputs[0]).dtype, DType::F32, "{out}");
+    assert_ne!(mul.inputs[0], out.inputs()[0], "{out}");
+    assert_eq!(reads("neg").inputs, [out.inputs()[1]], "{out}");
+    assert_eq!(
+        nodes
+            .iter()
+            .filter(|n| n.primitive.name() == "cast")
+            .count(),
+        2,
+        "{out}"
     );
 }

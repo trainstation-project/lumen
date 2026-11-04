@@ -145,24 +145,39 @@ impl<'a> Emitter<'a> {
             let (a, _) = self.computed(&x, operand);
 
             let value = match op {
-                // Integer exponents: libdevice.pow takes int32, so i64/u64 exponents are clamped
-                // to int32 range keeping their parity (sign of the result for negative bases).
-                Pow if !other.is_float() && (other.bits() < 32 || other == DType::I32) => {
-                    format!("libdevice.pow({a}, {y}.to(tl.int32))")
-                }
                 Pow if !other.is_float() && operand == DType::F64 => {
                     format!("libdevice.pow({a}, {y}.to(tl.float64))")
                 }
+                // Integer exponents, as MPS's `pow_op`: held within int32 keeping their parity (i64/u64
+                // past it are 0, inf or 1 but for |a| = 1), then a float pow, exact in float32 up to
+                // 2^24 (libdevice's integer pow squares, compounding its rounding); past it `a^hi * a^lo`
+                // with `lo = n % 128` of n's sign, both exact in float32.
                 Pow if !other.is_float() => {
                     let most = (1u32 << 31) - 2;
 
-                    let low = match other {
-                        DType::I64 => format!("tl.where({y} < -{most}, -{most} - ({y} & 1), {y})"),
-                        _ => y.clone(),
+                    let n = match other.bits() < 32 || other == DType::I32 {
+                        true => format!("{y}.to(tl.int32)"),
+                        false => {
+                            let low = match other {
+                                DType::I64 => {
+                                    format!("tl.where({y} < -{most}, -{most} - ({y} & 1), {y})")
+                                }
+                                _ => y.clone(),
+                            };
+
+                            format!(
+                                "tl.where({y} > {most}, {most} + ({y} & 1), {low}).to(tl.int32)"
+                            )
+                        }
                     };
 
+                    let exact = 1u32 << 24;
+
                     format!(
-                        "libdevice.pow({a}, tl.where({y} > {most}, {most} + ({y} & 1), {low}).to(tl.int32))"
+                        "tl.where((({n}) <= {exact}) & (({n}) >= -{exact}), \
+                         libdevice.pow({a}, ({n}).to(tl.float32)), \
+                         libdevice.pow({a}, (({n}) - ({n}) % 128).to(tl.float32)) \
+                         * libdevice.pow({a}, (({n}) % 128).to(tl.float32)))"
                     )
                 }
                 Pow => format!("libdevice.pow({a}, {})", self.computed(&y, operand).0),
@@ -236,7 +251,9 @@ impl<'a> Emitter<'a> {
     }
 
     /// Inverse error function via Giles' single-precision approximation: two polynomials in
-    /// `w = -log(1 - a^2)`, split at `w = 5`.
+    /// `w = -log(1 - a^2)`, split at `w = 5`. Each element evaluates only its branch's, as MPS
+    /// does: the branch picks the coefficients and the point, and each step is one explicit FMA
+    /// (the approximation's own arithmetic, not traced multiplies and adds).
     fn erf_inv(&mut self, a: &str, f: &str) -> String {
         const SMALL: [&str; 9] = [
             "2.81022636e-08",
@@ -263,25 +280,25 @@ impl<'a> Emitter<'a> {
         ];
 
         let w = self.local(format!("-libdevice.log((1.0 - {a}) * (1.0 + {a}))"));
-        let near = self.local(format!("{w} - 2.5"));
-        let far = self.local(format!("libdevice.sqrt({w}) - 3.0"));
+        let near = self.local(format!("{w} < 5.0"));
+        let at = self.local(format!(
+            "tl.where({near}, {w} - 2.5, libdevice.sqrt({w}) - 3.0)"
+        ));
 
-        let mut polynomial = |at: &str, coefficients: &[&str]| {
-            let mut p = self.local(format!("tl.full([], {}, {f})", coefficients[0]));
-
-            for c in &coefficients[1..] {
-                p = self.local(format!("{c} + {p} * {at}"));
-            }
-
-            p
+        let coefficient = |k: usize| {
+            format!(
+                "tl.where({near}, tl.full([], {}, {f}), tl.full([], {}, {f}))",
+                SMALL[k], LARGE[k]
+            )
         };
 
-        let small = polynomial(&near, &SMALL);
-        let large = polynomial(&far, &LARGE);
+        let mut p = self.local(coefficient(0));
 
-        format!(
-            "tl.where(tl.abs({a}) == 1.0, {a} * float(\"inf\"), tl.where({w} < 5.0, {small}, {large}) * {a})"
-        )
+        for k in 1..SMALL.len() {
+            p = self.local(format!("tl.fma({p}, {at}, {})", coefficient(k)));
+        }
+
+        format!("tl.where(tl.abs({a}) == 1.0, {a} * float(\"inf\"), {p} * {a})")
     }
 
     /// XLA `reduce_precision`: rounds the mantissa to nearest-even at `mantissa_bits` and clamps the
