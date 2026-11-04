@@ -1054,3 +1054,46 @@ fn reordering_moves_only_factors_of_cross_tile_reductions() {
     assert_eq!(names(&linear_reordering(&g, Some(64))), names(&g));
     assert_ne!(names(&linear_reordering(&g, None)), names(&g));
 }
+
+/// With `preserve_precision`, a forward reader of a round trip through bfloat16 (`f32(bf16(x))`) reads
+/// `x`; a gradient's reader keeps the round trip (the activation saved in bfloat16); a round trip
+/// through a wider dtype (`bf16(f32(y))`) is dropped for both.
+#[test]
+fn preserve_precision_drops_forward_round_trips() {
+    use super::common::preserve_precision::preserve_precision;
+
+    let mut g = Graph::new();
+    let x = g.input(ty(&[4]));
+    let y = g.input(TensorType::new(DType::BF16, &[4]));
+    let bf16 = Cast {
+        new_dtype: DType::BF16,
+    };
+    let f32 = Cast {
+        new_dtype: DType::F32,
+    };
+
+    let narrowed = apply(&mut g, bf16.clone(), &[x]);
+    let trip = apply(&mut g, f32.clone(), &[narrowed]);
+    let forward = apply(&mut g, Exp, &[trip]);
+    let widened = apply(&mut g, f32, &[y]);
+    let exact = apply(&mut g, bf16, &[widened]);
+
+    g.set_backward(true);
+    let gradient = apply(&mut g, Mul, &[trip, trip]);
+    let other = apply(&mut g, Neg, &[exact]);
+    g.set_backward(false);
+
+    g.set_outputs(&[forward, gradient, other]).unwrap();
+    let out = preserve_precision(&g);
+    let nodes = out.nodes();
+    let reads = |name: &str| nodes.iter().find(|n| n.primitive.name() == name).unwrap();
+
+    // The forward exp reads x; the gradient's mul reads the round trip; neg reads y.
+    assert_eq!(reads("exp").inputs, [out.inputs()[0]], "{out}");
+    let mul = reads("mul");
+    assert!(mul.backward, "{out}");
+    assert_eq!(out.type_of(mul.inputs[0]).dtype, DType::F32, "{out}");
+    assert_ne!(mul.inputs[0], out.inputs()[0], "{out}");
+    assert_eq!(reads("neg").inputs, [out.inputs()[1]], "{out}");
+    assert_eq!(nodes.iter().filter(|n| n.primitive.name() == "cast").count(), 2, "{out}");
+}

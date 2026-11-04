@@ -168,10 +168,11 @@ def backward_pass(linear, linear_vars, cts):
     ``ad.backward_pass``)."""
     graph = tracer.current_graph()
     base = list(tracer._SCOPES[-1])
-    for name, inputs, params, out in reversed(linear):
-        made = tracer._SCOPE_OF[-1].get(out[0] if name == _FUNCTION else out)
-        with tracer._scope(list(made) if made else base):
-            _transpose_node(graph, name, inputs, params, out, linear_vars, cts)
+    with tracer._gradients():
+        for name, inputs, params, out in reversed(linear):
+            made = tracer._SCOPE_OF[-1].get(out[0] if name == _FUNCTION else out)
+            with tracer._scope(list(made) if made else base):
+                _transpose_node(graph, name, inputs, params, out, linear_vars, cts)
     return cts
 
 

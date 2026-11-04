@@ -25,6 +25,7 @@ use crate::graph::{FUSION_SEPARATOR, Graph, Primitive, Var, intern};
 
 use common::cse::Cse;
 use common::merge_dots::Packs;
+use common::preserve_precision::PreservePrecision;
 use common::simplify::Simplify;
 pub use config::{CompilerConfig, Configs, CpuConfig, CudaConfig, MpsConfig, TpuConfig};
 use pass::{GraphModule, Pipeline};
@@ -74,7 +75,14 @@ pub fn compile_with(graph: &Graph, device: Device, options: &Options) -> Result<
         options,
     };
 
-    Pipeline::new("frontend")
+    let mut frontend = Pipeline::new("frontend");
+
+    // Round trips through another float dtype go first, before CSE shares their casts.
+    if options.config.of(device).preserve_precision() {
+        frontend.add(PreservePrecision);
+    }
+
+    frontend
         .add(Cse)
         .add(Simplify { matched: false })
         .run(&mut module)?;

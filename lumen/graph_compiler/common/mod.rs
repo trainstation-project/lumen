@@ -13,6 +13,7 @@ pub(crate) mod fold_dot_reshapes;
 pub(crate) mod fusion;
 pub(crate) mod horizontal;
 pub(crate) mod linear_reordering;
+pub(crate) mod preserve_precision;
 pub(crate) mod multi_output;
 pub(crate) mod place_views;
 #[cfg_attr(not(feature = "python"), allow(dead_code))]
