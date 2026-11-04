@@ -13,13 +13,13 @@
    "stored_bytes": 8192,
    "flops": 4096,
    "compute_bound": false,
-   "lumen_us": 5.313,
-   "torch_us": 10.337,
+   "lumen_us": 5.425,
+   "torch_us": 10.327,
    "matches_torch": true,
    "rotation": 4096,
    "chained": false,
    "kernels": 1,
-   "gbs": 4.63
+   "gbs": 4.53
   },
   {
    "op": "slice",
@@ -34,13 +34,13 @@
    "stored_bytes": 32768,
    "flops": 16384,
    "compute_bound": false,
-   "lumen_us": 5.161,
-   "torch_us": 10.376,
+   "lumen_us": 5.253,
+   "torch_us": 10.258,
    "matches_torch": true,
    "rotation": 4096,
    "chained": false,
    "kernels": 1,
-   "gbs": 19.05
+   "gbs": 18.71
   },
   {
    "op": "slice",
@@ -55,13 +55,13 @@
    "stored_bytes": 131072,
    "flops": 65536,
    "compute_bound": false,
-   "lumen_us": 5.19,
-   "torch_us": 10.533,
+   "lumen_us": 5.301,
+   "torch_us": 10.445,
    "matches_torch": true,
    "rotation": 1366,
    "chained": false,
    "kernels": 1,
-   "gbs": 75.76
+   "gbs": 74.18
   },
   {
    "op": "slice",
@@ -76,13 +76,13 @@
    "stored_bytes": 524288,
    "flops": 262144,
    "compute_bound": false,
-   "lumen_us": 5.113,
-   "torch_us": 10.463,
+   "lumen_us": 5.196,
+   "torch_us": 10.441,
    "matches_torch": true,
    "rotation": 342,
    "chained": false,
    "kernels": 1,
-   "gbs": 307.62
+   "gbs": 302.71
   },
   {
    "op": "slice",
@@ -97,13 +97,13 @@
    "stored_bytes": 2097152,
    "flops": 1048576,
    "compute_bound": false,
-   "lumen_us": 5.311,
-   "torch_us": 10.44,
+   "lumen_us": 5.426,
+   "torch_us": 10.347,
    "matches_torch": true,
    "rotation": 86,
    "chained": false,
    "kernels": 1,
-   "gbs": 1184.61
+   "gbs": 1159.5
   },
   {
    "op": "slice",
@@ -118,13 +118,13 @@
    "stored_bytes": 8388608,
    "flops": 4194304,
    "compute_bound": false,
-   "lumen_us": 9.235,
-   "torch_us": 11.401,
+   "lumen_us": 9.23,
+   "torch_us": 11.355,
    "matches_torch": true,
    "rotation": 22,
    "chained": false,
    "kernels": 1,
-   "gbs": 2725.05
+   "gbs": 2726.52
   },
   {
    "op": "slice",
@@ -139,13 +139,13 @@
    "stored_bytes": 33554432,
    "flops": 16777216,
    "compute_bound": false,
-   "lumen_us": 26.726,
-   "torch_us": 31.482,
+   "lumen_us": 26.455,
+   "torch_us": 31.514,
    "matches_torch": true,
    "rotation": 6,
    "chained": false,
    "kernels": 1,
-   "gbs": 3766.49
+   "gbs": 3805.08
   },
   {
    "op": "slice",
@@ -160,13 +160,13 @@
    "stored_bytes": 134217728,
    "flops": 67108864,
    "compute_bound": false,
-   "lumen_us": 96.485,
-   "torch_us": 113.078,
+   "lumen_us": 93.621,
+   "torch_us": 113.148,
    "matches_torch": true,
    "rotation": 2,
    "chained": false,
    "kernels": 1,
-   "gbs": 4173.22
+   "gbs": 4300.89
   },
   {
    "op": "slice",
@@ -181,13 +181,13 @@
    "stored_bytes": 4096,
    "flops": 4096,
    "compute_bound": false,
-   "lumen_us": 5.353,
-   "torch_us": 10.541,
+   "lumen_us": 5.481,
+   "torch_us": 10.429,
    "matches_torch": true,
    "rotation": 4096,
    "chained": false,
    "kernels": 1,
-   "gbs": 2.3
+   "gbs": 2.24
   },
   {
    "op": "slice",
@@ -202,13 +202,13 @@
    "stored_bytes": 16384,
    "flops": 16384,
    "compute_bound": false,
-   "lumen_us": 5.26,
-   "torch_us": 10.413,
+   "lumen_us": 5.375,
+   "torch_us": 10.382,
    "matches_torch": true,
    "rotation": 4096,
    "chained": false,
    "kernels": 1,
-   "gbs": 9.34
+   "gbs": 9.14
   },
   {
    "op": "slice",
@@ -223,13 +223,13 @@
    "stored_bytes": 65536,
    "flops": 65536,
    "compute_bound": false,
-   "lumen_us": 5.226,
-   "torch_us": 10.607,
+   "lumen_us": 5.291,
+   "torch_us": 10.364,
    "matches_torch": true,
    "rotation": 2731,
    "chained": false,
    "kernels": 1,
-   "gbs": 37.62
+   "gbs": 37.16
   },
   {
    "op": "slice",
@@ -244,13 +244,13 @@
    "stored_bytes": 262144,
    "flops": 262144,
    "compute_bound": false,
-   "lumen_us": 5.2,
-   "torch_us": 10.472,
+   "lumen_us": 5.236,
+   "torch_us": 10.474,
    "matches_torch": true,
    "rotation": 683,
    "chained": false,
    "kernels": 1,
-   "gbs": 151.24
+   "gbs": 150.2
   },
   {
    "op": "slice",
@@ -265,13 +265,13 @@
    "stored_bytes": 1048576,
    "flops": 1048576,
    "compute_bound": false,
-   "lumen_us": 5.221,
-   "torch_us": 10.532,
+   "lumen_us": 5.289,
+   "torch_us": 10.552,
    "matches_torch": true,
    "rotation": 171,
    "chained": false,
    "kernels": 1,
-   "gbs": 602.51
+   "gbs": 594.77
   },
   {
    "op": "slice",
@@ -286,13 +286,13 @@
    "stored_bytes": 4194304,
    "flops": 4194304,
    "compute_bound": false,
-   "lumen_us": 5.86,
-   "torch_us": 10.831,
+   "lumen_us": 5.897,
+   "torch_us": 10.741,
    "matches_torch": true,
    "rotation": 43,
    "chained": false,
    "kernels": 1,
-   "gbs": 2147.25
+   "gbs": 2133.78
   },
   {
    "op": "slice",
@@ -307,13 +307,13 @@
    "stored_bytes": 16777216,
    "flops": 16777216,
    "compute_bound": false,
-   "lumen_us": 14.599,
-   "torch_us": 24.544,
+   "lumen_us": 14.655,
+   "torch_us": 24.559,
    "matches_torch": true,
    "rotation": 11,
    "chained": false,
    "kernels": 1,
-   "gbs": 3447.61
+   "gbs": 3434.44
   },
   {
    "op": "slice",
@@ -328,18 +328,18 @@
    "stored_bytes": 67108864,
    "flops": 67108864,
    "compute_bound": false,
-   "lumen_us": 49.256,
-   "torch_us": 84.911,
+   "lumen_us": 47.864,
+   "torch_us": 84.931,
    "matches_torch": true,
    "rotation": 3,
    "chained": false,
    "kernels": 1,
-   "gbs": 4087.35
+   "gbs": 4206.22
   }
  ],
  "code": {
   "kernel": "// step 0: slice\n// { lambda %0:f32[1024,1024]. let\n//     %1:f32[1024,512] = slice[limit_indices=(1024, 512) start_indices=(0, 0)] %0\n//   in (%1) }\n\nimport cuda.bindings.driver as cuda\nimport cutlass\nimport cutlass.cute as cute\nfrom cutlass import Int32\n\nfrom lumen.codegen.elementwise.cuda.kernel import ElementwiseKernel\n\n\n@cute.jit\ndef BODY(ins, outs, fins, fouts, j, v, SEGMENT: cutlass.Constexpr):\n    \"\"\"Every output of segment `SEGMENT` at flat index `j`, the tensors read and written at `j` through\n    `fins` and `fouts` at `v`.\"\"\"\n    in0 = ins[0]\n    out0 = outs[0]\n    fin0 = fins[0]\n    fout0 = fouts[0]\n    if cutlass.const_expr(SEGMENT == 0):\n        i0 = 0 + (j // 512) * 1024 + (j) % 512\n        v1 = in0[i0]\n        fout0[v] = v1\n\n\n@cute.jit\ndef launch(in0, out0, blocks: Int32, stream: cuda.CUstream, vectorized: cutlass.Constexpr):\n    \"\"\"Runs the fusion's `ElementwiseKernel` on `blocks` blocks on `stream`, with vector loads and stores\n    when `vectorized` (every tensor 16-byte aligned).\"\"\"\n    kernel = ElementwiseKernel(BODY, (524288, ), (cutlass.Float32, cutlass.Float32, ), (1048576, 524288, ), ((), ), ((0, ), ), (True, ), vectorized)\n    kernel.launch([in0], [out0], blocks, stream)",
   "plan": "plan (workspace 2097152 bytes)\n    ws+0:f32[1024,512] = fusion[name=elementwise body={ lambda %0:f32[1024,1024]. let\n    %1:f32[1024,512] = slice[limit_indices=(1024, 512) start_indices=(0, 0)] %0\n  in (%1) }] in0"
  },
- "measured_at": "2026-11-04T09:19:59+00:00"
+ "measured_at": "2026-11-04T09:48:29+00:00"
 }

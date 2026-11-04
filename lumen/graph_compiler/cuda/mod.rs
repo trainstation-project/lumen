@@ -253,7 +253,8 @@ pub(crate) fn run(
     })?;
 
     let (name, source) = code.as_ref();
-    launch(name, source, &tensors, blocks(n))
+    let widest = tensors.iter().map(|t| t.dtype().size_of()).max().unwrap_or(1);
+    launch(name, source, &tensors, blocks(n, widest))
 }
 
 /// The body of a copy of `x` reshaped to `shape`: its input, reshaped, its output.

@@ -14,10 +14,10 @@ use crate::codegen::utils::cuda::{Cuda, cute_type, unsigned};
 use crate::graph::Graph;
 use crate::graph_compiler::common::horizontal::segments;
 
-/// Threads per block of `ElementwiseKernel` (`kernel.py`'s `THREADS`) and elements a thread computes
-/// a step (16 bytes of float32), which size its grid.
+/// Threads per block of `ElementwiseKernel` (`kernel.py`'s `THREADS`), and the bytes of its widest
+/// tensor each thread moves a step (its `STEP_BYTES`), which size its grid.
 const THREADS: usize = 256;
-const UNROLL: usize = 4;
+const STEP_BYTES: usize = 16;
 
 /// The strides (in elements, from the first) a CUDA elementwise kernel reads each input and writes
 /// each output at: what its generated loads and stores index with; and the elements each tensor spans,
@@ -184,8 +184,9 @@ def launch({tensors}, blocks: Int32, stream: cuda.CUstream, vectorized: cutlass.
     }
 }
 
-/// Blocks a kernel over `n` elements launches: enough for every thread's first step, at most 4096
-/// (the walk is grid-strided, so fewer cover any `n`).
-pub(crate) fn blocks(n: usize) -> usize {
-    n.div_ceil(THREADS * UNROLL).clamp(1, 4096)
+/// Blocks a kernel over `n` elements whose widest tensor has `widest`-byte elements launches: one per
+/// tile of `THREADS` threads' steps, so each block makes one pass (faster than fewer blocks looping).
+pub(crate) fn blocks(n: usize, widest: usize) -> usize {
+    let per_thread = (STEP_BYTES / widest).max(1);
+    n.div_ceil(THREADS * per_thread).max(1)
 }
