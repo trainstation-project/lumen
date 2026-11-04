@@ -5,7 +5,6 @@ pub(crate) mod ane;
 mod autotune;
 mod canonicalize_dots;
 pub(crate) mod fusion;
-mod horizontal;
 mod kernel_codegen;
 mod place_concats;
 mod place_views;

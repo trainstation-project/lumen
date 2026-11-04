@@ -1,7 +1,7 @@
 //! MPS fusion: the shared fusion (`common::fusion`) with Metal's kernels' limits and shapes,
 //! each fusion compiled to one Metal kernel.
 
-use super::{Kernel, MpsModule, horizontal, request};
+use super::{Kernel, MpsModule, request};
 use crate::DType;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
@@ -114,7 +114,10 @@ impl<'a> CompilerPass<MpsModule<'a>> for Fusion {
                 true => {
                     let vars: Vec<Var> = m.scalars.iter().map(|&i| fused.inputs()[i]).collect();
 
-                    let mut target = horizontal::Horizontal {
+                    let mut target = crate::graph_compiler::common::horizontal::Kernels {
+                        candidate: horizontal_candidate,
+                        grouping: crate::graph_compiler::common::horizontal::Grouping::Tiling,
+                        buffers: HORIZONTAL_BUFFERS,
                         kernel: &mut kernel,
                     };
 
@@ -143,5 +146,32 @@ impl<'a> CompilerPass<MpsModule<'a>> for Fusion {
         m.graph = graph;
         m.rows.clear();
         Ok(())
+    }
+}
+
+/// Most buffers one horizontally fused kernel may bind.
+const HORIZONTAL_BUFFERS: usize = 30;
+
+/// Whether horizontal fusion may merge `node`: an elementwise node the fusion can fuse, or a fusion without
+/// reductions, attention, GEMMs or updates.
+fn horizontal_candidate(graph: &Graph, node: &Node) -> bool {
+    use crate::graph_compiler::common::attention;
+
+    match &node.primitive {
+        Primitive::Fusion { name, .. } if name == crate::graph::UPDATES => false,
+        Primitive::Fusion { body, .. } => {
+            let reduces = body.nodes().iter().any(|n| {
+                matches!(
+                    n.primitive,
+                    Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. }
+                )
+            });
+
+            !reduces
+                && attention::of_body(body).is_none()
+                && attention::backward_of_body(body).is_none()
+                && crate::codegen::kinds::gemm_dot(body).is_none()
+        }
+        p => elementwise(p) && fusible(graph, node),
     }
 }

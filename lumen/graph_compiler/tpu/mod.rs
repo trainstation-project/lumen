@@ -7,8 +7,9 @@ mod tests;
 
 use super::common::updates::Updates;
 use crate::graph_compiler::common::diamonds::FusedDiamonds;
+use crate::graph_compiler::common::horizontal::{Grouping, HorizontalFusion};
 use flash_attention_backward::FlashAttentionBackward;
-use fusion::{DotRows, FuseDots, Fusion, HorizontalFusion};
+use fusion::{DotRows, FuseDots, Fusion};
 use place_concats::PlaceConcats;
 
 use super::common::attention;
@@ -160,7 +161,12 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         .add(Fusion);
 
     if options.config.horizontal_fusion {
-        pipeline.add(HorizontalFusion);
+        pipeline.add(HorizontalFusion {
+            candidate: fusion::horizontal_candidate,
+            grouping: Grouping::Shape,
+            buffers: fusion::HORIZONTAL_BUFFERS,
+            name: "elementwise",
+        });
     }
 
     pipeline.run(&mut module)?;
