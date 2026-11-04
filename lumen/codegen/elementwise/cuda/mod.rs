@@ -6,10 +6,11 @@ use std::fmt::Write;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 use super::ElementwiseCodegen;
+use crate::DType;
 use crate::codegen::emitter::Emit;
 use crate::codegen::emitter::cuda::Emitter;
 use crate::codegen::store::triton::gather_index;
-use crate::codegen::utils::cuda::Cuda;
+use crate::codegen::utils::cuda::{Cuda, cute_type, unsigned};
 use crate::graph::Graph;
 use crate::graph_compiler::common::horizontal::segments;
 
@@ -19,10 +20,12 @@ const THREADS: usize = 256;
 const UNROLL: usize = 4;
 
 /// The strides (in elements, from the first) a CUDA elementwise kernel reads each input and writes
-/// each output at: what its generated loads and stores index with.
+/// each output at: what its generated loads and stores index with; and the elements each tensor spans,
+/// inputs then outputs, the flat views its kernel builds from their pointers.
 pub(crate) struct Layouts {
     pub inputs: Vec<Vec<usize>>,
     pub outputs: Vec<Vec<usize>>,
+    pub spans: Vec<usize>,
 }
 
 /// CUDA elementwise fusions: the fixed `ElementwiseKernel` (lumen.codegen.elementwise.cuda.kernel) walks
@@ -71,6 +74,13 @@ impl ElementwiseCodegen for Cuda {
             for &k in outputs {
                 let v = body.outputs()[k];
                 let value = emitter.value(v, "j".into());
+
+                // A bool is stored as a byte.
+                let value = match body.type_of(v).dtype {
+                    DType::Bool => format!("cutlass.Boolean({value}).to(cutlass.Uint8)"),
+                    _ => value,
+                };
+
                 let at = gather_index("j", &body.type_of(v).shape, &layouts.outputs[k]);
 
                 match at == "j" {
@@ -137,7 +147,7 @@ def BODY(ins, outs, fins, fouts, j, v, SEGMENT: cutlass.Constexpr):
 def launch({tensors}, blocks: Int32, stream: cuda.CUstream, vectorized: cutlass.Constexpr):
     """Runs the fusion's `ElementwiseKernel` on `blocks` blocks on `stream`, with vector loads and stores
     when `vectorized` (every tensor 16-byte aligned)."""
-    kernel = ElementwiseKernel(BODY, ({counts}), ({fragments_in}), ({fragments_out}), ({contiguous}), vectorized)
+    kernel = ElementwiseKernel(BODY, ({counts}), ({types}), ({spans}), ({fragments_in}), ({fragments_out}), ({contiguous}), vectorized)
     kernel.launch([{ins}], [{outs}], blocks, stream)
 "#,
             unpack_ins = unpack("in", ins.len()),
@@ -147,6 +157,20 @@ def launch({tensors}, blocks: Int32, stream: cuda.CUstream, vectorized: cutlass.
             fragments_in = fragments_in,
             fragments_out = fragments_out,
             contiguous = contiguous,
+            types = body
+                .inputs()
+                .iter()
+                .chain(body.outputs())
+                .map(|&v| match body.type_of(v).dtype {
+                    DType::Bool => format!("{}, ", unsigned(8)),
+                    d => format!("{}, ", cute_type(d).expect("a CuTe dtype")),
+                })
+                .collect::<String>(),
+            spans = layouts
+                .spans
+                .iter()
+                .map(|n| format!("{n}, "))
+                .collect::<String>(),
             tensors = [ins.clone(), outs.clone()].concat().join(", "),
             counts = counts.concat(),
             ins = ins.join(", "),

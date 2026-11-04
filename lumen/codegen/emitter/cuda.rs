@@ -448,7 +448,7 @@ impl<'a> Emit<'a> for Emitter<'a> {
                     false => {
                         let at = gather_index(&idx, &ty.shape, &self.strides[k]);
 
-                        match at == "j" {
+                        let read = match at == "j" {
                             true => {
                                 self.fragments.insert(k);
                                 format!("fin{k}[v]")
@@ -457,6 +457,15 @@ impl<'a> Emit<'a> for Emitter<'a> {
                                 self.scattered |= out_of_order(&self.strides[k]);
                                 format!("in{k}[{}]", self.index(at))
                             }
+                        };
+
+                        // A bool is stored as a byte, an unsigned int as a signless one.
+                        match ty.dtype {
+                            DType::Bool => format!("{read} != 0"),
+                            DType::U8 | DType::U16 | DType::U32 | DType::U64 => {
+                                format!("{read}.bitcast({t})")
+                            }
+                            _ => read,
                         }
                     }
                 }

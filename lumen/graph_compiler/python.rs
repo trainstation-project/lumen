@@ -804,7 +804,11 @@ fn triton_attention(launch: &super::triton::Launch) -> Result<(), String> {
 }
 
 /// Launches the CUDA backend's kernel `name` of module `source` on `tensors` (inputs, then outputs, each
-/// a flat view) through `lumen.codegen.utils.cuda`, on lumen's stream (a CUDA graph's while it captures).
+/// a flat view) on `blocks` blocks, as a Triton kernel launches: `lumen.codegen.utils.cuda.compile`
+/// compiles it once for its tensors' dtypes and 16-byte alignment and returns the loaded function, which
+/// every launch then runs by `cuLaunchKernel` from here, on lumen's stream (a CUDA graph's while it
+/// captures).
+#[cfg_attr(not(lumen_cuda_linked), allow(unused_variables))]
 fn cuda_launch(
     name: &str,
     source: &str,
@@ -816,20 +820,49 @@ fn cuda_launch(
     crate::profiler::launched::launched(name, || Some(source.to_string()));
 
     #[cfg(lumen_cuda_linked)]
-    let stream = crate::stream::cuda::launch_stream() as usize;
+    {
+        use super::triton::direct::{self, Class, Value};
+
+        let Device::Cuda(device) = tensors[0].device() else {
+            return Err(format!("{name}: a CUDA kernel launched on a host tensor"));
+        };
+
+        let values: Vec<Value> = tensors.iter().map(Value::of).collect();
+
+        let kernel = direct::compiled(&direct::key(name, device, &values), || {
+            let dtypes = tensors
+                .iter()
+                .map(|t| crate::codegen::utils::cuda::cute_type(t.dtype()))
+                .collect::<Option<Vec<&str>>>()
+                .ok_or(format!("{name}: a dtype CuTe has no type for"))?;
+
+            let aligned = values
+                .iter()
+                .all(|v| matches!(v.class(), Class::Pointer(_, true)));
+
+            Python::attach(|py| {
+                let (function, warps, shared, plain, types) = py
+                    .import("lumen.codegen.utils.cuda")?
+                    .getattr("compile")?
+                    .call1((name, source, dtypes, aligned))?
+                    .extract()?;
+
+                Ok(direct::Compiled {
+                    function,
+                    warps,
+                    shared,
+                    plain,
+                    types,
+                })
+            })
+            .map_err(|e: PyErr| e.to_string())
+        })?;
+
+        direct::launch(&kernel, [blocks, 1, 1], &values)
+    }
 
     #[cfg(not(lumen_cuda_linked))]
-    let stream = 0usize;
-
-    Python::attach(|py| {
-        let tensors: Vec<PyTensor> = tensors.iter().map(|t| PyTensor::wrap(t.clone())).collect();
-
-        py.import("lumen.codegen.utils.cuda")?
-            .getattr("launch")?
-            .call1((name, source, tensors, blocks, stream))
-            .map(|_| ())
-    })
-    .map_err(|e: PyErr| e.to_string())
+    Err(format!("{name}: CUDA kernels launch only where lumen links CUDA"))
 }
 
 /// Registers the Triton and CUDA launch hooks and the module's Python functions and class.

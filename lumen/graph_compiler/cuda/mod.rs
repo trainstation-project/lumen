@@ -218,15 +218,23 @@ pub(crate) fn run(
         return Ok(());
     }
 
+    let tensors: Vec<Tensor> = inputs
+        .iter()
+        .chain(outputs.iter().copied())
+        .map(Tensor::flat)
+        .collect();
+
     let layouts = Layouts {
         inputs: inputs.iter().map(|t| t.strides().to_vec()).collect(),
         outputs: outputs.iter().map(|t| t.strides().to_vec()).collect(),
+        spans: tensors.iter().map(Tensor::numel).collect(),
     };
 
     let key = layouts
         .inputs
         .iter()
         .chain(&layouts.outputs)
+        .chain(std::iter::once(&layouts.spans))
         .fold(0u64, |h, s| {
             use std::hash::{Hash, Hasher};
 
@@ -245,7 +253,6 @@ pub(crate) fn run(
     })?;
 
     let (name, source) = code.as_ref();
-    let tensors: Vec<Tensor> = inputs.iter().chain(outputs).map(Tensor::flat).collect();
     launch(name, source, &tensors, blocks(n))
 }
 

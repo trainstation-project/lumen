@@ -1,38 +1,50 @@
-"""Python side of the CUDA backend: compiles generated CuTe DSL kernels and launches them."""
+"""Python side of the CUDA backend: compiles generated CuTe DSL kernels for Rust to launch."""
 
+import builtins
 import linecache
 
 import cuda.bindings.driver as cuda
+import cutlass
 import cutlass.cute as cute
-from cutlass.cute.runtime import from_dlpack
+from cutlass.cute.runtime import make_ptr
+
+from lumen.codegen.elementwise.cuda.kernel import THREADS
 
 # Alignment, in bytes, of the vectors kernels move their tensors by.
 VECTOR_BYTES = 16
 
-kernels = {}
+# The loaded modules of the compiled kernels, kept so their functions stay loaded.
+modules = []
 
 
-def compiled(name, source, tensors):
-    """The `launch` of the generated module `source` named `name`, compiled through TVM FFI for tensors like
-    `tensors` (flat views of their dtypes: one compiled kernel serves every later set of them) on its first
-    use. The same source compiles once per set of dtypes and alignment: the kernel is specialized to them,
-    moving its tensors by 16-byte vectors when every one starts 16-byte aligned."""
-    vectorized = all(t.data_ptr() % VECTOR_BYTES == 0 for t in tensors)
-    key = (name, tuple(str(t.dtype) for t in tensors), vectorized)
-    if key not in kernels:
-        filename = f"<lumen {name}>"
-        # CuTe reads its functions' source, so register the generated module's with linecache.
-        linecache.cache[filename] = (len(source), None, source.splitlines(True), filename)
-        scope = {"__name__": name}
-        exec(compile(source, filename, "exec"), scope)
-        examples = [from_dlpack(t, assumed_align=VECTOR_BYTES if vectorized else None) for t in tensors]
-        kernels[key] = cute.compile(
-            scope["launch"], *examples, 1, cuda.CUstream(0), vectorized, options="--enable-tvm-ffi"
-        )
-    return kernels[key]
+def compile(name, source, dtypes, aligned):
+    """Compiles the `launch` of the generated module `source` named `name` for tensors of CuTe types
+    `dtypes` (``"cutlass.Float32"``…, passed by pointer: its inputs, then its outputs), moving them by
+    16-byte vectors when `aligned` (every one starts 16-byte aligned), and loads it into the current
+    context. Returns it as a Triton kernel's launch info: its ``CUfunction``, warps per block, dynamic
+    shared bytes, whether a plain ``cuLaunchKernel`` runs it, and its parameters' types (each a pointer)."""
+    filename = f"<lumen {name}>"
+    # CuTe reads its functions' source, so register the generated module's with linecache.
+    linecache.cache[filename] = (len(source), None, source.splitlines(True), filename)
+    scope = {"__name__": name}
+    exec(builtins.compile(source, filename, "exec"), scope)
+
+    align = VECTOR_BYTES if aligned else None
+    types = [getattr(cutlass, d.removeprefix("cutlass.")) for d in dtypes]
+    pointers = [make_ptr(t, VECTOR_BYTES, cute.AddressSpace.gmem, assumed_align=align) for t in types]
+    compiled = cute.compile(scope["launch"], *pointers, 1, cuda.CUstream(0), aligned, options="--keep-cubin")
+    (entry,) = compiled.kernel_info
+
+    status, module = cuda.cuModuleLoadData(compiled.artifacts.CUBIN)
+    check(status, name)
+    modules.append(module)
+    status, function = cuda.cuModuleGetFunction(module, entry.encode())
+    check(status, name)
+
+    return int(function), THREADS // 32, 0, True, ["*"] * len(dtypes)
 
 
-def launch(name, source, tensors, blocks, stream):
-    """Launches kernel `name` of `source` on `tensors` (its inputs, then its outputs) on `blocks` blocks on
-    CUDA stream `stream` (a `cudaStream_t` integer, 0 for the default stream)."""
-    compiled(name, source, tensors)(*tensors, blocks, cuda.CUstream(stream))
+def check(status, name):
+    """Raises if CUDA driver call `status` failed loading kernel `name`."""
+    if status != cuda.CUresult.CUDA_SUCCESS:
+        raise RuntimeError(f"{name}: loading its CuTe kernel failed ({status.name})")
