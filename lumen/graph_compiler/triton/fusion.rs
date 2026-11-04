@@ -185,3 +185,21 @@ pub(super) fn horizontal_candidate(_: &Graph, node: &Node) -> bool {
 
     name == "elementwise" && !alone && reduction_root(body).is_none() && gemm_dot(body).is_none()
 }
+
+/// Whether `producer` ends a kernel of its own writing fresh memory, so it can write a concatenation's operand
+/// straight into its slot through the slot's strides: a matmul, or a fusible elementwise or copying layout op
+/// (a reshape or view slice aliases its operand instead). Fusion leaves such a concatenate unfused, so each
+/// producer is its kernel's root.
+pub(super) fn slot_writes(graph: &Graph, producer: &Node) -> bool {
+    let copies = matches!(
+        producer.primitive,
+        Primitive::Transpose { .. }
+            | Primitive::BroadcastInDim { .. }
+            | Primitive::Slice { view: false, .. }
+    );
+
+    let kernel = fusible(graph, producer)
+        && (crate::graph_compiler::elementwise(&producer.primitive) || copies);
+
+    kernel || matches!(producer.primitive, Primitive::DotGeneral { .. })
+}

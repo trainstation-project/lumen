@@ -7,7 +7,6 @@ mod cross_entropy;
 pub(crate) mod direct;
 mod fusion;
 pub(crate) mod gemm;
-mod place_concats;
 mod scatter_add;
 mod split_k;
 mod wide_rows;
@@ -23,7 +22,6 @@ pub(crate) use attention::{Launch, set_attention};
 use fusion::{Fusion, PlaceViews};
 #[cfg(feature = "python")]
 pub(crate) use gemm::{Epilogue, set_gemm};
-use place_concats::PlaceConcats;
 use scatter_add::Scatter;
 use split_k::SplitK;
 use wide_rows::WideRows;
@@ -56,9 +54,10 @@ use crate::codegen::scan::ScanCodegen;
 use crate::codegen::scan::triton::Scan;
 use crate::codegen::store::triton::{load, store};
 use crate::codegen::utils::triton as codegen;
-use crate::graph::{Graph, Primitive, TensorType, UPDATES};
+use crate::graph::{Graph, Node, Primitive, TensorType, UPDATES};
 use crate::graph_compiler::common::diamonds::{Diamonds, Row, RowsModule};
 use crate::graph_compiler::common::horizontal::{Grouping, HorizontalFusion, segments};
+use crate::graph_compiler::common::place_concats::{PlaceConcats, Slots};
 use crate::plan::{Buffer, Step};
 use crate::{DType, Device, Scalar, Tensor, TensorOptions};
 
@@ -294,6 +293,13 @@ impl Module for TritonModule<'_> {
 
     fn config(&self) -> &CompilerConfig {
         &self.options.config
+    }
+}
+
+impl Slots for TritonModule<'_> {
+    /// Kernels of their own writing fresh memory (`fusion::slot_writes`).
+    fn writes(&self, _: &Node, _: usize, producer: &Node, _: usize) -> Option<bool> {
+        fusion::slot_writes(&self.graph, producer).then_some(true)
     }
 }
 

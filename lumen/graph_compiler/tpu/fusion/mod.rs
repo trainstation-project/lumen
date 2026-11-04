@@ -48,3 +48,27 @@ pub(super) fn horizontal_candidate(graph: &Graph, node: &Node) -> bool {
             .all(|n| crate::codegen::utils::tpu::fusible(&n.primitive))
         && !placed
 }
+
+/// Whether operand `k` of `concat`, made by `producer` (a fusion when it is one of its outputs), can be written
+/// straight into its slot: the concat joins its last axis, the operand's width fills whole lanes, and its
+/// producer's kernel writes a strided slice of the shared buffer (a dot, an elementwise fusion, a fill, a
+/// scalar broadcast or an elementwise op).
+pub(super) fn slot_writes(graph: &Graph, concat: &Node, k: usize, producer: &Node) -> bool {
+    let Primitive::Concatenate { dimension, .. } = concat.primitive else {
+        return false;
+    };
+
+    let writes = match &producer.primitive {
+        Primitive::DotGeneral { .. } | Primitive::Full { .. } => true,
+        Primitive::Fusion { name, .. } => name == "dot_general" || name == "elementwise",
+        Primitive::BroadcastInDim {
+            broadcast_dimensions,
+            ..
+        } => broadcast_dimensions.is_empty(),
+        p => crate::graph_compiler::elementwise(p),
+    };
+
+    dimension + 1 == graph.type_of(concat.output).shape.len()
+        && graph.type_of(concat.inputs[k]).shape[dimension].is_multiple_of(super::LANES)
+        && writes
+}
