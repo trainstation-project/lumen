@@ -285,7 +285,11 @@ impl AttentionCodegen for Mps {
 /// Generates the fused attention forward kernel for `body` run as `tuned` (decode attention ignores it), with an
 /// optional elementwise epilogue, raw-score/LSE outputs and dropout; returns its name and source; the match
 /// already reads the operands' layout.
-pub(crate) fn forward_with(body: &Graph, a: &Attention, tuned: Tuning) -> Result<(String, String), String> {
+pub(crate) fn forward_with(
+    body: &Graph,
+    a: &Attention,
+    tuned: Tuning,
+) -> Result<(String, String), String> {
     // With dropout, the last two body inputs are the seed and offset passed as constants.
     let n = body.inputs().len() - if a.dropout.is_some() { 2 } else { 0 };
 
@@ -464,4 +468,3 @@ pub(crate) fn forward_with(body: &Graph, a: &Attention, tuned: Tuning) -> Result
         "
     )))
 }
-
