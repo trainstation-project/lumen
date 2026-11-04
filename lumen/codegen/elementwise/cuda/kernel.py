@@ -6,6 +6,10 @@ outputs ``outs``, each a flat view (built from the pointer the kernel takes) ind
 it reads from ``fins`` and writes to ``fouts`` at ``v``: register fragments of a thread's consecutive
 elements, moved with vector loads and stores, or the tensors themselves with ``v = j``."""
 
+import functools
+import inspect
+import types
+
 import cuda.bindings.driver as cuda
 import cutlass
 import cutlass.cute as cute
@@ -15,6 +19,33 @@ from cutlass import Int32, Int64
 THREADS = 256
 # Bytes of its widest tensor a thread moves a step: one 128-bit load or store.
 STEP_BYTES = 16
+
+
+def fast(f):
+    """`f` with ``fastmath=True`` when it takes the flag (CuTe's fast approximations), else `f` itself. A
+    fast call drops any explicit ``rounding`` (CuTe takes one or the other), so the compiler may also
+    contract its adds and multiplies into FMAs."""
+    try:
+        takes = "fastmath" in inspect.signature(f).parameters
+    except (TypeError, ValueError):
+        takes = False
+
+    if not takes:
+        return f
+
+    @functools.wraps(f)
+    def call(*args, rounding=None, **kwargs):
+        """`f` of `args` with fast math, its `rounding` left to the compiler."""
+        return f(*args, fastmath=True, **kwargs)
+
+    return call
+
+
+# ``cute.math`` computing with fast approximations: what a generated ``BODY`` calls as ``math`` under
+# ``config.compiler.fast_math``.
+FAST_MATH = types.SimpleNamespace(
+    **{name: fast(f) if callable(f) else f for name, f in vars(cute.math).items() if not name.startswith("_")}
+)
 
 
 def vectors(t, V):

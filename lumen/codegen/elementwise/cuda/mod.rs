@@ -134,7 +134,10 @@ import cutlass
 import cutlass.cute as cute
 from cutlass import Int32
 
-from lumen.codegen.elementwise.cuda.kernel import ElementwiseKernel
+from lumen.codegen.elementwise.cuda.kernel import FAST_MATH, ElementwiseKernel
+
+# The math functions BODY calls: CuTe's, or their fast approximations under config.compiler.fast_math.
+math = {math}
 
 
 @cute.jit
@@ -150,6 +153,10 @@ def launch({tensors}, blocks: Int32, stream: cuda.CUstream, vectorized: cutlass.
     kernel = ElementwiseKernel(BODY, ({counts}), ({types}), ({spans}), ({fragments_in}), ({fragments_out}), ({contiguous}), vectorized)
     kernel.launch([{ins}], [{outs}], blocks, stream)
 "#,
+            math = match crate::graph_compiler::config::config().fast_math {
+                true => "FAST_MATH",
+                false => "cute.math",
+            },
             unpack_ins = unpack("in", ins.len()),
             unpack_outs = unpack("out", outs.len()),
             unpack_fins = unpack("fin", ins.len()),

@@ -25,6 +25,7 @@ class CompilerConfig:
     reduction_epilogues: bool = True
     contraction_epilogues: bool = True
     online_softmax: bool = True
+    fast_math: bool = False
     neural_engine: bool = False
     row_cache: int = 8
 

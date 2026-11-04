@@ -2,8 +2,10 @@
 //!
 //! Each thread computes one element at a time, so loads take no mask (the kernel guards the index)
 //! and every value is a scalar. Floats add, subtract and multiply rounded to nearest even
-//! (`cute.math.add`/`mul` with `rounding`), which no compiler stage contracts into an FMA: the
+//! (`math.add`/`mul` with `rounding`), which no compiler stage contracts into an FMA: the
 //! program runs exactly as traced. Division and square roots are correctly rounded as written.
+//! `math` is the generated module's: `cute.math`, or its fast approximations under
+//! `config.compiler.fast_math`.
 
 use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write;
@@ -16,7 +18,7 @@ use crate::tensor::contiguous_strides;
 use crate::{DType, Scalar};
 
 /// Rounding argument of `cute.math`'s exactly rounded add and multiply.
-const RN: &str = "rounding=cute.math.RoundingMode.NEAREST_EVEN";
+const RN: &str = "rounding=math.RoundingMode.NEAREST_EVEN";
 
 /// Builds the CuTe statements computing body values at symbolic flat indices, memoizing each
 /// `(var, index)` so shared subexpressions are emitted once.
@@ -81,13 +83,13 @@ impl<'a> Emitter<'a> {
     /// half floats, whose sum or product of two values float32 holds exactly enough to round once.
     fn rounded(&mut self, op: &str, x: &str, y: &str, dtype: DType) -> String {
         match dtype {
-            DType::F32 | DType::F64 => format!("cute.math.{op}({x}, {y}, {RN})"),
+            DType::F32 | DType::F64 => format!("math.{op}({x}, {y}, {RN})"),
             _ => {
                 let (a, _) = self.computed(x, dtype);
                 let (b, _) = self.computed(y, dtype);
                 let t = cute_type(dtype).expect("a CuTe dtype");
 
-                format!("cute.math.{op}({a}, {b}, {RN}).to({t})")
+                format!("math.{op}({a}, {b}, {RN}).to({t})")
             }
         }
     }
@@ -112,31 +114,31 @@ impl<'a> Emitter<'a> {
         let (a, f) = self.computed(&x, operand);
 
         let value = match op {
-            Sin => format!("cute.math.sin({a})"),
-            Cos => format!("cute.math.cos({a})"),
-            Tan => format!("cute.math.tan({a})"),
-            Asin => format!("cute.math.asin({a})"),
-            Acos => format!("cute.math.acos({a})"),
-            Atan => format!("cute.math.atan({a})"),
-            Sinh => format!("cute.math.sinh({a})"),
-            Cosh => format!("cute.math.cosh({a})"),
-            Asinh => format!("cute.math.asinh({a})"),
-            Acosh => format!("cute.math.acosh({a})"),
-            Atanh => format!("cute.math.atanh({a})"),
-            Floor => format!("cute.math.floor({a})"),
-            Ceil => format!("cute.math.ceil({a})"),
-            RoundEven => format!("cute.math.roundeven({a})"),
-            Log1p => format!("cute.math.log1p({a})"),
-            Expm1 => format!("cute.math.expm1({a})"),
-            Exp2 => format!("cute.math.exp2({a})"),
-            Log2 => format!("cute.math.log2({a})"),
-            Rsqrt => format!("{f}(1.0) / cute.math.sqrt({a})"),
-            Cbrt => format!("cute.math.cbrt({a})"),
-            Abs => format!("cute.math.abs({a})"),
+            Sin => format!("math.sin({a})"),
+            Cos => format!("math.cos({a})"),
+            Tan => format!("math.tan({a})"),
+            Asin => format!("math.asin({a})"),
+            Acos => format!("math.acos({a})"),
+            Atan => format!("math.atan({a})"),
+            Sinh => format!("math.sinh({a})"),
+            Cosh => format!("math.cosh({a})"),
+            Asinh => format!("math.asinh({a})"),
+            Acosh => format!("math.acosh({a})"),
+            Atanh => format!("math.atanh({a})"),
+            Floor => format!("math.floor({a})"),
+            Ceil => format!("math.ceil({a})"),
+            RoundEven => format!("math.roundeven({a})"),
+            Log1p => format!("math.log1p({a})"),
+            Expm1 => format!("math.expm1({a})"),
+            Exp2 => format!("math.exp2({a})"),
+            Log2 => format!("math.log2({a})"),
+            Rsqrt => format!("{f}(1.0) / math.sqrt({a})"),
+            Cbrt => format!("math.cbrt({a})"),
+            Abs => format!("math.abs({a})"),
             Sign => format!(
                 "{f}(cutlass.select_(({a} == {f}(0.0)) | ({a} != {a}), {a}, cutlass.select_({a} > {f}(0.0), {f}(1.0), {f}(-1.0))))"
             ),
-            IsFinite => return format!("cute.math.isfinite({a})"),
+            IsFinite => return format!("math.isfinite({a})"),
             ErfInv => self.erf_inv(&a, f),
             op => unreachable!("{} of a float", op.name()),
         };
@@ -161,7 +163,7 @@ impl<'a> Emitter<'a> {
 
             let value = match op {
                 Pow if !other.is_float() && operand == DType::F64 => {
-                    format!("cute.math.pow({a}, {y}.to(cutlass.Float64))")
+                    format!("math.pow({a}, {y}.to(cutlass.Float64))")
                 }
                 // Integer exponents, as MPS's `pow_op` (and Triton's): held within int32 keeping their
                 // parity (i64/u64 past it are 0, inf or 1 but for |a| = 1), then a float pow, exact in
@@ -193,16 +195,16 @@ impl<'a> Emitter<'a> {
 
                     format!(
                         "cutlass.Float32(cutlass.select_(({n} <= {exact}) & ({n} >= -{exact}), \
-                         cute.math.pow({a}, {n}.to(cutlass.Float32)), \
-                         cute.math.pow({a}, ({n} - {lo}).to(cutlass.Float32)) \
-                         * cute.math.pow({a}, {lo}.to(cutlass.Float32))))"
+                         math.pow({a}, {n}.to(cutlass.Float32)), \
+                         math.pow({a}, ({n} - {lo}).to(cutlass.Float32)) \
+                         * math.pow({a}, {lo}.to(cutlass.Float32))))"
                     )
                 }
-                Pow => format!("cute.math.pow({a}, {})", self.computed(&y, operand).0),
-                Rem => format!("cute.math.rem({a}, {})", self.computed(&y, operand).0),
+                Pow => format!("math.pow({a}, {})", self.computed(&y, operand).0),
+                Rem => format!("math.rem({a}, {})", self.computed(&y, operand).0),
                 Min => {
                     let b = self.computed(&y, operand).0;
-                    format!("cute.math.min({a}, {b}, propagate_nan=True)")
+                    format!("math.min({a}, {b}, propagate_nan=True)")
                 }
                 op => unreachable!("{} of floats", op.name()),
             };
@@ -293,15 +295,13 @@ impl<'a> Emitter<'a> {
         ];
 
         let one = format!("{f}(1.0)");
-        let below = self.local(format!("cute.math.add({one}, -{a}, {RN})"));
-        let above = self.local(format!("cute.math.add({one}, {a}, {RN})"));
-        let w = self.local(format!(
-            "-cute.math.log(cute.math.mul({below}, {above}, {RN}))"
-        ));
+        let below = self.local(format!("math.add({one}, -{a}, {RN})"));
+        let above = self.local(format!("math.add({one}, {a}, {RN})"));
+        let w = self.local(format!("-math.log(math.mul({below}, {above}, {RN}))"));
         let near = self.local(format!("{w} < {f}(5.0)"));
 
         let at = self.local(format!(
-            "{f}(cutlass.select_({near}, cute.math.add({w}, {f}(-2.5), {RN}), cute.math.add(cute.math.sqrt({w}), {f}(-3.0), {RN})))"
+            "{f}(cutlass.select_({near}, math.add({w}, {f}(-2.5), {RN}), math.add(math.sqrt({w}), {f}(-3.0), {RN})))"
         ));
 
         let coefficient = |k: usize| {
@@ -314,11 +314,11 @@ impl<'a> Emitter<'a> {
         let mut p = self.local(coefficient(0));
 
         for k in 1..SMALL.len() {
-            p = self.local(format!("cute.math.fma({p}, {at}, {})", coefficient(k)));
+            p = self.local(format!("math.fma({p}, {at}, {})", coefficient(k)));
         }
 
         format!(
-            "{f}(cutlass.select_(cute.math.abs({a}) == {one}, cute.math.mul({a}, {f}(float(\"inf\")), {RN}), cute.math.mul({p}, {a}, {RN})))"
+            "{f}(cutlass.select_(math.abs({a}) == {one}, math.mul({a}, {f}(float(\"inf\")), {RN}), math.mul({p}, {a}, {RN})))"
         )
     }
 
@@ -511,7 +511,7 @@ impl<'a> Emit<'a> for Emitter<'a> {
                                     "cutlass.select_({y} == 0, ~({x} ^ {x}), ({x} - {x} % {safe}) // {safe})"
                                 )
                             }
-                            (Max, true) => format!("cute.math.max({x}, {y}, propagate_nan=True)"),
+                            (Max, true) => format!("math.max({x}, {y}, propagate_nan=True)"),
                             (Max, false) => format!("cutlass.max({x}, {y})"),
                             (Eq, _) => format!("{x} == {y}"),
                             _ => format!("{x} < {y}"),
@@ -523,13 +523,11 @@ impl<'a> Emit<'a> for Emitter<'a> {
                         let (a, f) = self.computed(&x, ty.dtype);
 
                         let value = match &node.primitive {
-                            Exp => format!("cute.math.exp({a})"),
-                            Log => format!("cute.math.log({a})"),
-                            Sqrt => format!("cute.math.sqrt({a})"),
-                            Tanh => format!("cute.math.tanh({a})"),
-                            _ => format!(
-                                "{f}(1.0) / cute.math.add({f}(1.0), cute.math.exp(-{a}), {RN})"
-                            ),
+                            Exp => format!("math.exp({a})"),
+                            Log => format!("math.log({a})"),
+                            Sqrt => format!("math.sqrt({a})"),
+                            Tanh => format!("math.tanh({a})"),
+                            _ => format!("{f}(1.0) / math.add({f}(1.0), math.exp(-{a}), {RN})"),
                         };
 
                         match half {
