@@ -21,7 +21,9 @@ use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::common::alone::wrapped;
 use crate::graph_compiler::common::attention::{self, Strides};
 use crate::graph_compiler::common::place_concats::in_place_concats;
+use crate::graph_compiler::common::place_views;
 use crate::graph_compiler::pass::CompilerPass;
+use crate::plan::Step;
 
 /// Compiler pass turning pending kernel requests into generated kernels.
 pub(super) struct Codegen;
@@ -269,4 +271,53 @@ pub(super) fn slot_worth(m: &MpsModule<'_>, producer: &Node) -> bool {
         pending(&m.kernels, producer),
         Some(Kernel::AttentionBackward)
     )
+}
+
+/// Whether fusion input `k` may be bound as a strided view: it is not attention and no dot reads it.
+pub(crate) fn loads_strided(body: &Graph, k: usize) -> bool {
+    let Some(&v) = body.inputs().get(k) else {
+        return false;
+    };
+
+    let template = |p: &Primitive| matches!(p, Primitive::DotGeneral { .. });
+
+    attention::of_body(body).is_none()
+        && attention::backward_of_body(body).is_none()
+        && !body
+            .nodes()
+            .iter()
+            .any(|n| template(&n.primitive) && n.inputs.contains(&v))
+}
+
+/// Whether some input of `step` is a view its kernel loads element by element (a strided variant of the
+/// kernel), which tuned kernels don't; views a GEMM's dot strides through need none.
+pub(crate) fn loads_views(step: &Step) -> bool {
+    let Primitive::Fusion { body, .. } = &step.primitive else {
+        return step.views.iter().any(Option::is_some);
+    };
+
+    step.views
+        .iter()
+        .enumerate()
+        .any(|(k, view)| view.is_some() && loads_strided(body, k))
+}
+
+/// Whether an attention fusion reads its inputs at `strides`: any, with a contiguous last dim (its
+/// kernel is generated for the layout when it runs).
+pub(crate) fn attention_reads_strided(body: &Graph, strides: &[usize]) -> bool {
+    strides.last().is_none_or(|&s| s == 1)
+        && (attention::of_body(body).is_some() || attention::backward_of_body(body).is_some())
+}
+
+/// Whether GEMM fusion input `k` is read only by the dot, as one operand, in a layout MPS's matmul
+/// kernels stride through: an attention's dots are its kernel's, not a GEMM's.
+pub(crate) fn fusion_reads_strided(body: &Graph, k: usize, strides: &[usize]) -> bool {
+    attention::of_body(body).is_none()
+        && attention::backward_of_body(body).is_none()
+        && place_views::fusion_reads_strided(
+            body,
+            k,
+            strides,
+            crate::codegen::dot_general::mps::reads_strided,
+        )
 }

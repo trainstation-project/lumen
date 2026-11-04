@@ -4,7 +4,6 @@
 pub(crate) mod ane;
 pub(crate) mod fusion;
 pub(crate) mod kernel_codegen;
-mod place_views;
 mod split_k;
 #[cfg(test)]
 mod tests;
@@ -25,6 +24,7 @@ use super::common::linear_reordering::LinearReordering;
 use super::common::merge_dots::{Blocks, MergeDots, Packs, Target};
 use super::common::merge_dots_backward::MergeDotsBackward;
 use super::common::place_concats::{PlaceConcats, Slots};
+use super::common::place_views::PlaceViews;
 use super::common::simplify::Simplify;
 use super::common::take_along_axis::TakeAlongAxis;
 use super::pass::{Module, Pipeline};
@@ -55,8 +55,7 @@ use crate::runtime::mps::{
 use crate::tensor::contiguous_strides;
 use crate::{DType, Scalar, Tensor};
 use kernel_codegen::Codegen;
-use place_views::PlaceViews;
-pub(crate) use place_views::{
+pub(crate) use kernel_codegen::{
     attention_reads_strided, fusion_reads_strided, loads_strided, loads_views,
 };
 
@@ -326,7 +325,9 @@ fn pipeline<'a>(config: &CompilerConfig) -> Pipeline<MpsModule<'a>> {
     }
 
     // Slices a GEMM reads in place become views before the lone layout ops left become elementwise fusions, as on Triton.
-    p.add(PlaceViews);
+    p.add(PlaceViews {
+        reads: gemm::reads_strided,
+    });
     p.add(Alone);
     p.add(Codegen);
     p
