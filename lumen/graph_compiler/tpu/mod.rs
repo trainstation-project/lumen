@@ -64,15 +64,15 @@ impl Module for TpuModule<'_> {
         self.options
     }
 
-    fn config(&self) -> &dyn CompilerConfig {
-        &self.options.config.tpu
+    fn config(&self) -> &CompilerConfig {
+        &self.options.config
     }
 }
 
 /// Flash-attention matching for TPU: scalar epilogue leaves, no extra scalars, static offsets.
 impl Attentions for TpuModule<'_> {
     fn contraction_epilogues(&self) -> bool {
-        self.options.config.tpu.contraction_epilogues
+        self.options.config.contraction_epilogues
     }
 
     fn epilogues(&self) -> attention::Epilogues {
@@ -114,15 +114,15 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
 
     let mut pipeline = Pipeline::new("tpu");
 
-    if options.config.tpu.merge_dots {
+    if options.config.merge_dots {
         pipeline.add(MergeDotsBackward);
     }
 
-    if options.config.tpu.flash_attention {
+    if options.config.flash_attention {
         pipeline.add(FlashAttention).add(FlashAttentionBackward);
     }
 
-    if options.config.tpu.safe_kernels {
+    if options.config.safe_kernels {
         pipeline.add(ClampIndices);
     }
 
@@ -131,7 +131,7 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         .add(Simplify { matched: true })
         .add(DotStrength);
 
-    if options.config.tpu.merge_dots {
+    if options.config.merge_dots {
         pipeline.add(MergeDots {
             target: Target {
                 reads: |_, _| true,
@@ -142,7 +142,7 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         });
     }
 
-    if options.config.tpu.normalization_diamonds {
+    if options.config.normalization_diamonds {
         pipeline.add(Diamonds).add(DotRows);
     }
 
@@ -155,7 +155,7 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         .add(PlaceConcats)
         .add(Fusion);
 
-    if options.config.tpu.horizontal_fusion {
+    if options.config.horizontal_fusion {
         pipeline.add(HorizontalFusion);
     }
 
@@ -168,7 +168,7 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         ..
     } = module;
 
-    let config = &options.config.tpu;
+    let config = &options.config;
 
     let plan = PlanOptions {
         layout: Some(LAYOUT),

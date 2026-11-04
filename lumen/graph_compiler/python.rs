@@ -54,9 +54,8 @@ impl PyPlan {
 
         // Position lists become per-input masks for the compiler options.
         let mask = |positions: &[usize]| (0..n).map(|i| positions.contains(&i)).collect();
-        let mut config = crate::graph_compiler::config::configs();
-        config.mps.fuse = fuse.unwrap_or(config.mps.fuse);
-        config.cuda.fuse = fuse.unwrap_or(config.cuda.fuse);
+        let mut config = crate::graph_compiler::config::config();
+        config.fuse = fuse.unwrap_or(config.fuse);
 
         let options = crate::graph_compiler::Options {
             config,

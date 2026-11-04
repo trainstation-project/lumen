@@ -112,6 +112,6 @@ def pytest_configure(config):
 def triton_on_cuda(device):
     """``use_triton_backend`` on for CUDA, whose plans run with Triton: its
     GEMM and generated kernels."""
-    lumen.config.compiler.cuda.use_triton_backend = device == "cuda"
+    lumen.config.compiler.use_triton_backend = device == "cuda"
     yield
-    lumen.config.compiler.cuda.use_triton_backend = False
+    lumen.config.compiler.use_triton_backend = False

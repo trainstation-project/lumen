@@ -30,7 +30,7 @@ use super::common::merge_dots_backward::MergeDotsBackward;
 use super::common::simplify::Simplify;
 use super::common::take_along_axis::TakeAlongAxis;
 use super::pass::{Module, Pipeline};
-use super::{CompilerConfig, MpsConfig, Options};
+use super::{CompilerConfig, Options};
 use crate::codegen::attention::AttentionCodegen;
 use crate::codegen::attention::mps::{backward_block_with_dq, decodes};
 use crate::codegen::dot_general::mps as gemm;
@@ -120,7 +120,7 @@ struct MpsModule<'a> {
 impl Attentions for MpsModule<'_> {
     /// Whether attention may absorb elementwise epilogues.
     fn contraction_epilogues(&self) -> bool {
-        self.options.config.mps.contraction_epilogues
+        self.options.config.contraction_epilogues
     }
 
     /// Graph values of the by-value scalar inputs.
@@ -140,7 +140,7 @@ impl Attentions for MpsModule<'_> {
 impl AttentionBackwards for MpsModule<'_> {
     /// Backwards whose dQ fits the dK/dV kernel, unless deterministic mode forbids its atomic dQ accumulation.
     fn together(&self) -> impl Fn(&Backward) -> bool + 'static {
-        let deterministic = self.options.config.mps.deterministic;
+        let deterministic = self.options.config.deterministic;
         move |b| !deterministic && backward_block_with_dq(b).is_some()
     }
 
@@ -208,8 +208,8 @@ impl Module for MpsModule<'_> {
         self.options
     }
 
-    fn config(&self) -> &dyn CompilerConfig {
-        &self.options.config.mps
+    fn config(&self) -> &CompilerConfig {
+        &self.options.config
     }
 }
 
@@ -236,7 +236,7 @@ fn request(kernels: &mut Vec<Kernel>, kernel: Kernel) -> String {
 }
 
 /// The MPS pass pipeline, with optional passes enabled by `config`.
-fn pipeline<'a>(config: &MpsConfig) -> Pipeline<MpsModule<'a>> {
+fn pipeline<'a>(config: &CompilerConfig) -> Pipeline<MpsModule<'a>> {
     let mut p = Pipeline::new("mps");
     p.add(TakeAlongAxis);
 
@@ -345,7 +345,7 @@ fn unsupported(graph: &Graph) -> Result<(), String> {
 /// Compiles `graph` for MPS: runs the passes, compiles the kernels, plans buffers and optionally autotunes.
 pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> {
     unsupported(graph)?;
-    let config = &options.config.mps;
+    let config = &options.config;
 
     let mut module = MpsModule {
         graph: graph.clone(),
@@ -690,7 +690,7 @@ fn run_loop(
         false => HashMap::from([(0, (0, dst.strides().to_vec()))]),
     };
 
-    let config = super::config::configs().mps;
+    let config = super::config::config();
     let (name, source) = kernel_codegen::kernel(&body, &[by_value], &config, &views, None);
 
     let compiled = SOURCES

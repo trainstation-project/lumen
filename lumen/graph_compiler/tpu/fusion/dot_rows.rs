@@ -19,7 +19,7 @@ impl CompilerPass<TpuModule<'_>> for DotRows {
     }
 
     fn apply(&mut self, m: &mut TpuModule<'_>) -> Result<(), String> {
-        if m.options.config.tpu.contraction_epilogues {
+        if m.options.config.contraction_epilogues {
             m.graph = dot_rows(&m.graph, full, |_| true, false);
         }
 

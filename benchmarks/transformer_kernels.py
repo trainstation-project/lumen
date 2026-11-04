@@ -79,7 +79,7 @@ def op(name, shapes, dtype, steps, top, repeats=16):
     in one compiled function (on as many operands: back to back, the GPU
     kept busy, as in a step), compiled as examples/transformer.py compiles
     (deterministic)."""
-    lumen.config.compiler.mps.deterministic = True
+    lumen.config.compiler.deterministic = True
     rng = np.random.default_rng(0)
     args = [
         lumen.from_numpy(rng.standard_normal(s).astype(np.float32)).to(dtype=dtype).to("mps")

@@ -3,6 +3,7 @@
 from lumen.autograd.core import UndefinedPrimal, _value
 from lumen.autograd.function import _FUNCTION, Function, FunctionCtx
 from lumen.autograd.rules import _dot_dims, _dot_general_transpose, _narrowed
+from lumen.config._C import config
 from lumen.graph import prims, tracer
 
 __all__ = ["substitute"]
@@ -17,7 +18,7 @@ def substitute(tape, leaves):
     """``tape`` with each group of dots sharing their lhs, their rhs distinct
     float weights among ``leaves`` alike but in their one free dimension,
     replaced by one ``_MergedDot`` node (where the first was)."""
-    if not tracer.compiler_config().merge_dots:
+    if not config.compiler.merge_dots:
         return tape
     graph = tracer.current_graph()
     weights = {t.var for t in leaves if not t.weak}

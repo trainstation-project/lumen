@@ -32,7 +32,7 @@ class MLP(lumen.nn.Module):
 @pytest.fixture
 def neural_engine():
     """Turns on the Neural Engine for one test, then resets the compiler config."""
-    lumen.config.compiler.mps.neural_engine = True
+    lumen.config.compiler.neural_engine = True
     yield
     lumen.config.compiler.reset()
 
@@ -78,7 +78,7 @@ def _load(model, values):
 
 def test_neural_engine_off_by_default():
     """The flag is off: no Core ML step, every dot on lumen's kernels."""
-    assert lumen.config.compiler.mps.neural_engine is False
+    assert lumen.config.compiler.neural_engine is False
     x = np.ones((M, K), np.float16)
     _, plan = _compiled(lambda m, x: m(x), _model(), x)
     assert not plan.neural_engine

@@ -186,7 +186,7 @@ def test_autotuned_elementwise_fusions_match_untuned_and_dump_their_launch(tmp_p
     elements per thread and threadgroup size it picked."""
     if not lumen.mps.is_available():
         pytest.skip("no MPS device")
-    compiler = lumen.config.compiler.mps
+    compiler = lumen.config.compiler
     try:
         # Lengths that are not multiples of any elements-per-thread choice, plus one large power of two.
         for n in ((1 << 16) + 7, 1 << 20, (3 << 20) + 1):

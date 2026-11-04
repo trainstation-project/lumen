@@ -89,7 +89,7 @@ def test_matmul_epilogues_fuse(device, f, shapes, dtype, triton_on_cuda):
     (step,) = lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), "mps").steps()
     assert step["label"].startswith("dot_general →"), step["label"]
     fused = lumen.to_numpy(lumen.compile(f)(*args).to(dtype="float32"))
-    lumen.config.compiler.mps.contraction_epilogues = False
+    lumen.config.compiler.contraction_epilogues = False
     try:
         assert len(lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), "mps").steps()) == 2
         unfused = lumen.to_numpy(lumen.compile(f)(*args).to(dtype="float32"))
@@ -205,7 +205,7 @@ def test_matmul_epilogue_normalizes_its_rows(device, f, m, d, triton_on_cuda):
     wide = d > 64
     assert len(rows) == (not wide or f is not _softmax_block), [s["label"] for s in steps]
     fused = flatten(lumen.compile(f)(*args))
-    lumen.config.compiler.mps.contraction_epilogues = False
+    lumen.config.compiler.contraction_epilogues = False
     try:
         unfused = flatten(lumen.compile(f)(*args))
     finally:
@@ -279,7 +279,7 @@ def test_trained_matmul_epilogue_normalizes_its_rows(device, triton_on_cuda):
     fused = [label for label in labels if label.startswith("dot_general → add") and "reduce_sum" in label]
     assert len(fused) == 1, labels
     got = run()
-    lumen.config.compiler.mps.contraction_epilogues = False
+    lumen.config.compiler.contraction_epilogues = False
     try:
         want = run()
     finally:
@@ -385,7 +385,7 @@ def test_narrowing_cast_of_a_matmul_is_its_output_dtype():
         """Each MPS plan step of `f`'s graph as its matmul description, or its text."""
         return [_dot(s) or s["text"] for s in lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), "mps").steps()]
 
-    lumen.config.compiler.mps.contraction_epilogues = False
+    lumen.config.compiler.contraction_epilogues = False
     try:
         (dot,) = dots(rounded, x, w)
         assert dot.startswith("dot_general") and "output_dtype=bf16" in dot
@@ -399,7 +399,7 @@ def test_narrowing_cast_of_a_matmul_is_its_output_dtype():
     want = lumen.to_numpy(lumen.compile(both)(x, w)[0].to(dtype="float32"))
     np.testing.assert_array_equal(got, want)
     half = lambda x, w: F.matmul(x, w, "float32", "float32").half()  # noqa: E731
-    lumen.config.compiler.mps.contraction_epilogues = False
+    lumen.config.compiler.contraction_epilogues = False
     try:
         assert [t.split("[")[0] for t in dots(half, x, w)] == ["dot_general", "cast(float32 -> float16)"]
     finally:
@@ -544,7 +544,7 @@ def test_matmul_epilogue_writes_values_the_backward_reads(device, triton_on_cuda
         return
     results = []
     for epilogues in (True, False):
-        lumen.config.compiler.mps.contraction_epilogues = epilogues
+        lumen.config.compiler.contraction_epilogues = epilogues
         try:
             model = _ReluMLP(lumen.empty([64, 96], device="meta"), lumen.empty([96, 32], device="meta"))
             f = lumen.compile(step, device="mps")
@@ -594,7 +594,7 @@ def test_linear_reordering_keeps_the_values(device, triton_on_cuda):
         args = [lumen.from_numpy(a).to(device) for a in (x, g, w, q, s, z, c, v, u)]
     except RuntimeError as e:
         pytest.skip(str(e))
-    config = getattr(lumen.config.compiler, device)
+    config = lumen.config.compiler
     assert not config.linear_reordering
     exact = [lumen.to_numpy(t) for t in lumen.compile(block)(*args)]
     config.linear_reordering = True
@@ -640,7 +640,7 @@ def test_linear_reordering_runs_rms_norm_as_coda():
         args = [lumen.from_numpy(rng.standard_normal(s).astype(np.float32) / 8).to("mps") for s in shapes]
     except RuntimeError as e:
         pytest.skip(str(e))
-    lumen.config.compiler.mps.linear_reordering = True
+    lumen.config.compiler.linear_reordering = True
     try:
         steps = lumen.graph_compiler.Plan(lumen.make_graph(_coda_block)(*args), "mps").steps()
         f = lumen.compile(_coda_block)
@@ -648,7 +648,7 @@ def test_linear_reordering_runs_rms_norm_as_coda():
         with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS], record_shapes=True) as prof:
             f(*args)
             lumen.mps.synchronize()
-        lumen.config.compiler.mps.contraction_epilogues = False
+        lumen.config.compiler.contraction_epilogues = False
         want = [lumen.to_numpy(t.to(dtype="float32")) for t in lumen.compile(_coda_block)(*args)]
     finally:
         lumen.config.compiler.reset()
@@ -696,7 +696,7 @@ def test_linear_reordering_keeps_a_norm_in_its_profiler_range():
         with record_function("projection"):
             return F.matmul(h, wg.t().bfloat16(), "float32", "float32"), x
 
-    lumen.config.compiler.mps.linear_reordering = True
+    lumen.config.compiler.linear_reordering = True
     try:
         steps = lumen.graph_compiler.Plan(lumen.make_graph(block)(*args), "mps").steps()
     finally:

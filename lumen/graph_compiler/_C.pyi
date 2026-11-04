@@ -34,7 +34,7 @@ class Plan:
     @property
     def neural_engine(self) -> bool:
         """Whether it runs steps on the Apple Neural Engine (Core ML
-        programs, ``lumen.config.compiler.mps.neural_engine``)."""
+        programs, ``lumen.config.compiler.neural_engine``)."""
 
     @property
     def capturable(self) -> bool:

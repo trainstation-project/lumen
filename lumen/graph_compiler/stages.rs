@@ -190,7 +190,7 @@ pub(crate) fn compile(
         };
 
         let plan = if b.host {
-            super::cpu::compile(&b.graph, Device::Cpu(0), &stage_options)?
+            super::cpu::compile(&b.graph, &stage_options)?
         } else {
             stage_options.parameters = options.parameters.as_ref().map(|p| mask(p));
             stage_options.packable = mask(&options.packable);

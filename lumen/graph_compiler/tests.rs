@@ -508,7 +508,7 @@ fn ops_on_host_and_device_values_raise() {
 fn a_pipeline_runs_its_passes_in_order_and_dumps_each() {
     use super::common::cse::Cse;
     use super::pass::{CompilerPass, GraphModule, Pipeline};
-    use super::{CpuConfig, Options};
+    use super::{CompilerConfig, Options};
 
     /// Test pass that negates the graph's first output.
     struct Negate;
@@ -535,19 +535,15 @@ fn a_pipeline_runs_its_passes_in_order_and_dumps_each() {
     let dir = std::env::temp_dir().join(format!("lumen-passes-{}", std::process::id()));
 
     let options = Options {
-        config: super::Configs {
-            cpu: CpuConfig {
-                dump_to: Some(dir.to_string_lossy().into_owned()),
-                ..CpuConfig::default()
-            },
-            ..Default::default()
+        config: CompilerConfig {
+            dump_to: Some(dir.to_string_lossy().into_owned()),
+            ..CompilerConfig::default()
         },
         ..Options::default()
     };
 
     let mut module = GraphModule {
         graph: g,
-        device: crate::Device::Cpu(0),
         options: &options,
     };
 

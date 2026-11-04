@@ -19,7 +19,7 @@ pub(crate) fn scratch_bytes(x: &TensorType, indices: &TensorType, axis: usize) -
 }
 
 /// Encodes `out = x` with `updates` rows added at `indices` along the step's axis; inputs are
-/// `[x, indices, updates]`. Unless `mps.deterministic`, float32, float16, bfloat16, int32 and uint32
+/// `[x, indices, updates]`. Unless `deterministic`, float32, float16, bfloat16, int32 and uint32
 /// updates are added in by atomics, a thread an element (torch's `index_add`); otherwise they are
 /// sorted by position (a count, its prefix sum and a placement, in `scratch`), then a threadgroup per
 /// position with updates adds them in update order, a thread a column.
@@ -76,7 +76,7 @@ pub(crate) fn encode(
     );
 
     if atomic
-        && !crate::graph_compiler::config::configs().mps.deterministic
+        && !crate::graph_compiler::config::config().deterministic
         && count <= u32::MAX as usize
     {
         let name = format!("scatter_add_atomic_{}_{index}", x.dtype.name());

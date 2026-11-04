@@ -689,7 +689,7 @@ def use(device):
     global DEVICE, DATA
     DEVICE = device
     if device == "cuda":
-        lumen.config.compiler.cuda.use_triton_backend = True
+        lumen.config.compiler.use_triton_backend = True
         name = device_name()
         gpu = next((g for g in GPUS if g in name.upper()), None)
         if gpu is None:
@@ -766,7 +766,7 @@ def rotation(per_call):
 @contextlib.contextmanager
 def flagged(op):
     """Sets ``op``'s compiler flags on the benchmarked device while compiling and running it."""
-    config = getattr(lumen.config.compiler, DEVICE)
+    config = lumen.config.compiler
     old = [(name, getattr(config, name)) for name, _ in op.flags]
     for name, value in op.flags:
         setattr(config, name, value)

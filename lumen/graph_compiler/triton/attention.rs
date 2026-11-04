@@ -77,11 +77,11 @@ impl Attentions for TritonModule<'_> {
 }
 
 /// Each attention backward runs as one kernel adding dQ atomically as it computes dK and dV, or, when
-/// `cuda.deterministic`, a dK/dV kernel and a dQ kernel.
+/// `deterministic`, a dK/dV kernel and a dQ kernel.
 impl AttentionBackwards for TritonModule<'_> {
     /// Every backward runs as one kernel unless deterministic, so dQ is summed over key blocks in a fixed order.
     fn together(&self) -> impl Fn(&Backward) -> bool + 'static {
-        let deterministic = self.options.config.cuda.deterministic;
+        let deterministic = self.options.config.deterministic;
         move |_| !deterministic
     }
 

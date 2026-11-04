@@ -19,7 +19,7 @@ const MPS: Target = Target {
 use super::fusion;
 use crate::graph::Primitive::*;
 use crate::graph::{Graph, Primitive, TensorType, Var};
-use crate::graph_compiler::MpsConfig;
+use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::plan_tests::mps::{
     available, check, check_within, exact_values, values,
 };
@@ -34,7 +34,7 @@ fn ty(dtype: DType, shape: &[usize]) -> TensorType {
 
 /// Runs MPS fusion with default config and normalization rows on `g`.
 fn fuse(g: &Graph) -> Graph {
-    let config = MpsConfig::default();
+    let config = CompilerConfig::default();
 
     fusion::fuse(
         g,
@@ -85,7 +85,14 @@ fn gathers_from_tables_past_u32_index_in_ulong() {
         let index = g.input(ty(DType::I32, &[8]));
         let out = apply(&mut g, Gather { axis: 0 }, &[table, index]);
         g.set_outputs(&[out]).unwrap();
-        kernel_codegen::kernel(&g, &[], &MpsConfig::default(), &Default::default(), None).1
+        kernel_codegen::kernel(
+            &g,
+            &[],
+            &CompilerConfig::default(),
+            &Default::default(),
+            None,
+        )
+        .1
     };
 
     let (narrow, wide) = (source(1000), source(1 << 31));
@@ -512,9 +519,14 @@ fn transposes_in_fusions_are_tiled() {
 
             assert_eq!(fused.nodes().len(), 1, "{fused}");
 
-            let source =
-                kernel_codegen::kernel(body, &[], &MpsConfig::default(), &Default::default(), None)
-                    .1;
+            let source = kernel_codegen::kernel(
+                body,
+                &[],
+                &CompilerConfig::default(),
+                &Default::default(),
+                None,
+            )
+            .1;
 
             assert_eq!(transpose_tiling(body).is_some(), tiled, "{shape:?}");
 
@@ -562,8 +574,14 @@ fn reductions_are_normalized() {
             panic!("{fused}")
         };
 
-        let source =
-            kernel_codegen::kernel(body, &[], &MpsConfig::default(), &Default::default(), None).1;
+        let source = kernel_codegen::kernel(
+            body,
+            &[],
+            &CompilerConfig::default(),
+            &Default::default(),
+            None,
+        )
+        .1;
 
         assert!(
             source.contains(&format!("{kernel}<")),
@@ -625,7 +643,7 @@ fn hierarchical_reductions_keep_their_dtype() {
                 let source = kernel_codegen::kernel(
                     body,
                     &[],
-                    &MpsConfig::default(),
+                    &CompilerConfig::default(),
                     &Default::default(),
                     None,
                 )
@@ -688,9 +706,14 @@ fn hierarchical_reductions_keep_their_dtype() {
 
     for node in fused.nodes() {
         if let Fusion { body, .. } = &node.primitive {
-            let source =
-                kernel_codegen::kernel(body, &[], &MpsConfig::default(), &Default::default(), None)
-                    .1;
+            let source = kernel_codegen::kernel(
+                body,
+                &[],
+                &CompilerConfig::default(),
+                &Default::default(),
+                None,
+            )
+            .1;
 
             assert!(!mentions(&source, "float"), "{source}");
         }
@@ -1234,8 +1257,14 @@ fn dots_fuse_their_epilogue() {
     };
 
     assert!(label.starts_with("dot_general"), "{label}");
-    let source =
-        kernel_codegen::kernel(body, &[], &MpsConfig::default(), &Default::default(), None).1;
+    let source = kernel_codegen::kernel(
+        body,
+        &[],
+        &CompilerConfig::default(),
+        &Default::default(),
+        None,
+    )
+    .1;
 
     assert!(
         source.contains("matmul_sg_impl") && source.contains("_small("),
@@ -1247,9 +1276,9 @@ fn dots_fuse_their_epilogue() {
         ["fusion", "fusion_output"]
     );
 
-    let config = MpsConfig {
+    let config = CompilerConfig {
         contraction_epilogues: false,
-        ..MpsConfig::default()
+        ..CompilerConfig::default()
     };
 
     let unfused = fusion::fuse(
@@ -1468,9 +1497,14 @@ fn reductions_apply_their_epilogue() {
 
             assert!(has_epilogue(body));
 
-            let source =
-                kernel_codegen::kernel(body, &[], &MpsConfig::default(), &Default::default(), None)
-                    .1;
+            let source = kernel_codegen::kernel(
+                body,
+                &[],
+                &CompilerConfig::default(),
+                &Default::default(),
+                None,
+            )
+            .1;
 
             assert!(source.contains("operator()(float r)"), "{source}");
             assert_eq!(source.contains("_final("), split, "{source}");
@@ -1506,8 +1540,14 @@ fn reductions_apply_an_epilogue_reading_them_twice() {
         };
 
         assert!(has_epilogue(body));
-        let source =
-            kernel_codegen::kernel(body, &[], &MpsConfig::default(), &Default::default(), None).1;
+        let source = kernel_codegen::kernel(
+            body,
+            &[],
+            &CompilerConfig::default(),
+            &Default::default(),
+            None,
+        )
+        .1;
         assert_eq!(source.contains("_final("), split, "{source}");
 
         if available() {
@@ -1843,8 +1883,14 @@ fn division_by_sqrt_is_as_traced() {
         panic!("{fused}")
     };
 
-    let source =
-        kernel_codegen::kernel(body, &[], &MpsConfig::default(), &Default::default(), None).1;
+    let source = kernel_codegen::kernel(
+        body,
+        &[],
+        &CompilerConfig::default(),
+        &Default::default(),
+        None,
+    )
+    .1;
 
     assert!(
         !source.contains("rsqrt(") && source.contains("Div::") && source.contains("Sqrt::"),
@@ -1877,8 +1923,14 @@ fn division_by_sqrt_is_as_traced() {
         panic!("{fused}")
     };
 
-    let source =
-        kernel_codegen::kernel(body, &[], &MpsConfig::default(), &Default::default(), None).1;
+    let source = kernel_codegen::kernel(
+        body,
+        &[],
+        &CompilerConfig::default(),
+        &Default::default(),
+        None,
+    )
+    .1;
 
     assert!(
         !source.contains("rsqrt(") && source.contains("Div::") && source.contains("Sqrt::"),
@@ -2201,7 +2253,7 @@ fn every_gemm_candidate_matches_the_reference() {
     ];
 
     let mut options = crate::graph_compiler::Options::default();
-    options.config.mps.autotune = false;
+    options.config.autotune = false;
 
     for dtype in [DType::F32, DType::BF16] {
         for (lhs, rhs, lc, rc) in cases {
@@ -2260,7 +2312,7 @@ fn every_gemm_candidate_matches_the_reference() {
 
                 let mut gemms = Gemms::default();
 
-                let built: Vec<_> = gemm::configs()
+                let built: Vec<_> = gemm::config()
                     .iter()
                     .chain(mpp)
                     .chain(skinny)
@@ -2314,7 +2366,7 @@ fn every_tiled_gemm_stores_regions_halves_and_expansions_along_rows_and_columns(
     let (pairs, plain, other, k) = (40, 24, 69, 96);
     let extent = 2 * pairs + plain;
     let mut options = crate::graph_compiler::Options::default();
-    options.config.mps.autotune = false;
+    options.config.autotune = false;
 
     let along = |g: &mut Graph, v: Var, shape: &[usize], at: usize, start: usize, end: usize| {
         let mut limit = shape.to_vec();
@@ -2449,7 +2501,7 @@ fn every_tiled_gemm_stores_regions_halves_and_expansions_along_rows_and_columns(
         assert!(matmul_of(&step).is_some(), "{case}: {plan}");
         let mut gemms = Gemms::default();
 
-        let built: Vec<_> = gemm::configs()
+        let built: Vec<_> = gemm::config()
             .iter()
             .map(|&config| (config, gemms.build(&step, config)))
             .collect();
@@ -2607,7 +2659,7 @@ fn every_tuned_paired_and_wide_norm_gemm_matches_the_reference() {
     };
 
     let mut options = crate::graph_compiler::Options::default();
-    options.config.mps.autotune = false;
+    options.config.autotune = false;
 
     for k in [96, 256] {
         let cases = [
@@ -2645,7 +2697,7 @@ fn every_tuned_paired_and_wide_norm_gemm_matches_the_reference() {
                 .expect("a matmul step");
 
             let step = plan.steps()[at].clone();
-            let mut gemms = Gemms::new(&MpsConfig::default());
+            let mut gemms = Gemms::new(&CompilerConfig::default());
 
             let configs: Vec<_> = gemms
                 .configs(&step)
@@ -2929,8 +2981,8 @@ fn every_tuned_gemm_kernel_stores_every_epilogue() {
     ];
 
     let mut options = crate::graph_compiler::Options::default();
-    options.config.mps.autotune = false;
-    options.config.mps.split_k = false;
+    options.config.autotune = false;
+    options.config.split_k = false;
 
     for (algorithm, cases) in [(Algorithm::Mpp, large), (Algorithm::Skinny, skinny)] {
         let tried = |c: &GemmConfig| c.algorithm == algorithm;
@@ -2968,7 +3020,7 @@ fn every_tuned_gemm_kernel_stores_every_epilogue() {
 
             let got = gemm::gemm_flags(body, gemm_dot(body).unwrap());
             assert_eq!(got, want, "{case} {algorithm:?}: {body}");
-            let mut gemms = Gemms::new(&MpsConfig::default());
+            let mut gemms = Gemms::new(&CompilerConfig::default());
 
             let configs: Vec<_> = gemms
                 .configs(&step)
@@ -3031,8 +3083,8 @@ fn every_gemm_candidate_accumulates_in_the_accum_dtype() {
     }
 
     let mut options = crate::graph_compiler::Options::default();
-    options.config.mps.autotune = false;
-    options.config.mps.split_k = false;
+    options.config.autotune = false;
+    options.config.split_k = false;
     let k = (1 << 16) + (1 << 8);
 
     for accum in [DType::F32, DType::BF16] {
@@ -3073,7 +3125,7 @@ fn every_gemm_candidate_accumulates_in_the_accum_dtype() {
                 .expect("a matmul step");
 
             let step = plan.steps()[at].clone();
-            let mut gemms = Gemms::new(&MpsConfig::default());
+            let mut gemms = Gemms::new(&CompilerConfig::default());
 
             let built: Vec<_> = gemms
                 .configs(&step)
@@ -3112,8 +3164,8 @@ fn gemv_lanes_sum_in_a_bfloat_accumulator() {
     }
 
     let mut options = crate::graph_compiler::Options::default();
-    options.config.mps.autotune = false;
-    options.config.mps.split_k = false;
+    options.config.autotune = false;
+    options.config.split_k = false;
 
     // A K-contiguous weight (`x · wᵀ`), so the dot is a GEMV. A lane reads `GEMV_WIDTH` elements at a time: lane `l` the ones from `l * GEMV_WIDTH`.
     let (k, n) = (32 * gemm::GEMV_WIDTH, 64);
@@ -3161,7 +3213,7 @@ fn gemv_lanes_sum_in_a_bfloat_accumulator() {
         .expect("a matmul step");
 
     let step = plan.steps()[at].clone();
-    let mut gemms = Gemms::new(&MpsConfig::default());
+    let mut gemms = Gemms::new(&CompilerConfig::default());
 
     let built: Vec<_> = gemms
         .configs(&step)
@@ -3549,7 +3601,7 @@ fn every_gemv_candidate_stores_every_epilogue() {
     ];
 
     let mut options = crate::graph_compiler::Options::default();
-    options.config.mps.autotune = false;
+    options.config.autotune = false;
 
     for (case, g, tol) in cases {
         let inputs: Vec<Tensor> = g
@@ -3579,7 +3631,7 @@ fn every_gemv_candidate_stores_every_epilogue() {
 
         let untuned = plan.run(&on_mps).unwrap();
         let step = plan.steps()[at].clone();
-        let mut gemms = Gemms::new(&MpsConfig::default());
+        let mut gemms = Gemms::new(&CompilerConfig::default());
         let configs = gemms.configs(&step);
 
         assert!(

@@ -110,8 +110,8 @@ def test_every_device_kernel_dumps_its_source(device, tmp_path, triton_on_cuda):
     each a generated GEMM): each a file of the device's source (Metal on
     MPS, Triton on CUDA), none the step's text in its place."""
     if device == "mps":
-        lumen.config.compiler.mps.fused_linear_cross_entropy = True
-    lumen.config.compiler.of(device).fused_linear_cross_entropy_chunk_size = 32
+        lumen.config.compiler.fused_linear_cross_entropy = True
+    lumen.config.compiler.fused_linear_cross_entropy_chunk_size = 32
     try:
         f = lumen.compile(_step)
         try:

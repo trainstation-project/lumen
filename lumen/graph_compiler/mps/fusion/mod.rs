@@ -4,7 +4,7 @@
 use super::{Kernel, MpsModule, horizontal, request};
 use crate::DType;
 use crate::graph::{Graph, Node, Primitive, Var};
-use crate::graph_compiler::MpsConfig;
+use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::common::diamonds::Row;
 use crate::graph_compiler::common::fusion::{self as common, Backend};
 use crate::graph_compiler::pass::CompilerPass;
@@ -59,7 +59,7 @@ pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
 
 /// The shared fusion's view of Metal: its kernels bind at most 29 buffers, a GEMM epilogue
 /// writes at most 4 extra outputs, and the GEMM shapes the Metal kernels take.
-fn backend(config: &MpsConfig) -> Backend {
+fn backend(config: &CompilerConfig) -> Backend {
     Backend {
         fusible,
         max_inputs: 29,
@@ -80,7 +80,7 @@ pub(super) fn fuse(
     graph: &Graph,
     rows: &[Row],
     scalars: &[Var],
-    config: &MpsConfig,
+    config: &CompilerConfig,
     kernel: impl FnMut(&Graph, &[bool]) -> String,
 ) -> Graph {
     common::fuse(graph, rows, scalars, &backend(config), kernel)
@@ -96,7 +96,7 @@ impl<'a> CompilerPass<MpsModule<'a>> for Fusion {
 
     /// Fuses the graph, repeating until every by-value scalar is read only by fusions.
     fn apply(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
-        let config = &m.options.config.mps;
+        let config = &m.options.config;
         let requested = m.kernels.len();
 
         // Dropping a scalar that some unfused node reads changes kernel signatures, so fuse again from scratch.
