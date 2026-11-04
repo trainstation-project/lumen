@@ -1,0 +1,118 @@
+{
+ "rows": [
+  {
+   "op": "dynamic_slice",
+   "dtype": "float32",
+   "n": 4096,
+   "error": "dynamic_slice does not run on TPU yet",
+   "jax_us": 32.073
+  },
+  {
+   "op": "dynamic_slice",
+   "dtype": "float32",
+   "n": 16384,
+   "error": "dynamic_slice does not run on TPU yet",
+   "jax_us": 31.965
+  },
+  {
+   "op": "dynamic_slice",
+   "dtype": "float32",
+   "n": 65536,
+   "error": "dynamic_slice does not run on TPU yet",
+   "jax_us": 30.701
+  },
+  {
+   "op": "dynamic_slice",
+   "dtype": "float32",
+   "n": 262144,
+   "error": "dynamic_slice does not run on TPU yet",
+   "jax_us": 38.872
+  },
+  {
+   "op": "dynamic_slice",
+   "dtype": "float32",
+   "n": 1048576,
+   "error": "dynamic_slice does not run on TPU yet",
+   "jax_us": 37.871
+  },
+  {
+   "op": "dynamic_slice",
+   "dtype": "float32",
+   "n": 4194304,
+   "error": "dynamic_slice does not run on TPU yet",
+   "jax_us": 40.56
+  },
+  {
+   "op": "dynamic_slice",
+   "dtype": "float32",
+   "n": 16777216,
+   "error": "dynamic_slice does not run on TPU yet",
+   "jax_us": 72.448
+  },
+  {
+   "op": "dynamic_slice",
+   "dtype": "float32",
+   "n": 67108864,
+   "error": "dynamic_slice does not run on TPU yet",
+   "jax_us": 193.332
+  },
+  {
+   "op": "dynamic_slice",
+   "dtype": "bfloat16",
+   "n": 4096,
+   "error": "dynamic_slice does not run on TPU yet",
+   "jax_us": 43.855
+  },
+  {
+   "op": "dynamic_slice",
+   "dtype": "bfloat16",
+   "n": 16384,
+   "error": "dynamic_slice does not run on TPU yet",
+   "jax_us": 44.703
+  },
+  {
+   "op": "dynamic_slice",
+   "dtype": "bfloat16",
+   "n": 65536,
+   "error": "dynamic_slice does not run on TPU yet",
+   "jax_us": 44.442
+  },
+  {
+   "op": "dynamic_slice",
+   "dtype": "bfloat16",
+   "n": 262144,
+   "error": "dynamic_slice does not run on TPU yet",
+   "jax_us": 40.737
+  },
+  {
+   "op": "dynamic_slice",
+   "dtype": "bfloat16",
+   "n": 1048576,
+   "error": "dynamic_slice does not run on TPU yet",
+   "jax_us": 37.033
+  },
+  {
+   "op": "dynamic_slice",
+   "dtype": "bfloat16",
+   "n": 4194304,
+   "error": "dynamic_slice does not run on TPU yet",
+   "jax_us": 39.696
+  },
+  {
+   "op": "dynamic_slice",
+   "dtype": "bfloat16",
+   "n": 16777216,
+   "error": "dynamic_slice does not run on TPU yet",
+   "jax_us": 43.283
+  },
+  {
+   "op": "dynamic_slice",
+   "dtype": "bfloat16",
+   "n": 67108864,
+   "error": "dynamic_slice does not run on TPU yet",
+   "jax_us": 105.128
+  }
+ ],
+ "code": null,
+ "measured_at": "2026-11-04T11:06:53+00:00"
+}

@@ -1,0 +1,118 @@
+{
+ "rows": [
+  {
+   "op": "dynamic_update_slice",
+   "dtype": "float32",
+   "n": 4096,
+   "error": "a dynamic_update_slice of fewer than 2 dimensions does not run on TPU yet: f32[2048] into f32[4096]",
+   "jax_us": 45.838
+  },
+  {
+   "op": "dynamic_update_slice",
+   "dtype": "float32",
+   "n": 16384,
+   "error": "a dynamic_update_slice of fewer than 2 dimensions does not run on TPU yet: f32[8192] into f32[16384]",
+   "jax_us": 46.106
+  },
+  {
+   "op": "dynamic_update_slice",
+   "dtype": "float32",
+   "n": 65536,
+   "error": "a dynamic_update_slice of fewer than 2 dimensions does not run on TPU yet: f32[32768] into f32[65536]",
+   "jax_us": 41.769
+  },
+  {
+   "op": "dynamic_update_slice",
+   "dtype": "float32",
+   "n": 262144,
+   "error": "a dynamic_update_slice of fewer than 2 dimensions does not run on TPU yet: f32[131072] into f32[262144]",
+   "jax_us": 40.253
+  },
+  {
+   "op": "dynamic_update_slice",
+   "dtype": "float32",
+   "n": 1048576,
+   "error": "a dynamic_update_slice of fewer than 2 dimensions does not run on TPU yet: f32[524288] into f32[1048576]",
+   "jax_us": 37.663
+  },
+  {
+   "op": "dynamic_update_slice",
+   "dtype": "float32",
+   "n": 4194304,
+   "error": "a dynamic_update_slice of fewer than 2 dimensions does not run on TPU yet: f32[2097152] into f32[4194304]",
+   "jax_us": 96.868
+  },
+  {
+   "op": "dynamic_update_slice",
+   "dtype": "float32",
+   "n": 16777216,
+   "error": "a dynamic_update_slice of fewer than 2 dimensions does not run on TPU yet: f32[8388608] into f32[16777216]",
+   "jax_us": 358.324
+  },
+  {
+   "op": "dynamic_update_slice",
+   "dtype": "float32",
+   "n": 67108864,
+   "error": "a dynamic_update_slice of fewer than 2 dimensions does not run on TPU yet: f32[33554432] into f32[67108864]",
+   "jax_us": 1380.448
+  },
+  {
+   "op": "dynamic_update_slice",
+   "dtype": "bfloat16",
+   "n": 4096,
+   "error": "a dynamic_update_slice of fewer than 2 dimensions does not run on TPU yet: bf16[2048] into bf16[4096]",
+   "jax_us": 45.852
+  },
+  {
+   "op": "dynamic_update_slice",
+   "dtype": "bfloat16",
+   "n": 16384,
+   "error": "a dynamic_update_slice of fewer than 2 dimensions does not run on TPU yet: bf16[8192] into bf16[16384]",
+   "jax_us": 46.231
+  },
+  {
+   "op": "dynamic_update_slice",
+   "dtype": "bfloat16",
+   "n": 65536,
+   "error": "a dynamic_update_slice of fewer than 2 dimensions does not run on TPU yet: bf16[32768] into bf16[65536]",
+   "jax_us": 44.509
+  },
+  {
+   "op": "dynamic_update_slice",
+   "dtype": "bfloat16",
+   "n": 262144,
+   "error": "a dynamic_update_slice of fewer than 2 dimensions does not run on TPU yet: bf16[131072] into bf16[262144]",
+   "jax_us": 41.005
+  },
+  {
+   "op": "dynamic_update_slice",
+   "dtype": "bfloat16",
+   "n": 1048576,
+   "error": "a dynamic_update_slice of fewer than 2 dimensions does not run on TPU yet: bf16[524288] into bf16[1048576]",
+   "jax_us": 37.754
+  },
+  {
+   "op": "dynamic_update_slice",
+   "dtype": "bfloat16",
+   "n": 4194304,
+   "error": "a dynamic_update_slice of fewer than 2 dimensions does not run on TPU yet: bf16[2097152] into bf16[4194304]",
+   "jax_us": 76.983
+  },
+  {
+   "op": "dynamic_update_slice",
+   "dtype": "bfloat16",
+   "n": 16777216,
+   "error": "a dynamic_update_slice of fewer than 2 dimensions does not run on TPU yet: bf16[8388608] into bf16[16777216]",
+   "jax_us": 283.05
+  },
+  {
+   "op": "dynamic_update_slice",
+   "dtype": "bfloat16",
+   "n": 67108864,
+   "error": "a dynamic_update_slice of fewer than 2 dimensions does not run on TPU yet: bf16[33554432] into bf16[67108864]",
+   "jax_us": 1099.594
+  }
+ ],
+ "code": null,
+ "measured_at": "2026-11-04T11:06:56+00:00"
+}

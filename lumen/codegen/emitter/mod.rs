@@ -1,6 +1,7 @@
 //! Emitters: each backend's statements computing a fused body's values at an index, the core of every
 //! generated kernel.
 
+pub(crate) mod cuda;
 #[cfg(lumen_mps_linked)]
 pub(crate) mod mps;
 pub(crate) mod triton;

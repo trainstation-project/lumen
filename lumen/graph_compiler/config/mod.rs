@@ -114,6 +114,9 @@ compiler_config! {
     contraction_epilogues, set_contraction_epilogues: bool = true;
     /// Compute a softmax's max and sum in one rescaled pass (rounding differs from the traced program).
     online_softmax, set_online_softmax: bool = true;
+    /// Compute CUDA (CuTe) kernels' math functions with fast approximations (rounding differs from the
+    /// traced program).
+    fast_math, set_fast_math: bool = false;
     /// Run fusions the Apple Neural Engine can on it.
     neural_engine, set_neural_engine: bool = false;
     /// Row elements a thread keeps in registers between a row kernel's passes.

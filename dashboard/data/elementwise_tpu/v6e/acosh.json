@@ -1,0 +1,118 @@
+{
+ "rows": [
+  {
+   "op": "acosh",
+   "dtype": "float32",
+   "n": 4096,
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.acosh': %143 = \"math.acosh\"(%127) <{fast",
+   "jax_us": 38.887
+  },
+  {
+   "op": "acosh",
+   "dtype": "float32",
+   "n": 16384,
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.acosh': %225 = \"math.acosh\"(%149) <{fast",
+   "jax_us": 38.667
+  },
+  {
+   "op": "acosh",
+   "dtype": "float32",
+   "n": 65536,
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.acosh': %563 = \"math.acosh\"(%247) <{fast",
+   "jax_us": 38.714
+  },
+  {
+   "op": "acosh",
+   "dtype": "float32",
+   "n": 262144,
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.acosh': %1907 = \"math.acosh\"(%631) <{fas",
+   "jax_us": 36.711
+  },
+  {
+   "op": "acosh",
+   "dtype": "float32",
+   "n": 1048576,
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.acosh': %7283 = \"math.acosh\"(%2167) <{fa",
+   "jax_us": 38.114
+  },
+  {
+   "op": "acosh",
+   "dtype": "float32",
+   "n": 4194304,
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.acosh': %7338 = \"math.acosh\"(%2222) <{fa",
+   "jax_us": 41.46
+  },
+  {
+   "op": "acosh",
+   "dtype": "float32",
+   "n": 16777216,
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.acosh': %7338 = \"math.acosh\"(%2222) <{fa",
+   "jax_us": 99.995
+  },
+  {
+   "op": "acosh",
+   "dtype": "float32",
+   "n": 67108864,
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.acosh': %7338 = \"math.acosh\"(%2222) <{fa",
+   "jax_us": 400.032
+  },
+  {
+   "op": "acosh",
+   "dtype": "bfloat16",
+   "n": 4096,
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.acosh': %166 = \"math.acosh\"(%159) <{fast",
+   "jax_us": 40.427
+  },
+  {
+   "op": "acosh",
+   "dtype": "bfloat16",
+   "n": 16384,
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.acosh': %319 = \"math.acosh\"(%288) <{fast",
+   "jax_us": 39.886
+  },
+  {
+   "op": "acosh",
+   "dtype": "bfloat16",
+   "n": 65536,
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.acosh': %944 = \"math.acosh\"(%817) <{fast",
+   "jax_us": 39.701
+  },
+  {
+   "op": "acosh",
+   "dtype": "bfloat16",
+   "n": 262144,
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.acosh': %3439 = \"math.acosh\"(%2928) <{fa",
+   "jax_us": 37.227
+  },
+  {
+   "op": "acosh",
+   "dtype": "bfloat16",
+   "n": 1048576,
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.acosh': %13423 = \"math.acosh\"(%11376) <{",
+   "jax_us": 36.783
+  },
+  {
+   "op": "acosh",
+   "dtype": "bfloat16",
+   "n": 4194304,
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.acosh': %13477 = \"math.acosh\"(%11430) <{",
+   "jax_us": 39.141
+  },
+  {
+   "op": "acosh",
+   "dtype": "bfloat16",
+   "n": 16777216,
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.acosh': %13475 = \"math.acosh\"(%11428) <{",
+   "jax_us": 90.854
+  },
+  {
+   "op": "acosh",
+   "dtype": "bfloat16",
+   "n": 67108864,
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.acosh': %13477 = \"math.acosh\"(%11430) <{",
+   "jax_us": 328.193
+  }
+ ],
+ "code": null,
+ "measured_at": "2026-11-04T10:46:18+00:00"
+}

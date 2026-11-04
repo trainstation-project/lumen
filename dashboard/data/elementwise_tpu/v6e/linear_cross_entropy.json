@@ -1,0 +1,104 @@
+{
+ "rows": [
+  {
+   "op": "linear_cross_entropy",
+   "dtype": "float32",
+   "n": 4096,
+   "error": "linear_cross_entropy does not run on TPU yet",
+   "jax_us": 32.944
+  },
+  {
+   "op": "linear_cross_entropy",
+   "dtype": "float32",
+   "n": 16384,
+   "error": "linear_cross_entropy does not run on TPU yet",
+   "jax_us": 31.023
+  },
+  {
+   "op": "linear_cross_entropy",
+   "dtype": "float32",
+   "n": 65536,
+   "error": "linear_cross_entropy does not run on TPU yet",
+   "jax_us": 29.667
+  },
+  {
+   "op": "linear_cross_entropy",
+   "dtype": "float32",
+   "n": 262144,
+   "error": "linear_cross_entropy does not run on TPU yet",
+   "jax_us": 28.949
+  },
+  {
+   "op": "linear_cross_entropy",
+   "dtype": "float32",
+   "n": 1048576,
+   "error": "linear_cross_entropy does not run on TPU yet",
+   "jax_us": 28.614
+  },
+  {
+   "op": "linear_cross_entropy",
+   "dtype": "float32",
+   "n": 4194304,
+   "error": "linear_cross_entropy does not run on TPU yet",
+   "jax_us": 51.73
+  },
+  {
+   "op": "linear_cross_entropy",
+   "dtype": "float32",
+   "n": 16777216,
+   "error": "linear_cross_entropy does not run on TPU yet",
+   "jax_us": 124.989
+  },
+  {
+   "op": "linear_cross_entropy",
+   "dtype": "bfloat16",
+   "n": 4096,
+   "error": "linear_cross_entropy does not run on TPU yet",
+   "jax_us": 33.674
+  },
+  {
+   "op": "linear_cross_entropy",
+   "dtype": "bfloat16",
+   "n": 16384,
+   "error": "linear_cross_entropy does not run on TPU yet",
+   "jax_us": 33.289
+  },
+  {
+   "op": "linear_cross_entropy",
+   "dtype": "bfloat16",
+   "n": 65536,
+   "error": "linear_cross_entropy does not run on TPU yet",
+   "jax_us": 31.549
+  },
+  {
+   "op": "linear_cross_entropy",
+   "dtype": "bfloat16",
+   "n": 262144,
+   "error": "linear_cross_entropy does not run on TPU yet",
+   "jax_us": 30.474
+  },
+  {
+   "op": "linear_cross_entropy",
+   "dtype": "bfloat16",
+   "n": 1048576,
+   "error": "linear_cross_entropy does not run on TPU yet",
+   "jax_us": 28.934
+  },
+  {
+   "op": "linear_cross_entropy",
+   "dtype": "bfloat16",
+   "n": 4194304,
+   "error": "linear_cross_entropy does not run on TPU yet",
+   "jax_us": 48.814
+  },
+  {
+   "op": "linear_cross_entropy",
+   "dtype": "bfloat16",
+   "n": 16777216,
+   "error": "linear_cross_entropy does not run on TPU yet",
+   "jax_us": 119.075
+  }
+ ],
+ "code": null,
+ "measured_at": "2026-11-04T11:05:00+00:00"
+}
