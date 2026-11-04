@@ -298,8 +298,8 @@ impl Module for TritonModule<'_> {
 
 impl Slots for TritonModule<'_> {
     /// Kernels of their own writing fresh memory (`fusion::slot_writes`).
-    fn writes(&self, _: &Node, _: usize, producer: &Node, _: usize) -> Option<bool> {
-        fusion::slot_writes(&self.graph, producer).then_some(true)
+    fn writes(&self, _: &Node, _: usize, producer: &Node, _: usize) -> bool {
+        fusion::slot_writes(&self.graph, producer)
     }
 }
 

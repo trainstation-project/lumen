@@ -53,8 +53,8 @@ struct TpuModule<'a> {
 /// Exposes the graph and the TPU compiler config to the shared pass framework.
 impl Slots for TpuModule<'_> {
     /// What `fusion::slot_writes` accepts.
-    fn writes(&self, concat: &Node, k: usize, producer: &Node, _: usize) -> Option<bool> {
-        fusion::slot_writes(&self.graph, concat, k, producer).then_some(true)
+    fn writes(&self, concat: &Node, k: usize, producer: &Node, _: usize) -> bool {
+        fusion::slot_writes(&self.graph, concat, k, producer)
     }
 }
 

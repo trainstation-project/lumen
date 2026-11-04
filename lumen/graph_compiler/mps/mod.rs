@@ -191,8 +191,13 @@ impl Lone for MpsModule<'_> {
 
 impl Slots for MpsModule<'_> {
     /// Before fusion: what `kernel_codegen::slot_writes` accepts, fusible nodes counting as kernels.
-    fn writes(&self, concat: &Node, k: usize, producer: &Node, index: usize) -> Option<bool> {
-        kernel_codegen::slot_writes(&self.kernels, &self.graph, concat, k, producer, index, true)
+    fn writes(&self, concat: &Node, k: usize, producer: &Node, index: usize) -> bool {
+        kernel_codegen::slot_writes(self, concat, k, producer, index, true)
+    }
+
+    /// The attention backward kernel's operands (`kernel_codegen::slot_worth`).
+    fn worth(&self, _: &Node, _: usize, producer: &Node, _: usize) -> bool {
+        kernel_codegen::slot_worth(self, producer)
     }
 }
 

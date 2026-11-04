@@ -36,9 +36,13 @@ impl<'a> CompilerPass<MpsModule<'a>> for Codegen {
     fn apply(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
         let config = &m.options.config;
         // Concatenations no longer valid in place get copied by their own elementwise kernel.
-        let valid = in_place_concats(&m.graph, |c, k, p, index| {
-            slot_writes(&m.kernels, &m.graph, c, k, p, index, false)
-        });
+        let module = &*m;
+
+        let valid = in_place_concats(
+            &m.graph,
+            |c, k, p, index| slot_writes(module, c, k, p, index, false),
+            |_, _, p, _| slot_worth(module, p),
+        );
         let mut unmarked = false;
 
         for (i, node) in m.graph.nodes.iter_mut().enumerate() {
@@ -213,40 +217,36 @@ pub(super) fn writes_views(body: &Graph) -> bool {
     gemm_dot(body).is_none() && row_reductions(body).is_empty() && reduction_root(body).is_none()
 }
 
-/// Whether the kernel making operand `k` of `concat` (`producer`, its output `index`) can write it into its slot,
-/// as `common::place_concats` asks: the attention backward kernel (worth placing for), or a fusion writing views,
-/// or before fusion a fusible layout or elementwise node.
-#[allow(clippy::too_many_arguments)]
-pub(super) fn slot_writes(
-    kernels: &[Kernel],
-    graph: &Graph,
-    concat: &Node,
-    k: usize,
-    producer: &Node,
-    index: usize,
-    before_fusion: bool,
-) -> Option<bool> {
-    // The kernel request behind a still-pending fusion.
-    let kernel = match &producer.primitive {
+/// The kernel request behind `producer` when it is a still-pending fusion.
+fn pending<'k>(kernels: &'k [Kernel], producer: &Node) -> Option<&'k Kernel> {
+    match &producer.primitive {
         Primitive::Fusion { name, .. } => name
             .strip_prefix(PENDING)
             .and_then(|k| k.parse::<usize>().ok())
             .map(|k| &kernels[k]),
         _ => None,
-    };
+    }
+}
 
-    match (kernel, &producer.primitive) {
+/// Whether the kernel making operand `k` of `concat` (`producer`, its output `index`) can write it into its slot:
+/// the attention backward kernel (its atomically accumulated dQ aside), a fusion writing views, or, before fusion
+/// (`before_fusion`), a fusible layout or elementwise node.
+pub(super) fn slot_writes(
+    m: &MpsModule<'_>,
+    concat: &Node,
+    k: usize,
+    producer: &Node,
+    index: usize,
+    before_fusion: bool,
+) -> bool {
+    match (pending(&m.kernels, producer), &producer.primitive) {
         (Some(Kernel::AttentionBackward), Primitive::Fusion { body, .. }) => {
-            // The atomically accumulated dQ output can't target a strided slot.
             let atomic = body.outputs().len() == 3 && index == 2;
-            let at = graph.slot(concat, k);
+            let at = m.graph.slot(concat, k);
             let views = HashMap::from([(index, (at.offset, at.strides))]);
-            let writes = !atomic && attention::backward_of_body_into(body, views).is_some();
-            writes.then_some(true)
+            !atomic && attention::backward_of_body_into(body, views).is_some()
         }
-        (Some(Kernel::Fusion(_)), Primitive::Fusion { body, .. }) => {
-            writes_views(body).then_some(false)
-        }
+        (Some(Kernel::Fusion(_)), Primitive::Fusion { body, .. }) => writes_views(body),
         (None, p) if before_fusion => {
             let layout = matches!(
                 p,
@@ -256,9 +256,17 @@ pub(super) fn slot_writes(
                     | Primitive::Slice { .. }
             );
 
-            let fuses = fusion::fusible(graph, producer) && (layout || fusion::elementwise(p));
-            fuses.then_some(false)
+            fusion::fusible(&m.graph, producer) && (layout || fusion::elementwise(p))
         }
-        _ => None,
+        _ => false,
     }
+}
+
+/// Whether an operand `producer` writes into its slot is worth placing its concatenation for: the attention
+/// backward kernel's are (its gradients land side by side), others alone aren't.
+pub(super) fn slot_worth(m: &MpsModule<'_>, producer: &Node) -> bool {
+    matches!(
+        pending(&m.kernels, producer),
+        Some(Kernel::AttentionBackward)
+    )
 }
