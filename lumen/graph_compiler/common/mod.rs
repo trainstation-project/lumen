@@ -3,8 +3,6 @@
 pub(crate) mod alone;
 #[cfg_attr(not(all(feature = "python", lumen_mps_linked)), allow(dead_code))]
 pub(crate) mod attention;
-#[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
-pub(crate) mod autotune;
 pub(crate) mod cse;
 pub(crate) mod diamonds;
 pub(crate) mod dot_rows;

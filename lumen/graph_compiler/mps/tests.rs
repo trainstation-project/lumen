@@ -2224,9 +2224,9 @@ fn skinny_dots_split_their_contraction() {
 /// Every tiled, MPP and skinny GEMM config computes plain and bias-fused matmuls like the reference.
 #[test]
 fn every_gemm_candidate_matches_the_reference() {
-    use super::autotune::{Gemms, matmul_of};
+    use crate::autotune::Kernels;
+    use crate::autotune::mps::{Gemms, matmul_of};
     use crate::codegen::dot_general::mps as gemm;
-    use crate::graph_compiler::common::autotune::Kernels;
 
     if !available() {
         return;
@@ -2344,9 +2344,9 @@ fn every_gemm_candidate_matches_the_reference() {
 /// Every tiled GEMM config stores column regions, row halves and concatenated expansions correctly.
 #[test]
 fn every_tiled_gemm_stores_regions_halves_and_expansions_along_rows_and_columns() {
-    use super::autotune::{Gemms, matmul_of};
+    use crate::autotune::Kernels;
+    use crate::autotune::mps::{Gemms, matmul_of};
     use crate::codegen::dot_general::mps as gemm;
-    use crate::graph_compiler::common::autotune::Kernels;
 
     if !available() {
         return;
@@ -2528,9 +2528,9 @@ fn every_tiled_gemm_stores_regions_halves_and_expansions_along_rows_and_columns(
 /// Every MPP config handles gated pairs (halves or interleaved) and an RMS norm wider than one tile.
 #[test]
 fn every_tuned_paired_and_wide_norm_gemm_matches_the_reference() {
-    use super::autotune::{Gemms, matmul_of};
+    use crate::autotune::Kernels;
+    use crate::autotune::mps::{Gemms, matmul_of};
     use crate::codegen::dot_general::mps::Algorithm;
-    use crate::graph_compiler::common::autotune::Kernels;
 
     if !available() || !super::mpp_available() {
         return;
@@ -2735,9 +2735,9 @@ fn every_tuned_paired_and_wide_norm_gemm_matches_the_reference() {
 /// MPP and skinny GEMM candidates pick the expected epilogue layout flags and store every epilogue correctly.
 #[test]
 fn every_tuned_gemm_kernel_stores_every_epilogue() {
-    use super::autotune::{Gemms, matmul_of};
+    use crate::autotune::Kernels;
+    use crate::autotune::mps::{Gemms, matmul_of};
     use crate::codegen::dot_general::mps::{Algorithm, GemmConfig};
-    use crate::graph_compiler::common::autotune::Kernels;
 
     if !available() || !super::mpp_available() {
         return;
@@ -3073,8 +3073,8 @@ fn every_tuned_gemm_kernel_stores_every_epilogue() {
 /// count bfloat16 cannot hold, whichever partial sums a candidate splits it into.
 #[test]
 fn every_gemm_candidate_accumulates_in_the_accum_dtype() {
-    use super::autotune::{Gemms, matmul_of};
-    use crate::graph_compiler::common::autotune::Kernels;
+    use crate::autotune::Kernels;
+    use crate::autotune::mps::{Gemms, matmul_of};
 
     if !available() {
         return;
@@ -3154,8 +3154,8 @@ fn every_gemm_candidate_accumulates_in_the_accum_dtype() {
 /// rounded once (288).
 #[test]
 fn gemv_lanes_sum_in_a_bfloat_accumulator() {
-    use super::autotune::{Gemms, matmul_of};
-    use crate::graph_compiler::common::autotune::Kernels;
+    use crate::autotune::Kernels;
+    use crate::autotune::mps::{Gemms, matmul_of};
 
     if !available() {
         return;
@@ -3245,9 +3245,9 @@ fn gemv_lanes_sum_in_a_bfloat_accumulator() {
 /// each of them reads the view through its strides.
 #[test]
 fn strided_gemms_tune_mpp() {
-    use super::autotune::{Gemms, matmul_of};
+    use crate::autotune::Kernels;
+    use crate::autotune::mps::{Gemms, matmul_of};
     use crate::codegen::dot_general::mps::Algorithm;
-    use crate::graph_compiler::common::autotune::Kernels;
 
     if !available() || !super::mpp_available() {
         return;
@@ -3467,9 +3467,9 @@ fn a_reduction_feeding_a_norm_of_other_rows_is_its_own_kernel() {
 /// Every GEMV config stores plain, row-half and row-region epilogues for either vector side, bit-identical to the default.
 #[test]
 fn every_gemv_candidate_stores_every_epilogue() {
-    use super::autotune::{Gemms, matmul_of};
+    use crate::autotune::Kernels;
+    use crate::autotune::mps::{Gemms, matmul_of};
     use crate::codegen::dot_general::mps::Algorithm;
-    use crate::graph_compiler::common::autotune::Kernels;
 
     if !available() {
         return;

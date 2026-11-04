@@ -7,9 +7,8 @@ use crate::codegen::dot_general::GemmCodegen;
 use crate::codegen::dot_general::triton::{self as codegen, CONFIGS, Config, UNTUNED};
 use crate::codegen::utils::triton::Triton;
 use crate::graph::{Graph, Node, Primitive};
-use crate::graph_compiler::common::autotune::Kernels;
 use crate::plan::Buffer;
-use crate::plan::{Step, Tuned};
+use crate::plan::Step;
 use crate::tensor::contiguous_strides;
 use crate::{DType, Tensor};
 
@@ -38,7 +37,7 @@ pub struct Epilogue<'a> {
 }
 
 /// Name of a fusion of a matmul and the normalization row reading its product.
-const DOT_ROW: &str = "dot_row";
+pub(crate) const DOT_ROW: &str = "dot_row";
 
 /// Name of a matmul writing its product and partials of the normalization row reading it.
 const DOT_PARTIALS: &str = "dot_partials";
@@ -199,7 +198,7 @@ fn operands<'a>(body: &Graph, dot: &Node, inputs: &'a [Tensor]) -> (&'a Tensor, 
 /// Runs a dot, GEMM-epilogue fusion or linear cross entropy `step` with tile `config` (the untuned one
 /// when `None`), its strided prologues and epilogue generated once per layout of its tensors; secondary
 /// fusion outputs go in `outs`.
-fn gemm(
+pub(crate) fn gemm(
     step: &Step,
     inputs: &[Tensor],
     out: &Tensor,
@@ -294,7 +293,8 @@ pub(crate) fn is_gemm(step: &Step) -> bool {
 }
 
 /// A tuned GEMM launch with its config baked in.
-type Run = Box<dyn Fn(&Step, &[Tensor], &Tensor, &[Tensor]) -> Result<(), String> + Send + Sync>;
+pub(crate) type Run =
+    Box<dyn Fn(&Step, &[Tensor], &Tensor, &[Tensor]) -> Result<(), String> + Send + Sync>;
 
 /// Runs GEMM `step` with its tuned config, or the untuned default.
 pub(crate) fn run(
@@ -306,31 +306,5 @@ pub(crate) fn run(
     match step.launch::<Run>() {
         Some(run) => run(step, inputs, out, outs),
         None => gemm(step, inputs, out, outs, None),
-    }
-}
-
-/// Autotuning candidates for GEMM steps.
-pub(crate) struct Gemms;
-
-impl Kernels for Gemms {
-    type Config = Config;
-
-    /// Every GEMM config for a GEMM step (whole-row tiles for a row epilogue), none otherwise.
-    fn configs(&self, step: &Step) -> Vec<Config> {
-        match &step.primitive {
-            Primitive::Fusion { name, .. } if name == DOT_ROW => {
-                codegen::row_gemm_configs(step.output.1.shape.last().copied().unwrap_or(1))
-            }
-            _ if is_gemm(step) => CONFIGS.to_vec(),
-            _ => Vec::new(),
-        }
-    }
-
-    /// A launch of `step` with `config`.
-    fn build(&mut self, _: &Step, config: Config) -> Tuned {
-        let run: Run =
-            Box::new(move |step, inputs, out, outs| gemm(step, inputs, out, outs, Some(&config)));
-
-        Tuned::new(format!("{config:?}"), run)
     }
 }

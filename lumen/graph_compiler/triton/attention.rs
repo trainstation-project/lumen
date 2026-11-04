@@ -5,13 +5,12 @@ use std::sync::OnceLock;
 
 use super::{Function, Launches, TritonModule, copy, fill};
 use crate::codegen::attention::AttentionCodegen;
-use crate::codegen::attention::triton::{ATTENTION_CONFIGS, AttentionConfig, untuned_attention};
+use crate::codegen::attention::triton::{AttentionConfig, untuned_attention};
 use crate::codegen::utils::triton as codegen;
 use crate::graph::{Primitive, Var};
 use crate::graph_compiler::common::attention::{self, Backward, Strides};
-use crate::graph_compiler::common::autotune::Kernels;
 use crate::graph_compiler::common::flash_attention::{AttentionBackwards, Attentions};
-use crate::plan::{Step, Tuned};
+use crate::plan::Step;
 use crate::{Scalar, Tensor, TensorOptions};
 
 /// Name of a forward flash-attention fusion.
@@ -267,7 +266,7 @@ fn prepare(step: &Step, strides: &Strides) -> Result<Prepared, String> {
 
 /// Runs the forward or backward flash-attention fusion `step` with tile `config`, or the untuned
 /// config for its head size; its kernel and helpers are prepared on its first run.
-fn attention(
+pub(crate) fn attention(
     step: &Step,
     inputs: &[Tensor],
     out: &Tensor,
@@ -359,28 +358,4 @@ fn attention(
     }
 
     Ok(())
-}
-
-/// Autotuning candidates for flash-attention steps.
-pub(super) struct Tiles;
-
-impl Kernels for Tiles {
-    type Config = AttentionConfig;
-
-    /// Every attention config for an attention step, none otherwise.
-    fn configs(&self, step: &Step) -> Vec<AttentionConfig> {
-        match is_attention(&step.primitive) {
-            true => ATTENTION_CONFIGS.to_vec(),
-            false => Vec::new(),
-        }
-    }
-
-    /// A launch of `step` with `config`.
-    fn build(&mut self, _: &Step, config: AttentionConfig) -> Tuned {
-        let run: Run = Box::new(move |step, inputs, out, outs| {
-            attention(step, inputs, out, outs, Some(&config))
-        });
-
-        Tuned::new(format!("{config:?}"), run)
-    }
 }

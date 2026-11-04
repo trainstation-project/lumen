@@ -1,12 +1,12 @@
 //! The Triton backend for CUDA: pass pipeline, plan compilation, autotuning, and running steps
 //! through Triton kernels launched from Python.
 
-mod attention;
+pub(crate) mod attention;
 mod cross_entropy;
 #[cfg(all(feature = "python", lumen_cuda_linked))]
 pub(crate) mod direct;
 mod fusion;
-mod gemm;
+pub(crate) mod gemm;
 mod place_concats;
 mod scatter_add;
 mod split_k;
@@ -18,7 +18,6 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 #[cfg(feature = "python")]
 pub(crate) use crate::codegen::dot_general::triton::Config;
-use attention::Tiles;
 #[cfg(feature = "python")]
 pub(crate) use attention::{Launch, set_attention};
 use fusion::{Fusion, PlaceViews};
@@ -30,7 +29,6 @@ use split_k::SplitK;
 use wide_rows::WideRows;
 
 use super::common::alone::Alone;
-use super::common::autotune::{Autotuner, Kernels, Timer};
 use super::common::chunked_cross_entropy::ChunkedCrossEntropy;
 use super::common::clamp_indices::ClampIndices;
 use super::common::dot_strength::DotStrength;
@@ -44,11 +42,11 @@ use super::common::take_along_axis::TakeAlongAxis;
 use super::common::updates::Updates;
 use super::pass::{Module, Pipeline};
 use super::{CompilerConfig, Options, Plan, plan_options, positions};
+use crate::autotune::Autotuner;
+use crate::autotune::triton::{Events, Gemms, Loops, Tiles};
 use crate::codegen::dynamic_slice::DynamicSliceCodegen;
 use crate::codegen::elementwise::ElementwiseCodegen;
-use crate::codegen::elementwise::triton::{
-    LOOP_CONFIGS, LoopConfig, UNTUNED_LOOP, loop_configs, untuned_loop,
-};
+use crate::codegen::elementwise::triton::{LOOP_CONFIGS, LoopConfig, UNTUNED_LOOP, untuned_loop};
 use crate::codegen::kinds::{gemm_dot, reduction_root};
 use crate::codegen::layout::{LayoutCodegen, TILE, transpose_tiling};
 use crate::codegen::reduction::ReductionCodegen;
@@ -61,7 +59,7 @@ use crate::codegen::utils::triton as codegen;
 use crate::graph::{Graph, Primitive, TensorType, UPDATES};
 use crate::graph_compiler::common::diamonds::{Diamonds, Row, RowsModule};
 use crate::graph_compiler::common::horizontal::{Grouping, HorizontalFusion, segments};
-use crate::plan::{Buffer, Step, Tuned};
+use crate::plan::{Buffer, Step};
 use crate::{DType, Device, Scalar, Tensor, TensorOptions};
 
 /// A generated Triton loop kernel for one plan step.
@@ -432,7 +430,7 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
             },
         };
 
-        tuner.tune(&mut gemm::Gemms, &mut plan)?;
+        tuner.tune(&mut Gemms, &mut plan)?;
         tuner.tune(&mut Tiles, &mut plan)?;
         tuner.tune(&mut Loops { deterministic }, &mut plan)?;
     }
@@ -469,7 +467,7 @@ fn atomic_add(dtype: DType) -> bool {
 /// Generates the loop kernel for `step`, or `None` for GEMMs and steps without a Triton loop kernel;
 /// unless `deterministic`, a scatter-add of a dtype with atomic adds adds each update element atomically,
 /// otherwise it sorts its picks by position and adds a row's in order.
-fn loop_kernel(step: &Step, deterministic: bool) -> Option<Kernel> {
+pub(crate) fn loop_kernel(step: &Step, deterministic: bool) -> Option<Kernel> {
     let by_value: Vec<bool> = step
         .inputs
         .iter()
@@ -618,97 +616,6 @@ fn scan(step: &Step) -> Option<Scan> {
     let scan = codegen::Triton::scan(&step.inputs[0].1, axis, reverse, accum_dtype);
 
     Some(scan.expect("a Triton scan of every cumsum"))
-}
-
-/// Autotuning candidates for loop kernels, of the plan's `deterministic`.
-struct Loops {
-    deterministic: bool,
-}
-
-impl Kernels for Loops {
-    type Config = LoopConfig;
-
-    /// Loop configs whose block covers the kernel's lanes and splits; none for a scatter-add.
-    fn configs(&self, step: &Step) -> Vec<LoopConfig> {
-        let Some(kernel) = loop_kernel(step, self.deterministic) else {
-            return Vec::new();
-        };
-
-        // Timed on zeroed indices, every update would add into one position, measuring contention on it
-        // rather than the kernels: a scatter-add's launch with the configs in its config.rs.
-        if let Some(Template::ScatterAdd { .. }) = kernel.template {
-            return Vec::new();
-        }
-
-        loop_configs(kernel.lanes.max(kernel.splits.next_power_of_two()))
-    }
-
-    /// The step launched with `config`.
-    fn build(&mut self, _: &Step, config: LoopConfig) -> Tuned {
-        Tuned::new(format!("{config:?}"), config)
-    }
-}
-
-/// Times steps on `device` with CUDA events, their loop kernels those of the plan's `deterministic`.
-struct Events {
-    device: Device,
-    deterministic: bool,
-}
-
-impl Timer for Events {
-    type Buffers = (Option<Kernel>, Vec<Tensor>, Tensor, Vec<Tensor>);
-
-    /// The device steps run on.
-    fn device(&self) -> Device {
-        self.device
-    }
-
-    /// Zeroed inputs and outputs for `step`; scalars live on the CPU, and in-place ops write their operand.
-    fn buffers(&self, step: &Step) -> Result<Option<Self::Buffers>, String> {
-        let zeros = |ty: &TensorType, device| {
-            Tensor::zeros(
-                &ty.shape,
-                TensorOptions::new().dtype(ty.dtype).device(device),
-            )
-        };
-
-        let inputs: Vec<Tensor> = step
-            .inputs
-            .iter()
-            .map(|(b, ty)| match b {
-                Buffer::Scalar(_) => zeros(ty, Device::Cpu(0)),
-                _ => zeros(ty, self.device),
-            })
-            .collect();
-
-        let out = match step.primitive {
-            Primitive::DynamicUpdateSlice | Primitive::ScatterAdd { .. } => inputs[0].clone(),
-            _ => zeros(&step.output.1, self.device),
-        };
-
-        let outs = step
-            .extra_outputs
-            .iter()
-            .map(|(_, ty)| zeros(ty, self.device))
-            .collect();
-
-        Ok(Some((
-            loop_kernel(step, self.deterministic),
-            inputs,
-            out,
-            outs,
-        )))
-    }
-
-    /// One run of the step.
-    fn run(
-        &self,
-        (kernel, inputs, out, outs): &Self::Buffers,
-        step: &Step,
-        _: usize,
-    ) -> Result<(), String> {
-        run(kernel.as_ref(), step, inputs, out, outs)
-    }
 }
 
 /// Runs `step` on the given buffers: GEMMs through the GEMM kernel, everything else through `kernel`.
