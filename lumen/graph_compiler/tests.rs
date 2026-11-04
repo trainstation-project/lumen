@@ -1095,5 +1095,12 @@ fn preserve_precision_drops_forward_round_trips() {
     assert_eq!(out.type_of(mul.inputs[0]).dtype, DType::F32, "{out}");
     assert_ne!(mul.inputs[0], out.inputs()[0], "{out}");
     assert_eq!(reads("neg").inputs, [out.inputs()[1]], "{out}");
-    assert_eq!(nodes.iter().filter(|n| n.primitive.name() == "cast").count(), 2, "{out}");
+    assert_eq!(
+        nodes
+            .iter()
+            .filter(|n| n.primitive.name() == "cast")
+            .count(),
+        2,
+        "{out}"
+    );
 }

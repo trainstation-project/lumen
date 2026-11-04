@@ -68,12 +68,22 @@ pub(crate) fn preserve_precision(graph: &Graph) -> Graph {
 
     for node in graph.nodes() {
         out.set_origin(node);
-        let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[read(v, node.backward)]).collect();
-        map[node.output] = out.apply(node.primitive.clone(), &inputs).expect("well typed");
+        let inputs: Vec<Var> = node
+            .inputs
+            .iter()
+            .map(|&v| map[read(v, node.backward)])
+            .collect();
+        map[node.output] = out
+            .apply(node.primitive.clone(), &inputs)
+            .expect("well typed");
     }
 
     // The program's outputs are the forward's.
-    let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[read(v, false)]).collect();
+    let outputs: Vec<Var> = graph
+        .outputs()
+        .iter()
+        .map(|&v| map[read(v, false)])
+        .collect();
     out.set_outputs(&outputs).expect("values of the graph");
     out.prune().0
 }
