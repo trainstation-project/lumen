@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 pub(crate) use crate::codegen::dot_general::triton::Config;
 #[cfg(feature = "python")]
 pub(crate) use attention::{Launch, set_attention};
-use fusion::{Fusion, PlaceViews};
+use fusion::Fusion;
 #[cfg(feature = "python")]
 pub(crate) use gemm::{Epilogue, set_gemm};
 use scatter_add::Scatter;
@@ -58,6 +58,7 @@ use crate::graph::{Graph, Node, Primitive, TensorType, UPDATES};
 use crate::graph_compiler::common::diamonds::{Diamonds, Row, RowsModule};
 use crate::graph_compiler::common::horizontal::{Grouping, HorizontalFusion, segments};
 use crate::graph_compiler::common::place_concats::{PlaceConcats, Slots};
+use crate::graph_compiler::common::place_views::PlaceViews;
 use crate::plan::{Buffer, Step};
 use crate::{DType, Device, Scalar, Tensor, TensorOptions};
 
@@ -298,8 +299,8 @@ impl Module for TritonModule<'_> {
 
 impl Slots for TritonModule<'_> {
     /// Kernels of their own writing fresh memory (`fusion::slot_writes`).
-    fn writes(&self, _: &Node, _: usize, producer: &Node, _: usize) -> Option<bool> {
-        fusion::slot_writes(&self.graph, producer).then_some(true)
+    fn writes(&self, _: &Node, _: usize, producer: &Node, _: usize) -> bool {
+        fusion::slot_writes(&self.graph, producer)
     }
 }
 
@@ -398,7 +399,10 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
         }
     }
 
-    pipeline.add(PlaceViews);
+    // Triton's GEMM reads its operands at any strides.
+    pipeline.add(PlaceViews {
+        reads: |_, _, _, _| true,
+    });
     pipeline.add(Alone);
 
     if config.fuse && config.horizontal_fusion {

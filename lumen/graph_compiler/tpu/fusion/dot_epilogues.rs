@@ -75,12 +75,13 @@ fn split(graph: &Graph, dot: &Node) -> Option<(usize, Vec<(usize, Var)>)> {
 
 /// Returns the concatenation producing `dot`'s lhs when it can be built inside the dot's fusion.
 ///
-/// The concat must feed only dots as their lhs, not be placed in place, and join lane-aligned parts
-/// along one of the lhs's last two axes.
+/// The concat must feed only dots as their lhs, not be placed in place (`placed`, the graph's in-place
+/// concatenations), and join lane-aligned parts along one of the lhs's last two axes.
 fn stacked(
     graph: &Graph,
     producer: &[Option<usize>],
     users: &[Vec<usize>],
+    placed: &[usize],
     dot: &Node,
 ) -> Option<usize> {
     let lhs = dot.inputs[0];
@@ -101,10 +102,7 @@ fn stacked(
     });
 
     let fits = dots
-        && !in_place_concats(graph, |c, i, p, _| {
-            super::slot_writes(graph, c, i, p).then_some(true)
-        })
-        .contains(&k)
+        && !placed.contains(&k)
         && !graph.outputs().contains(&lhs)
         && dimension + 2 >= rank
         && graph.nodes()[k]
@@ -141,6 +139,13 @@ fn fused(graph: &Graph, epilogues: bool) -> Vec<Option<Fused>> {
         node.inputs.iter().for_each(|&v| users[v].push(i));
     }
 
+    // Concatenations placed in place, which their producers write rather than a dot's fusion building them.
+    let placed = in_place_concats(
+        graph,
+        |c, k, p, _| super::slot_writes(graph, c, k, p),
+        |_, _, _, _| true,
+    );
+
     let mut claimed = vec![false; nodes.len()];
     let mut found: Vec<Option<Fused>> = (0..nodes.len()).map(|_| None).collect();
 
@@ -151,7 +156,7 @@ fn fused(graph: &Graph, epilogues: bool) -> Vec<Option<Fused>> {
 
         let before = |v: Var| producer[v].is_none_or(|p| p < d);
         let parts = split(graph, dot);
-        let stack = stacked(graph, &producer, &users, dot);
+        let stack = stacked(graph, &producer, &users, &placed, dot);
 
         // Values computed by the fusion, keyed to the slice (part) they derive from.
         let mut member: HashMap<Var, usize> = match &parts {

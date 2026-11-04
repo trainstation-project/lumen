@@ -9,7 +9,6 @@ use crate::codegen::utils::triton::triton_type;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::common::alone::Lone;
 use crate::graph_compiler::common::fusion::{Backend, fuse};
-use crate::graph_compiler::common::place_views::place_views;
 use crate::graph_compiler::pass::CompilerPass;
 
 /// Whether `node` can be emitted inside a Triton fusion kernel: a supported primitive whose
@@ -121,23 +120,6 @@ impl CompilerPass<TritonModule<'_>> for Fusion {
         let backend = backend(m);
         m.graph = fuse(&m.graph, &m.rows, &scalars, &backend, |body, _| named(body));
         m.rows.clear();
-        Ok(())
-    }
-}
-
-/// Compiler pass marking slices read only by GEMMs as strided views, as on MPS: Triton's GEMM reads its
-/// operands at any strides.
-pub(super) struct PlaceViews;
-
-impl CompilerPass<TritonModule<'_>> for PlaceViews {
-    /// Pass name used in profiler ranges and dumps.
-    fn name(&self) -> &'static str {
-        "place_views"
-    }
-
-    /// Marks each slice read only by GEMMs a view (`common::place_views`).
-    fn apply(&mut self, m: &mut TritonModule<'_>) -> Result<(), String> {
-        place_views(&mut m.graph, |_, _, _, _| true, gemm_dot);
         Ok(())
     }
 }
