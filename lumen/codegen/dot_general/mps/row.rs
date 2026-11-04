@@ -14,7 +14,7 @@ use crate::codegen::kinds::gemm_dot;
 use crate::codegen::row::mps::*;
 use crate::codegen::store::mps::load;
 use crate::codegen::utils::mps::*;
-use crate::graph::{Graph, Node, Primitive, Var};
+use crate::graph::{Graph, Node, Primitive, TensorType, Var};
 use crate::graph_compiler::MpsConfig;
 
 /// Output columns one threadgroup tile covers; wider rows are reduced across tiles.
@@ -87,8 +87,152 @@ pub(crate) fn tile_reductions(body: &Graph) -> Option<Vec<usize>> {
     first.iter().all(simd).then_some(first)
 }
 
-/// For a multi-tile row matmul, byte offsets into scratch of the dot value (first) and each
-/// tile-reduction's partials, and the total scratch size.
+/// Outputs of a multi-tile row matmul's `body` (by output index) its partials pass writes: whole rows
+/// that read no row reduction (a residual stream; CODA's rows scaled by a norm's weight, its `1 / rms`
+/// moved past the next matmul), from the GEMM's accumulators. The combine writes the rest.
+pub(crate) fn early_outputs(body: &Graph) -> Vec<usize> {
+    let (rows, _) = row_shape(body);
+    let reduced: Vec<Var> = row_reductions(body).iter().map(|r| r.output).collect();
+    let summed: Vec<Var> = row_partials(body).iter().map(|p| p.output).collect();
+
+    (0..body.outputs().len())
+        .filter(|&k| {
+            let v = body.outputs()[k];
+
+            body.type_of(v).numel() != rows
+                && !summed.contains(&v)
+                && !crate::graph_compiler::common::diamonds::depends_on(body, v, &reduced)
+        })
+        .collect()
+}
+
+/// Where the combine of a multi-tile row matmul reads its rows from: the value of the partials pass
+/// that cuts it from the dot most cheaply ([`cut`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Cut {
+    /// The combine's outputs follow from the tiles' partials alone: it reads no rows.
+    Nothing,
+    /// The dot's value, staged in scratch (`dotv`).
+    Dot,
+    /// Output `.0` (by index), which the partials pass writes anyway.
+    Output(usize),
+    /// Value `.0`, which the partials pass writes to scratch (`cutv`).
+    Scratch(Var),
+}
+
+/// The cheapest cut, in bytes moved, between a multi-tile row matmul's partials pass and its combine,
+/// in `body` whose matmul's value is `dot` (its node's output, or the staged input of the rows body):
+/// each value the partials pass computes from the dot (before any tile reduction) that leaves the
+/// combine needing neither the dot nor more of the rows costs its read, its write unless it is an output
+/// written anyway, and the inputs the combine still reads (row-sized ones as a full read); the dot itself
+/// a write and a read. Values an earlier pass computes are computed there, never again.
+pub(crate) fn cut(body: &Graph, dot: Var) -> Cut {
+    let (rows, n) = row_shape(body);
+    let reductions = row_reductions(body);
+    let reduced: Vec<Var> = reductions.iter().map(|r| r.output).collect();
+    let early = early_outputs(body);
+    let producer: HashMap<Var, &Node> = body.nodes().iter().map(|n| (n.output, n)).collect();
+
+    let tiled: Vec<Var> = tile_reductions(body)
+        .unwrap_or_default()
+        .iter()
+        .map(|&k| reduced[k])
+        .collect();
+
+    // What the combine computes: its outputs and the operands of the reductions it runs itself.
+    let roots: Vec<Var> = (0..body.outputs().len())
+        .filter(|k| !early.contains(k))
+        .map(|k| body.outputs()[k])
+        .chain(
+            reductions
+                .iter()
+                .filter(|r| !tiled.contains(&r.output))
+                .map(|r| r.inputs[0]),
+        )
+        .collect();
+
+    let whole = rows * n;
+    let bytes = |v: Var| body.type_of(v).numel().min(whole) * body.type_of(v).dtype.size_of();
+
+    // The values the combine reaches with `stop` read from memory, not past the tiles' partials.
+    let reached = |stop: Option<Var>| {
+        let (mut stack, mut seen) = (roots.clone(), vec![false; body.types.len()]);
+        let mut reached = Vec::new();
+
+        while let Some(v) = stack.pop() {
+            if std::mem::replace(&mut seen[v], true) || tiled.contains(&v) {
+                continue;
+            }
+
+            reached.push(v);
+
+            if Some(v) != stop {
+                stack.extend(producer.get(&v).map_or(&[][..], |n| &n.inputs[..]));
+            }
+        }
+
+        reached
+    };
+
+    let rows_of = |v: Var| body.type_of(v).numel() == whole;
+
+    if !reached(None).into_iter().any(rows_of) {
+        return Cut::Nothing;
+    }
+
+    let output = |v: Var| body.outputs().iter().position(|&o| o == v);
+
+    // A candidate's cost: its read, its write unless written anyway, and the inputs left to read.
+    let cost = |u: Var| -> Option<usize> {
+        let reached = reached(Some(u));
+
+        if u != dot && reached.contains(&dot) {
+            return None;
+        }
+
+        let inputs: usize = reached
+            .iter()
+            .filter(|&&v| v != u && body.inputs().contains(&v))
+            .map(|&v| bytes(v))
+            .sum();
+
+        let write = match output(u) {
+            Some(_) if u != dot => 0,
+            _ => bytes(u),
+        };
+
+        Some(bytes(u) + write + inputs)
+    };
+
+    let candidates = body
+        .nodes()
+        .iter()
+        .map(|node| node.output)
+        .filter(|&v| {
+            rows_of(v)
+                && crate::graph_compiler::common::diamonds::depends_on(body, v, &[dot])
+                && !crate::graph_compiler::common::diamonds::depends_on(body, v, &reduced)
+        })
+        .chain([dot]);
+
+    let best = candidates
+        .filter_map(|u| cost(u).map(|c| (c, output(u).is_none(), u)))
+        .min()
+        .map(|(_, _, u)| u);
+
+    match best {
+        Some(u) if u == dot => Cut::Dot,
+        Some(u) => match output(u) {
+            Some(k) => Cut::Output(k),
+            None => Cut::Scratch(u),
+        },
+        None => Cut::Dot,
+    }
+}
+
+/// For a multi-tile row matmul, byte offsets into scratch of the dot value (first), each
+/// tile-reduction's partials, then the [`Cut`] when the partials pass writes it there, and the total
+/// scratch size.
 pub(crate) fn tile_scratch(body: &Graph) -> Option<(Vec<usize>, usize)> {
     let dot = row_dot(body)?;
     let (rows, n) = row_shape(body);
@@ -108,11 +252,135 @@ pub(crate) fn tile_scratch(body: &Graph) -> Option<(Vec<usize>, usize)> {
         at += aligned(rows * tiles * body.type_of(reductions[k].output).dtype.size_of());
     }
 
+    // A cut the partials pass writes for the combine, after the partials.
+    if let Cut::Scratch(u) = cut(body, dot.output) {
+        offsets.push(at);
+        at += aligned(rows * n * body.type_of(u).dtype.size_of());
+    }
+
     Some((offsets, at))
 }
 
-/// Generates `NAME_tiles`, the first pass of a multi-tile row matmul: computes the dot, stores
-/// its value to `dotv` and each per-tile partial of the `first` reductions to `tiles{k}`.
+/// A multi-tile row matmul's two launches, as the profiler shows them: the body inputs each reads (by
+/// position), the outputs the partials pass writes, and the scratch values between them.
+pub(crate) struct TilePasses {
+    /// Inputs the partials pass reads: the dot's operands and what its tile reductions and early
+    /// outputs read.
+    pub(crate) partials: Vec<usize>,
+    /// Inputs the combine pass reads: what its outputs read past the dot's value and the partials.
+    pub(crate) combine: Vec<usize>,
+    /// Outputs (by index) the partials pass writes ([`early_outputs`]); the combine writes the rest.
+    pub(crate) early: Vec<usize>,
+    /// The output (by index) the combine reads its rows from, when the [`Cut`] is one.
+    pub(crate) read: Option<usize>,
+    /// What the partials pass writes to scratch and the combine reads: the dot's value when the cut is
+    /// the dot, each tile reduction's partials (`[rows, tiles]`), then the cut when it is kept there.
+    pub(crate) scratch: Vec<TensorType>,
+}
+
+/// [`TilePasses`] of `body`, a multi-tile row matmul, or `None` when its rows fit one tile.
+pub(crate) fn tile_passes(body: &Graph) -> Option<TilePasses> {
+    let dot = row_dot(body)?;
+    let (rows, n) = row_shape(body);
+
+    if n <= ROW_TILE {
+        return None;
+    }
+
+    let reductions = row_reductions(body);
+    let tiled: Vec<Var> = tile_reductions(body)?
+        .iter()
+        .map(|&k| reductions[k].output)
+        .collect();
+    let tiles = n.div_ceil(ROW_TILE);
+    let mut producer = vec![None; body.types.len()];
+
+    for node in body.nodes() {
+        producer[node.output] = Some(node);
+    }
+
+    // The inputs reached walking back from `roots`, not past the values in `stops` (read from scratch).
+    let reads = |roots: Vec<Var>, stops: &[Var]| {
+        let mut seen = vec![false; body.types.len()];
+        let mut stack = roots;
+
+        while let Some(v) = stack.pop() {
+            if std::mem::replace(&mut seen[v], true) || stops.contains(&v) {
+                continue;
+            }
+
+            if let Some(node) = producer[v] {
+                stack.extend(&node.inputs);
+            }
+        }
+
+        (0..body.inputs().len())
+            .filter(|&i| seen[body.inputs()[i]])
+            .collect::<Vec<_>>()
+    };
+
+    let mut stops = vec![dot.output];
+    stops.extend(&tiled);
+
+    let early = early_outputs(body);
+    let late: Vec<Var> = (0..body.outputs().len())
+        .filter(|k| !early.contains(k))
+        .map(|k| body.outputs()[k])
+        .collect();
+
+    // The combine reads its rows from the cut, not past it.
+    let cut = cut(body, dot.output);
+
+    let (value, kept) = match cut {
+        Cut::Dot => (Some(dot.output), None),
+        Cut::Scratch(u) => (None, Some(u)),
+        Cut::Output(k) => {
+            stops.push(body.outputs()[k]);
+            (None, None)
+        }
+        Cut::Nothing => (None, None),
+    };
+
+    stops.extend(kept);
+
+    let rows_of = |v: Var| TensorType::new(body.type_of(v).dtype, &[rows, n]);
+
+    let scratch = value
+        .map(rows_of)
+        .into_iter()
+        .chain(
+            tiled
+                .iter()
+                .map(|&v| TensorType::new(body.type_of(v).dtype, &[rows, tiles])),
+        )
+        .chain(kept.map(rows_of))
+        .collect();
+
+    let written = early.iter().map(|&k| body.outputs()[k]);
+
+    Some(TilePasses {
+        partials: reads(
+            std::iter::once(dot.output)
+                .chain(tiled.iter().copied())
+                .chain(written)
+                .chain(kept)
+                .collect(),
+            &[],
+        ),
+        combine: reads(late, &stops),
+        early,
+        read: match cut {
+            Cut::Output(k) => Some(k),
+            _ => None,
+        },
+        scratch,
+    })
+}
+
+/// Generates `NAME_partials`, the first pass of a multi-tile row matmul: computes the dot, stores each
+/// per-tile partial of the `first` reductions to `tiles{k}` and the outputs that read no reduction
+/// ([`early_outputs`]), and the combine's [`Cut`] when it is the dot's value (`dotv`) or a value kept
+/// in scratch (`cutv`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn gemm_tiles(
     body: &Graph,
@@ -184,7 +452,40 @@ pub(crate) fn gemm_tiles(
         .unwrap();
     }
 
+    // Outputs that read no reduction are written here, from the accumulators, not by the combine.
+    for k in early_outputs(rows_body) {
+        let value = e.value(rows_body.outputs()[k], "j".into());
+
+        let name = match k {
+            0 => "out".to_owned(),
+            k => format!("out{k}"),
+        };
+
+        writeln!(step, "{name}[j] = {value};").unwrap();
+    }
+
     let staged = rows_body.inputs().len() - 1;
+    let cut = cut(rows_body, rows_body.inputs()[staged]);
+
+    // A cut that is neither the dot nor an output is written to scratch here, for the combine.
+    if let Cut::Scratch(u) = cut {
+        let value = e.value(u, "j".into());
+        let ty = metal_type(rows_body.type_of(u).dtype);
+        extra.push(format!("device {ty} *cutv"));
+        writeln!(step, "cutv[j] = {value};").unwrap();
+    }
+
+    // The combine reads the dot's value only when it is the cut.
+    let kept = match cut == Cut::Dot {
+        true => formatdoc!(
+            "
+            if (m0 + r < M && n0 + col + h < N) {{
+                                            dotv[(m0 + r) * N + n0 + col + h] = v;
+                                        }}"
+        ),
+        false => String::new(),
+    };
+
     let (params, first_arg) = io_params(body, by_value, out, &extra);
 
     if let Some(c) = mpp {
@@ -224,7 +525,7 @@ pub(crate) fn gemm_tiles(
         return formatdoc!(
             "
             [[max_total_threads_per_threadgroup({threads})]]
-            kernel void NAME_tiles({params}constant ulong *p [[buffer({first_arg})]],
+            kernel void NAME_partials({params}constant ulong *p [[buffer({first_arg})]],
                                    {THREAD_ARGS}) {{
                 {product}
                 threadgroup_barrier(mem_flags::mem_device);
@@ -253,7 +554,7 @@ pub(crate) fn gemm_tiles(
 
     formatdoc!(
         "
-        struct NAME_tiles_staging {{
+        struct NAME_partials_staging {{
             threadgroup {o} *staged;
             device {o} *dotv;
             ulong M, N;
@@ -276,25 +577,23 @@ pub(crate) fn gemm_tiles(
                         for (uint h = 0; h < 2; ++h) {{
                             const {o} v = {o}(e[h]);
                             staged[r * {tile}u + col + h] = v;
-                            if (m0 + r < M && n0 + col + h < N) {{
-                                dotv[(m0 + r) * N + n0 + col + h] = v;
-                            }}
+                            {kept}
                         }}
                     }}
                 }}
                 threadgroup_barrier(mem_flags::mem_threadgroup);
             }}
         }};
-        kernel void NAME_tiles({params}constant ulong *p [[buffer({first_arg})]],
+        kernel void NAME_partials({params}constant ulong *p [[buffer({first_arg})]],
                                {THREAD_ARGS}) {{
             threadgroup {t} lt[SG_LT({tile}, SG_BK, {t}, {accum})], rt[SG_RT(SG_BK, {tile}, {t})];
             threadgroup {o} staged[{tile} * {tile}];
             matmul_sg_impl<{t}, {accum}, {o}, {tile}, {tile}, SG_BK, {o},
-                           NAME_tiles_staging, false, false, true>(
+                           NAME_partials_staging, false, false, true>(
                 {lhs}, {rhs}, (device {o} *)nullptr, p,
                 lt, rt,
                 group, tid.y * 16 + tid.x, sg, lane,
-                NAME_tiles_staging{{staged, dotv, p[0], p[1]}});
+                NAME_partials_staging{{staged, dotv, p[0], p[1]}});
             const ulong m0 = ulong(group.y) * {tile}, n0 = ulong(group.x) * {tile};
             for (uint rr = sg; rr < {tile}u; rr += {SIMD_ROWS}u) {{
                 uint row = uint(m0) + rr;

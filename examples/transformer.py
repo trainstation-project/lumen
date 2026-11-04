@@ -10,12 +10,13 @@ import lumen
 import lumen.functional as F
 from lumen.profiler import ProfilerActivity, profile, record_function, supported_activities
 
-VOCAB, SEQ, DIM, HEADS, HIDDEN, LAYERS = 1984, 32, 64, 4, 256, 1
+VOCAB, SEQ, DIM, HEADS, HIDDEN, LAYERS = 1984, 32, 640, 4, 256, 2
 BATCH, STEPS, DROPOUT = 32, 300, 0
 ACCUM = 1
 PROFILED_STEPS = 10
 
 DEVICE = sys.argv[1] if len(sys.argv) > 1 else "mps"
+lumen.config.compiler.mps.linear_reordering = True
 
 # The device's compiler settings, each where it has one; CUDA runs through the Triton backend.
 config = getattr(lumen.config.compiler, DEVICE)
