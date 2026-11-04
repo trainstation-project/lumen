@@ -369,7 +369,9 @@ pub(crate) fn linear_reordering(graph: &Graph, tile: Option<usize>) -> Graph {
         let mut v = out.apply(dot, &operands).expect("well typed");
 
         for (side, s) in reordered[k].iter().enumerate() {
-            let Some((_, (f, divide, at))) = s else { continue };
+            let Some((_, (f, divide, at))) = s else {
+                continue;
+            };
 
             // The factor applied after the matmul keeps the origin of the op that applied it before.
             out.set_origin(&nodes[*at]);
