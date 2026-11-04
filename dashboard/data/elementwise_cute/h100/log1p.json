@@ -13,13 +13,13 @@
    "stored_bytes": 16384,
    "flops": 4096,
    "compute_bound": false,
-   "lumen_us": 16.117,
-   "torch_us": 5.984,
+   "lumen_us": 5.289,
+   "torch_us": 5.831,
    "matches_torch": true,
    "rotation": 4096,
    "chained": false,
    "kernels": 1,
-   "gbs": 2.03
+   "gbs": 6.2
   },
   {
    "op": "log1p",
@@ -34,13 +34,13 @@
    "stored_bytes": 65536,
    "flops": 16384,
    "compute_bound": false,
-   "lumen_us": 16.514,
-   "torch_us": 5.985,
+   "lumen_us": 5.329,
+   "torch_us": 5.949,
    "matches_torch": true,
    "rotation": 4096,
    "chained": false,
    "kernels": 1,
-   "gbs": 7.94
+   "gbs": 24.6
   },
   {
    "op": "log1p",
@@ -55,13 +55,13 @@
    "stored_bytes": 262144,
    "flops": 65536,
    "compute_bound": false,
-   "lumen_us": 16.519,
-   "torch_us": 6.088,
+   "lumen_us": 5.319,
+   "torch_us": 6.174,
    "matches_torch": true,
    "rotation": 1024,
    "chained": false,
    "kernels": 1,
-   "gbs": 31.74
+   "gbs": 98.57
   },
   {
    "op": "log1p",
@@ -76,13 +76,13 @@
    "stored_bytes": 1048576,
    "flops": 262144,
    "compute_bound": false,
-   "lumen_us": 16.228,
-   "torch_us": 6.167,
+   "lumen_us": 5.25,
+   "torch_us": 5.971,
    "matches_torch": true,
    "rotation": 256,
    "chained": false,
    "kernels": 1,
-   "gbs": 129.23
+   "gbs": 399.46
   },
   {
    "op": "log1p",
@@ -97,13 +97,13 @@
    "stored_bytes": 4194304,
    "flops": 1048576,
    "compute_bound": false,
-   "lumen_us": 16.445,
-   "torch_us": 6.075,
+   "lumen_us": 5.627,
+   "torch_us": 5.858,
    "matches_torch": true,
    "rotation": 64,
    "chained": false,
    "kernels": 1,
-   "gbs": 510.1
+   "gbs": 1490.78
   },
   {
    "op": "log1p",
@@ -118,13 +118,13 @@
    "stored_bytes": 16777216,
    "flops": 4194304,
    "compute_bound": false,
-   "lumen_us": 24.942,
-   "torch_us": 14.691,
+   "lumen_us": 14.63,
+   "torch_us": 14.856,
    "matches_torch": true,
    "rotation": 16,
    "chained": false,
    "kernels": 1,
-   "gbs": 1345.3
+   "gbs": 2293.54
   },
   {
    "op": "log1p",
@@ -139,13 +139,13 @@
    "stored_bytes": 67108864,
    "flops": 16777216,
    "compute_bound": false,
-   "lumen_us": 59.204,
-   "torch_us": 48.442,
+   "lumen_us": 49.185,
+   "torch_us": 48.622,
    "matches_torch": true,
    "rotation": 4,
    "chained": false,
    "kernels": 1,
-   "gbs": 2267.04
+   "gbs": 2728.83
   },
   {
    "op": "log1p",
@@ -160,13 +160,13 @@
    "stored_bytes": 268435456,
    "flops": 67108864,
    "compute_bound": false,
-   "lumen_us": 199.902,
-   "torch_us": 181.566,
+   "lumen_us": 189.542,
+   "torch_us": 181.558,
    "matches_torch": true,
    "rotation": 2,
    "chained": false,
    "kernels": 1,
-   "gbs": 2685.67
+   "gbs": 2832.46
   },
   {
    "op": "log1p",
@@ -181,13 +181,13 @@
    "stored_bytes": 8192,
    "flops": 4096,
    "compute_bound": false,
-   "lumen_us": 17.261,
-   "torch_us": 6.075,
+   "lumen_us": 5.476,
+   "torch_us": 5.894,
    "matches_torch": true,
    "rotation": 4096,
    "chained": false,
    "kernels": 1,
-   "gbs": 0.95
+   "gbs": 2.99
   },
   {
    "op": "log1p",
@@ -202,13 +202,13 @@
    "stored_bytes": 32768,
    "flops": 16384,
    "compute_bound": false,
-   "lumen_us": 17.278,
-   "torch_us": 6.029,
+   "lumen_us": 5.519,
+   "torch_us": 5.92,
    "matches_torch": true,
    "rotation": 4096,
    "chained": false,
    "kernels": 1,
-   "gbs": 3.79
+   "gbs": 11.87
   },
   {
    "op": "log1p",
@@ -223,13 +223,13 @@
    "stored_bytes": 131072,
    "flops": 65536,
    "compute_bound": false,
-   "lumen_us": 17.353,
-   "torch_us": 5.965,
+   "lumen_us": 5.542,
+   "torch_us": 6.015,
    "matches_torch": true,
    "rotation": 2048,
    "chained": false,
    "kernels": 1,
-   "gbs": 15.11
+   "gbs": 47.3
   },
   {
    "op": "log1p",
@@ -244,13 +244,13 @@
    "stored_bytes": 524288,
    "flops": 262144,
    "compute_bound": false,
-   "lumen_us": 17.307,
-   "torch_us": 6.162,
+   "lumen_us": 5.417,
+   "torch_us": 6.084,
    "matches_torch": true,
    "rotation": 512,
    "chained": false,
    "kernels": 1,
-   "gbs": 60.59
+   "gbs": 193.57
   },
   {
    "op": "log1p",
@@ -265,13 +265,13 @@
    "stored_bytes": 2097152,
    "flops": 1048576,
    "compute_bound": false,
-   "lumen_us": 17.429,
-   "torch_us": 6.011,
+   "lumen_us": 5.397,
+   "torch_us": 5.897,
    "matches_torch": true,
    "rotation": 128,
    "chained": false,
    "kernels": 1,
-   "gbs": 240.65
+   "gbs": 777.15
   },
   {
    "op": "log1p",
@@ -286,13 +286,13 @@
    "stored_bytes": 8388608,
    "flops": 4194304,
    "compute_bound": false,
-   "lumen_us": 19.733,
-   "torch_us": 9.347,
+   "lumen_us": 9.404,
+   "torch_us": 9.37,
    "matches_torch": true,
    "rotation": 32,
    "chained": false,
    "kernels": 1,
-   "gbs": 850.21
+   "gbs": 1784.05
   },
   {
    "op": "log1p",
@@ -307,13 +307,13 @@
    "stored_bytes": 33554432,
    "flops": 16777216,
    "compute_bound": false,
-   "lumen_us": 37.022,
-   "torch_us": 27.743,
+   "lumen_us": 27.124,
+   "torch_us": 27.842,
    "matches_torch": true,
    "rotation": 8,
    "chained": false,
    "kernels": 1,
-   "gbs": 1812.68
+   "gbs": 2474.15
   },
   {
    "op": "log1p",
@@ -328,18 +328,18 @@
    "stored_bytes": 134217728,
    "flops": 67108864,
    "compute_bound": false,
-   "lumen_us": 106.727,
-   "torch_us": 98.021,
+   "lumen_us": 96.692,
+   "torch_us": 98.054,
    "matches_torch": true,
    "rotation": 2,
    "chained": false,
    "kernels": 1,
-   "gbs": 2515.16
+   "gbs": 2776.19
   }
  ],
  "code": {
-  "kernel": "// step 0: log1p\n// { lambda %0:f32[1048576]. let\n//     %1:f32[1048576] = log1p %0\n//   in (%1) }\n\nimport cuda.bindings.driver as cuda\nimport cutlass\nimport cutlass.cute as cute\nfrom cutlass import Int32\n\nfrom lumen.codegen.elementwise.cuda.kernel import ElementwiseKernel\n\n\n@cute.jit\ndef BODY(ins, outs, fins, fouts, j, v, SEGMENT: cutlass.Constexpr):\n    \"\"\"Every output of segment `SEGMENT` at flat index `j`, the tensors read and written at `j` through\n    `fins` and `fouts` at `v`.\"\"\"\n    in0 = ins[0]\n    out0 = outs[0]\n    fin0 = fins[0]\n    fout0 = fouts[0]\n    if cutlass.const_expr(SEGMENT == 0):\n        v0 = fin0[v]\n        v1 = (cute.math.log1p(v0)).to(cutlass.Float32)\n        fout0[v] = v1\n\n\n@cute.jit\ndef launch(in0, out0, blocks: Int32, stream: cuda.CUstream, vectorized: cutlass.Constexpr):\n    \"\"\"Runs the fusion's `ElementwiseKernel` on `blocks` blocks on `stream`, with vector loads and stores\n    when `vectorized` (every tensor 16-byte aligned).\"\"\"\n    kernel = ElementwiseKernel(BODY, (1048576, ), ((0, ), ), ((0, ), ), (True, ), vectorized)\n    kernel.launch([in0], [out0], blocks, stream)",
+  "kernel": "// step 0: log1p\n// { lambda %0:f32[1048576]. let\n//     %1:f32[1048576] = log1p %0\n//   in (%1) }\n\nimport cuda.bindings.driver as cuda\nimport cutlass\nimport cutlass.cute as cute\nfrom cutlass import Int32\n\nfrom lumen.codegen.elementwise.cuda.kernel import ElementwiseKernel\n\n\n@cute.jit\ndef BODY(ins, outs, fins, fouts, j, v, SEGMENT: cutlass.Constexpr):\n    \"\"\"Every output of segment `SEGMENT` at flat index `j`, the tensors read and written at `j` through\n    `fins` and `fouts` at `v`.\"\"\"\n    in0 = ins[0]\n    out0 = outs[0]\n    fin0 = fins[0]\n    fout0 = fouts[0]\n    if cutlass.const_expr(SEGMENT == 0):\n        v0 = fin0[v]\n        v1 = (cute.math.log1p(v0)).to(cutlass.Float32)\n        fout0[v] = v1\n\n\n@cute.jit\ndef launch(in0, out0, blocks: Int32, stream: cuda.CUstream, vectorized: cutlass.Constexpr):\n    \"\"\"Runs the fusion's `ElementwiseKernel` on `blocks` blocks on `stream`, with vector loads and stores\n    when `vectorized` (every tensor 16-byte aligned).\"\"\"\n    kernel = ElementwiseKernel(BODY, (1048576, ), (cutlass.Float32, cutlass.Float32, ), (1048576, 1048576, ), ((0, ), ), ((0, ), ), (True, ), vectorized)\n    kernel.launch([in0], [out0], blocks, stream)",
   "plan": "plan (workspace 4194304 bytes)\n    ws+0:f32[1048576] = fusion[name=elementwise body={ lambda %0:f32[1048576]. let\n    %1:f32[1048576] = log1p %0\n  in (%1) }] in0"
  },
- "measured_at": "2026-11-04T08:36:37+00:00"
+ "measured_at": "2026-11-04T09:12:33+00:00"
 }
