@@ -323,7 +323,10 @@ fn dot_operands_are_put_in_matmul_form_by_a_transpose_step() {
 
     let y = apply(&mut g, dot, &[a, b]);
     g.set_outputs(&[y]).unwrap();
-    let canonical = super::canonicalize_dots(&g);
+    let canonical = crate::graph_compiler::common::canonicalize_dots::canonicalize_dots(
+        &g,
+        super::reads_contiguous,
+    );
 
     assert_eq!(
         names(&canonical),
@@ -350,7 +353,15 @@ fn dot_operands_are_put_in_matmul_form_by_a_transpose_step() {
 
     let y = apply(&mut g, mm, &[a, b]);
     g.set_outputs(&[y]).unwrap();
-    assert_eq!(names(&super::canonicalize_dots(&g)), ["dot_general"]);
+    assert_eq!(
+        names(
+            &crate::graph_compiler::common::canonicalize_dots::canonicalize_dots(
+                &g,
+                super::reads_contiguous
+            )
+        ),
+        ["dot_general"]
+    );
 }
 
 /// Large reductions get workspace scratch in the plan, and the generic plan refuses MPS inputs.
