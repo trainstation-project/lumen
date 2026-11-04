@@ -9,8 +9,10 @@ use crate::graph_compiler::pass::{CompilerPass, Module};
 pub(crate) trait Lone: Module {
     /// Whether lone `node` of `graph` runs only as a generated kernel.
     fn alone(graph: &Graph, node: &Node) -> bool;
+
     /// Graph input indices passed to kernels by value, when the backend passes any.
     fn scalars(&mut self) -> Option<&mut Vec<usize>>;
+
     /// Names the kernel of the one-node fusion `body`, given whether each input is by value.
     fn kernel(&mut self, body: &Graph, by_value: &[bool]) -> String;
 }
