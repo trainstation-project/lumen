@@ -9,6 +9,11 @@ device_config! {
 
 /// Exposes the shared settings to the compiler.
 impl CompilerConfig for CpuConfig {
+    /// Whether to drop forward round trips through another float dtype.
+    fn preserve_precision(&self) -> bool {
+        self.preserve_precision
+    }
+
     /// Whether to merge dots that share an operand.
     fn merge_dots(&self) -> bool {
         self.merge_dots

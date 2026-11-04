@@ -282,6 +282,11 @@ impl PyGraph {
             .set_sources(var, crate::graph::intern_lines(&[line]));
     }
 
+    /// Sets whether nodes appended from now on compute gradients (autograd's backward pass).
+    fn _set_backward(&mut self, backward: bool) {
+        self.inner.set_backward(backward);
+    }
+
     /// Sets the profiler scope (`(name, call)` ranges) attached to nodes appended from now on.
     fn _set_scope(&mut self, ranges: Vec<(String, u64)>) {
         let ranges: Vec<crate::graph::Range> = ranges

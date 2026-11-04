@@ -25,6 +25,8 @@ __all__ = [
 
 # Stacks with one entry per open ``tracing`` context, innermost last.
 _TRACES = []
+# One entry per backward pass being traced: nodes appended meanwhile compute gradients.
+_BACKWARD = []
 _RNG = []
 _DEVICES = []
 _HOSTS = []
@@ -140,6 +142,21 @@ def _backward_scope(var, base):
     ``name (backward)``, of the same call (one backward range per forward
     call)."""
     return tuple(base) + tuple((f"{name} (backward)", call) for name, call in _SCOPE_OF[-1].get(var, ()))
+
+
+@contextlib.contextmanager
+def _gradients():
+    """Trace autograd's backward pass: the nodes appended meanwhile are
+    marked as computing gradients (``Node::backward``), which tells the
+    compiler what a forward value's gradient readers are (the activations
+    saved for backward)."""
+    _BACKWARD.append(True)
+    _TRACES[-1]._set_backward(True)
+    try:
+        yield
+    finally:
+        _BACKWARD.pop()
+        _TRACES[-1]._set_backward(bool(_BACKWARD))
 
 
 @contextlib.contextmanager

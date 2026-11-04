@@ -15,6 +15,7 @@ pub(crate) mod horizontal;
 pub(crate) mod linear_reordering;
 pub(crate) mod multi_output;
 pub(crate) mod place_views;
+pub(crate) mod preserve_precision;
 #[cfg_attr(not(feature = "python"), allow(dead_code))]
 pub(crate) mod rms_norm;
 pub(crate) mod simplify;

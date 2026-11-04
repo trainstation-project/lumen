@@ -11,6 +11,7 @@ class CompilerConfig:
     fused_linear_cross_entropy_chunk_size: Optional[int] = None
     memory_limit: int = 0
     dump_to: Optional[str] = None
+    preserve_precision: bool = False
 
     def reset(self) -> None:
         """This device's settings back to their defaults."""

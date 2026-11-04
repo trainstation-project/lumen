@@ -64,6 +64,9 @@ pub struct Node {
     pub sources: Lines,
     /// Display name overriding the primitive's own, set for fused or renamed nodes.
     pub label: Option<&'static str>,
+    /// Whether the node computes gradients: traced by autograd's backward pass (a transpose rule, a
+    /// `Function`'s `backward`), or rebuilt from such a node.
+    pub backward: bool,
 }
 
 /// Interned stack of named ranges a node was traced in.
@@ -92,6 +95,8 @@ pub struct Graph {
     pub(crate) scope: Scope,
     /// Source lines stamped on nodes appended next.
     pub(crate) sources: Lines,
+    /// Whether nodes appended next compute gradients ([`Node::backward`]).
+    pub(crate) backward: bool,
 }
 
 /// Where a value lives inside another value's buffer: element offset and strides.
@@ -119,15 +124,25 @@ impl Graph {
         self.scope = scope;
     }
 
-    /// Makes nodes appended from now on inherit `node`'s scope and source lines.
+    /// Sets whether nodes appended from now on compute gradients ([`Node::backward`]).
+    #[cfg_attr(not(feature = "python"), allow(dead_code))]
+    pub(crate) fn set_backward(&mut self, backward: bool) {
+        self.backward = backward;
+    }
+
+    /// Makes nodes appended from now on inherit `node`'s scope, source lines and whether it computes
+    /// gradients.
     pub fn set_origin(&mut self, node: &Node) {
         self.scope = node.scope;
         self.sources = node.sources;
+        self.backward = node.backward;
     }
 
-    /// Makes nodes appended from now on inherit the first node's scope and the union of all their source lines.
+    /// Makes nodes appended from now on inherit the first node's scope and whether it computes gradients,
+    /// and the union of all their source lines.
     pub fn set_origins(&mut self, nodes: &[&Node]) {
         self.scope = nodes.first().map_or(&[], |n| n.scope);
+        self.backward = nodes.first().is_some_and(|n| n.backward);
         let mut lines = Vec::new();
 
         for &line in nodes.iter().flat_map(|n| n.sources) {
@@ -154,6 +169,7 @@ impl Graph {
             scope: self.scope,
             sources: self.sources,
             label: None,
+            backward: self.backward,
         });
 
         Ok(output)

@@ -18,6 +18,7 @@ NEW_TOKENS = 256
 CHECK_EVERY = 128
 
 lumen.config.static_allocator_bytes = 4 << 30
+lumen.config.compiler.mps.linear_reordering = True
 
 
 class Linear(lumen.nn.Module):

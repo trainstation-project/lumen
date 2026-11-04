@@ -37,6 +37,9 @@ pub trait CompilerConfig: std::fmt::Debug + Send + Sync {
     fn memory_limit(&self) -> Option<usize>;
     /// Directory to dump the graph to after each pass.
     fn dump_to(&self) -> Option<&str>;
+    /// Whether to drop a value's round trip through another float dtype where the forward reads it
+    /// (`preserve_precision`).
+    fn preserve_precision(&self) -> bool;
 }
 
 /// The compiler configs of every device type.
@@ -79,6 +82,9 @@ macro_rules! device_config {
             pub memory_limit: usize,
             /// Directory to dump the graph to after each pass.
             pub dump_to: Option<String>,
+            /// Drop a value's round trip through another float dtype where the forward reads it, the
+            /// narrower dtype kept for the gradients' reads (off: the program runs as traced).
+            pub preserve_precision: bool,
             $(pub $flag: $ty,)*
         }
 
@@ -91,6 +97,7 @@ macro_rules! device_config {
                     fused_linear_cross_entropy_chunk_size: None,
                     memory_limit: 0,
                     dump_to: None,
+                    preserve_precision: false,
                     $($flag: $default,)*
                 }
             }
@@ -138,6 +145,7 @@ macro_rules! device_config {
                     ),
                     format!("memory_limit={}", super::py_value(&c.memory_limit)),
                     format!("dump_to={}", super::py_value(&c.dump_to)),
+                    format!("preserve_precision={}", super::py_value(&c.preserve_precision)),
                     $(format!("{}={}", stringify!($flag), super::py_value(&c.$flag))),*
                 ];
 
@@ -213,6 +221,7 @@ shared_flags! {
     fused_linear_cross_entropy_chunk_size, set_fused_linear_cross_entropy_chunk_size: Option<usize>;
     memory_limit, set_memory_limit: usize;
     dump_to, set_dump_to: Option<String>;
+    preserve_precision, set_preserve_precision: bool;
 }
 
 #[cfg(feature = "python")]
