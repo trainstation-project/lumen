@@ -1,7 +1,7 @@
 //! Tests for plan compilation (buffer reuse, donation, scheduling, scratch, views) and,
 //! when MPS is linked, for running plans on MPS against the reference evaluator.
+use super::Buffer;
 use super::Plan;
-use super::plan::Buffer;
 use crate::graph::Primitive::*;
 use crate::graph::{Graph, Primitive, TensorType};
 use crate::reference;

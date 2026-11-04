@@ -8,8 +8,8 @@ use crate::codegen::dot_general::triton::{self as codegen, CONFIGS, Config, UNTU
 use crate::codegen::utils::triton::Triton;
 use crate::graph::{Graph, Node, Primitive};
 use crate::graph_compiler::common::autotune::Kernels;
-use crate::graph_compiler::plan::Buffer;
-use crate::graph_compiler::plan::{Step, Tuned};
+use crate::plan::Buffer;
+use crate::plan::{Step, Tuned};
 use crate::tensor::contiguous_strides;
 use crate::{DType, Tensor};
 

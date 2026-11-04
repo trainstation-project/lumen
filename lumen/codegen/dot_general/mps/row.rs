@@ -243,7 +243,7 @@ pub(crate) fn tile_scratch(body: &Graph) -> Option<(Vec<usize>, usize)> {
 
     let reductions = row_reductions(body);
     let tiles = n.div_ceil(ROW_TILE);
-    let aligned = |bytes: usize| bytes.next_multiple_of(crate::graph_compiler::plan::ALIGNMENT);
+    let aligned = |bytes: usize| bytes.next_multiple_of(crate::plan::ALIGNMENT);
     let mut offsets = vec![0];
     let mut at = aligned(rows * n * body.type_of(dot.output).dtype.size_of());
 

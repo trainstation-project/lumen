@@ -7,7 +7,7 @@ use super::{Function, Kernel, Launches, Template};
 use crate::codegen::dot_general::triton::{self as codegen, Config};
 use crate::codegen::elementwise::triton::{LOOP_CONFIGS, UNTUNED_LOOP};
 use crate::graph::Primitive;
-use crate::graph_compiler::plan::Step;
+use crate::plan::Step;
 use crate::tensor::contiguous_strides;
 use crate::{DType, Device, Tensor, TensorOptions};
 

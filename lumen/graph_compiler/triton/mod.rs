@@ -47,7 +47,6 @@ use super::common::simplify::Simplify;
 use super::common::take_along_axis::TakeAlongAxis;
 use super::common::updates::Updates;
 use super::pass::{Module, Pipeline};
-use super::plan::{Buffer, Step, Tuned};
 use super::{CompilerConfig, Options, Plan, plan_options, positions};
 use crate::codegen::dynamic_slice::DynamicSliceCodegen;
 use crate::codegen::elementwise::ElementwiseCodegen;
@@ -66,6 +65,7 @@ use crate::codegen::utils::triton as codegen;
 use crate::graph::{Graph, Primitive, TensorType, UPDATES};
 use crate::graph_compiler::common::diamonds::Row;
 use crate::graph_compiler::common::horizontal::segments;
+use crate::plan::{Buffer, Step, Tuned};
 use crate::{DType, Device, Scalar, Tensor, TensorOptions};
 
 /// A generated Triton loop kernel for one plan step.

@@ -5,7 +5,7 @@ use crate::codegen::layout::LayoutCodegen;
 use crate::codegen::utils::tpu::Tpu;
 use crate::device::tpu::layout::Layout;
 use crate::graph::{Graph, TensorType};
-use crate::graph_compiler::plan::Step;
+use crate::plan::Step;
 use crate::runtime::tpu::{Launch, launch};
 
 /// TPU layout: the fixed reshape Pallas program, specialized by a spec of the split or merged last dim;

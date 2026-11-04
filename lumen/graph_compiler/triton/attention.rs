@@ -11,7 +11,7 @@ use crate::graph::{Primitive, Var};
 use crate::graph_compiler::common::attention::{self, Backward, Strides};
 use crate::graph_compiler::common::autotune::Kernels;
 use crate::graph_compiler::common::flash_attention::{AttentionBackwards, Attentions};
-use crate::graph_compiler::plan::{Step, Tuned};
+use crate::plan::{Step, Tuned};
 use crate::{Scalar, Tensor, TensorOptions};
 
 /// Name of a forward flash-attention fusion.

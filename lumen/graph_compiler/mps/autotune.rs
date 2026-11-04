@@ -13,7 +13,7 @@ use crate::device::Device;
 use crate::graph::{Primitive, TensorType, Var, View};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::common::autotune::{Kernels, Timer};
-use crate::graph_compiler::plan::{Buffer, Step, Tuned};
+use crate::plan::{Buffer, Step, Tuned};
 use crate::runtime::mps::Encode;
 use crate::tensor::contiguous_strides;
 

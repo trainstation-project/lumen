@@ -7,7 +7,7 @@ use crate::graph::{Graph, Primitive};
 use crate::graph_compiler::common::attention;
 use crate::graph_compiler::common::place_views::{self, place_views};
 use crate::graph_compiler::pass::CompilerPass;
-use crate::graph_compiler::plan::Step;
+use crate::plan::Step;
 
 /// Compiler pass marking slices as views where their readers allow it.
 pub(super) struct PlaceViews;

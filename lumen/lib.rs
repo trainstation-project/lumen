@@ -26,6 +26,7 @@ pub mod distributed;
 pub mod graph;
 pub mod graph_compiler;
 pub mod pallas;
+pub mod plan;
 pub mod profiler;
 #[cfg(feature = "python")]
 mod python;

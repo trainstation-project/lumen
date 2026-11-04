@@ -11,7 +11,7 @@ use super::MpsModule;
 use crate::codegen::ane::mil;
 use crate::graph::{FUSION_SEPARATOR, Graph, NEURAL_ENGINE, Primitive, TensorType, Var, intern};
 use crate::graph_compiler::pass::CompilerPass;
-use crate::graph_compiler::plan::Step;
+use crate::plan::Step;
 use crate::tensor::contiguous_strides;
 use crate::{DType, Tensor};
 

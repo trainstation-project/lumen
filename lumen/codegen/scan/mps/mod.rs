@@ -3,7 +3,7 @@ use crate::codegen::reduction::mps::kernel_dtype;
 use crate::codegen::scan::ScanCodegen;
 use crate::codegen::utils::mps::Mps;
 use crate::graph::{Primitive, TensorType};
-use crate::graph_compiler::plan::Step;
+use crate::plan::Step;
 use crate::runtime::mps::{Grid, launch, u32_arg, u64_arg};
 use crate::{DType, Tensor};
 

@@ -6,7 +6,7 @@ use std::ffi::{CString, c_char, c_void};
 use std::sync::{Mutex, PoisonError};
 
 use crate::graph::{Primitive, TensorType};
-use crate::graph_compiler::plan::Step;
+use crate::plan::Step;
 use crate::stream::mps::{self, Completion};
 use crate::tensor::dtype::dispatch_dtype;
 use crate::tensor::storage::as_bytes;

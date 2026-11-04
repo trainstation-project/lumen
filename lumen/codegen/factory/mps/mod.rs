@@ -1,7 +1,7 @@
 //! Metal encoding of factory primitives: fill and iota (random bits are codegen/random's).
 use crate::Tensor;
 use crate::graph::Primitive::*;
-use crate::graph_compiler::plan::Step;
+use crate::plan::Step;
 use crate::runtime::mps::{Grid, element_arg, elementwise_grid, launch_step, u32_arg};
 
 /// Encodes one factory `step` writing into `output`, keeping `keep` alive until the command buffer finishes.

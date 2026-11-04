@@ -8,12 +8,12 @@ use super::common::alone::{Alone, Lone};
 use super::common::fusion::{Backend, fuse};
 use super::config::CompilerConfig;
 use super::pass::{CompilerPass, Module, Pipeline};
-use super::plan::{Plan, Step};
 use super::{Options, plan_options};
 use crate::codegen::elementwise::ElementwiseCodegen;
 use crate::codegen::elementwise::cuda::Layouts;
 use crate::codegen::utils::cuda::{Cuda, cute_type};
 use crate::graph::{Graph, Node, Primitive, TensorType, Var};
+use crate::plan::{Plan, Step};
 use crate::{Device, Tensor};
 
 /// Launches kernel `name` of module `source` (compiling it on its first launch) on `tensors`, its

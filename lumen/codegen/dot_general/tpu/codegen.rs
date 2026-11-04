@@ -9,7 +9,7 @@ use crate::codegen::dot_general::tpu::{block, caps};
 use crate::codegen::utils::tpu::{Tpu, window};
 use crate::device::tpu::layout::Layout;
 use crate::graph::{Graph, Node, Primitive, TensorType, Var};
-use crate::graph_compiler::plan::Step;
+use crate::plan::Step;
 
 /// A fused GEMM's structure: a concatenated lhs, the dot output's slices and the nodes applied to them.
 pub(crate) struct Epilogue {

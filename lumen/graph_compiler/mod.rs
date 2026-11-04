@@ -8,13 +8,10 @@ pub(crate) mod cuda;
 #[cfg(lumen_mps_linked)]
 pub(crate) mod mps;
 pub(crate) mod pass;
-pub mod plan;
-#[cfg(test)]
-pub(crate) mod plan_tests;
 #[cfg(feature = "python")]
 pub(crate) mod python;
-mod remat;
-mod schedule;
+pub(crate) mod remat;
+pub(crate) mod schedule;
 mod stages;
 #[cfg(test)]
 mod tests;
@@ -24,14 +21,14 @@ pub(crate) mod triton;
 use crate::Device;
 use crate::graph::{FUSION_SEPARATOR, Graph, Primitive, Var, intern};
 
+pub use crate::plan::{Plan, PlanOptions};
+pub(crate) use crate::plan::{Source, Stage, Staged};
 use common::cse::Cse;
 use common::merge_dots::Packs;
 use common::preserve_precision::PreservePrecision;
 use common::simplify::Simplify;
 pub use config::CompilerConfig;
 use pass::{GraphModule, Pipeline};
-pub use plan::{Plan, PlanOptions};
-pub(crate) use plan::{Source, Stage, Staged};
 
 /// Per-compilation options: compiler configs and how the graph's inputs may be used.
 #[derive(Debug, Clone)]

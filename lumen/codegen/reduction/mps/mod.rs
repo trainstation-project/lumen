@@ -16,7 +16,7 @@ use crate::graph::TensorType;
 use crate::graph::primitive::free_dims;
 use crate::graph::{Graph, Node};
 use crate::graph_compiler::mps::fusion;
-use crate::graph_compiler::plan::Step;
+use crate::plan::Step;
 use crate::runtime::mps::{Grid, dims_arg, dims32_arg, element_arg, launch, u32_arg, u64_arg};
 use crate::tensor::contiguous_strides;
 use crate::{DType, Scalar, Tensor};
