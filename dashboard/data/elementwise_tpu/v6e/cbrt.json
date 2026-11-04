@@ -4,115 +4,115 @@
    "op": "cbrt",
    "dtype": "float32",
    "n": 4096,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cbrt': %106 = \"math.cbrt\"(%87) <{fastmat",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cbrt': %143 = \"math.cbrt\"(%127) <{fastma",
    "jax_us": 41.078
   },
   {
    "op": "cbrt",
    "dtype": "float32",
    "n": 16384,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cbrt': %202 = \"math.cbrt\"(%111) <{fastma",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cbrt': %225 = \"math.cbrt\"(%149) <{fastma",
    "jax_us": 40.37
   },
   {
    "op": "cbrt",
    "dtype": "float32",
    "n": 65536,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cbrt': %585 = \"math.cbrt\"(%207) <{fastma",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cbrt': %563 = \"math.cbrt\"(%247) <{fastma",
    "jax_us": 38.959
   },
   {
    "op": "cbrt",
    "dtype": "float32",
    "n": 262144,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cbrt': %658 = \"math.cbrt\"(%280) <{fastma",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cbrt': %1907 = \"math.cbrt\"(%631) <{fastm",
    "jax_us": 37.418
   },
   {
    "op": "cbrt",
    "dtype": "float32",
    "n": 1048576,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cbrt': %658 = \"math.cbrt\"(%280) <{fastma",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cbrt': %7283 = \"math.cbrt\"(%2167) <{fast",
    "jax_us": 37.93
   },
   {
    "op": "cbrt",
    "dtype": "float32",
    "n": 4194304,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cbrt': %658 = \"math.cbrt\"(%280) <{fastma",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cbrt': %7338 = \"math.cbrt\"(%2222) <{fast",
    "jax_us": 41.437
   },
   {
    "op": "cbrt",
    "dtype": "float32",
    "n": 16777216,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cbrt': %658 = \"math.cbrt\"(%280) <{fastma",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cbrt': %7338 = \"math.cbrt\"(%2222) <{fast",
    "jax_us": 100.457
   },
   {
    "op": "cbrt",
    "dtype": "float32",
    "n": 67108864,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cbrt': %658 = \"math.cbrt\"(%280) <{fastma",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cbrt': %7338 = \"math.cbrt\"(%2222) <{fast",
    "jax_us": 419.48
   },
   {
    "op": "cbrt",
    "dtype": "bfloat16",
    "n": 4096,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cbrt': %239 = \"math.cbrt\"(%176) <{fastma",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cbrt': %166 = \"math.cbrt\"(%159) <{fastma",
    "jax_us": 40.922
   },
   {
    "op": "cbrt",
    "dtype": "bfloat16",
    "n": 16384,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cbrt': %737 = \"math.cbrt\"(%482) <{fastma",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cbrt': %319 = \"math.cbrt\"(%288) <{fastma",
    "jax_us": 40.736
   },
   {
    "op": "cbrt",
    "dtype": "bfloat16",
    "n": 65536,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cbrt': %2727 = \"math.cbrt\"(%1704) <{fast",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cbrt': %944 = \"math.cbrt\"(%817) <{fastma",
    "jax_us": 39.943
   },
   {
    "op": "cbrt",
    "dtype": "bfloat16",
    "n": 262144,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cbrt': %2800 = \"math.cbrt\"(%1777) <{fast",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cbrt': %3439 = \"math.cbrt\"(%2928) <{fast",
    "jax_us": 36.686
   },
   {
    "op": "cbrt",
    "dtype": "bfloat16",
    "n": 1048576,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cbrt': %2800 = \"math.cbrt\"(%1777) <{fast",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cbrt': %13423 = \"math.cbrt\"(%11376) <{fa",
    "jax_us": 36.682
   },
   {
    "op": "cbrt",
    "dtype": "bfloat16",
    "n": 4194304,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cbrt': %2800 = \"math.cbrt\"(%1777) <{fast",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cbrt': %13477 = \"math.cbrt\"(%11430) <{fa",
    "jax_us": 39.824
   },
   {
    "op": "cbrt",
    "dtype": "bfloat16",
    "n": 16777216,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cbrt': %2798 = \"math.cbrt\"(%1775) <{fast",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cbrt': %13475 = \"math.cbrt\"(%11428) <{fa",
    "jax_us": 72.758
   },
   {
    "op": "cbrt",
    "dtype": "bfloat16",
    "n": 67108864,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cbrt': %2800 = \"math.cbrt\"(%1777) <{fast",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cbrt': %13477 = \"math.cbrt\"(%11430) <{fa",
    "jax_us": 263.896
   }
  ],
  "code": null,
- "measured_at": "2026-11-04T09:12:55+00:00"
+ "measured_at": "2026-11-04T10:50:06+00:00"
 }

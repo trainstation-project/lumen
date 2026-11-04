@@ -4,115 +4,115 @@
    "op": "asinh",
    "dtype": "float32",
    "n": 4096,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.asinh': %106 = \"math.asinh\"(%87) <{fastm",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.asinh': %143 = \"math.asinh\"(%127) <{fast",
    "jax_us": 39.534
   },
   {
    "op": "asinh",
    "dtype": "float32",
    "n": 16384,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.asinh': %202 = \"math.asinh\"(%111) <{fast",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.asinh': %225 = \"math.asinh\"(%149) <{fast",
    "jax_us": 39.271
   },
   {
    "op": "asinh",
    "dtype": "float32",
    "n": 65536,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.asinh': %585 = \"math.asinh\"(%207) <{fast",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.asinh': %563 = \"math.asinh\"(%247) <{fast",
    "jax_us": 37.378
   },
   {
    "op": "asinh",
    "dtype": "float32",
    "n": 262144,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.asinh': %658 = \"math.asinh\"(%280) <{fast",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.asinh': %1907 = \"math.asinh\"(%631) <{fas",
    "jax_us": 36.256
   },
   {
    "op": "asinh",
    "dtype": "float32",
    "n": 1048576,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.asinh': %658 = \"math.asinh\"(%280) <{fast",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.asinh': %7283 = \"math.asinh\"(%2167) <{fa",
    "jax_us": 35.94
   },
   {
    "op": "asinh",
    "dtype": "float32",
    "n": 4194304,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.asinh': %658 = \"math.asinh\"(%280) <{fast",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.asinh': %7338 = \"math.asinh\"(%2222) <{fa",
    "jax_us": 41.217
   },
   {
    "op": "asinh",
    "dtype": "float32",
    "n": 16777216,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.asinh': %658 = \"math.asinh\"(%280) <{fast",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.asinh': %7338 = \"math.asinh\"(%2222) <{fa",
    "jax_us": 101.919
   },
   {
    "op": "asinh",
    "dtype": "float32",
    "n": 67108864,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.asinh': %658 = \"math.asinh\"(%280) <{fast",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.asinh': %7338 = \"math.asinh\"(%2222) <{fa",
    "jax_us": 400.188
   },
   {
    "op": "asinh",
    "dtype": "bfloat16",
    "n": 4096,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.asinh': %239 = \"math.asinh\"(%176) <{fast",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.asinh': %166 = \"math.asinh\"(%159) <{fast",
    "jax_us": 39.148
   },
   {
    "op": "asinh",
    "dtype": "bfloat16",
    "n": 16384,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.asinh': %737 = \"math.asinh\"(%482) <{fast",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.asinh': %319 = \"math.asinh\"(%288) <{fast",
    "jax_us": 39.387
   },
   {
    "op": "asinh",
    "dtype": "bfloat16",
    "n": 65536,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.asinh': %2727 = \"math.asinh\"(%1704) <{fa",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.asinh': %944 = \"math.asinh\"(%817) <{fast",
    "jax_us": 39.03
   },
   {
    "op": "asinh",
    "dtype": "bfloat16",
    "n": 262144,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.asinh': %2800 = \"math.asinh\"(%1777) <{fa",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.asinh': %3439 = \"math.asinh\"(%2928) <{fa",
    "jax_us": 36.985
   },
   {
    "op": "asinh",
    "dtype": "bfloat16",
    "n": 1048576,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.asinh': %2800 = \"math.asinh\"(%1777) <{fa",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.asinh': %13423 = \"math.asinh\"(%11376) <{",
    "jax_us": 35.386
   },
   {
    "op": "asinh",
    "dtype": "bfloat16",
    "n": 4194304,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.asinh': %2800 = \"math.asinh\"(%1777) <{fa",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.asinh': %13477 = \"math.asinh\"(%11430) <{",
    "jax_us": 36.974
   },
   {
    "op": "asinh",
    "dtype": "bfloat16",
    "n": 16777216,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.asinh': %2798 = \"math.asinh\"(%1775) <{fa",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.asinh': %13475 = \"math.asinh\"(%11428) <{",
    "jax_us": 100.207
   },
   {
    "op": "asinh",
    "dtype": "bfloat16",
    "n": 67108864,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.asinh': %2800 = \"math.asinh\"(%1777) <{fa",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.asinh': %13477 = \"math.asinh\"(%11430) <{",
    "jax_us": 365.446
   }
  ],
  "code": null,
- "measured_at": "2026-11-04T09:09:23+00:00"
+ "measured_at": "2026-11-04T10:46:15+00:00"
 }

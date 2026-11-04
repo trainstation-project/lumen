@@ -4,115 +4,115 @@
    "op": "expm1",
    "dtype": "float32",
    "n": 4096,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.expm1': %106 = \"math.expm1\"(%87) <{fastm",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.expm1': %143 = \"math.expm1\"(%127) <{fast",
    "jax_us": 40.819
   },
   {
    "op": "expm1",
    "dtype": "float32",
    "n": 16384,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.expm1': %202 = \"math.expm1\"(%111) <{fast",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.expm1': %225 = \"math.expm1\"(%149) <{fast",
    "jax_us": 40.521
   },
   {
    "op": "expm1",
    "dtype": "float32",
    "n": 65536,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.expm1': %585 = \"math.expm1\"(%207) <{fast",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.expm1': %563 = \"math.expm1\"(%247) <{fast",
    "jax_us": 39.53
   },
   {
    "op": "expm1",
    "dtype": "float32",
    "n": 262144,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.expm1': %658 = \"math.expm1\"(%280) <{fast",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.expm1': %1907 = \"math.expm1\"(%631) <{fas",
    "jax_us": 36.347
   },
   {
    "op": "expm1",
    "dtype": "float32",
    "n": 1048576,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.expm1': %658 = \"math.expm1\"(%280) <{fast",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.expm1': %7283 = \"math.expm1\"(%2167) <{fa",
    "jax_us": 36.294
   },
   {
    "op": "expm1",
    "dtype": "float32",
    "n": 4194304,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.expm1': %658 = \"math.expm1\"(%280) <{fast",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.expm1': %7338 = \"math.expm1\"(%2222) <{fa",
    "jax_us": 39.426
   },
   {
    "op": "expm1",
    "dtype": "float32",
    "n": 16777216,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.expm1': %658 = \"math.expm1\"(%280) <{fast",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.expm1': %7338 = \"math.expm1\"(%2222) <{fa",
    "jax_us": 100.285
   },
   {
    "op": "expm1",
    "dtype": "float32",
    "n": 67108864,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.expm1': %658 = \"math.expm1\"(%280) <{fast",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.expm1': %7338 = \"math.expm1\"(%2222) <{fa",
    "jax_us": 394.575
   },
   {
    "op": "expm1",
    "dtype": "bfloat16",
    "n": 4096,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.expm1': %239 = \"math.expm1\"(%176) <{fast",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.expm1': %166 = \"math.expm1\"(%159) <{fast",
    "jax_us": 40.805
   },
   {
    "op": "expm1",
    "dtype": "bfloat16",
    "n": 16384,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.expm1': %737 = \"math.expm1\"(%482) <{fast",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.expm1': %319 = \"math.expm1\"(%288) <{fast",
    "jax_us": 41.069
   },
   {
    "op": "expm1",
    "dtype": "bfloat16",
    "n": 65536,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.expm1': %2727 = \"math.expm1\"(%1704) <{fa",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.expm1': %944 = \"math.expm1\"(%817) <{fast",
    "jax_us": 40.003
   },
   {
    "op": "expm1",
    "dtype": "bfloat16",
    "n": 262144,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.expm1': %2800 = \"math.expm1\"(%1777) <{fa",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.expm1': %3439 = \"math.expm1\"(%2928) <{fa",
    "jax_us": 37.651
   },
   {
    "op": "expm1",
    "dtype": "bfloat16",
    "n": 1048576,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.expm1': %2800 = \"math.expm1\"(%1777) <{fa",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.expm1': %13423 = \"math.expm1\"(%11376) <{",
    "jax_us": 35.915
   },
   {
    "op": "expm1",
    "dtype": "bfloat16",
    "n": 4194304,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.expm1': %2800 = \"math.expm1\"(%1777) <{fa",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.expm1': %13477 = \"math.expm1\"(%11430) <{",
    "jax_us": 37.939
   },
   {
    "op": "expm1",
    "dtype": "bfloat16",
    "n": 16777216,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.expm1': %2798 = \"math.expm1\"(%1775) <{fa",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.expm1': %13475 = \"math.expm1\"(%11428) <{",
    "jax_us": 75.378
   },
   {
    "op": "expm1",
    "dtype": "bfloat16",
    "n": 67108864,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.expm1': %2800 = \"math.expm1\"(%1777) <{fa",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.expm1': %13477 = \"math.expm1\"(%11430) <{",
    "jax_us": 273.873
   }
  ],
  "code": null,
- "measured_at": "2026-11-04T09:11:27+00:00"
+ "measured_at": "2026-11-04T10:48:32+00:00"
 }

@@ -13,13 +13,13 @@
    "stored_bytes": 16384,
    "flops": 4096,
    "compute_bound": false,
-   "lumen_us": 5.352,
-   "torch_us": 5.345,
+   "lumen_us": 5.522,
+   "torch_us": 5.409,
    "matches_torch": true,
    "rotation": 4096,
    "chained": false,
    "kernels": 1,
-   "gbs": 6.12
+   "gbs": 5.93
   },
   {
    "op": "erf_inv",
@@ -34,13 +34,13 @@
    "stored_bytes": 65536,
    "flops": 16384,
    "compute_bound": false,
-   "lumen_us": 5.29,
-   "torch_us": 5.376,
+   "lumen_us": 5.498,
+   "torch_us": 5.46,
    "matches_torch": true,
    "rotation": 4096,
    "chained": false,
    "kernels": 1,
-   "gbs": 24.78
+   "gbs": 23.84
   },
   {
    "op": "erf_inv",
@@ -55,13 +55,13 @@
    "stored_bytes": 262144,
    "flops": 65536,
    "compute_bound": false,
-   "lumen_us": 5.334,
-   "torch_us": 5.491,
+   "lumen_us": 5.494,
+   "torch_us": 5.689,
    "matches_torch": true,
    "rotation": 1024,
    "chained": false,
    "kernels": 1,
-   "gbs": 98.29
+   "gbs": 95.43
   },
   {
    "op": "erf_inv",
@@ -76,13 +76,13 @@
    "stored_bytes": 1048576,
    "flops": 262144,
    "compute_bound": false,
-   "lumen_us": 5.233,
-   "torch_us": 5.542,
+   "lumen_us": 5.385,
+   "torch_us": 5.584,
    "matches_torch": true,
    "rotation": 256,
    "chained": false,
    "kernels": 1,
-   "gbs": 400.76
+   "gbs": 389.44
   },
   {
    "op": "erf_inv",
@@ -97,13 +97,13 @@
    "stored_bytes": 4194304,
    "flops": 1048576,
    "compute_bound": false,
-   "lumen_us": 6.763,
-   "torch_us": 5.714,
+   "lumen_us": 6.608,
+   "torch_us": 5.7,
    "matches_torch": true,
    "rotation": 64,
    "chained": false,
    "kernels": 1,
-   "gbs": 1240.37
+   "gbs": 1269.46
   },
   {
    "op": "erf_inv",
@@ -118,13 +118,13 @@
    "stored_bytes": 16777216,
    "flops": 4194304,
    "compute_bound": false,
-   "lumen_us": 17.349,
-   "torch_us": 14.795,
+   "lumen_us": 17.499,
+   "torch_us": 14.711,
    "matches_torch": true,
    "rotation": 16,
    "chained": false,
    "kernels": 1,
-   "gbs": 1934.08
+   "gbs": 1917.51
   },
   {
    "op": "erf_inv",
@@ -139,13 +139,13 @@
    "stored_bytes": 67108864,
    "flops": 16777216,
    "compute_bound": false,
-   "lumen_us": 57.273,
-   "torch_us": 48.473,
+   "lumen_us": 53.946,
+   "torch_us": 48.502,
    "matches_torch": true,
    "rotation": 4,
    "chained": false,
    "kernels": 1,
-   "gbs": 2343.47
+   "gbs": 2488.0
   },
   {
    "op": "erf_inv",
@@ -160,13 +160,13 @@
    "stored_bytes": 268435456,
    "flops": 67108864,
    "compute_bound": false,
-   "lumen_us": 215.458,
-   "torch_us": 181.509,
+   "lumen_us": 192.453,
+   "torch_us": 181.355,
    "matches_torch": true,
    "rotation": 2,
    "chained": false,
    "kernels": 1,
-   "gbs": 2491.77
+   "gbs": 2789.62
   },
   {
    "op": "erf_inv",
@@ -181,13 +181,13 @@
    "stored_bytes": 8192,
    "flops": 4096,
    "compute_bound": false,
-   "lumen_us": 5.659,
-   "torch_us": 5.393,
+   "lumen_us": 5.747,
+   "torch_us": 5.541,
    "matches_torch": true,
    "rotation": 4096,
    "chained": false,
    "kernels": 1,
-   "gbs": 2.9
+   "gbs": 2.85
   },
   {
    "op": "erf_inv",
@@ -202,13 +202,13 @@
    "stored_bytes": 32768,
    "flops": 16384,
    "compute_bound": false,
-   "lumen_us": 5.598,
-   "torch_us": 5.343,
+   "lumen_us": 5.696,
+   "torch_us": 5.51,
    "matches_torch": true,
    "rotation": 4096,
    "chained": false,
    "kernels": 1,
-   "gbs": 11.71
+   "gbs": 11.51
   },
   {
    "op": "erf_inv",
@@ -223,13 +223,13 @@
    "stored_bytes": 131072,
    "flops": 65536,
    "compute_bound": false,
-   "lumen_us": 5.614,
-   "torch_us": 5.438,
+   "lumen_us": 5.767,
+   "torch_us": 5.56,
    "matches_torch": true,
    "rotation": 2048,
    "chained": false,
    "kernels": 1,
-   "gbs": 46.69
+   "gbs": 45.46
   },
   {
    "op": "erf_inv",
@@ -244,13 +244,13 @@
    "stored_bytes": 524288,
    "flops": 262144,
    "compute_bound": false,
-   "lumen_us": 5.548,
-   "torch_us": 5.527,
+   "lumen_us": 5.635,
+   "torch_us": 5.685,
    "matches_torch": true,
    "rotation": 512,
    "chained": false,
    "kernels": 1,
-   "gbs": 189.0
+   "gbs": 186.08
   },
   {
    "op": "erf_inv",
@@ -265,13 +265,13 @@
    "stored_bytes": 2097152,
    "flops": 1048576,
    "compute_bound": false,
-   "lumen_us": 6.499,
-   "torch_us": 5.363,
+   "lumen_us": 6.288,
+   "torch_us": 5.468,
    "matches_torch": true,
    "rotation": 128,
    "chained": false,
    "kernels": 1,
-   "gbs": 645.38
+   "gbs": 667.03
   },
   {
    "op": "erf_inv",
@@ -286,13 +286,13 @@
    "stored_bytes": 8388608,
    "flops": 4194304,
    "compute_bound": false,
-   "lumen_us": 15.98,
-   "torch_us": 8.88,
+   "lumen_us": 15.805,
+   "torch_us": 8.882,
    "matches_torch": true,
    "rotation": 32,
    "chained": false,
    "kernels": 1,
-   "gbs": 1049.89
+   "gbs": 1061.51
   },
   {
    "op": "erf_inv",
@@ -307,13 +307,13 @@
    "stored_bytes": 33554432,
    "flops": 16777216,
    "compute_bound": false,
-   "lumen_us": 51.722,
-   "torch_us": 26.166,
+   "lumen_us": 49.37,
+   "torch_us": 26.15,
    "matches_torch": true,
    "rotation": 8,
    "chained": false,
    "kernels": 1,
-   "gbs": 1297.49
+   "gbs": 1359.3
   },
   {
    "op": "erf_inv",
@@ -328,18 +328,18 @@
    "stored_bytes": 134217728,
    "flops": 67108864,
    "compute_bound": false,
-   "lumen_us": 192.851,
-   "torch_us": 92.078,
+   "lumen_us": 177.009,
+   "torch_us": 92.145,
    "matches_torch": true,
    "rotation": 2,
    "chained": false,
    "kernels": 1,
-   "gbs": 1391.93
+   "gbs": 1516.51
   }
  ],
  "code": {
-  "kernel": "// step 0: erf_inv\n// { lambda %0:f32[1048576]. let\n//     %1:f32[1048576] = erf_inv %0\n//   in (%1) }\n\nimport cuda.bindings.driver as cuda\nimport cutlass\nimport cutlass.cute as cute\nfrom cutlass import Int32\n\nfrom lumen.codegen.elementwise.cuda.kernel import ElementwiseKernel\n\n\n@cute.jit\ndef BODY(ins, outs, fins, fouts, j, v, SEGMENT: cutlass.Constexpr):\n    \"\"\"Every output of segment `SEGMENT` at flat index `j`, the tensors read and written at `j` through\n    `fins` and `fouts` at `v`.\"\"\"\n    in0 = ins[0]\n    out0 = outs[0]\n    fin0 = fins[0]\n    fout0 = fouts[0]\n    if cutlass.const_expr(SEGMENT == 0):\n        v0 = fin0[v]\n        t1 = cute.math.add(cutlass.Float32(1.0), -v0, rounding=cute.math.RoundingMode.NEAREST_EVEN)\n        t2 = cute.math.add(cutlass.Float32(1.0), v0, rounding=cute.math.RoundingMode.NEAREST_EVEN)\n        t3 = -cute.math.log(cute.math.mul(t1, t2, rounding=cute.math.RoundingMode.NEAREST_EVEN))\n        t4 = t3 < cutlass.Float32(5.0)\n        t5 = cutlass.Float32(cutlass.select_(t4, cute.math.add(t3, cutlass.Float32(-2.5), rounding=cute.math.RoundingMode.NEAREST_EVEN), cute.math.add(cute.math.sqrt(t3), cutlass.Float32(-3.0), rounding=cute.math.RoundingMode.NEAREST_EVEN)))\n        t6 = cutlass.Float32(cutlass.select_(t4, cutlass.Float32(2.81022636e-08), cutlass.Float32(-0.000200214257)))\n        t7 = cute.math.fma(t6, t5, cutlass.Float32(cutlass.select_(t4, cutlass.Float32(3.43273939e-07), cutlass.Float32(0.000100950558))))\n        t8 = cute.math.fma(t7, t5, cutlass.Float32(cutlass.select_(t4, cutlass.Float32(-3.5233877e-06), cutlass.Float32(0.00134934322))))\n        t9 = cute.math.fma(t8, t5, cutlass.Float32(cutlass.select_(t4, cutlass.Float32(-4.39150654e-06), cutlass.Float32(-0.00367342844))))\n        t10 = cute.math.fma(t9, t5, cutlass.Float32(cutlass.select_(t4, cutlass.Float32(0.00021858087), cutlass.Float32(0.00573950773))))\n        t11 = cute.math.fma(t10, t5, cutlass.Float32(cutlass.select_(t4, cutlass.Float32(-0.00125372503), cutlass.Float32(-0.0076224613))))\n        t12 = cute.math.fma(t11, t5, cutlass.Float32(cutlass.select_(t4, cutlass.Float32(-0.00417768164), cutlass.Float32(0.00943887047))))\n        t13 = cute.math.fma(t12, t5, cutlass.Float32(cutlass.select_(t4, cutlass.Float32(0.246640727), cutlass.Float32(1.00167406))))\n        t14 = cute.math.fma(t13, t5, cutlass.Float32(cutlass.select_(t4, cutlass.Float32(1.50140941), cutlass.Float32(2.83297682))))\n        v15 = (cutlass.Float32(cutlass.select_(cute.math.abs(v0) == cutlass.Float32(1.0), cute.math.mul(v0, cutlass.Float32(float(\"inf\")), rounding=cute.math.RoundingMode.NEAREST_EVEN), cute.math.mul(t14, v0, rounding=cute.math.RoundingMode.NEAREST_EVEN)))).to(cutlass.Float32)\n        fout0[v] = v15\n\n\n@cute.jit\ndef launch(in0, out0, blocks: Int32, stream: cuda.CUstream, vectorized: cutlass.Constexpr):\n    \"\"\"Runs the fusion's `ElementwiseKernel` on `blocks` blocks on `stream`, with vector loads and stores\n    when `vectorized` (every tensor 16-byte aligned).\"\"\"\n    kernel = ElementwiseKernel(BODY, (1048576, ), (cutlass.Float32, cutlass.Float32, ), (1048576, 1048576, ), ((0, ), ), ((0, ), ), (True, ), vectorized)\n    kernel.launch([in0], [out0], blocks, stream)",
+  "kernel": "// step 0: erf_inv\n// { lambda %0:f32[1048576]. let\n//     %1:f32[1048576] = erf_inv %0\n//   in (%1) }\n\nimport cuda.bindings.driver as cuda\nimport cutlass\nimport cutlass.cute as cute\nfrom cutlass import Int32\n\nfrom lumen.codegen.elementwise.cuda.kernel import FAST_MATH, ElementwiseKernel\n\n# The math functions BODY calls: CuTe's, or their fast approximations under config.compiler.fast_math.\nmath = cute.math\n\n\n@cute.jit\ndef BODY(ins, outs, fins, fouts, j, v, SEGMENT: cutlass.Constexpr):\n    \"\"\"Every output of segment `SEGMENT` at flat index `j`, the tensors read and written at `j` through\n    `fins` and `fouts` at `v`.\"\"\"\n    in0 = ins[0]\n    out0 = outs[0]\n    fin0 = fins[0]\n    fout0 = fouts[0]\n    if cutlass.const_expr(SEGMENT == 0):\n        v0 = fin0[v]\n        t1 = math.add(cutlass.Float32(1.0), -v0, rounding=math.RoundingMode.NEAREST_EVEN)\n        t2 = math.add(cutlass.Float32(1.0), v0, rounding=math.RoundingMode.NEAREST_EVEN)\n        t3 = -math.log(math.mul(t1, t2, rounding=math.RoundingMode.NEAREST_EVEN))\n        t4 = t3 < cutlass.Float32(5.0)\n        t5 = cutlass.Float32(cutlass.select_(t4, math.add(t3, cutlass.Float32(-2.5), rounding=math.RoundingMode.NEAREST_EVEN), math.add(math.sqrt(t3), cutlass.Float32(-3.0), rounding=math.RoundingMode.NEAREST_EVEN)))\n        t6 = cutlass.Float32(cutlass.select_(t4, cutlass.Float32(2.81022636e-08), cutlass.Float32(-0.000200214257)))\n        t7 = math.fma(t6, t5, cutlass.Float32(cutlass.select_(t4, cutlass.Float32(3.43273939e-07), cutlass.Float32(0.000100950558))))\n        t8 = math.fma(t7, t5, cutlass.Float32(cutlass.select_(t4, cutlass.Float32(-3.5233877e-06), cutlass.Float32(0.00134934322))))\n        t9 = math.fma(t8, t5, cutlass.Float32(cutlass.select_(t4, cutlass.Float32(-4.39150654e-06), cutlass.Float32(-0.00367342844))))\n        t10 = math.fma(t9, t5, cutlass.Float32(cutlass.select_(t4, cutlass.Float32(0.00021858087), cutlass.Float32(0.00573950773))))\n        t11 = math.fma(t10, t5, cutlass.Float32(cutlass.select_(t4, cutlass.Float32(-0.00125372503), cutlass.Float32(-0.0076224613))))\n        t12 = math.fma(t11, t5, cutlass.Float32(cutlass.select_(t4, cutlass.Float32(-0.00417768164), cutlass.Float32(0.00943887047))))\n        t13 = math.fma(t12, t5, cutlass.Float32(cutlass.select_(t4, cutlass.Float32(0.246640727), cutlass.Float32(1.00167406))))\n        t14 = math.fma(t13, t5, cutlass.Float32(cutlass.select_(t4, cutlass.Float32(1.50140941), cutlass.Float32(2.83297682))))\n        v15 = (cutlass.Float32(cutlass.select_(math.abs(v0) == cutlass.Float32(1.0), math.mul(v0, cutlass.Float32(float(\"inf\")), rounding=math.RoundingMode.NEAREST_EVEN), math.mul(t14, v0, rounding=math.RoundingMode.NEAREST_EVEN)))).to(cutlass.Float32)\n        fout0[v] = v15\n\n\n@cute.jit\ndef launch(\n    in0, out0,\n    blocks: Int32,\n    stream: cuda.CUstream,\n    vectorized: cutlass.Constexpr,\n    threads: cutlass.Constexpr,\n    step_bytes: cutlass.Constexpr,\n):\n    \"\"\"Runs the fusion's `ElementwiseKernel` on `blocks` blocks on `stream`, with vector loads and stores\n    when `vectorized` (every tensor 16-byte aligned), its blocks of `threads` threads each moving `step_bytes`\n    of its widest tensor a step.\"\"\"\n    kernel = ElementwiseKernel(BODY, (1048576, ), (cutlass.Float32, cutlass.Float32, ), (1048576, 1048576, ), ((0, ), ), ((0, ), ), (True, ), vectorized, threads, step_bytes)\n    kernel.launch([in0], [out0], blocks, stream)",
   "plan": "plan (workspace 4194304 bytes)\n    ws+0:f32[1048576] = fusion[name=elementwise body={ lambda %0:f32[1048576]. let\n    %1:f32[1048576] = erf_inv %0\n  in (%1) }] in0"
  },
- "measured_at": "2026-11-04T09:42:24+00:00"
+ "measured_at": "2026-11-04T17:13:01+00:00"
 }

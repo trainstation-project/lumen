@@ -4,115 +4,115 @@
    "op": "cosh",
    "dtype": "float32",
    "n": 4096,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cosh': %106 = \"math.cosh\"(%87) <{fastmat",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cosh': %143 = \"math.cosh\"(%127) <{fastma",
    "jax_us": 39.877
   },
   {
    "op": "cosh",
    "dtype": "float32",
    "n": 16384,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cosh': %202 = \"math.cosh\"(%111) <{fastma",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cosh': %225 = \"math.cosh\"(%149) <{fastma",
    "jax_us": 40.136
   },
   {
    "op": "cosh",
    "dtype": "float32",
    "n": 65536,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cosh': %585 = \"math.cosh\"(%207) <{fastma",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cosh': %563 = \"math.cosh\"(%247) <{fastma",
    "jax_us": 37.19
   },
   {
    "op": "cosh",
    "dtype": "float32",
    "n": 262144,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cosh': %658 = \"math.cosh\"(%280) <{fastma",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cosh': %1907 = \"math.cosh\"(%631) <{fastm",
    "jax_us": 36.267
   },
   {
    "op": "cosh",
    "dtype": "float32",
    "n": 1048576,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cosh': %658 = \"math.cosh\"(%280) <{fastma",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cosh': %7283 = \"math.cosh\"(%2167) <{fast",
    "jax_us": 35.88
   },
   {
    "op": "cosh",
    "dtype": "float32",
    "n": 4194304,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cosh': %658 = \"math.cosh\"(%280) <{fastma",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cosh': %7338 = \"math.cosh\"(%2222) <{fast",
    "jax_us": 36.256
   },
   {
    "op": "cosh",
    "dtype": "float32",
    "n": 16777216,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cosh': %658 = \"math.cosh\"(%280) <{fastma",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cosh': %7338 = \"math.cosh\"(%2222) <{fast",
    "jax_us": 99.495
   },
   {
    "op": "cosh",
    "dtype": "float32",
    "n": 67108864,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cosh': %658 = \"math.cosh\"(%280) <{fastma",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cosh': %7338 = \"math.cosh\"(%2222) <{fast",
    "jax_us": 376.445
   },
   {
    "op": "cosh",
    "dtype": "bfloat16",
    "n": 4096,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cosh': %239 = \"math.cosh\"(%176) <{fastma",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cosh': %166 = \"math.cosh\"(%159) <{fastma",
    "jax_us": 39.113
   },
   {
    "op": "cosh",
    "dtype": "bfloat16",
    "n": 16384,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cosh': %737 = \"math.cosh\"(%482) <{fastma",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cosh': %319 = \"math.cosh\"(%288) <{fastma",
    "jax_us": 39.474
   },
   {
    "op": "cosh",
    "dtype": "bfloat16",
    "n": 65536,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cosh': %2727 = \"math.cosh\"(%1704) <{fast",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cosh': %944 = \"math.cosh\"(%817) <{fastma",
    "jax_us": 37.904
   },
   {
    "op": "cosh",
    "dtype": "bfloat16",
    "n": 262144,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cosh': %2800 = \"math.cosh\"(%1777) <{fast",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cosh': %3439 = \"math.cosh\"(%2928) <{fast",
    "jax_us": 36.535
   },
   {
    "op": "cosh",
    "dtype": "bfloat16",
    "n": 1048576,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cosh': %2800 = \"math.cosh\"(%1777) <{fast",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cosh': %13423 = \"math.cosh\"(%11376) <{fa",
    "jax_us": 36.43
   },
   {
    "op": "cosh",
    "dtype": "bfloat16",
    "n": 4194304,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cosh': %2800 = \"math.cosh\"(%1777) <{fast",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cosh': %13477 = \"math.cosh\"(%11430) <{fa",
    "jax_us": 36.731
   },
   {
    "op": "cosh",
    "dtype": "bfloat16",
    "n": 16777216,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cosh': %2798 = \"math.cosh\"(%1775) <{fast",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cosh': %13475 = \"math.cosh\"(%11428) <{fa",
    "jax_us": 53.903
   },
   {
    "op": "cosh",
    "dtype": "bfloat16",
    "n": 67108864,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cosh': %2800 = \"math.cosh\"(%1777) <{fast",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.cosh': %13477 = \"math.cosh\"(%11430) <{fa",
    "jax_us": 192.117
   }
  ],
  "code": null,
- "measured_at": "2026-11-04T09:09:20+00:00"
+ "measured_at": "2026-11-04T10:46:12+00:00"
 }

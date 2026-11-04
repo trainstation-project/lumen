@@ -4,115 +4,115 @@
    "op": "atan",
    "dtype": "float32",
    "n": 4096,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.atan': %106 = \"math.atan\"(%87) <{fastmat",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.atan': %143 = \"math.atan\"(%127) <{fastma",
    "jax_us": 39.143
   },
   {
    "op": "atan",
    "dtype": "float32",
    "n": 16384,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.atan': %202 = \"math.atan\"(%111) <{fastma",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.atan': %225 = \"math.atan\"(%149) <{fastma",
    "jax_us": 40.333
   },
   {
    "op": "atan",
    "dtype": "float32",
    "n": 65536,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.atan': %585 = \"math.atan\"(%207) <{fastma",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.atan': %563 = \"math.atan\"(%247) <{fastma",
    "jax_us": 37.156
   },
   {
    "op": "atan",
    "dtype": "float32",
    "n": 262144,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.atan': %658 = \"math.atan\"(%280) <{fastma",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.atan': %1907 = \"math.atan\"(%631) <{fastm",
    "jax_us": 37.17
   },
   {
    "op": "atan",
    "dtype": "float32",
    "n": 1048576,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.atan': %658 = \"math.atan\"(%280) <{fastma",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.atan': %7283 = \"math.atan\"(%2167) <{fast",
    "jax_us": 35.189
   },
   {
    "op": "atan",
    "dtype": "float32",
    "n": 4194304,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.atan': %658 = \"math.atan\"(%280) <{fastma",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.atan': %7338 = \"math.atan\"(%2222) <{fast",
    "jax_us": 39.295
   },
   {
    "op": "atan",
    "dtype": "float32",
    "n": 16777216,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.atan': %658 = \"math.atan\"(%280) <{fastma",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.atan': %7338 = \"math.atan\"(%2222) <{fast",
    "jax_us": 102.125
   },
   {
    "op": "atan",
    "dtype": "float32",
    "n": 67108864,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.atan': %658 = \"math.atan\"(%280) <{fastma",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.atan': %7338 = \"math.atan\"(%2222) <{fast",
    "jax_us": 388.243
   },
   {
    "op": "atan",
    "dtype": "bfloat16",
    "n": 4096,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.atan': %239 = \"math.atan\"(%176) <{fastma",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.atan': %166 = \"math.atan\"(%159) <{fastma",
    "jax_us": 39.755
   },
   {
    "op": "atan",
    "dtype": "bfloat16",
    "n": 16384,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.atan': %737 = \"math.atan\"(%482) <{fastma",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.atan': %319 = \"math.atan\"(%288) <{fastma",
    "jax_us": 40.206
   },
   {
    "op": "atan",
    "dtype": "bfloat16",
    "n": 65536,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.atan': %2727 = \"math.atan\"(%1704) <{fast",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.atan': %944 = \"math.atan\"(%817) <{fastma",
    "jax_us": 39.442
   },
   {
    "op": "atan",
    "dtype": "bfloat16",
    "n": 262144,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.atan': %2800 = \"math.atan\"(%1777) <{fast",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.atan': %3439 = \"math.atan\"(%2928) <{fast",
    "jax_us": 34.882
   },
   {
    "op": "atan",
    "dtype": "bfloat16",
    "n": 1048576,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.atan': %2800 = \"math.atan\"(%1777) <{fast",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.atan': %13423 = \"math.atan\"(%11376) <{fa",
    "jax_us": 35.652
   },
   {
    "op": "atan",
    "dtype": "bfloat16",
    "n": 4194304,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.atan': %2800 = \"math.atan\"(%1777) <{fast",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.atan': %13477 = \"math.atan\"(%11430) <{fa",
    "jax_us": 37.077
   },
   {
    "op": "atan",
    "dtype": "bfloat16",
    "n": 16777216,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.atan': %2798 = \"math.atan\"(%1775) <{fast",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.atan': %13475 = \"math.atan\"(%11428) <{fa",
    "jax_us": 103.211
   },
   {
    "op": "atan",
    "dtype": "bfloat16",
    "n": 67108864,
-   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.atan': %2800 = \"math.atan\"(%1777) <{fast",
+   "error": "generated: compiling a TPU program: Mosaic failed to compile TPU kernel with MLIR module name `<no name>` HLO name `name.1`: failed to legalize operation 'math.atan': %13477 = \"math.atan\"(%11430) <{fa",
    "jax_us": 375.685
   }
  ],
  "code": null,
- "measured_at": "2026-11-04T09:09:14+00:00"
+ "measured_at": "2026-11-04T10:46:06+00:00"
 }

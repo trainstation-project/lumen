@@ -13,13 +13,13 @@
    "stored_bytes": 16384,
    "flops": 4096,
    "compute_bound": false,
-   "lumen_us": 82.677,
+   "lumen_us": 82.302,
    "torch_us": null,
    "matches_torch": null,
    "rotation": 4096,
    "chained": false,
    "kernels": 1,
-   "gbs": 0.99,
+   "gbs": 1.0,
    "jax_us": 43.28
   },
   {
@@ -35,7 +35,7 @@
    "stored_bytes": 65536,
    "flops": 16384,
    "compute_bound": false,
-   "lumen_us": 81.125,
+   "lumen_us": 81.118,
    "torch_us": null,
    "matches_torch": null,
    "rotation": 1639,
@@ -57,13 +57,13 @@
    "stored_bytes": 262144,
    "flops": 65536,
    "compute_bound": false,
-   "lumen_us": 78.567,
+   "lumen_us": 78.596,
    "torch_us": null,
    "matches_torch": null,
    "rotation": 410,
    "chained": false,
    "kernels": 1,
-   "gbs": 16.69,
+   "gbs": 16.68,
    "jax_us": 40.8
   },
   {
@@ -79,13 +79,13 @@
    "stored_bytes": 1048576,
    "flops": 262144,
    "compute_bound": false,
-   "lumen_us": 68.468,
+   "lumen_us": 68.643,
    "torch_us": null,
    "matches_torch": null,
    "rotation": 103,
    "chained": false,
    "kernels": 1,
-   "gbs": 76.59,
+   "gbs": 76.39,
    "jax_us": 40.326
   },
   {
@@ -101,13 +101,13 @@
    "stored_bytes": 4194304,
    "flops": 1048576,
    "compute_bound": false,
-   "lumen_us": 36.048,
+   "lumen_us": 36.449,
    "torch_us": null,
    "matches_torch": null,
    "rotation": 26,
    "chained": false,
    "kernels": 1,
-   "gbs": 581.88,
+   "gbs": 575.48,
    "jax_us": 41.833
   },
   {
@@ -123,13 +123,13 @@
    "stored_bytes": 16777216,
    "flops": 4194304,
    "compute_bound": false,
-   "lumen_us": 61.913,
+   "lumen_us": 62.078,
    "torch_us": null,
    "matches_torch": null,
    "rotation": 7,
    "chained": false,
    "kernels": 1,
-   "gbs": 1355.17,
+   "gbs": 1351.57,
    "jax_us": 76.547
   },
   {
@@ -145,13 +145,13 @@
    "stored_bytes": 67108864,
    "flops": 16777216,
    "compute_bound": false,
-   "lumen_us": 159.008,
+   "lumen_us": 159.035,
    "torch_us": null,
    "matches_torch": null,
    "rotation": 2,
    "chained": false,
    "kernels": 1,
-   "gbs": 2110.65,
+   "gbs": 2110.29,
    "jax_us": 225.409
   },
   {
@@ -167,13 +167,13 @@
    "stored_bytes": 268435456,
    "flops": 67108864,
    "compute_bound": false,
-   "lumen_us": 542.252,
+   "lumen_us": 543.894,
    "torch_us": null,
    "matches_torch": null,
    "rotation": 2,
    "chained": false,
    "kernels": 1,
-   "gbs": 2475.67,
+   "gbs": 2468.2,
    "jax_us": 894.15
   },
   {
@@ -189,13 +189,13 @@
    "stored_bytes": 8192,
    "flops": 4096,
    "compute_bound": false,
-   "lumen_us": 39.847,
+   "lumen_us": 43.712,
    "torch_us": null,
    "matches_torch": null,
    "rotation": 4096,
    "chained": false,
    "kernels": 1,
-   "gbs": 1.03,
+   "gbs": 0.94,
    "jax_us": 44.102
   },
   {
@@ -211,13 +211,13 @@
    "stored_bytes": 32768,
    "flops": 16384,
    "compute_bound": false,
-   "lumen_us": 39.87,
+   "lumen_us": 43.162,
    "torch_us": null,
    "matches_torch": null,
    "rotation": 3276,
    "chained": false,
    "kernels": 1,
-   "gbs": 4.11,
+   "gbs": 3.8,
    "jax_us": 43.892
   },
   {
@@ -233,13 +233,13 @@
    "stored_bytes": 131072,
    "flops": 65536,
    "compute_bound": false,
-   "lumen_us": 39.588,
+   "lumen_us": 42.703,
    "torch_us": null,
    "matches_torch": null,
    "rotation": 819,
    "chained": false,
    "kernels": 1,
-   "gbs": 16.56,
+   "gbs": 15.35,
    "jax_us": 41.507
   },
   {
@@ -255,13 +255,13 @@
    "stored_bytes": 524288,
    "flops": 262144,
    "compute_bound": false,
-   "lumen_us": 23.682,
+   "lumen_us": 30.08,
    "torch_us": null,
    "matches_torch": null,
    "rotation": 205,
    "chained": false,
    "kernels": 1,
-   "gbs": 110.74,
+   "gbs": 87.18,
    "jax_us": 38.722
   },
   {
@@ -277,13 +277,13 @@
    "stored_bytes": 2097152,
    "flops": 1048576,
    "compute_bound": false,
-   "lumen_us": 49.302,
+   "lumen_us": 49.621,
    "torch_us": null,
    "matches_torch": null,
    "rotation": 52,
    "chained": false,
    "kernels": 1,
-   "gbs": 212.77,
+   "gbs": 211.4,
    "jax_us": 39.427
   },
   {
@@ -299,13 +299,13 @@
    "stored_bytes": 8388608,
    "flops": 4194304,
    "compute_bound": false,
-   "lumen_us": 200.767,
+   "lumen_us": 202.097,
    "torch_us": null,
    "matches_torch": null,
    "rotation": 13,
    "chained": false,
    "kernels": 1,
-   "gbs": 209.0,
+   "gbs": 207.62,
    "jax_us": 86.619
   },
   {
@@ -321,13 +321,13 @@
    "stored_bytes": 33554432,
    "flops": 16777216,
    "compute_bound": false,
-   "lumen_us": 687.351,
+   "lumen_us": 687.959,
    "torch_us": null,
    "matches_torch": null,
    "rotation": 4,
    "chained": false,
    "kernels": 1,
-   "gbs": 244.18,
+   "gbs": 243.96,
    "jax_us": 204.77
   },
   {
@@ -343,13 +343,13 @@
    "stored_bytes": 134217728,
    "flops": 67108864,
    "compute_bound": false,
-   "lumen_us": 2718.957,
+   "lumen_us": 2719.551,
    "torch_us": null,
    "matches_torch": null,
    "rotation": 2,
    "chained": false,
    "kernels": 1,
-   "gbs": 246.91,
+   "gbs": 246.86,
    "jax_us": 682.7
   }
  ],
@@ -357,5 +357,5 @@
   "kernel": "// step 0: gather\n// gather[axis=0]\n\n\"builtin.module\"() ({\n  \"stable_mosaic.func.func\"() ({\n  ^bb0(%arg0: i32, %arg1: i32, %arg2: memref<1048320x1024xi32, #tpu.memory_space<hbm>>, %arg3: memref<1024xi32, #tpu.memory_space<hbm>>, %arg4: memref<3xi32, #tpu.memory_space<hbm>>, %arg5: memref<1048320x1024xi32, #tpu.memory_space<hbm>>, %arg6: memref<32xi32, #tpu.memory_space<vmem>>, %arg7: memref<32x1024xi32, #tpu.memory_space<vmem>>, %arg8: memref<!tpu.dma_semaphore, #tpu.memory_space<semaphore_mem>>, %arg9: memref<3xi32, #tpu.memory_space<vmem_shared>>, %arg10: memref<3xi32, #tpu.memory_space<smem>>):\n    %t0 = \"stable_mosaic.arith.constant\"() {value = 16 : i32} : () -> i32\n    %t1 = \"stable_mosaic.arith.muli\"(%arg0, %t0) {overflowFlags = #arith.overflow<none>} : (i32, i32) -> i32\n    %t2 = \"stable_mosaic.arith.addi\"(%t1, %arg1) {overflowFlags = #arith.overflow<none>} : (i32, i32) -> i32\n    %t3 = \"stable_mosaic.arith.constant\"() {value = 32 : i32} : () -> i32\n    %t4 = \"stable_mosaic.arith.muli\"(%t2, %t3) {overflowFlags = #arith.overflow<none>} : (i32, i32) -> i32\n    \"stable_mosaic.tpu.enqueue_dma\"(%arg4, %arg9, %arg8) {operandSegmentSizes = array<i32: 1, 0, 1, 1, 0, 0, 0>, priority = 0 : i32, strict_ordering = false} : (memref<3xi32, #tpu.memory_space<hbm>>, memref<3xi32, #tpu.memory_space<vmem_shared>>, memref<!tpu.dma_semaphore, #tpu.memory_space<semaphore_mem>>) -> ()\n    \"stable_mosaic.tpu.wait_dma2\"(%arg8, %arg4, %arg9) {operandSegmentSizes = array<i32: 1, 1, 1, 0, 0>, strict_ordering = false} : (memref<!tpu.dma_semaphore, #tpu.memory_space<semaphore_mem>>, memref<3xi32, #tpu.memory_space<hbm>>, memref<3xi32, #tpu.memory_space<vmem_shared>>) -> ()\n    \"stable_mosaic.tpu.enqueue_dma\"(%arg9, %arg10, %arg8) {operandSegmentSizes = array<i32: 1, 0, 1, 1, 0, 0, 0>, priority = 0 : i32, strict_ordering = false} : (memref<3xi32, #tpu.memory_space<vmem_shared>>, memref<3xi32, #tpu.memory_space<smem>>, memref<!tpu.dma_semaphore, #tpu.memory_space<semaphore_mem>>) -> ()\n    \"stable_mosaic.tpu.wait_dma2\"(%arg8, %arg9, %arg10) {operandSegmentSizes = array<i32: 1, 1, 1, 0, 0>, strict_ordering = false} : (memref<!tpu.dma_semaphore, #tpu.memory_space<semaphore_mem>>, memref<3xi32, #tpu.memory_space<vmem_shared>>, memref<3xi32, #tpu.memory_space<smem>>) -> ()\n    %t9 = \"stable_mosaic.arith.constant\"() {value = 2 : i32} : () -> i32\n    %t10 = \"stable_mosaic.arith.index_cast\"(%t9) : (i32) -> index\n    %t11 = \"stable_mosaic.memref.load\"(%arg10, %t10) : (memref<3xi32, #tpu.memory_space<smem>>, index) -> i32\n    %t12 = \"stable_mosaic.arith.constant\"() {value = 8 : i32} : () -> i32\n    %t13 = \"stable_mosaic.arith.divsi\"(%t11, %t12) : (i32, i32) -> i32\n    %t14 = \"stable_mosaic.arith.constant\"() {value = 0 : i32} : () -> i32\n    %t15 = \"stable_mosaic.arith.remsi\"(%t11, %t12) : (i32, i32) -> i32\n    %t16 = \"stable_mosaic.arith.cmpi\"(%t15, %t14) {predicate = 0 : i64} : (i32, i32) -> i1\n    %t17 = \"stable_mosaic.arith.constant\"() {value = false} : () -> i1\n    %t18 = \"stable_mosaic.arith.constant\"() {value = true} : () -> i1\n    %t19 = \"stable_mosaic.arith.xori\"(%t16, %t17) : (i1, i1) -> i1\n    %t20 = \"stable_mosaic.arith.xori\"(%t19, %t18) : (i1, i1) -> i1\n    %t21 = \"stable_mosaic.arith.cmpi\"(%t11, %t14) {predicate = 2 : i64} : (i32, i32) -> i1\n    %t22 = \"stable_mosaic.arith.cmpi\"(%t12, %t14) {predicate = 2 : i64} : (i32, i32) -> i1\n    %t23 = \"stable_mosaic.arith.constant\"() {value = true} : () -> i1\n    %t24 = \"stable_mosaic.arith.xori\"(%t21, %t22) : (i1, i1) -> i1\n    %t25 = \"stable_mosaic.arith.xori\"(%t24, %t23) : (i1, i1) -> i1\n    %t26 = \"stable_mosaic.arith.constant\"() {value = false} : () -> i1\n    %t27 = \"stable_mosaic.arith.constant\"() {value = true} : () -> i1\n    %t28 = \"stable_mosaic.arith.xori\"(%t25, %t26) : (i1, i1) -> i1\n    %t29 = \"stable_mosaic.arith.xori\"(%t28, %t27) : (i1, i1) -> i1\n    %t30 = \"stable_mosaic.arith.andi\"(%t20, %t29) : (i1, i1) -> i1\n    %t31 = \"stable_mosaic.arith.constant\"() {value = 1 : i32} : () -> i32\n    %t32 = \"stable_mosaic.arith.subi\"(%t13, %t31) {overflowFlags = #arith.overflow<none>} : (i32, i32) -> i32\n    %t33 = \"stable_mosaic.arith.select\"(%t30, %t32, %t13) : (i1, i32, i32) -> i32\n    %t34 = \"stable_mosaic.arith.constant\"() {value = 0 : i32} : () -> i32\n    %t35 = \"stable_mosaic.arith.constant\"() {value = 1 : i32} : () -> i32\n    %t36 = \"stable_mosaic.arith.constant\"() {value = 1 : i32} : () -> i32\n    \"stable_mosaic.scf.for\"(%t34, %t35, %t36) ({\n    ^bb0(%v36: i32):\n      %t38 = \"stable_mosaic.arith.constant\"() {value = 0 : i32} : () -> i32\n      %t39 = \"stable_mosaic.arith.constant\"() {value = 1 : i32} : () -> i32\n      %t40 = \"stable_mosaic.arith.muli\"(%v36, %t39) {overflowFlags = #arith.overflow<none>} : (i32, i32) -> i32\n      %t41 = \"stable_mosaic.arith.addi\"(%t38, %t40) {overflowFlags = #arith.overflow<none>} : (i32, i32) -> i32\n      %t42 = \"stable_mosaic.arith.constant\"() {value = 32 : i32} : () -> i32\n      %t43 = \"stable_mosaic.arith.muli\"(%t41, %t42) {overflowFlags = #arith.overflow<none>} : (i32, i32) -> i32\n      %t44 = \"stable_mosaic.arith.addi\"(%t4, %t43) {overflowFlags = #arith.overflow<none>} : (i32, i32) -> i32\n      %t45 = \"stable_mosaic.tpu.assume_multiple\"(%t44) {multiple = 32 : i32} : (i32) -> i32\n      %t46 = \"stable_mosaic.tpu.memref_slice\"(%arg3, %t45) {operandSegmentSizes = array<i32: 1, 1, 0>} : (memref<1024xi32, #tpu.memory_space<hbm>>, i32) -> memref<32xi32, #tpu.memory_space<hbm>>\n      \"stable_mosaic.tpu.enqueue_dma\"(%t46, %arg6, %arg8) {operandSegmentSizes = array<i32: 1, 0, 1, 1, 0, 0, 0>, priority = 0 : i32, strict_ordering = false} : (memref<32xi32, #tpu.memory_space<hbm>>, memref<32xi32, #tpu.memory_space<vmem>>, memref<!tpu.dma_semaphore, #tpu.memory_space<semaphore_mem>>) -> ()\n      \"stable_mosaic.tpu.wait_dma2\"(%arg8, %t46, %arg6) {operandSegmentSizes = array<i32: 1, 1, 1, 0, 0>, strict_ordering = false} : (memref<!tpu.dma_semaphore, #tpu.memory_space<semaphore_mem>>, memref<32xi32, #tpu.memory_space<hbm>>, memref<32xi32, #tpu.memory_space<vmem>>) -> ()\n      \"stable_mosaic.tpu.enqueue_indirect_dma\"(%arg5, %arg7, %arg6, %arg8) {add = false} : (memref<1048320x1024xi32, #tpu.memory_space<hbm>>, memref<32x1024xi32, #tpu.memory_space<vmem>>, memref<32xi32, #tpu.memory_space<vmem>>, memref<!tpu.dma_semaphore, #tpu.memory_space<semaphore_mem>>) -> ()\n      \"stable_mosaic.tpu.wait_indirect_dma\"(%arg8, %arg5, %arg7) : (memref<!tpu.dma_semaphore, #tpu.memory_space<semaphore_mem>>, memref<1048320x1024xi32, #tpu.memory_space<hbm>>, memref<32x1024xi32, #tpu.memory_space<vmem>>) -> ()\n      %t51 = \"stable_mosaic.arith.addi\"(%t33, %t45) {overflowFlags = #arith.overflow<none>} : (i32, i32) -> i32\n      %t52 = \"stable_mosaic.tpu.assume_multiple\"(%t51) {multiple = 8 : i32} : (i32) -> i32\n      %t53 = \"stable_mosaic.arith.constant\"() {value = 32 : i32} : () -> i32\n      %t54 = \"stable_mosaic.arith.addi\"(%t45, %t53) {overflowFlags = #arith.overflow<none>} : (i32, i32) -> i32\n      %t55 = \"stable_mosaic.arith.constant\"() {value = 1024 : i32} : () -> i32\n      %t56 = \"stable_mosaic.arith.cmpi\"(%t54, %t55) {predicate = 2 : i64} : (i32, i32) -> i1\n      %t57 = \"stable_mosaic.arith.cmpi\"(%t54, %t55) {predicate = 0 : i64} : (i32, i32) -> i1\n      %t58 = \"stable_mosaic.arith.select\"(%t56, %t56, %t57) : (i1, i1, i1) -> i1\n      \"stable_mosaic.scf.if\"(%t58) ({\n        %t60 = \"stable_mosaic.arith.constant\"() {value = 0 : i32} : () -> i32\n        %t61 = \"stable_mosaic.tpu.memref_slice\"(%arg5, %t52, %t60) {operandSegmentSizes = array<i32: 1, 2, 0>} : (memref<1048320x1024xi32, #tpu.memory_space<hbm>>, i32, i32) -> memref<32x1024xi32, #tpu.memory_space<hbm>>\n        \"stable_mosaic.tpu.enqueue_dma\"(%arg7, %t61, %arg8) {operandSegmentSizes = array<i32: 1, 0, 1, 1, 0, 0, 0>, priority = 0 : i32, strict_ordering = false} : (memref<32x1024xi32, #tpu.memory_space<vmem>>, memref<32x1024xi32, #tpu.memory_space<hbm>>, memref<!tpu.dma_semaphore, #tpu.memory_space<semaphore_mem>>) -> ()\n        \"stable_mosaic.tpu.wait_dma2\"(%arg8, %arg7, %t61) {operandSegmentSizes = array<i32: 1, 1, 1, 0, 0>, strict_ordering = false} : (memref<!tpu.dma_semaphore, #tpu.memory_space<semaphore_mem>>, memref<32x1024xi32, #tpu.memory_space<vmem>>, memref<32x1024xi32, #tpu.memory_space<hbm>>) -> ()\n        \"stable_mosaic.scf.yield\"() : () -> ()\n      }, {\n      }) : (i1) -> ()\n      \"stable_mosaic.scf.yield\"() : () -> ()\n    }) : (i32, i32, i32) -> ()\n    \"stable_mosaic.func.return\"() : () -> ()\n  }) {dimension_semantics = [#tpu.dimension_semantics<core_parallel>, #tpu.dimension_semantics<subcore_parallel>], function_type = (i32, i32, memref<1048320x1024xi32, #tpu.memory_space<hbm>>, memref<1024xi32, #tpu.memory_space<hbm>>, memref<3xi32, #tpu.memory_space<hbm>>, memref<1048320x1024xi32, #tpu.memory_space<hbm>>, memref<32xi32, #tpu.memory_space<vmem>>, memref<32x1024xi32, #tpu.memory_space<vmem>>, memref<!tpu.dma_semaphore, #tpu.memory_space<semaphore_mem>>, memref<3xi32, #tpu.memory_space<vmem_shared>>, memref<3xi32, #tpu.memory_space<smem>>) -> (), iteration_bounds = array<i64: 2, 16>, scalar_prefetch = 0 : i64, scratch_operands = 5 : i64, sym_name = \"kernel\", tpu.core_type = #tpu.core_type<sc_vector_subcore>, window_params = [{transform_indices = affine_map<(d0, d1) -> (0, 0)>}, {transform_indices = affine_map<(d0, d1) -> (0)>}, {transform_indices = affine_map<(d0, d1) -> (0)>}, {transform_indices = affine_map<(d0, d1) -> (0, 0)>}]} : () -> ()\n}) {stable_mosaic.version = 17 : i64} : () -> ()",
   "plan": "plan (workspace 4194304 bytes)\n    ws+0:f32[1024,1024] = gather[axis=0] in0 in1"
  },
- "measured_at": "2026-11-04T09:50:21+00:00"
+ "measured_at": "2026-11-04T16:51:56+00:00"
 }
