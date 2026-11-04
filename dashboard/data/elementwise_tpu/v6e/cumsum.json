@@ -1,0 +1,118 @@
+{
+ "rows": [
+  {
+   "op": "cumsum",
+   "dtype": "float32",
+   "n": 4096,
+   "error": "cumsum does not run on TPU yet",
+   "jax_us": 38.804
+  },
+  {
+   "op": "cumsum",
+   "dtype": "float32",
+   "n": 16384,
+   "error": "cumsum does not run on TPU yet",
+   "jax_us": 38.87
+  },
+  {
+   "op": "cumsum",
+   "dtype": "float32",
+   "n": 65536,
+   "error": "cumsum does not run on TPU yet",
+   "jax_us": 36.361
+  },
+  {
+   "op": "cumsum",
+   "dtype": "float32",
+   "n": 262144,
+   "error": "cumsum does not run on TPU yet",
+   "jax_us": 57.278
+  },
+  {
+   "op": "cumsum",
+   "dtype": "float32",
+   "n": 1048576,
+   "error": "cumsum does not run on TPU yet",
+   "jax_us": 223.761
+  },
+  {
+   "op": "cumsum",
+   "dtype": "float32",
+   "n": 4194304,
+   "error": "cumsum does not run on TPU yet",
+   "jax_us": 881.17
+  },
+  {
+   "op": "cumsum",
+   "dtype": "float32",
+   "n": 16777216,
+   "error": "cumsum does not run on TPU yet",
+   "jax_us": 296.064
+  },
+  {
+   "op": "cumsum",
+   "dtype": "float32",
+   "n": 67108864,
+   "error": "cumsum does not run on TPU yet",
+   "jax_us": 2638.456
+  },
+  {
+   "op": "cumsum",
+   "dtype": "bfloat16",
+   "n": 4096,
+   "error": "cumsum does not run on TPU yet",
+   "jax_us": 39.357
+  },
+  {
+   "op": "cumsum",
+   "dtype": "bfloat16",
+   "n": 16384,
+   "error": "cumsum does not run on TPU yet",
+   "jax_us": 39.723
+  },
+  {
+   "op": "cumsum",
+   "dtype": "bfloat16",
+   "n": 65536,
+   "error": "cumsum does not run on TPU yet",
+   "jax_us": 37.494
+  },
+  {
+   "op": "cumsum",
+   "dtype": "bfloat16",
+   "n": 262144,
+   "error": "cumsum does not run on TPU yet",
+   "jax_us": 56.949
+  },
+  {
+   "op": "cumsum",
+   "dtype": "bfloat16",
+   "n": 1048576,
+   "error": "cumsum does not run on TPU yet",
+   "jax_us": 222.276
+  },
+  {
+   "op": "cumsum",
+   "dtype": "bfloat16",
+   "n": 4194304,
+   "error": "cumsum does not run on TPU yet",
+   "jax_us": 877.369
+  },
+  {
+   "op": "cumsum",
+   "dtype": "bfloat16",
+   "n": 16777216,
+   "error": "cumsum does not run on TPU yet",
+   "jax_us": 366.853
+  },
+  {
+   "op": "cumsum",
+   "dtype": "bfloat16",
+   "n": 67108864,
+   "error": "cumsum does not run on TPU yet",
+   "jax_us": 3004.759
+  }
+ ],
+ "code": null,
+ "measured_at": "2026-11-04T11:04:58+00:00"
+}

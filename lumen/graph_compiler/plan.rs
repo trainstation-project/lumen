@@ -281,6 +281,8 @@ pub struct Plan {
     pub(crate) staged: Option<Box<Staged>>,
     /// Per step, the compiled Triton kernel used on CUDA.
     pub(crate) triton: Option<Vec<Option<super::triton::Kernel>>>,
+    /// Whether the CUDA (CuTe DSL) backend runs the steps, each a kernel generated at its launch.
+    pub(crate) cuda: bool,
     /// MPS launches captured per step, replayed on later runs.
     #[cfg(lumen_mps_linked)]
     launches: Launches,
@@ -903,6 +905,7 @@ impl Plan {
             interleaved: Vec::new(),
             staged: None,
             triton: None,
+            cuda: false,
             #[cfg(lumen_mps_linked)]
             launches: OnceLock::new(),
         }
@@ -932,6 +935,7 @@ impl Plan {
             interleaved,
             staged: Some(Box::new(staged)),
             triton: None,
+            cuda: false,
             #[cfg(lumen_mps_linked)]
             launches: OnceLock::new(),
         }
@@ -1293,7 +1297,7 @@ impl Plan {
         let executor = if cfg!(lumen_mps_linked) && device == Device::Mps(0) {
             Device::Mps(0)
         } else if cfg!(lumen_tpu_linked) && matches!(device, Device::Tpu(_))
-            || self.triton.is_some() && matches!(device, Device::Cuda(_))
+            || (self.triton.is_some() || self.cuda) && matches!(device, Device::Cuda(_))
         {
             device
         } else {
@@ -1589,7 +1593,10 @@ impl Plan {
                     let out = outputs.next().expect("a step's output");
                     let outs: Vec<Tensor> = outputs.collect();
                     let kernel = kernels.get(at).and_then(Option::as_ref);
-                    let run = || super::triton::run(kernel, step, &inputs, &out, &outs);
+                    let run = || match self.cuda {
+                        true => super::cuda::run(step, &inputs, &out, &outs),
+                        false => super::triton::run(kernel, step, &inputs, &out, &outs),
+                    };
 
                     // Captured into a CUDA graph, the nodes it adds are the step's, by name.
                     #[cfg(all(feature = "python", lumen_cuda_linked))]

@@ -1,0 +1,54 @@
+{
+ "rows": [
+  {
+   "op": "clz",
+   "dtype": "int32",
+   "n": 4096,
+   "error": "clz: the CUDA (CuTe DSL) backend has no kernel for it yet; turn config.compiler.use_triton_backend on to run it on Triton"
+  },
+  {
+   "op": "clz",
+   "dtype": "int32",
+   "n": 16384,
+   "error": "clz: the CUDA (CuTe DSL) backend has no kernel for it yet; turn config.compiler.use_triton_backend on to run it on Triton"
+  },
+  {
+   "op": "clz",
+   "dtype": "int32",
+   "n": 65536,
+   "error": "clz: the CUDA (CuTe DSL) backend has no kernel for it yet; turn config.compiler.use_triton_backend on to run it on Triton"
+  },
+  {
+   "op": "clz",
+   "dtype": "int32",
+   "n": 262144,
+   "error": "clz: the CUDA (CuTe DSL) backend has no kernel for it yet; turn config.compiler.use_triton_backend on to run it on Triton"
+  },
+  {
+   "op": "clz",
+   "dtype": "int32",
+   "n": 1048576,
+   "error": "clz: the CUDA (CuTe DSL) backend has no kernel for it yet; turn config.compiler.use_triton_backend on to run it on Triton"
+  },
+  {
+   "op": "clz",
+   "dtype": "int32",
+   "n": 4194304,
+   "error": "clz: the CUDA (CuTe DSL) backend has no kernel for it yet; turn config.compiler.use_triton_backend on to run it on Triton"
+  },
+  {
+   "op": "clz",
+   "dtype": "int32",
+   "n": 16777216,
+   "error": "clz: the CUDA (CuTe DSL) backend has no kernel for it yet; turn config.compiler.use_triton_backend on to run it on Triton"
+  },
+  {
+   "op": "clz",
+   "dtype": "int32",
+   "n": 67108864,
+   "error": "clz: the CUDA (CuTe DSL) backend has no kernel for it yet; turn config.compiler.use_triton_backend on to run it on Triton"
+  }
+ ],
+ "code": null,
+ "measured_at": "2026-11-04T17:14:55+00:00"
+}

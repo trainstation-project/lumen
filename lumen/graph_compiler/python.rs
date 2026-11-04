@@ -803,8 +803,190 @@ fn triton_attention(launch: &super::triton::Launch) -> Result<(), String> {
     Python::attach(|py| call(py, None).map(|_| ())).map_err(|e| e.to_string())
 }
 
-/// Registers the Triton launch hooks and the module's Python functions and class.
+/// Launches the CUDA backend's kernel `name` of module `source` on `tensors` (inputs, then its `outputs`
+/// outputs, each a flat view) over `n` elements, as a Triton kernel launches:
+/// `lumen.codegen.utils.cuda.compile` compiles it once for its tensors' dtypes and 16-byte alignment and
+/// a launch shape, and returns the loaded function, which every launch then runs by `cuLaunchKernel`
+/// from here, on lumen's stream (a CUDA graph's while it captures). The shape is the fastest of
+/// `shapes()` when autotuning (timed once a kernel and argument classes), else the untuned one.
+#[cfg_attr(not(lumen_cuda_linked), allow(unused_variables))]
+fn cuda_launch(
+    name: &str,
+    source: &str,
+    tensors: &[crate::Tensor],
+    outputs: usize,
+    n: usize,
+) -> Result<(), String> {
+    current(&tensors[0]);
+
+    crate::profiler::launched::launched(name, || Some(source.to_string()));
+
+    #[cfg(lumen_cuda_linked)]
+    {
+        use super::triton::direct::{self, Class, Value};
+        use crate::codegen::elementwise::cuda::{Shape, UNTUNED, blocks};
+
+        let Device::Cuda(device) = tensors[0].device() else {
+            return Err(format!("{name}: a CUDA kernel launched on a host tensor"));
+        };
+
+        let values: Vec<Value> = tensors.iter().map(Value::of).collect();
+        let key = direct::key(name, device, &values);
+        let widest = tensors
+            .iter()
+            .map(|t| t.dtype().size_of())
+            .max()
+            .unwrap_or(1);
+
+        // The kernel compiled for launch shape `(threads, step_bytes)`.
+        let compiled = |(threads, step_bytes): Shape| {
+            direct::compiled(&format!("{key}|{threads}x{step_bytes}"), || {
+                let dtypes = tensors
+                    .iter()
+                    .map(|t| crate::codegen::utils::cuda::cute_type(t.dtype()))
+                    .collect::<Option<Vec<&str>>>()
+                    .ok_or(format!("{name}: a dtype CuTe has no type for"))?;
+
+                let aligned = values
+                    .iter()
+                    .all(|v| matches!(v.class(), Class::Pointer(_, true)));
+
+                Python::attach(|py| {
+                    let (function, warps, shared, plain, types) = py
+                        .import("lumen.codegen.utils.cuda")?
+                        .getattr("compile")?
+                        .call1((name, source, dtypes, aligned, threads, step_bytes))?
+                        .extract()?;
+
+                    Ok(direct::Compiled {
+                        function,
+                        warps,
+                        shared,
+                        plain,
+                        types,
+                    })
+                })
+                .map_err(|e: PyErr| e.to_string())
+            })
+        };
+
+        let shape = match super::config::config().autotune && n >= TUNED_ELEMENTS {
+            true => tuned(&key, tensors, outputs, |shape| {
+                let kernel = compiled(shape)?;
+                Ok((kernel, blocks(n, widest, shape)))
+            })?,
+            false => UNTUNED,
+        };
+
+        let kernel = compiled(shape)?;
+        direct::launch(&kernel, [blocks(n, widest, shape), 1, 1], &values)
+    }
+
+    #[cfg(not(lumen_cuda_linked))]
+    Err(format!(
+        "{name}: CUDA kernels launch only where lumen links CUDA"
+    ))
+}
+
+/// Fewest elements a CUDA (CuTe) kernel is autotuned at: below, its launch costs more than any shape
+/// saves, and compiling every candidate would cost far more.
+#[cfg(lumen_cuda_linked)]
+const TUNED_ELEMENTS: usize = 1 << 20;
+
+/// The fastest launch shape of the kernel `key` names, timed on its first launch: each of `shapes()`
+/// built by `build` (its kernel and blocks) runs on `tensors`' inputs, writing scratch copies of its last
+/// `outputs` (so outputs aliasing an input stay unwritten), and the shape of the least time is kept.
+#[cfg(lumen_cuda_linked)]
+fn tuned(
+    key: &str,
+    tensors: &[crate::Tensor],
+    outputs: usize,
+    build: impl Fn(
+        crate::codegen::elementwise::cuda::Shape,
+    ) -> Result<(std::sync::Arc<super::triton::direct::Compiled>, usize), String>,
+) -> Result<crate::codegen::elementwise::cuda::Shape, String> {
+    use super::triton::direct::{self, Value};
+    use crate::codegen::elementwise::cuda::{Shape, shapes};
+    use std::collections::HashMap;
+    use std::sync::{Mutex, PoisonError};
+
+    static TUNED: Mutex<Option<HashMap<String, Shape>>> = Mutex::new(None);
+
+    let found = TUNED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get_or_insert_with(HashMap::new)
+        .get(key)
+        .copied();
+
+    if let Some(shape) = found {
+        return Ok(shape);
+    }
+
+    let device = tensors[0].device();
+    let inputs = tensors.len() - outputs;
+
+    let scratch: Vec<crate::Tensor> = tensors[inputs..]
+        .iter()
+        .map(|t| {
+            let options = crate::TensorOptions::new().dtype(t.dtype()).device(device);
+            unsafe { crate::Tensor::empty(t.shape(), options) }
+        })
+        .collect();
+
+    let values: Vec<Value> = tensors[..inputs]
+        .iter()
+        .chain(&scratch)
+        .map(Value::of)
+        .collect();
+
+    // Seconds per launch of `kernel` on `blocks` blocks: the best of two timed batches after a warm-up.
+    let time = |kernel: &direct::Compiled, blocks: usize| -> Result<f64, String> {
+        const REPS: usize = 10;
+
+        direct::launch(kernel, [blocks, 1, 1], &values)?;
+        let mut best = f64::INFINITY;
+
+        for _ in 0..2 {
+            let mut start = crate::stream::event_for(device, true)?;
+            let mut end = crate::stream::event_for(device, true)?;
+            start.record()?;
+
+            for _ in 0..REPS {
+                direct::launch(kernel, [blocks, 1, 1], &values)?;
+            }
+
+            end.record()?;
+            end.synchronize()?;
+            best = best.min(start.elapsed_time(end.as_ref())? / 1e3 / REPS as f64);
+        }
+
+        Ok(best)
+    };
+
+    let mut fastest = (f64::INFINITY, crate::codegen::elementwise::cuda::UNTUNED);
+
+    for shape in shapes() {
+        let (kernel, blocks) = build(shape)?;
+        let seconds = time(&kernel, blocks)?;
+
+        if seconds < fastest.0 {
+            fastest = (seconds, shape);
+        }
+    }
+
+    TUNED
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .get_or_insert_with(HashMap::new)
+        .insert(key.to_owned(), fastest.1);
+
+    Ok(fastest.1)
+}
+
+/// Registers the Triton and CUDA launch hooks and the module's Python functions and class.
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    super::cuda::set_launch(cuda_launch);
     super::triton::set_gemm(triton_gemm);
     super::triton::set_loop(triton_loop);
     super::triton::set_attention(triton_attention);

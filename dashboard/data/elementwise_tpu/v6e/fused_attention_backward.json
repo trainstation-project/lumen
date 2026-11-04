@@ -1,0 +1,78 @@
+{
+ "rows": [
+  {
+   "op": "fused_attention_backward",
+   "dtype": "float32",
+   "n": 131072,
+   "error": "flash attention on TPU: q, read from f32[1,256,8,64] (offset 0, rows 512 apart, columns 1 apart): an operand whose rows are not its tiles' rows"
+  },
+  {
+   "op": "fused_attention_backward",
+   "dtype": "float32",
+   "n": 262144,
+   "error": "flash attention on TPU: q, read from f32[1,512,8,64] (offset 0, rows 512 apart, columns 1 apart): an operand whose rows are not its tiles' rows"
+  },
+  {
+   "op": "fused_attention_backward",
+   "dtype": "float32",
+   "n": 524288,
+   "error": "flash attention on TPU: q, read from f32[1,1024,8,64] (offset 0, rows 512 apart, columns 1 apart): an operand whose rows are not its tiles' rows"
+  },
+  {
+   "op": "fused_attention_backward",
+   "dtype": "float32",
+   "n": 1048576,
+   "error": "flash attention on TPU: q, read from f32[1,2048,8,64] (offset 0, rows 512 apart, columns 1 apart): an operand whose rows are not its tiles' rows"
+  },
+  {
+   "op": "fused_attention_backward",
+   "dtype": "float32",
+   "n": 2097152,
+   "error": "flash attention on TPU: q, read from f32[1,4096,8,64] (offset 0, rows 512 apart, columns 1 apart): an operand whose rows are not its tiles' rows"
+  },
+  {
+   "op": "fused_attention_backward",
+   "dtype": "float32",
+   "n": 4194304,
+   "error": "flash attention on TPU: q, read from f32[1,8192,8,64] (offset 0, rows 512 apart, columns 1 apart): an operand whose rows are not its tiles' rows"
+  },
+  {
+   "op": "fused_attention_backward",
+   "dtype": "bfloat16",
+   "n": 131072,
+   "error": "flash attention on TPU: q, read from bf16[1,256,8,64] (offset 0, rows 512 apart, columns 1 apart): an operand whose rows are not its tiles' rows"
+  },
+  {
+   "op": "fused_attention_backward",
+   "dtype": "bfloat16",
+   "n": 262144,
+   "error": "flash attention on TPU: q, read from bf16[1,512,8,64] (offset 0, rows 512 apart, columns 1 apart): an operand whose rows are not its tiles' rows"
+  },
+  {
+   "op": "fused_attention_backward",
+   "dtype": "bfloat16",
+   "n": 524288,
+   "error": "flash attention on TPU: q, read from bf16[1,1024,8,64] (offset 0, rows 512 apart, columns 1 apart): an operand whose rows are not its tiles' rows"
+  },
+  {
+   "op": "fused_attention_backward",
+   "dtype": "bfloat16",
+   "n": 1048576,
+   "error": "flash attention on TPU: q, read from bf16[1,2048,8,64] (offset 0, rows 512 apart, columns 1 apart): an operand whose rows are not its tiles' rows"
+  },
+  {
+   "op": "fused_attention_backward",
+   "dtype": "bfloat16",
+   "n": 2097152,
+   "error": "flash attention on TPU: q, read from bf16[1,4096,8,64] (offset 0, rows 512 apart, columns 1 apart): an operand whose rows are not its tiles' rows"
+  },
+  {
+   "op": "fused_attention_backward",
+   "dtype": "bfloat16",
+   "n": 4194304,
+   "error": "flash attention on TPU: q, read from bf16[1,8192,8,64] (offset 0, rows 512 apart, columns 1 apart): an operand whose rows are not its tiles' rows"
+  }
+ ],
+ "code": null,
+ "measured_at": "2026-11-04T11:14:35+00:00"
+}
