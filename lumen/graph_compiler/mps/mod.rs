@@ -1000,7 +1000,8 @@ pub(super) fn encode_with(
 
         // Decode attention runs one threadgroup per query, otherwise one of its tuning's simdgroups per
         // its rows of them.
-        let t = attention_tuned.map_or_else(|| crate::codegen::attention::mps::tuning(&a), |(_, t)| t);
+        let t =
+            attention_tuned.map_or_else(|| crate::codegen::attention::mps::tuning(&a), |(_, t)| t);
         let (groups, rows) = (t.groups, t.rows());
 
         let grid = match decodes(&a) {
