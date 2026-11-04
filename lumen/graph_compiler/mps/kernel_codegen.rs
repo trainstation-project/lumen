@@ -4,9 +4,9 @@
 
 use std::collections::HashMap;
 
-use super::autotune::Tunable;
 use super::place_concats::in_place_concats;
 use super::{Kernel, MpsModule, PENDING, request};
+use crate::autotune::mps::Tunable;
 use crate::codegen::attention::AttentionCodegen;
 use crate::codegen::dot_general::mps::{gemm_kernel, gemm_row_kernel, gemv_config, row_dot};
 use crate::codegen::dynamic_slice::DynamicSliceCodegen;
@@ -152,7 +152,7 @@ pub(super) fn tuning_of(body: &Graph) -> Option<Tuning> {
 }
 
 /// Candidate launch tunings to autotune when `body` lowers to the elementwise kernel.
-pub(super) fn tunings_of(body: &Graph) -> Vec<Tuning> {
+pub(crate) fn tunings_of(body: &Graph) -> Vec<Tuning> {
     match is_elementwise(body) {
         true => elementwise_tunings(body),
         false => Vec::new(),
@@ -171,7 +171,7 @@ fn is_elementwise(body: &Graph) -> bool {
 /// Generates the kernel for a fused `body`, returning its name and Metal source.
 /// `by_value[k]` passes input `k` as a constant scalar; `views` maps output index to the
 /// (element offset, strides) it writes through.
-pub(super) fn kernel(
+pub(crate) fn kernel(
     body: &Graph,
     by_value: &[bool],
     config: &CompilerConfig,

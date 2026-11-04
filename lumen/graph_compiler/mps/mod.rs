@@ -2,10 +2,9 @@
 //! and the encoder that launches each fused step with the right grid.
 
 pub(crate) mod ane;
-mod autotune;
 mod canonicalize_dots;
 pub(crate) mod fusion;
-mod kernel_codegen;
+pub(crate) mod kernel_codegen;
 mod place_concats;
 mod place_views;
 mod split_k;
@@ -113,7 +112,7 @@ struct MpsModule<'a> {
     /// Generated Metal sources by kernel name.
     sources: BTreeMap<String, String>,
     /// Elementwise kernels that the autotuner may regenerate, by kernel name.
-    tunable: BTreeMap<String, autotune::Tunable>,
+    tunable: BTreeMap<String, crate::autotune::mps::Tunable>,
 }
 
 impl Attentions for MpsModule<'_> {
@@ -388,19 +387,19 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
     let mut plan = Plan::compile_with(&fused, &plan);
 
     if config.autotune {
-        let tuner = super::common::autotune::Autotuner {
-            timer: autotune::Mps,
+        let tuner = crate::autotune::Autotuner {
+            timer: crate::autotune::mps::Mps,
         };
 
-        let mut elementwise = autotune::Elementwise {
+        let mut elementwise = crate::autotune::mps::Elementwise {
             tunable: &tunable,
             config,
             sources: BTreeMap::new(),
         };
 
         tuner.tune(&mut elementwise, &mut plan)?;
-        tuner.tune(&mut autotune::Gemms::new(config), &mut plan)?;
-        tuner.tune(&mut autotune::Attentions::default(), &mut plan)?;
+        tuner.tune(&mut crate::autotune::mps::Gemms::new(config), &mut plan)?;
+        tuner.tune(&mut crate::autotune::mps::Attentions::default(), &mut plan)?;
     }
 
     // Relabel dots reading packed weight blocks (directly or through same-sized elementwise steps) as `Nx dot_general`.
@@ -508,7 +507,7 @@ const MPP: &str = concat!(
 
 /// Compiles `sources`, attention kernels on Metal Performance Primitives against their templates and the rest
 /// against the standard prelude.
-fn compile_routed(sources: BTreeMap<String, String>) -> Result<(), String> {
+pub(crate) fn compile_routed(sources: BTreeMap<String, String>) -> Result<(), String> {
     let (mpp, sources): (BTreeMap<_, _>, BTreeMap<_, _>) = sources
         .into_iter()
         .partition(|(_, source)| source.contains("flash_attention_mpp"));
@@ -518,12 +517,12 @@ fn compile_routed(sources: BTreeMap<String, String>) -> Result<(), String> {
 }
 
 /// Compiles `sources` against the standard prelude.
-fn compile_kernels(sources: BTreeMap<String, String>) -> Result<(), String> {
+pub(crate) fn compile_kernels(sources: BTreeMap<String, String>) -> Result<(), String> {
     compile_with(PRELUDE, sources)
 }
 
 /// Compiles `sources` against the prelude plus the MPP templates.
-fn compile_mpp_kernels(sources: BTreeMap<String, String>) -> Result<(), String> {
+pub(crate) fn compile_mpp_kernels(sources: BTreeMap<String, String>) -> Result<(), String> {
     compile_with(&format!("{PRELUDE}\n{MPP}"), sources)
 }
 
@@ -551,7 +550,7 @@ fn compile_with(prelude: &str, sources: BTreeMap<String, String>) -> Result<(), 
 }
 
 /// Every compiled kernel source by name.
-static SOURCES: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
+pub(crate) static SOURCES: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
 
 /// Whether this Metal toolchain supports Metal Performance Primitives, probed once: a kernel defined only
 /// under `LUMEN_MPP`, compiling (and logging) no error either way.
@@ -569,7 +568,7 @@ pub(crate) fn mpp_available() -> bool {
 
 /// How a fused kernel is launched.
 #[derive(Clone, Copy, PartialEq)]
-enum Launch {
+pub(crate) enum Launch {
     /// Flash attention forward.
     Attention,
     /// Flash attention backward.
@@ -592,7 +591,7 @@ enum Launch {
 static LAUNCHES: Mutex<BTreeMap<String, (Launch, Option<Tuning>)>> = Mutex::new(BTreeMap::new());
 
 /// Classifies a fusion body by the launch its kernel needs.
-fn launch_of(body: &Graph) -> Launch {
+pub(crate) fn launch_of(body: &Graph) -> Launch {
     let update = |n: &crate::graph::Node| {
         matches!(
             n.primitive,
@@ -625,7 +624,7 @@ fn launch_of(body: &Graph) -> Launch {
 }
 
 /// Records how kernel `name` for `body` launches under `tuning`.
-pub(super) fn record_launch(name: &str, body: &Graph, tuning: Option<Tuning>) {
+pub(crate) fn record_launch(name: &str, body: &Graph, tuning: Option<Tuning>) {
     let launch = (launch_of(body), tuning);
     let mut launches = LAUNCHES.lock().unwrap_or_else(PoisonError::into_inner);
     launches.insert(name.to_owned(), launch);
@@ -833,7 +832,7 @@ fn strided_variant(step: &Step, name: &str, body: &Graph) -> Result<Option<Strin
 }
 
 /// The strides attention step `step` (of fused `body`) reads its operands and writes its outputs at.
-pub(super) fn attention_strides(step: &Step, body: &Graph) -> attention::Strides {
+pub(crate) fn attention_strides(step: &Step, body: &Graph) -> attention::Strides {
     let outputs: Vec<(usize, Vec<usize>)> = std::iter::once(&step.output)
         .chain(&step.extra_outputs)
         .zip(&step.output_views)
@@ -929,7 +928,7 @@ pub(crate) fn encode(
 /// Encodes a fused step, launching the tuned GEMM variant `gemm` or attention variant `attention_tuned`
 /// (its kernel and tuning) when given. `inputs` holds the body inputs followed by extra output pointers.
 #[allow(clippy::too_many_arguments)]
-pub(super) fn encode_with(
+pub(crate) fn encode_with(
     step: &Step,
     name: &str,
     gemm: Option<(&str, GemmConfig)>,

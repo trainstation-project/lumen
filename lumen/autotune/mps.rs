@@ -3,22 +3,25 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::PoisonError;
 
-use super::kernel_codegen;
-use super::{SOURCES, Tuning, compile_kernels, compile_mpp_kernels, compile_routed, record_launch};
+use super::{Kernels, Timer};
 use crate::allocator::Scratch;
 use crate::codegen::dot_general::mps::{self as gemm, GemmConfig};
 use crate::codegen::elementwise::mps::TUNED_ELEMENTS;
+use crate::codegen::elementwise::mps::Tuning;
 use crate::codegen::kinds::gemm_dot;
 use crate::device::Device;
 use crate::graph::{Primitive, TensorType, Var, View};
 use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::common::autotune::{Kernels, Timer};
+use crate::graph_compiler::mps::kernel_codegen;
+use crate::graph_compiler::mps::{
+    SOURCES, compile_kernels, compile_mpp_kernels, compile_routed, record_launch,
+};
 use crate::plan::{Buffer, Step, Tuned};
 use crate::runtime::mps::Encode;
 use crate::tensor::contiguous_strides;
 
 /// What a tunable elementwise fusion needs to regenerate its kernel under another tuning.
-pub(super) struct Tunable {
+pub(crate) struct Tunable {
     /// Per fusion input, whether it is passed by value.
     pub by_value: Vec<bool>,
     /// Strided views of fusion inputs, keyed by input index, as `(offset, strides)`.
@@ -29,7 +32,7 @@ pub(super) struct Tunable {
 const ALIGNMENT: usize = 256;
 
 /// Tuning backend for elementwise fusions.
-pub(super) struct Elementwise<'a> {
+pub(crate) struct Elementwise<'a> {
     /// Fusions that may be retuned, by name.
     pub tunable: &'a BTreeMap<String, Tunable>,
     pub config: &'a CompilerConfig,
@@ -76,7 +79,9 @@ impl Kernels for Elementwise<'_> {
         let name = kernel.clone();
 
         let encode: Encode = Box::new(move |step, inputs, output, scratch, keep| {
-            super::encode_with(step, &name, None, None, inputs, output, scratch, keep)
+            crate::graph_compiler::mps::encode_with(
+                step, &name, None, None, inputs, output, scratch, keep,
+            )
         });
 
         Tuned::new(kernel, encode)
@@ -90,14 +95,14 @@ impl Kernels for Elementwise<'_> {
 
 /// Tuning backend for GEMM fusions.
 #[derive(Default)]
-pub(super) struct Gemms {
+pub(crate) struct Gemms {
     sources: BTreeMap<String, String>,
     config: CompilerConfig,
 }
 
 /// Creates an empty GEMM tuner for `config`.
 impl Gemms {
-    pub(super) fn new(config: &CompilerConfig) -> Self {
+    pub(crate) fn new(config: &CompilerConfig) -> Self {
         Gemms {
             sources: BTreeMap::new(),
             config: config.clone(),
@@ -120,7 +125,7 @@ const ROW_TILES: GemmConfig = GemmConfig {
 const TUNED_OUTPUTS: usize = 64 << 10;
 
 /// The dot of a GEMM fusion with its lhs, rhs and output types.
-pub(super) fn matmul_of(
+pub(crate) fn matmul_of(
     step: &Step,
 ) -> Option<(&Primitive, &TensorType, &TensorType, &TensorType)> {
     let Primitive::Fusion { body, .. } = &step.primitive else {
@@ -142,12 +147,13 @@ pub(super) fn matmul_of(
 /// operands (read through their strides).
 fn tiled_gemm(step: &Step) -> bool {
     let float = step.output.1.dtype.is_float();
-    let views = !super::loads_views(step);
+    let views = !crate::graph_compiler::mps::loads_views(step);
 
     let tiled = match &step.primitive {
         Primitive::Fusion { name, body, .. } => {
             !name.starts_with(crate::graph::NEURAL_ENGINE)
-                && super::launch_of(body) == super::Launch::Gemm
+                && crate::graph_compiler::mps::launch_of(body)
+                    == crate::graph_compiler::mps::Launch::Gemm
                 && (gemm::row_dot(body).is_none() || gemm::tile_scratch(body).is_some())
         }
         _ => false,
@@ -224,7 +230,7 @@ impl Kernels for Gemms {
                 && group.is_none()
                 && layout.is_some()
                 && layout == gemm::mpp_transposes(dot, lhs, rhs, out)
-                && super::mpp_available();
+                && crate::graph_compiler::mps::mpp_available();
 
             let mpp: &[GemmConfig] = match mpp {
                 true => gemm::mpp_configs(),
@@ -267,8 +273,9 @@ impl Kernels for Gemms {
             epilogue.plain() || partials + 8 * c.bn * 4 + stage(c) <= gemm::MAX_THREADGROUP_BYTES
         };
 
-        let mpp =
-            large && gemm::mpp_transposes(dot, lhs, rhs, out).is_some() && super::mpp_available();
+        let mpp = large
+            && gemm::mpp_transposes(dot, lhs, rhs, out).is_some()
+            && crate::graph_compiler::mps::mpp_available();
 
         let mpp: Vec<GemmConfig> = match mpp {
             true => gemm::mpp_configs()
@@ -332,7 +339,9 @@ impl Kernels for Gemms {
 
             let tuned = (step.views == views).then_some((name.as_str(), config));
 
-            super::encode_with(step, fusion, tuned, None, inputs, output, scratch, keep)
+            crate::graph_compiler::mps::encode_with(
+                step, fusion, tuned, None, inputs, output, scratch, keep,
+            )
         });
 
         Tuned::new(kernel, encode)
@@ -352,7 +361,7 @@ impl Kernels for Gemms {
 /// Tuning backend for flash attention forwards: the kernel (8x8 matrices or Metal Performance Primitives), its
 /// simdgroups and its key block.
 #[derive(Default)]
-pub(super) struct Attentions {
+pub(crate) struct Attentions {
     /// Kernel sources built so far, compiled together by `compile`.
     sources: BTreeMap<String, String>,
 }
@@ -366,7 +375,7 @@ impl Kernels for Attentions {
             return Vec::new();
         };
 
-        let strides = super::attention_strides(step, body);
+        let strides = crate::graph_compiler::mps::attention_strides(step, body);
 
         match crate::graph_compiler::common::attention::of_body_strided(body, &strides) {
             Some(a) => crate::codegen::attention::mps::tunings(&a),
@@ -380,7 +389,7 @@ impl Kernels for Attentions {
             unreachable!("an attention fusion")
         };
 
-        let strides = super::attention_strides(step, body);
+        let strides = crate::graph_compiler::mps::attention_strides(step, body);
         let a = crate::graph_compiler::common::attention::of_body_strided(body, &strides)
             .expect("an attention it was tuned for");
 
@@ -399,7 +408,9 @@ impl Kernels for Attentions {
 
             let tuned = (step.views == views).then_some((name.as_str(), tuning));
 
-            super::encode_with(step, fusion, None, tuned, inputs, output, scratch, keep)
+            crate::graph_compiler::mps::encode_with(
+                step, fusion, None, tuned, inputs, output, scratch, keep,
+            )
         });
 
         Tuned::new(kernel, encode)
@@ -412,7 +423,7 @@ impl Kernels for Attentions {
 }
 
 /// Timer that runs tuning candidates on the first MPS device.
-pub(super) struct Mps;
+pub(crate) struct Mps;
 
 impl Timer for Mps {
     type Buffers = Buffers;
@@ -439,7 +450,7 @@ const COLD_BYTES: usize = 64 << 20;
 const MOST_COPIES: usize = 256;
 
 /// Zeroed device memory holding rotated input copies, the outputs and scratch for a timed step.
-pub(super) struct Buffers {
+pub(crate) struct Buffers {
     _memory: Scratch,
     /// Per copy, the input pointers followed by the extra output pointers.
     copies: Vec<Vec<*const u8>>,

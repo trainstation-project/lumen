@@ -1,5 +1,9 @@
 //! Backend-independent kernel autotuning: benchmarks candidate configs of each plan step and keeps the fastest.
 
+#[cfg(lumen_mps_linked)]
+pub(crate) mod mps;
+pub(crate) mod triton;
+
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex, PoisonError};
 
