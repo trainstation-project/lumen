@@ -11,15 +11,20 @@ use super::pass::{CompilerPass, Module, Pipeline};
 use super::plan::{Plan, Step};
 use super::{Options, plan_options};
 use crate::codegen::elementwise::ElementwiseCodegen;
-use crate::codegen::elementwise::cuda::{Layouts, blocks};
+use crate::codegen::elementwise::cuda::Layouts;
 use crate::codegen::utils::cuda::{Cuda, cute_type};
 use crate::graph::{Graph, Node, Primitive, TensorType, Var};
 use crate::{Device, Tensor};
 
 /// Launches kernel `name` of module `source` (compiling it on its first launch) on `tensors`, its
-/// inputs then its outputs, each a flat view of the elements it spans, on `blocks` blocks.
-pub type Launch =
-    fn(name: &str, source: &str, tensors: &[Tensor], blocks: usize) -> Result<(), String>;
+/// inputs then its `outputs` outputs, each a flat view of the elements it spans, over `n` elements.
+pub type Launch = fn(
+    name: &str,
+    source: &str,
+    tensors: &[Tensor],
+    outputs: usize,
+    n: usize,
+) -> Result<(), String>;
 
 /// The launcher installed from Python (`lumen.codegen.utils.cuda`).
 static LAUNCH: OnceLock<Launch> = OnceLock::new();
@@ -253,8 +258,7 @@ pub(crate) fn run(
     })?;
 
     let (name, source) = code.as_ref();
-    let widest = tensors.iter().map(|t| t.dtype().size_of()).max().unwrap_or(1);
-    launch(name, source, &tensors, blocks(n, widest))
+    launch(name, source, &tensors, outputs.len(), n)
 }
 
 /// The body of a copy of `x` reshaped to `shape`: its input, reshaped, its output.

@@ -15,9 +15,9 @@ import cutlass
 import cutlass.cute as cute
 from cutlass import Int32, Int64
 
-# Threads per block.
+# The launch shape kernels run with untuned: threads per block, and bytes of its widest tensor a thread
+# moves a step (one 128-bit load or store).
 THREADS = 256
-# Bytes of its widest tensor a thread moves a step: one 128-bit load or store.
 STEP_BYTES = 16
 
 
@@ -59,13 +59,27 @@ class ElementwiseKernel:
     tensor (inputs, then outputs; a bool's a byte) is stored as and the elements it spans from its pointer; `fragments_in` and `fragments_out` list
     per segment the inputs and outputs `body` reads and writes at the walk's own index; with `vectorized`
     (every tensor 16-byte aligned) those move a thread's vector of consecutive elements at a time in the
-    segments `contiguous` marks (reading every input in row-major order)."""
+    segments `contiguous` marks (reading every input in row-major order). Its blocks have `threads` threads,
+    each moving `step_bytes` of its widest tensor a step."""
 
-    def __init__(self, body, segments, types, spans, fragments_in, fragments_out, contiguous, vectorized):
+    def __init__(
+        self,
+        body,
+        segments,
+        types,
+        spans,
+        fragments_in,
+        fragments_out,
+        contiguous,
+        vectorized,
+        threads=THREADS,
+        step_bytes=STEP_BYTES,
+    ):
         """`body` is the generated ``BODY``, `segments` and `spans` tuples of element counts, `types` of CuTe
         types, `fragments_in` and
         `fragments_out` a tuple per segment of tensor positions, `contiguous` a flag per segment, and
-        `vectorized` whether the fragments of contiguous segments move by vectors."""
+        `vectorized` whether the fragments of contiguous segments move by vectors; `threads` and `step_bytes`
+        its launch shape."""
         self.body = body
         self.segments = segments
         self.types = types
@@ -74,13 +88,16 @@ class ElementwiseKernel:
         self.fragments_out = fragments_out
         self.contiguous = contiguous
         self.vectorized = vectorized
+        self.threads = threads
+        self.step_bytes = step_bytes
 
     @cute.kernel
     def kernel(self, ins: list, outs: list):
-        """Over the tensors at pointers `ins` and `outs`, walks each segment's indices grid-strided: whole tiles of `THREADS * V` elements with no bounds
-        checks, then the tail element by element. In a tile each thread takes `V` elements (`STEP_BYTES` of
+        """Over the tensors at pointers `ins` and `outs`, walks each segment's indices grid-strided: whole tiles of
+        `threads * V` elements with no bounds checks, then the tail element by element. In a tile each thread
+        takes `V` elements (`step_bytes` of
         its widest tensor): consecutive ones, its fragment tensors moved by one vector load or store
-        each, when vectorized; else ones `THREADS` apart, read in place. Indices are 32-bit when they reach
+        each, when vectorized; else ones `threads` apart, read in place. Indices are 32-bit when they reach
         every element."""
         THREAD_ID, _, _ = cute.arch.thread_idx()
         BLOCK_ID, _, _ = cute.arch.block_idx()
@@ -95,7 +112,8 @@ class ElementwiseKernel:
         ins, outs = flat[: len(ins)], flat[len(ins) :]
 
         widest = max(t.element_type.width for t in list(ins) + list(outs))
-        V = max(STEP_BYTES * 8 // widest, 1)
+        THREADS = self.threads
+        V = max(self.step_bytes * 8 // widest, 1)
         tile = THREADS * V
 
         for SEGMENT in cutlass.range_constexpr(len(self.segments)):
@@ -144,6 +162,6 @@ class ElementwiseKernel:
 
     @cute.jit
     def launch(self, ins: list, outs: list, blocks: Int32, stream: cuda.CUstream):
-        """Runs `kernel` on the tensors at pointers `ins` and `outs` on `blocks` blocks of `THREADS` threads
+        """Runs `kernel` on the tensors at pointers `ins` and `outs` on `blocks` blocks of `threads` threads
         on `stream`."""
-        self.kernel(ins, outs).launch(grid=[blocks, 1, 1], block=[THREADS, 1, 1], stream=stream)
+        self.kernel(ins, outs).launch(grid=[blocks, 1, 1], block=[self.threads, 1, 1], stream=stream)

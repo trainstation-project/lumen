@@ -8,8 +8,6 @@ import cutlass
 import cutlass.cute as cute
 from cutlass.cute.runtime import make_ptr
 
-from lumen.codegen.elementwise.cuda.kernel import THREADS
-
 # Alignment, in bytes, of the vectors kernels move their tensors by.
 VECTOR_BYTES = 16
 
@@ -17,10 +15,11 @@ VECTOR_BYTES = 16
 modules = []
 
 
-def compile(name, source, dtypes, aligned):
+def compile(name, source, dtypes, aligned, threads, step_bytes):
     """Compiles the `launch` of the generated module `source` named `name` for tensors of CuTe types
     `dtypes` (``"cutlass.Float32"``…, passed by pointer: its inputs, then its outputs), moving them by
-    16-byte vectors when `aligned` (every one starts 16-byte aligned), and loads it into the current
+    16-byte vectors when `aligned` (every one starts 16-byte aligned), in blocks of `threads` threads each
+    moving `step_bytes` of its widest tensor a step, and loads it into the current
     context. Returns it as a Triton kernel's launch info: its ``CUfunction``, warps per block, dynamic
     shared bytes, whether a plain ``cuLaunchKernel`` runs it, and its parameters' types (each a pointer)."""
     filename = f"<lumen {name}>"
@@ -32,7 +31,9 @@ def compile(name, source, dtypes, aligned):
     align = VECTOR_BYTES if aligned else None
     types = [getattr(cutlass, d.removeprefix("cutlass.")) for d in dtypes]
     pointers = [make_ptr(t, VECTOR_BYTES, cute.AddressSpace.gmem, assumed_align=align) for t in types]
-    compiled = cute.compile(scope["launch"], *pointers, 1, cuda.CUstream(0), aligned, options="--keep-cubin")
+    compiled = cute.compile(
+        scope["launch"], *pointers, 1, cuda.CUstream(0), aligned, threads, step_bytes, options="--keep-cubin"
+    )
     (entry,) = compiled.kernel_info
 
     status, module = cuda.cuModuleLoadData(compiled.artifacts.CUBIN)
@@ -41,7 +42,7 @@ def compile(name, source, dtypes, aligned):
     status, function = cuda.cuModuleGetFunction(module, entry.encode())
     check(status, name)
 
-    return int(function), THREADS // 32, 0, True, ["*"] * len(dtypes)
+    return int(function), threads // 32, 0, True, ["*"] * len(dtypes)
 
 
 def check(status, name):

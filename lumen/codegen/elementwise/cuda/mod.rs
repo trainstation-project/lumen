@@ -14,10 +14,21 @@ use crate::codegen::utils::cuda::{Cuda, cute_type, unsigned};
 use crate::graph::Graph;
 use crate::graph_compiler::common::horizontal::segments;
 
-/// Threads per block of `ElementwiseKernel` (`kernel.py`'s `THREADS`), and the bytes of its widest
-/// tensor each thread moves a step (its `STEP_BYTES`), which size its grid.
-const THREADS: usize = 256;
-const STEP_BYTES: usize = 16;
+/// The launch shape of an `ElementwiseKernel` (`kernel.py`): threads per block, and the bytes of its
+/// widest tensor each thread moves a step.
+#[cfg_attr(not(lumen_cuda_linked), allow(dead_code))]
+pub(crate) type Shape = (usize, usize);
+
+/// The shape kernels run with untuned (`kernel.py`'s `THREADS` and `STEP_BYTES`).
+#[cfg_attr(not(lumen_cuda_linked), allow(dead_code))]
+pub(crate) const UNTUNED: Shape = (256, 16);
+
+/// The shapes autotuning times: 128 to 1024 threads, 16 to 64 bytes a thread.
+#[cfg_attr(not(lumen_cuda_linked), allow(dead_code))]
+pub(crate) fn shapes() -> Vec<Shape> {
+    let threads = (1..=8).map(|k| 128 * k);
+    threads.flat_map(|t| [16, 32, 64].map(|b| (t, b))).collect()
+}
 
 /// The strides (in elements, from the first) a CUDA elementwise kernel reads each input and writes
 /// each output at: what its generated loads and stores index with; and the elements each tensor spans,
@@ -38,7 +49,7 @@ impl ElementwiseCodegen for Cuda {
 
     /// Generates `BODY(ins, outs, fins, fouts, j, v, SEGMENT)`, computing and storing every output of
     /// segment `SEGMENT` (the outputs of one element count, in `segments`' order) at flat index `j`, each
-    /// output at its `layouts` strides, and `launch(in0, …, out0, …, blocks, stream, vectorized)` running
+    /// output at its `layouts` strides, and `launch(in0, …, out0, …, blocks, stream, vectorized, threads, step_bytes)` running
     /// it in `ElementwiseKernel`. Tensors read or written at `j` itself go through `fins`/`fouts` at `v`
     /// (a thread's vector of consecutive elements, or the tensors themselves with `v = j`); each
     /// segment's are listed for the kernel, with whether the segment reads every input in row-major
@@ -147,10 +158,18 @@ def BODY(ins, outs, fins, fouts, j, v, SEGMENT: cutlass.Constexpr):
 {unpack_ins}{unpack_outs}{unpack_fins}{unpack_fouts}{code}
 
 @cute.jit
-def launch({tensors}, blocks: Int32, stream: cuda.CUstream, vectorized: cutlass.Constexpr):
+def launch(
+    {tensors},
+    blocks: Int32,
+    stream: cuda.CUstream,
+    vectorized: cutlass.Constexpr,
+    threads: cutlass.Constexpr,
+    step_bytes: cutlass.Constexpr,
+):
     """Runs the fusion's `ElementwiseKernel` on `blocks` blocks on `stream`, with vector loads and stores
-    when `vectorized` (every tensor 16-byte aligned)."""
-    kernel = ElementwiseKernel(BODY, ({counts}), ({types}), ({spans}), ({fragments_in}), ({fragments_out}), ({contiguous}), vectorized)
+    when `vectorized` (every tensor 16-byte aligned), its blocks of `threads` threads each moving `step_bytes`
+    of its widest tensor a step."""
+    kernel = ElementwiseKernel(BODY, ({counts}), ({types}), ({spans}), ({fragments_in}), ({fragments_out}), ({contiguous}), vectorized, threads, step_bytes)
     kernel.launch([{ins}], [{outs}], blocks, stream)
 "#,
             math = match crate::graph_compiler::config::config().fast_math {
@@ -191,9 +210,11 @@ def launch({tensors}, blocks: Int32, stream: cuda.CUstream, vectorized: cutlass.
     }
 }
 
-/// Blocks a kernel over `n` elements whose widest tensor has `widest`-byte elements launches: one per
-/// tile of `THREADS` threads' steps, so each block makes one pass (faster than fewer blocks looping).
-pub(crate) fn blocks(n: usize, widest: usize) -> usize {
-    let per_thread = (STEP_BYTES / widest).max(1);
-    n.div_ceil(THREADS * per_thread).max(1)
+/// Blocks a kernel of launch shape `(threads, step_bytes)` over `n` elements whose widest tensor has
+/// `widest`-byte elements launches: one per tile of its threads' steps, so each block makes one pass
+/// (faster than fewer blocks looping).
+#[cfg_attr(not(lumen_cuda_linked), allow(dead_code))]
+pub(crate) fn blocks(n: usize, widest: usize, (threads, step_bytes): Shape) -> usize {
+    let per_thread = (step_bytes / widest).max(1);
+    n.div_ceil(threads * per_thread).max(1)
 }
