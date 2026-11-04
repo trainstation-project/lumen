@@ -21,7 +21,19 @@ pub(crate) fn mpp_transposes(
         contiguous_strides(&rhs.shape),
     );
 
-    let launch_ = plan_matmul(dot, lhs, rhs, out, &ls, &rs, "", None).ok()?;
+    mpp_transposes_at(dot, lhs, rhs, out, &ls, &rs)
+}
+
+/// [`mpp_transposes`] for operands read at strides `ls` and `rs` (views of larger buffers).
+pub(crate) fn mpp_transposes_at(
+    dot: &Primitive,
+    lhs: &TensorType,
+    rhs: &TensorType,
+    out: &TensorType,
+    ls: &[usize],
+    rs: &[usize],
+) -> Option<(bool, bool)> {
+    let launch_ = plan_matmul(dot, lhs, rhs, out, ls, rs, "", None).ok()?;
     let [m, n, k, _, sm, sk, _, rk, rn] = launch_.p;
 
     let fits = [lhs.numel(), rhs.numel(), m * n]

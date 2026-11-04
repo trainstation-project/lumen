@@ -10,11 +10,12 @@ use crate::codegen::dot_general::mps::{self as gemm, GemmConfig};
 use crate::codegen::elementwise::mps::TUNED_ELEMENTS;
 use crate::codegen::kinds::gemm_dot;
 use crate::device::Device;
-use crate::graph::{Primitive, TensorType, View};
+use crate::graph::{Primitive, TensorType, Var, View};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::common::autotune::{Kernels, Timer};
 use crate::graph_compiler::plan::{Buffer, Step, Tuned};
 use crate::runtime::mps::Encode;
+use crate::tensor::contiguous_strides;
 
 /// What a tunable elementwise fusion needs to regenerate its kernel under another tuning.
 pub(super) struct Tunable {
@@ -177,8 +178,8 @@ impl Kernels for Gemms {
         let dual = gemm::gemm_mpp_pair(body, d);
         let staged = !epilogue.plain() && !dual;
 
-        // Operand views tune only the tiled kernels, which take the views' strides; the GEMV, skinny and MPP
-        // kernels are picked for whole operands.
+        // Operand views tune the tiled and plain MPP kernels, which take the views' strides; the GEMV and
+        // skinny kernels are picked for whole operands.
         let viewed = step.views.iter().any(Option::is_some);
 
         if !viewed && tiled_gemm(step) && gemm::gemv_config(body).is_some() {
@@ -204,9 +205,36 @@ impl Kernels for Gemms {
             let tiled =
                 !skinny && gemm::gemv_config(body).is_none() && gemm::tile_scratch(body).is_none();
 
+            // A view's strides, else the operand's contiguous ones.
+            let strides = |v: Var| {
+                let k = body.inputs().iter().position(|&i| i == v);
+
+                k.and_then(|k| step.views[k].as_ref()).map_or_else(
+                    || contiguous_strides(&body.type_of(v).shape),
+                    |view| view.strides.clone(),
+                )
+            };
+
+            // MPP's layout (TL, TR) is generated from contiguous strides, so a view keeps it to read through MPP.
+            let (ls, rs) = (strides(d.inputs[0]), strides(d.inputs[1]));
+            let layout = gemm::mpp_transposes_at(dot, lhs, rhs, out, &ls, &rs);
+            let mpp = large
+                && epilogue.plain()
+                && !dual
+                && group.is_none()
+                && layout.is_some()
+                && layout == gemm::mpp_transposes(dot, lhs, rhs, out)
+                && super::mpp_available();
+
+            let mpp: &[GemmConfig] = match mpp {
+                true => gemm::mpp_configs(),
+                false => &[],
+            };
+
             return match tiled {
                 true => gemm::config()
                     .iter()
+                    .chain(mpp)
                     .filter(|c| {
                         group.is_none_or(|(g, rows)| (if rows { c.bm } else { c.bn }) % g == 0)
                     })
