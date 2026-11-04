@@ -1,5 +1,5 @@
 //! TPU graph compiler: the pass pipeline that rewrites a traced graph into TPU kernels and plans its buffers.
-mod attention_layouts;
+mod attention;
 mod fusion;
 #[cfg(test)]
 mod tests;
@@ -9,7 +9,7 @@ use crate::graph_compiler::common::canonicalize_dots::CanonicalizeDots;
 use crate::graph_compiler::common::diamonds::FusedDiamonds;
 use crate::graph_compiler::common::horizontal::{Grouping, HorizontalFusion};
 use crate::graph_compiler::common::place_concats::{PlaceConcats, Slots};
-use attention_layouts::AttentionLayouts;
+use attention::AttentionLayouts;
 use fusion::{DotRows, FuseDots, Fusion};
 
 use super::common::clamp_indices::ClampIndices;
