@@ -298,8 +298,8 @@ impl Module for TritonModule<'_> {
         self.options
     }
 
-    fn config(&self) -> &dyn CompilerConfig {
-        &self.options.config.cuda
+    fn config(&self) -> &CompilerConfig {
+        &self.options.config
     }
 }
 
@@ -313,7 +313,7 @@ impl Blocks for TritonModule<'_> {
 /// loop kernels and autotunes GEMM and loop configs when enabled.
 pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Result<Plan, String> {
     unsupported(graph)?;
-    let config = &options.config.cuda;
+    let config = &options.config;
 
     let mut module = TritonModule {
         graph: graph.clone(),
@@ -413,7 +413,7 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
     let kernels = plan.steps().iter().map(|s| loop_kernel(s, deterministic));
     plan.triton = Some(kernels.collect());
 
-    if options.config.cuda.autotune {
+    if options.config.autotune {
         let tuner = Autotuner {
             timer: Events {
                 device,
@@ -609,7 +609,7 @@ fn scan(step: &Step) -> Option<Scan> {
     Some(scan.expect("a Triton scan of every cumsum"))
 }
 
-/// Autotuning candidates for loop kernels, of the plan's `cuda.deterministic`.
+/// Autotuning candidates for loop kernels, of the plan's `deterministic`.
 struct Loops {
     deterministic: bool,
 }
@@ -638,7 +638,7 @@ impl Kernels for Loops {
     }
 }
 
-/// Times steps on `device` with CUDA events, their loop kernels those of the plan's `cuda.deterministic`.
+/// Times steps on `device` with CUDA events, their loop kernels those of the plan's `deterministic`.
 struct Events {
     device: Device,
     deterministic: bool,

@@ -440,7 +440,7 @@ def test_attention_gradient_is_flash_attentions(attention, shapes):
     m = [lumen.empty(list(s), device="meta") for s in shapes]
     assert "log" in str(lumen.make_graph(grad)(*m))
     got = lumen.compile(grad)(*map(lumen.from_numpy, xs))
-    lumen.config.compiler.cpu.flash_attention = False
+    lumen.config.compiler.flash_attention = False
     try:
         assert "log" not in str(lumen.make_graph(grad)(*m))
         want = lumen.compile(grad)(*map(lumen.from_numpy, xs))
@@ -507,7 +507,7 @@ def test_dots_sharing_an_operand_are_differentiated_as_one(device, triton_on_cud
     x = rng.standard_normal((8, 32)).astype(np.float32)
     results = []
     for merge in (True, False):
-        lumen.config.compiler.of(device).merge_dots = merge
+        lumen.config.compiler.merge_dots = merge
         try:
             model = _QKV(*(lumen.empty([32, 16], device="meta") for _ in range(3)))
             f = lumen.compile(_qkv_step, device=device)
@@ -521,7 +521,7 @@ def test_dots_sharing_an_operand_are_differentiated_as_one(device, triton_on_cud
             graph = str(lumen.make_graph(_qkv_step)(model, lumen.from_numpy(x).to(device)))
             assert ("concatenate" in graph) == merge
         finally:
-            lumen.config.compiler.of(device).merge_dots = True
+            lumen.config.compiler.merge_dots = True
     (loss, gx, *gw), (loss_, gx_, *gw_) = results
     _equal(loss, loss_, device)
     for a, b in zip(gw, gw_):
@@ -587,7 +587,7 @@ def test_projections_backward_writes_cotangents_side_by_side(device, triton_on_c
     x = rng.standard_normal((32, 64)).astype(np.float32)
     results = []
     for merge in (True, False):
-        lumen.config.compiler.of(device).merge_dots = merge
+        lumen.config.compiler.merge_dots = merge
         try:
             model = _Projections(*(lumen.empty([64, 64], device="meta") for _ in range(3)))
             f = lumen.compile(_projections_step, device=device)
@@ -610,7 +610,7 @@ def test_projections_backward_writes_cotangents_side_by_side(device, triton_on_c
                     assert side_by_side != "concatenate" and "mul" in side_by_side, labels
                     assert not any("transpose" in label for label in labels), labels
         finally:
-            lumen.config.compiler.of(device).merge_dots = True
+            lumen.config.compiler.merge_dots = True
     (loss, gx, *gw), (loss_, gx_, *gw_) = results
     _equal(loss, loss_, device)
     for a, b in zip(gw, gw_):

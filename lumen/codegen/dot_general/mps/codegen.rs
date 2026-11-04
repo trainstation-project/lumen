@@ -15,7 +15,7 @@ use crate::codegen::emitter::Emit;
 use crate::codegen::emitter::mps::Emitter;
 use crate::codegen::utils::mps::*;
 use crate::graph::{Graph, Node, Primitive, Var};
-use crate::graph_compiler::MpsConfig;
+use crate::graph_compiler::CompilerConfig;
 use crate::tensor::contiguous_strides;
 
 pub(crate) use crate::codegen::kinds::gemm_dot;
@@ -526,7 +526,7 @@ pub(crate) fn gemm_variant(
     body: &Graph,
     by_value: &[bool],
     config: GemmConfig,
-    mps: &MpsConfig,
+    mps: &CompilerConfig,
 ) -> (String, String) {
     if tile_scratch(body).is_some() {
         let dot = row_dot(body).expect("a matmul with row reductions");

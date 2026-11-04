@@ -221,12 +221,6 @@ def keep(x):
     _EFFECTS[-1].append(x)
 
 
-def compiler_config():
-    """The compiler settings of the device being traced for
-    (``lumen.config.compiler.of``)."""
-    return config.compiler.of(_DEVICES[-1] if _DEVICES and _DEVICES[-1] is not None else "cpu")
-
-
 def current_graph():
     """The graph being traced into; raises outside ``lumen.compile``."""
     if not _TRACES:
@@ -603,10 +597,10 @@ _SCALARS = ("scalar", "hoisted", "rng")
 
 
 def _graphed(target):
-    """Whether calls on ``target`` replay as CUDA graphs: ``config.compiler.cuda.cuda_graphs`` on CUDA with
+    """Whether calls on ``target`` replay as CUDA graphs: ``config.compiler.cuda_graphs`` on CUDA with
     the Triton backend (without it, CUDA plans run on the CPU)."""
-    cuda = config.compiler.cuda
-    return _device_type(target) == "cuda" and cuda.cuda_graphs and cuda.use_triton_backend
+    compiler = config.compiler
+    return _device_type(target) == "cuda" and compiler.cuda_graphs and compiler.use_triton_backend
 
 
 def _compiler_flags():
@@ -681,7 +675,7 @@ def compile(fn, device=None):
     plan (the latest call's signature's) and ``compiled.allocate_memory()``
     allocates it again; the plan stays compiled.
 
-    With ``lumen.config.compiler.mps.neural_engine``, an MPS plan runs the large
+    With ``lumen.config.compiler.neural_engine``, an MPS plan runs the large
     float16 dots of the weights the function does not write (and the
     float16 work after them) on the Apple Neural Engine, their values baked
     into Core ML programs: compiled again once a weight is written
@@ -709,7 +703,7 @@ class Compiled:
         self._baked = {}
         self._hosts, self._pending = {}, []
         self._fast = {}
-        # CUDA graphs by plan (``config.compiler.cuda.cuda_graphs``): each plan's graph, its staged
+        # CUDA graphs by plan (``config.compiler.cuda_graphs``): each plan's graph, its staged
         # arguments, the addresses it was captured at and its outputs, or None once it cannot capture.
         self._graphs, self._warm = {}, set()
         # The signatures whose plans' workspaces `deallocate_memory` freed: their calls wait for `allocate_memory`.
@@ -889,7 +883,7 @@ class Compiled:
 
     def _run(self, key, plan, workspace, inputs):
         """``plan.run_in(workspace, inputs)`` for signature ``key``; on CUDA with
-        ``config.compiler.cuda.cuda_graphs``, a plan a graph can capture
+        ``config.compiler.cuda_graphs``, a plan a graph can capture
         (``_capturable``) runs as usual on its first call, is captured on its
         second, its arguments copied into device buffers of its own and its
         runtime scalars into a device vector per dtype, and from then on

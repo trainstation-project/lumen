@@ -16,7 +16,7 @@ def _bf16(a):
 
 def _compile(fn, device, preserve):
     """``fn`` compiled for ``device`` with ``preserve_precision`` set to ``preserve``."""
-    config = getattr(lumen.config.compiler, device)
+    config = lumen.config.compiler
     config.preserve_precision = preserve
     return lumen.compile(fn, device=device)
 
@@ -38,7 +38,7 @@ def test_a_forward_round_trip_is_dropped(device, triton_on_cuda):
         return x.bfloat16().float() * 3.0
 
     try:
-        assert not getattr(lumen.config.compiler, device).preserve_precision
+        assert not lumen.config.compiler.preserve_precision
         traced = lumen.to_numpy(_compile(f, device, False)(xt).to("cpu"))
         kept = lumen.to_numpy(_compile(f, device, True)(xt).to("cpu"))
     finally:

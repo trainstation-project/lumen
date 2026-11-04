@@ -258,7 +258,7 @@ def test_chunked_linear_cross_entropy(device, n, d, vocab, chunk, reduce, head, 
         pytest.skip(str(e))
     H, W = H.to(dtype="bfloat16"), W.to(dtype=head)
     step = trained(unfused)
-    config = getattr(lumen.config.compiler, device)
+    config = lumen.config.compiler
     config.fused_linear_cross_entropy_chunk_size = chunk
     try:
         plan = lumen.graph_compiler.Plan(lumen.make_graph(step)(H, W, T, C), device)
@@ -323,7 +323,7 @@ def test_chunked_gradients_alone_keep_no_logits(device, triton_on_cuda):
     except RuntimeError as e:
         pytest.skip(str(e))
     want = [lumen.to_numpy(g) for g in lumen.compile(grads)(H, W, T)]
-    config = getattr(lumen.config.compiler, device)
+    config = lumen.config.compiler
     config.fused_linear_cross_entropy_chunk_size = chunk
     try:
         plan = lumen.graph_compiler.Plan(lumen.make_graph(grads)(H, W, T), device)

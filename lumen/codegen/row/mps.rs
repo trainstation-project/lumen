@@ -17,7 +17,7 @@ pub(crate) use crate::codegen::kinds::{row_partials, row_reductions};
 use crate::codegen::reduction::mps as reduce;
 use crate::codegen::utils::mps::*;
 use crate::graph::{Graph, Node, Primitive, Var};
-use crate::graph_compiler::MpsConfig;
+use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::common::diamonds::{depends_on, softmax_pair};
 use crate::graph_compiler::mps::fusion;
 
@@ -91,7 +91,7 @@ pub(crate) fn row_kernel(
     body: &Graph,
     by_value: &[bool],
     reductions: &[&Node],
-    config: &MpsConfig,
+    config: &CompilerConfig,
     tile: Option<(&Graph, &[bool], &Node, Option<GemmConfig>)>,
 ) -> (String, String) {
     let out = body.outputs()[0];
@@ -775,13 +775,13 @@ pub(crate) fn functor_of_reduction(p: &Primitive) -> &'static str {
 impl RowCodegen for Mps {
     /// The kernel's name and source.
     type Code = (String, String);
-    type Options = MpsConfig;
+    type Options = CompilerConfig;
 
     /// The row kernel of `body` for `config`.
     fn row(
         body: &Graph,
         by_value: &[bool],
-        config: &MpsConfig,
+        config: &CompilerConfig,
     ) -> Result<(String, String), String> {
         Ok(row_kernel(
             body,

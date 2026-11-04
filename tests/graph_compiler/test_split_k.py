@@ -11,7 +11,7 @@ import lumen.functional as F
 @pytest.fixture
 def compiler(device, triton_on_cuda):
     """``device``'s compiler settings (CUDA's running Triton), reset to their defaults after the test."""
-    yield getattr(lumen.config.compiler, device)
+    yield lumen.config.compiler
     lumen.config.compiler.reset()
 
 

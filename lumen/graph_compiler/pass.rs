@@ -4,7 +4,6 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::{CompilerConfig, Options};
-use crate::Device;
 use crate::graph::Graph;
 
 /// A unit of compilation that passes read and rewrite: a graph with its options and device config.
@@ -14,13 +13,12 @@ pub(crate) trait Module {
     fn options(&self) -> &Options;
 
     /// Compiler config of the module's target device.
-    fn config(&self) -> &dyn CompilerConfig;
+    fn config(&self) -> &CompilerConfig;
 }
 
-/// A graph being compiled for `device` with the caller's options.
+/// A graph being compiled with the caller's options.
 pub(crate) struct GraphModule<'a> {
     pub graph: Graph,
-    pub device: Device,
     pub options: &'a Options,
 }
 
@@ -37,8 +35,8 @@ impl Module for GraphModule<'_> {
         self.options
     }
 
-    fn config(&self) -> &dyn CompilerConfig {
-        self.options.config.of(self.device)
+    fn config(&self) -> &CompilerConfig {
+        &self.options.config
     }
 }
 

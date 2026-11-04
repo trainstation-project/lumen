@@ -15,7 +15,7 @@ use crate::codegen::row::mps::*;
 use crate::codegen::store::mps::load;
 use crate::codegen::utils::mps::*;
 use crate::graph::{Graph, Node, Primitive, TensorType, Var};
-use crate::graph_compiler::MpsConfig;
+use crate::graph_compiler::CompilerConfig;
 
 /// Output columns one threadgroup tile covers; wider rows are reduced across tiles.
 pub(crate) const ROW_TILE: usize = 64;
@@ -617,7 +617,7 @@ pub(crate) fn gemm_row_kernel(
     body: &Graph,
     by_value: &[bool],
     dot: &Node,
-    config: &MpsConfig,
+    config: &CompilerConfig,
     gemm: Option<GemmConfig>,
 ) -> (String, String) {
     let mut rows = Graph::new();

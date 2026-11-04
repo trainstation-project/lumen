@@ -449,7 +449,7 @@ import lumen
 import lumen.distributed as dist
 import lumen.functional as F
 
-lumen.config.compiler.cuda.use_triton_backend = True
+lumen.config.compiler.use_triton_backend = True
 dist.init_process_group()
 rank, n = dist.get_rank(), dist.get_world_size()
 device = f"cuda:{rank}" if os.environ["LUMEN_TEST_DEVICE"] == "cuda" else "cpu"

@@ -11,7 +11,7 @@ use crate::codegen::elementwise::mps::TUNED_ELEMENTS;
 use crate::codegen::kinds::gemm_dot;
 use crate::device::Device;
 use crate::graph::{Primitive, TensorType, View};
-use crate::graph_compiler::MpsConfig;
+use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::common::autotune::{Kernels, Timer};
 use crate::graph_compiler::plan::{Buffer, Step, Tuned};
 use crate::runtime::mps::Encode;
@@ -31,7 +31,7 @@ const ALIGNMENT: usize = 256;
 pub(super) struct Elementwise<'a> {
     /// Fusions that may be retuned, by name.
     pub tunable: &'a BTreeMap<String, Tunable>,
-    pub config: &'a MpsConfig,
+    pub config: &'a CompilerConfig,
     /// Kernel sources built so far, compiled together by `compile`.
     pub sources: BTreeMap<String, String>,
 }
@@ -91,12 +91,12 @@ impl Kernels for Elementwise<'_> {
 #[derive(Default)]
 pub(super) struct Gemms {
     sources: BTreeMap<String, String>,
-    config: MpsConfig,
+    config: CompilerConfig,
 }
 
 /// Creates an empty GEMM tuner for `config`.
 impl Gemms {
-    pub(super) fn new(config: &MpsConfig) -> Self {
+    pub(super) fn new(config: &CompilerConfig) -> Self {
         Gemms {
             sources: BTreeMap::new(),
             config: config.clone(),
@@ -205,7 +205,7 @@ impl Kernels for Gemms {
                 !skinny && gemm::gemv_config(body).is_none() && gemm::tile_scratch(body).is_none();
 
             return match tiled {
-                true => gemm::configs()
+                true => gemm::config()
                     .iter()
                     .filter(|c| {
                         group.is_none_or(|(g, rows)| (if rows { c.bm } else { c.bn }) % g == 0)
@@ -270,7 +270,7 @@ impl Kernels for Gemms {
             false => Vec::new(),
         };
 
-        gemm::configs()
+        gemm::config()
             .iter()
             .chain(&mpp)
             .chain(&skinny)

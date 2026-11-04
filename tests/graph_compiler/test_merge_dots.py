@@ -138,7 +138,7 @@ def test_attention_projections_merge_into_one_matmul(device, triton_on_cuda):
     merged, attention = plan.steps()
     assert (merged["label"], attention["label"]) == ("3x dot_general", "flash_attention")
     assert attention["inputs"] == [(merged["output"][0], "float32", [16, 96])]
-    lumen.config.compiler.mps.flash_attention = False
+    lumen.config.compiler.flash_attention = False
     try:
         plan = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2, 3], packable=[1, 2, 3])
     finally:
@@ -538,8 +538,8 @@ def test_qkv_backward_merges_its_gradients_dots(device, deterministic, triton_on
         F.sum(y * y).backward()
         return model.w0.grad, model.wq.grad, model.wk.grad, model.wv.grad
 
-    before = lumen.config.compiler.mps.deterministic
-    lumen.config.compiler.mps.deterministic = deterministic
+    before = lumen.config.compiler.deterministic
+    lumen.config.compiler.deterministic = deterministic
     try:
         grads = {}
         for target in ("cpu", device):
@@ -555,7 +555,7 @@ def test_qkv_backward_merges_its_gradients_dots(device, deterministic, triton_on
             graph = lumen.make_graph(step)(model, meta(m, d))
             steps = lumen.graph_compiler.Plan(graph, "mps", parameters=[1, 2, 3, 4], packable=[1, 2, 3, 4]).steps()
     finally:
-        lumen.config.compiler.mps.deterministic = before
+        lumen.config.compiler.deterministic = before
     for got, want in zip(grads[device], grads["cpu"]):
         assert np.linalg.norm(got - want) / np.linalg.norm(want) < 2e-2
     if device != "mps":
@@ -692,14 +692,14 @@ def test_projections_of_several_inputs_each_read_one_block(device, module, trito
     got = []
     try:
         for merge in (True, False):
-            getattr(lumen.config.compiler, device).merge_dots = merge
+            lumen.config.compiler.merge_dots = merge
             model = module(meta(64, 64), meta(64, 64), meta(64, 64))
             g = lumen.compile(f, device=device)
             g(model, meta(32, 64), meta(32, 64))
             model.load_state_dict({k: lumen.from_numpy(v) for k, v in zip(["wq", "wk", "wv"], values)})
             got.append([lumen.to_numpy(v) for v in g(model, *xs)])
     finally:
-        getattr(lumen.config.compiler, device).merge_dots = True
+        lumen.config.compiler.merge_dots = True
     for merged, alone in zip(*got):
         np.testing.assert_array_equal(merged, alone)
 
@@ -754,14 +754,14 @@ def test_gated_pairs_weights_are_interleaved(device, triton_on_cuda):
     got = []
     try:
         for merge in (True, False):
-            getattr(lumen.config.compiler, device).merge_dots = merge
+            lumen.config.compiler.merge_dots = merge
             model = GatedPair(meta(64, 32), meta(64, 32))
             f = lumen.compile(lambda m, x: m(x), device=device)
             f(model, meta(16, 32))
             model.load_state_dict(values)
             got.append(lumen.to_numpy(f(model, x)))
     finally:
-        getattr(lumen.config.compiler, device).merge_dots = True
+        lumen.config.compiler.merge_dots = True
     np.testing.assert_allclose(got[0], got[1], rtol=1e-5, atol=1e-6)
 
 
@@ -812,14 +812,14 @@ def test_gated_pairs_backward_is_interleaved(device, triton_on_cuda):
     got = []
     try:
         for merge in (True, False):
-            getattr(lumen.config.compiler, device).merge_dots = merge
+            lumen.config.compiler.merge_dots = merge
             model = make()
             f = lumen.compile(step, device=device)
             f(model, meta(m, d))
             model.load_state_dict({k: lumen.from_numpy(v) for k, v in values.items()})
             got.append([lumen.to_numpy(t) for t in f(model, x)])
     finally:
-        getattr(lumen.config.compiler, device).merge_dots = True
+        lumen.config.compiler.merge_dots = True
     for merged, alone in zip(*got):
         np.testing.assert_allclose(merged, alone, rtol=1e-5, atol=1e-5)
 
@@ -915,14 +915,14 @@ def test_dots_of_one_operand_share_one_interleaved_block(
     got = []
     try:
         for merge in (True, False):
-            getattr(lumen.config.compiler, device).merge_dots = merge
+            lumen.config.compiler.merge_dots = merge
             model = make()
             f = lumen.compile(lambda model, x: model(x), device=device)
             f(model, meta(*shape))
             model.load_state_dict(values)
             got.append([lumen.to_numpy(t) for t in f(model, x)])
     finally:
-        getattr(lumen.config.compiler, device).merge_dots = True
+        lumen.config.compiler.merge_dots = True
     for merged, alone in zip(*got):
         np.testing.assert_allclose(merged, alone, rtol=1e-5, atol=1e-6)
 
@@ -1031,7 +1031,7 @@ def test_weights_shared_on_either_side_merge_alike(device, groups, h, interleave
         got = []
         try:
             for merge in (True, False):
-                getattr(lumen.config.compiler, device).merge_dots = merge
+                lumen.config.compiler.merge_dots = merge
                 model = make()
                 f = lumen.compile(step, device=device)
                 f(model, meta(*shape))
@@ -1041,7 +1041,7 @@ def test_weights_shared_on_either_side_merge_alike(device, groups, h, interleave
                 out = out if isinstance(out, (list, tuple)) else [out]
                 got.append([lumen.to_numpy(t) for t in out] + [lumen.to_numpy(w._placed(device)) for w in model.ws])
         finally:
-            getattr(lumen.config.compiler, device).merge_dots = True
+            lumen.config.compiler.merge_dots = True
         for merged, alone in zip(*got):
             assert np.isfinite(alone).all()
             np.testing.assert_allclose(merged, alone, rtol=1e-4, atol=1e-5 * np.abs(alone).max())
@@ -1082,7 +1082,7 @@ def test_merged_regions_fuse(device, make, n, left, triton_on_cuda):
     got = []
     try:
         for merge in (True, False):
-            getattr(lumen.config.compiler, device).merge_dots = merge
+            lumen.config.compiler.merge_dots = merge
             model = make([meta(h, d) for _ in range(n)], left)
             f = lumen.compile(lambda model, x: model(x), device=device)
             f(model, meta(*shape))
@@ -1091,7 +1091,7 @@ def test_merged_regions_fuse(device, make, n, left, triton_on_cuda):
             assert all(t.is_contiguous() for t in out)
             got.append([lumen.to_numpy(t.to("cpu")) for t in out])
     finally:
-        getattr(lumen.config.compiler, device).merge_dots = True
+        lumen.config.compiler.merge_dots = True
     for merged, alone in zip(*got):
         np.testing.assert_allclose(merged, alone, rtol=1e-5, atol=1e-5 * np.abs(alone).max())
 
@@ -1144,7 +1144,7 @@ def test_returned_dots_merge(device, n, summed, interleaved, left, triton_on_cud
     got = []
     try:
         for merge in (True, False):
-            getattr(lumen.config.compiler, device).merge_dots = merge
+            lumen.config.compiler.merge_dots = merge
             model = make()
             f = lumen.compile(lambda model, x: model(x), device=device)
             f(model, meta(*shape))
@@ -1153,7 +1153,7 @@ def test_returned_dots_merge(device, n, summed, interleaved, left, triton_on_cud
             assert all(t.is_contiguous() for t in out)
             got.append([lumen.to_numpy(t) for t in out])
     finally:
-        getattr(lumen.config.compiler, device).merge_dots = True
+        lumen.config.compiler.merge_dots = True
     for merged, alone in zip(*got):
         np.testing.assert_allclose(merged, alone, rtol=1e-5, atol=1e-5 * np.abs(alone).max())
 
@@ -1188,7 +1188,7 @@ def test_trained_projections_merge_into_one_matmul(device, module, triton_on_cud
     values = {n: lumen.from_numpy(rand(32, 32, seed=i + 1) / 4) for i, n in enumerate(("wq", "wk", "wv"))}
     trained = {}
     for merge in (True, False):
-        getattr(lumen.config.compiler, device).merge_dots = merge
+        lumen.config.compiler.merge_dots = merge
         try:
             model = module(meta(32, 32), meta(32, 32), meta(32, 32))
             f = lumen.compile(step, device=device)
@@ -1203,7 +1203,7 @@ def test_trained_projections_merge_into_one_matmul(device, module, triton_on_cud
                 for _ in range(3):
                     f(model, x, c)
         finally:
-            getattr(lumen.config.compiler, device).merge_dots = True
+            lumen.config.compiler.merge_dots = True
         if device == "mps":
             kernels = [e["name"] for e in prof.events() if e["kind"] == "gpu"]
             assert ("3x dot_general" in kernels) == merge, kernels

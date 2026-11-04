@@ -3,15 +3,13 @@
 use super::common::simplify::Simplify;
 use super::pass::{GraphModule, Pipeline};
 use super::{Options, positions};
-use crate::Device;
 use crate::graph::Graph;
 use crate::graph_compiler::{Plan, PlanOptions};
 
 /// Simplifies `graph` and plans it for execution on the CPU.
-pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Result<Plan, String> {
+pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> {
     let mut module = GraphModule {
         graph: graph.clone(),
-        device,
         options,
     };
 
@@ -19,18 +17,18 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
         .add(Simplify { matched: true })
         .run(&mut module)?;
 
-    Ok(plan(&module.graph, device, options))
+    Ok(plan(&module.graph, options))
 }
 
 /// Plans `graph` as given, with no scratch region, kernel blocks or device layout.
-pub(crate) fn plan(graph: &Graph, device: Device, options: &Options) -> Plan {
+pub(crate) fn plan(graph: &Graph, options: &Options) -> Plan {
     let plan = PlanOptions {
         scratch: None,
         donate: options.donate.clone(),
         donate_into: options.donate_into.clone(),
         parameters: options.parameters.clone(),
         scalars: positions(&options.scalars),
-        memory_limit: options.config.of(device).memory_limit(),
+        memory_limit: options.config.memory_limit(),
         blocks: Vec::new(),
         layout: None,
     };

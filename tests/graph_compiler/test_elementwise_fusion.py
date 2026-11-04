@@ -211,7 +211,7 @@ def test_values_read_outside_an_elementwise_fusion_are_its_extra_outputs(device,
     as with the flag off, where it is a step of its own. A value two fusions
     read is recomputed in each and both run as one horizontal kernel (MPS's
     fusion, Triton's too)."""
-    compiler = getattr(lumen.config.compiler, device)
+    compiler = lumen.config.compiler
     a, b = rand(64, 32), rand(32, seed=1)
     try:
         args = [lumen.from_numpy(v).to(device) for v in (a, b)]

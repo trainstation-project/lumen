@@ -38,12 +38,12 @@ opt.load_state_dict({f"params.{k}": tensor(shape) for k, shape in enumerate(shap
 grads = [[tensor(shape).to("mps") for shape in shapes] for _ in range(PROFILED_STEPS)]
 # Warm up both variants so compilation is outside the profiled range.
 for on in (False, True):
-    lumen.config.compiler.mps.horizontal_fusion = on
+    lumen.config.compiler.horizontal_fusion = on
     sgd_step(opt, *grads[0])
 lumen.mps.synchronize()
 with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS]) as prof:
     for on in (False, True):
-        lumen.config.compiler.mps.horizontal_fusion = on
+        lumen.config.compiler.horizontal_fusion = on
         with record_function(f"horizontal fusion {'on' if on else 'off'}"):
             for g in grads:
                 sgd_step(opt, *g)

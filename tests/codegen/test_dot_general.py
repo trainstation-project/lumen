@@ -98,7 +98,7 @@ def test_matmul_tiles_fit_its_rows(m, tiles):
         return F.relu(plain(a, b))
 
     for tuned in (False, True):
-        lumen.config.compiler.mps.autotune = tuned
+        lumen.config.compiler.autotune = tuned
         try:
             for f, want in ((plain, product), (fused, np.maximum(product, 0))):
                 with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS]) as prof:

@@ -303,7 +303,7 @@ def test_transformer_train_step_matches_cpu(device, chunk, triton_on_cuda):
     two 2% (at most 3.4%) from each other: rounded at different places (a
     fused kernel's, flash attention's), not wrongly."""
     results = {}
-    configs = (lumen.config.compiler.cpu, lumen.config.compiler.of(device))
+    configs = (lumen.config.compiler, lumen.config.compiler)
     for config in configs:
         config.fused_linear_cross_entropy_chunk_size = chunk
     try:

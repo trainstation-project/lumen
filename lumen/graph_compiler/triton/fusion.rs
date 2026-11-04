@@ -72,7 +72,7 @@ const ELEMENTWISE: &str = "elementwise";
 /// writes at most 4 extra outputs and its two results into a concatenation's slots (as on MPS), and
 /// a GEMM joins the row reading it when one tile holds whole rows (`dot_row_fits`).
 fn backend(m: &TritonModule<'_>) -> Backend {
-    let config = &m.options.config.cuda;
+    let config = &m.options.config;
 
     Backend {
         fusible,

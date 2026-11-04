@@ -6,7 +6,7 @@ use super::super::{Algorithm, GemmConfig, MAX_THREADGROUP_BYTES};
 
 /// Every tiled config autotuning tries, filtered to balanced fragment counts, whole cooperative
 /// loads and tiles that fit in threadgroup memory.
-pub(crate) fn configs() -> &'static [GemmConfig] {
+pub(crate) fn config() -> &'static [GemmConfig] {
     static CONFIGS: OnceLock<Vec<GemmConfig>> = OnceLock::new();
 
     CONFIGS.get_or_init(|| {

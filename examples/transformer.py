@@ -16,10 +16,10 @@ ACCUM = 1
 PROFILED_STEPS = 10
 
 DEVICE = sys.argv[1] if len(sys.argv) > 1 else "mps"
-lumen.config.compiler.mps.linear_reordering = True
+lumen.config.compiler.linear_reordering = True
 
 # The device's compiler settings, each where it has one; CUDA runs through the Triton backend.
-config = getattr(lumen.config.compiler, DEVICE)
+config = lumen.config.compiler
 settings = dict(
     use_triton_backend=True,
     deterministic=True,

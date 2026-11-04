@@ -1,5 +1,5 @@
 //! Running `scatter_add` steps: by default one kernel adding each update element atomically; with
-//! `cuda.deterministic`, or a dtype Triton has no atomic add for, a counting sort of the picks by position,
+//! `deterministic`, or a dtype Triton has no atomic add for, a counting sort of the picks by position,
 //! then a program a block of each position's entries adding its updates in pick order (as MPS's).
 
 use super::{Kernel, Launches, Template, fill, launch};

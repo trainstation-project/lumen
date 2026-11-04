@@ -19,7 +19,7 @@ def test_autotuned_elementwise_fusions_match_untuned(device, dtype, tmp_path, tr
     one does, at lengths no block size divides. A Triton one's dumped source names its
     template kernel and the ``BLOCK_SIZE`` and warps it picked, then its
     generated ``BODY``."""
-    compiler = getattr(lumen.config.compiler, device)
+    compiler = lumen.config.compiler
     try:
         for n in ((1 << 16) + 7, 1 << 20, (3 << 20) + 1):
             try:

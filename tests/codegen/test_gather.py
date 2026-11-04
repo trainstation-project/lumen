@@ -19,11 +19,9 @@ def safe_kernels():
     """Each test with its indices clamped (out of range here too), CUDA's
     programs on the Triton backend."""
     compiler = lumen.config.compiler
-    compiler.mps.safe_kernels = compiler.tpu.safe_kernels = compiler.cuda.safe_kernels = True
-    compiler.cuda.use_triton_backend = True
+    compiler.safe_kernels = compiler.use_triton_backend = True
     yield
-    compiler.mps.safe_kernels = compiler.tpu.safe_kernels = compiler.cuda.safe_kernels = False
-    compiler.cuda.use_triton_backend = False
+    compiler.safe_kernels = compiler.use_triton_backend = False
 
 
 def _tensor(a, device, dtype=None):
@@ -168,7 +166,7 @@ def test_gather_checks_its_operands():
 @pytest.mark.parametrize("width, rows, picks", [(64, 5, 300), (7, 5, 300), (7, 1, 2500)])
 @pytest.mark.parametrize("dtype", ["float32", "float16", "bfloat16", "int32", "int8"])
 def test_scatter_add_is_deterministic(device, dtype, width, rows, picks):
-    """A deterministic scatter_add (``mps.deterministic``, ``cuda.deterministic``;
+    """A deterministic scatter_add (``deterministic``;
     by default it adds by atomics, as torch's ``index_add``) adds each element's
     updates in index order (MPS and Triton sort the picks by position, then a
     thread a column adds its row's in order; no atomics on the values): the
@@ -176,7 +174,7 @@ def test_scatter_add_is_deterministic(device, dtype, width, rows, picks):
     the reference rounds it), the same each run; a lookup's gradient too
     (deterministic training). 2500 picks at one row are more than either sorts
     at once (1024), so that row walks every index in order instead."""
-    lumen.config.compiler.mps.deterministic = lumen.config.compiler.cuda.deterministic = True
+    lumen.config.compiler.deterministic = True
     rng = np.random.default_rng(4)
     x = (rng.standard_normal((rows, width)) * 4).astype(np.float32)
     ids = rng.integers(0, rows, (picks,))
@@ -192,7 +190,7 @@ def test_scatter_add_is_deterministic(device, dtype, width, rows, picks):
             got = lumen.to_numpy(compiled(*on(device)).to(dtype="float32").to("cpu"))
             np.testing.assert_array_equal(got, want)
     finally:
-        lumen.config.compiler.mps.deterministic = lumen.config.compiler.cuda.deterministic = False
+        lumen.config.compiler.deterministic = False
 
 
 # Unit roundoff of each float dtype: the largest relative error of rounding one result.
