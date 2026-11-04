@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::PoisonError;
 
 use super::kernel_codegen;
-use super::{SOURCES, Tuning, compile_kernels, compile_mpp_kernels, record_launch};
+use super::{SOURCES, Tuning, compile_kernels, compile_mpp_kernels, compile_routed, record_launch};
 use crate::allocator::Scratch;
 use crate::codegen::dot_general::mps::{self as gemm, GemmConfig};
 use crate::codegen::elementwise::mps::TUNED_ELEMENTS;
@@ -76,7 +76,7 @@ impl Kernels for Elementwise<'_> {
         let name = kernel.clone();
 
         let encode: Encode = Box::new(move |step, inputs, output, scratch, keep| {
-            super::encode_with(step, &name, None, inputs, output, scratch, keep)
+            super::encode_with(step, &name, None, None, inputs, output, scratch, keep)
         });
 
         Tuned::new(kernel, encode)
@@ -332,7 +332,7 @@ impl Kernels for Gemms {
 
             let tuned = (step.views == views).then_some((name.as_str(), config));
 
-            super::encode_with(step, fusion, tuned, inputs, output, scratch, keep)
+            super::encode_with(step, fusion, tuned, None, inputs, output, scratch, keep)
         });
 
         Tuned::new(kernel, encode)
@@ -346,6 +346,68 @@ impl Kernels for Gemms {
 
         compile_kernels(sg)?;
         compile_mpp_kernels(mpp)
+    }
+}
+
+/// Tuning backend for flash attention forwards: the kernel (8x8 matrices or Metal Performance Primitives), its
+/// simdgroups and its key block.
+#[derive(Default)]
+pub(super) struct Attentions {
+    /// Kernel sources built so far, compiled together by `compile`.
+    sources: BTreeMap<String, String>,
+}
+
+impl Kernels for Attentions {
+    type Config = crate::codegen::attention::mps::Tuning;
+
+    /// The tunings of an attention forward step's matched attention, laid out as the step reads it.
+    fn configs(&self, step: &Step) -> Vec<Self::Config> {
+        let Primitive::Fusion { body, .. } = &step.primitive else {
+            return Vec::new();
+        };
+
+        let strides = super::attention_strides(step, body);
+
+        match crate::graph_compiler::common::attention::of_body_strided(body, &strides) {
+            Some(a) => crate::codegen::attention::mps::tunings(&a),
+            None => Vec::new(),
+        }
+    }
+
+    /// Generates the forward for `tuning` and an encoder launching it.
+    fn build(&mut self, step: &Step, tuning: Self::Config) -> Tuned {
+        let Primitive::Fusion { body, .. } = &step.primitive else {
+            unreachable!("an attention fusion")
+        };
+
+        let strides = super::attention_strides(step, body);
+        let a = crate::graph_compiler::common::attention::of_body_strided(body, &strides)
+            .expect("an attention it was tuned for");
+
+        let (kernel, source) = crate::codegen::attention::mps::forward_with(body, &a, tuning)
+            .expect("a tuning generates as the untuned forward does");
+
+        self.sources.insert(kernel.clone(), source);
+        let name = kernel.clone();
+        let views = step.views.clone();
+
+        // Tuned for the step's views: other views (an input bound strided at run time) take the default kernel.
+        let encode: Encode = Box::new(move |step, inputs, output, scratch, keep| {
+            let Primitive::Fusion { name: fusion, .. } = &step.primitive else {
+                unreachable!("an attention fusion")
+            };
+
+            let tuned = (step.views == views).then_some((name.as_str(), tuning));
+
+            super::encode_with(step, fusion, None, tuned, inputs, output, scratch, keep)
+        });
+
+        Tuned::new(kernel, encode)
+    }
+
+    /// Compiles the newly generated forwards.
+    fn compile(&mut self) -> Result<(), String> {
+        compile_routed(uncompiled(&mut self.sources))
     }
 }
 

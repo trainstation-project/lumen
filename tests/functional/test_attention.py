@@ -102,6 +102,54 @@ def test_flash_attention(device, case, dtype, triton_on_cuda):
         assert steps(f, q, k, v, device=device) == ["flash_attention"]
 
 
+LONG_CASES = [
+    ((1, 64, 4096, 4, 2, 64, 64), True),
+    ((1, 32, 4096, 2, 2, 128, 128), False),
+]
+
+
+@pytest.mark.mps
+@pytest.mark.parametrize("dtype", ["float16", "bfloat16"])
+@pytest.mark.parametrize("case", LONG_CASES, ids=_ids(LONG_CASES))
+def test_flash_attention_over_long_keys(case, dtype):
+    """Half-precision flash attention over 4096 keys (on Metal Performance Primitives where the OS has them)
+    agrees with attention in float64 on MPS, causal with its diagonal offset by the extra keys and with
+    grouped heads, as one kernel."""
+    (b, sq, sk, n, nkv, h, hv), causal = case
+    (q, k, v), arrays = tensors("mps", dtype, (b, sq, n, h), (b, sk, nkv, h), (b, sk, nkv, hv))
+
+    def f(q, k, v):
+        """Flash attention, causal when the case is."""
+        return F.flash_attention(q, k, v, is_causal=causal)
+
+    out = lumen.compile(f)(q, k, v)
+    np.testing.assert_allclose(
+        lumen.to_numpy(out.to(dtype="float32")), reference(*arrays, causal=causal), rtol=TOL[dtype], atol=TOL[dtype]
+    )
+    assert steps(f, q, k, v) == ["flash_attention"]
+
+
+@pytest.mark.mps
+@pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
+def test_tuned_flash_attention(dtype):
+    """Flash attention large enough to be autotuned (a million query-key pairs a head: its kernel, simdgroups
+    and key block timed on MPS, Metal Performance Primitives among them in bfloat16) agrees with attention
+    in float64, causal with grouped heads."""
+    (q, k, v), arrays = tensors("mps", dtype, (1, 1024, 4, 64), (1, 1024, 2, 64), (1, 1024, 2, 64))
+    config = lumen.config.compiler
+    tuned = config.autotune
+    config.autotune = True
+
+    try:
+        out = lumen.compile(lambda q, k, v: F.flash_attention(q, k, v, is_causal=True))(q, k, v)
+    finally:
+        config.autotune = tuned
+
+    np.testing.assert_allclose(
+        lumen.to_numpy(out.to(dtype="float32")), reference(*arrays, causal=True), rtol=TOL[dtype], atol=TOL[dtype]
+    )
+
+
 DECODE_CASES = [
     (1, 1, 64, 32, 8, 64),
     (2, 4, 100, 4, 2, 32),
