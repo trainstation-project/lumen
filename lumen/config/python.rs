@@ -42,6 +42,5 @@ impl Config {
 /// Adds the config classes and the `config` singleton to the Python module.
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Config>()?;
-    m.add_class::<PyCompilerConfig>()?;
     m.add("config", Config)
 }

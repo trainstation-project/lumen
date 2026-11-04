@@ -6,7 +6,7 @@ from helpers import CUDA, MPS
 
 import lumen
 import lumen.functional as F
-from lumen.config._C import CompilerConfig
+from lumen.graph_compiler.config import CompilerConfig
 
 
 @pytest.fixture
@@ -69,13 +69,13 @@ def test_compiler_flags_defaults(compiler):
 
 
 def test_stub_defaults_are_the_compilers(compiler):
-    """The defaults ``lumen/config/_C.pyi`` shows for the compiler's flags
+    """The defaults ``lumen/graph_compiler/config/_C.pyi`` shows for the compiler's flags
     (``split_k: bool = True``) are the ones it starts from, every flag given
     one."""
     import ast
     import pathlib
 
-    stub = ast.parse((pathlib.Path(lumen.__file__).parent / "config" / "_C.pyi").read_text())
+    stub = ast.parse((pathlib.Path(lumen.__file__).parent / "graph_compiler" / "config" / "_C.pyi").read_text())
     (cls,) = [c for c in stub.body if isinstance(c, ast.ClassDef) and c.name == "CompilerConfig"]
     documented = {a.target.id: ast.literal_eval(a.value) for a in cls.body if isinstance(a, ast.AnnAssign)}
     compiler.reset()

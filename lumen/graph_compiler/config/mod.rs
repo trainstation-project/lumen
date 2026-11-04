@@ -132,6 +132,14 @@ impl CompilerConfig {
     }
 }
 
+/// Adds the `CompilerConfig` class to `lumen.graph_compiler.config._C`.
+#[cfg(feature = "python")]
+pub(crate) fn register(m: &pyo3::Bound<'_, pyo3::types::PyModule>) -> pyo3::PyResult<()> {
+    use pyo3::types::PyModuleMethods;
+
+    m.add_class::<PyCompilerConfig>()
+}
+
 /// `value`'s Debug text as Python source (`True`, `False`, `Some(x)` as `x`).
 #[cfg(feature = "python")]
 fn py_value(value: &dyn std::fmt::Debug) -> String {
