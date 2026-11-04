@@ -4,9 +4,7 @@
 pub(crate) mod ane;
 mod autotune;
 mod canonicalize_dots;
-mod diamonds;
 pub(crate) mod fusion;
-mod horizontal;
 mod kernel_codegen;
 mod place_concats;
 mod place_views;
@@ -22,7 +20,7 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 use super::common::alone::{Alone, Lone};
 use super::common::chunked_cross_entropy::ChunkedCrossEntropy;
 use super::common::clamp_indices::ClampIndices;
-use super::common::diamonds::{Diamonds, RowsModule};
+use super::common::diamonds::{Diamonds, Row, RowsModule};
 use super::common::dot_strength::DotStrength;
 use super::common::linear_cross_entropy::LinearCrossEntropy;
 use super::common::linear_reordering::LinearReordering;
@@ -107,7 +105,7 @@ struct MpsModule<'a> {
     /// Per packed block, how many members each interleaved group spans (all ones: side by side).
     interleaved: Vec<Vec<usize>>,
     /// Normalization rows found by the diamonds pass, consumed by fusion.
-    rows: Vec<diamonds::Row>,
+    rows: Vec<Row>,
     /// Graph input indices passed to kernels by value.
     scalars: Vec<usize>,
     /// Kernels requested so far; fusions name them as `PENDING` plus an index.
@@ -197,7 +195,7 @@ impl Lone for MpsModule<'_> {
 }
 
 impl RowsModule for MpsModule<'_> {
-    fn rows_mut(&mut self) -> &mut Vec<diamonds::Row> {
+    fn rows_mut(&mut self) -> &mut Vec<Row> {
         &mut self.rows
     }
 }
@@ -309,7 +307,7 @@ fn pipeline<'a>(config: &CompilerConfig) -> Pipeline<MpsModule<'a>> {
         if config.normalization_diamonds {
             p.add(Diamonds {
                 fusible: fusion::fusible,
-                partials: diamonds::PARTIALS,
+                partials: crate::codegen::row::mps::ROW_PARTIALS,
             });
         }
 

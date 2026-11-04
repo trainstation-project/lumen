@@ -166,3 +166,22 @@ impl Lone for TritonModule<'_> {
         named(body)
     }
 }
+
+/// Most tensors one horizontally fused Triton kernel may read and write.
+pub(super) const HORIZONTAL_BUFFERS: usize = 64;
+
+/// Whether horizontal fusion may merge `node`: an `elementwise` fusion without reductions or matmuls, as
+/// MPS's are; a node alone joins only when elementwise (MPS runs a lone fill, iota or the like as its own
+/// step).
+pub(super) fn horizontal_candidate(_: &Graph, node: &Node) -> bool {
+    let Primitive::Fusion { name, body, .. } = &node.primitive else {
+        return false;
+    };
+
+    let alone = match body.nodes() {
+        [n] => !crate::graph_compiler::elementwise(&n.primitive),
+        _ => false,
+    };
+
+    name == "elementwise" && !alone && reduction_root(body).is_none() && gemm_dot(body).is_none()
+}

@@ -7,7 +7,6 @@ mod cross_entropy;
 pub(crate) mod direct;
 mod fusion;
 mod gemm;
-mod horizontal;
 mod place_concats;
 mod scatter_add;
 mod split_k;
@@ -25,7 +24,6 @@ pub(crate) use attention::{Launch, set_attention};
 use fusion::{Fusion, PlaceViews};
 #[cfg(feature = "python")]
 pub(crate) use gemm::{Epilogue, set_gemm};
-use horizontal::HorizontalFusion;
 use place_concats::PlaceConcats;
 use scatter_add::Scatter;
 use split_k::SplitK;
@@ -62,7 +60,7 @@ use crate::codegen::store::triton::{load, store};
 use crate::codegen::utils::triton as codegen;
 use crate::graph::{Graph, Primitive, TensorType, UPDATES};
 use crate::graph_compiler::common::diamonds::{Diamonds, Row, RowsModule};
-use crate::graph_compiler::common::horizontal::segments;
+use crate::graph_compiler::common::horizontal::{Grouping, HorizontalFusion, segments};
 use crate::plan::{Buffer, Step, Tuned};
 use crate::{DType, Device, Scalar, Tensor, TensorOptions};
 
@@ -400,7 +398,12 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
     pipeline.add(Alone);
 
     if config.fuse && config.horizontal_fusion {
-        pipeline.add(HorizontalFusion);
+        pipeline.add(HorizontalFusion {
+            candidate: fusion::horizontal_candidate,
+            grouping: Grouping::Tiling,
+            buffers: fusion::HORIZONTAL_BUFFERS,
+            name: "elementwise",
+        });
     }
 
     pipeline.run(&mut module)?;
