@@ -5,7 +5,7 @@
 //! (`cute.math.add`/`mul` with `rounding`), which no compiler stage contracts into an FMA: the
 //! program runs exactly as traced. Division and square roots are correctly rounded as written.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write;
 
 use super::Emit;
@@ -36,6 +36,12 @@ pub(crate) struct Emitter<'a> {
     pub(crate) values: HashMap<(Var, String), String>,
     /// Local name already holding each index expression.
     pub(crate) indices: HashMap<String, String>,
+    /// Inputs read at the walk's own index `j`, read from their fragment `fin{k}` at `v` (the element's
+    /// place in the thread's vector) instead.
+    pub(crate) fragments: BTreeSet<usize>,
+    /// Whether an input is read out of row-major order (its strides not decreasing, as a transpose's), so
+    /// consecutive indices read far apart.
+    pub(crate) scattered: bool,
     /// Counter for fresh local names.
     locals: usize,
 }
@@ -363,6 +369,7 @@ impl<'a> Emitter<'a> {
             }
             Transpose { permutation } => {
                 let strides: Vec<usize> = permutation.iter().map(|&d| x_strides[d]).collect();
+                self.scattered |= out_of_order(&strides);
                 self.index(gather_index(&idx, &ty.shape, &strides))
             }
             Slice { start_indices, .. } => {
@@ -383,6 +390,13 @@ impl<'a> Emitter<'a> {
             p => unreachable!("{p} is not a layout primitive"),
         }
     }
+}
+
+/// Whether `strides` (in elements, per dimension) read out of row-major order: a later dimension's
+/// stride above an earlier one's, broadcast (zero) strides aside.
+fn out_of_order(strides: &[usize]) -> bool {
+    let strides: Vec<usize> = strides.iter().copied().filter(|&s| s > 0).collect();
+    strides.windows(2).any(|w| w[0] < w[1])
 }
 
 /// CUDA emitter: CuTe statements a fused body's values are computed in.
@@ -407,6 +421,8 @@ impl<'a> Emit<'a> for Emitter<'a> {
             indent: String::new(),
             values: HashMap::new(),
             indices: HashMap::new(),
+            fragments: BTreeSet::new(),
+            scattered: false,
             locals: 0,
         }
     }
@@ -431,8 +447,17 @@ impl<'a> Emit<'a> for Emitter<'a> {
                     true => format!("in{k}"),
                     false => {
                         let at = gather_index(&idx, &ty.shape, &self.strides[k]);
-                        let at = self.index(at);
-                        format!("in{k}[{at}]")
+
+                        match at == "j" {
+                            true => {
+                                self.fragments.insert(k);
+                                format!("fin{k}[v]")
+                            }
+                            false => {
+                                self.scattered |= out_of_order(&self.strides[k]);
+                                format!("in{k}[{}]", self.index(at))
+                            }
+                        }
                     }
                 }
             }

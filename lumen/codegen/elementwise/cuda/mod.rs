@@ -33,10 +33,13 @@ impl ElementwiseCodegen for Cuda {
     type Code = (String, String);
     type Schedule = Layouts;
 
-    /// Generates `BODY(ins, outs, j, SEGMENT)`, computing and storing every output of segment `SEGMENT` (the
-    /// outputs of one element count, in `segments`' order) at flat index `j`, each output at its `layouts`
-    /// strides, and `launch(in0, …, out0, …, blocks, stream)` running it in `ElementwiseKernel`. Inputs
-    /// flagged in `by_value` arrive as scalars.
+    /// Generates `BODY(ins, outs, fins, fouts, j, v, SEGMENT)`, computing and storing every output of
+    /// segment `SEGMENT` (the outputs of one element count, in `segments`' order) at flat index `j`, each
+    /// output at its `layouts` strides, and `launch(in0, …, out0, …, blocks, stream, vectorized)` running
+    /// it in `ElementwiseKernel`. Tensors read or written at `j` itself go through `fins`/`fouts` at `v`
+    /// (a thread's vector of consecutive elements, or the tensors themselves with `v = j`); each
+    /// segment's are listed for the kernel, with whether the segment reads every input in row-major
+    /// order (vectors pay only then). Inputs flagged in `by_value` arrive as scalars.
     fn elementwise(
         body: &Graph,
         by_value: &[bool],
@@ -51,21 +54,45 @@ impl ElementwiseCodegen for Cuda {
             segments(body).into_iter().filter(|(n, _)| *n > 0).collect();
 
         let mut code = String::new();
+        let (mut fragments_in, mut fragments_out) = (String::new(), String::new());
+        let mut contiguous = String::new();
 
         for (s, (_, outputs)) in segments.iter().enumerate() {
             // Values computed in another segment's branch aren't defined in this one.
             emitter.values.clear();
             emitter.indices.clear();
             emitter.lines.clear();
+            emitter.fragments.clear();
+            emitter.scattered = false;
 
             let mut stores = String::new();
+            let mut written = Vec::new();
 
             for &k in outputs {
                 let v = body.outputs()[k];
                 let value = emitter.value(v, "j".into());
                 let at = gather_index("j", &body.type_of(v).shape, &layouts.outputs[k]);
-                writeln!(stores, "        out{k}[{at}] = {value}").unwrap();
+
+                match at == "j" {
+                    true => {
+                        written.push(k);
+                        writeln!(stores, "        fout{k}[v] = {value}").unwrap();
+                    }
+                    false => writeln!(stores, "        out{k}[{at}] = {value}").unwrap(),
+                }
             }
+
+            let listed = |ks: &mut dyn Iterator<Item = usize>| -> String {
+                format!("({}), ", ks.map(|k| format!("{k}, ")).collect::<String>())
+            };
+
+            fragments_in += &listed(&mut emitter.fragments.iter().copied());
+            fragments_out += &listed(&mut written.into_iter());
+            contiguous += if emitter.scattered {
+                "False, "
+            } else {
+                "True, "
+            };
 
             write!(
                 code,
@@ -101,17 +128,25 @@ from lumen.codegen.elementwise.cuda.kernel import ElementwiseKernel
 
 
 @cute.jit
-def BODY(ins, outs, j, SEGMENT: cutlass.Constexpr):
-    """Every output of segment `SEGMENT` at flat index `j`."""
-{unpack_ins}{unpack_outs}{code}
+def BODY(ins, outs, fins, fouts, j, v, SEGMENT: cutlass.Constexpr):
+    """Every output of segment `SEGMENT` at flat index `j`, the tensors read and written at `j` through
+    `fins` and `fouts` at `v`."""
+{unpack_ins}{unpack_outs}{unpack_fins}{unpack_fouts}{code}
 
 @cute.jit
-def launch({tensors}, blocks: Int32, stream: cuda.CUstream):
-    """Runs the fusion's `ElementwiseKernel` on `blocks` blocks on `stream`."""
-    ElementwiseKernel(BODY, ({counts})).launch([{ins}], [{outs}], blocks, stream)
+def launch({tensors}, blocks: Int32, stream: cuda.CUstream, vectorized: cutlass.Constexpr):
+    """Runs the fusion's `ElementwiseKernel` on `blocks` blocks on `stream`, with vector loads and stores
+    when `vectorized` (every tensor 16-byte aligned)."""
+    kernel = ElementwiseKernel(BODY, ({counts}), ({fragments_in}), ({fragments_out}), ({contiguous}), vectorized)
+    kernel.launch([{ins}], [{outs}], blocks, stream)
 "#,
             unpack_ins = unpack("in", ins.len()),
             unpack_outs = unpack("out", outs.len()),
+            unpack_fins = unpack("fin", ins.len()),
+            unpack_fouts = unpack("fout", outs.len()),
+            fragments_in = fragments_in,
+            fragments_out = fragments_out,
+            contiguous = contiguous,
             tensors = [ins.clone(), outs.clone()].concat().join(", "),
             counts = counts.concat(),
             ins = ins.join(", "),
