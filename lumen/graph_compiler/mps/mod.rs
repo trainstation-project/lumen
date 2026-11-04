@@ -360,7 +360,14 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
     };
 
     pipeline(config).run(&mut module)?;
-    compile_kernels(std::mem::take(&mut module.sources))?;
+
+    // Kernels on Metal Performance Primitives compile against their templates, the rest against the prelude.
+    let (mpp, sources): (BTreeMap<_, _>, BTreeMap<_, _>) = std::mem::take(&mut module.sources)
+        .into_iter()
+        .partition(|(_, source)| source.contains("flash_attention_mpp"));
+
+    compile_kernels(sources)?;
+    compile_mpp_kernels(mpp)?;
 
     let MpsModule {
         graph: fused,
@@ -490,8 +497,11 @@ fn feeding(primitive: &Primitive, p: usize, inputs: usize) -> Vec<usize> {
     reads
 }
 
-/// Metal Performance Primitives matmul templates, compiled only into MPP kernels.
-const MPP: &str = include_str!("../../codegen/dot_general/mps/mpp/kernel.metal");
+/// Metal Performance Primitives matmul and attention templates, compiled only into MPP kernels.
+const MPP: &str = concat!(
+    include_str!("../../codegen/dot_general/mps/mpp/kernel.metal"),
+    include_str!("../../codegen/attention/mps/forward_mpp_kernel.metal"),
+);
 
 /// Compiles `sources` against the standard prelude.
 fn compile_kernels(sources: BTreeMap<String, String>) -> Result<(), String> {
@@ -531,7 +541,7 @@ static SOURCES: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
 
 /// Whether this Metal toolchain supports Metal Performance Primitives, probed once: a kernel defined only
 /// under `LUMEN_MPP`, compiling (and logging) no error either way.
-fn mpp_available() -> bool {
+pub(crate) fn mpp_available() -> bool {
     static AVAILABLE: OnceLock<bool> = OnceLock::new();
 
     *AVAILABLE.get_or_init(|| {
@@ -976,13 +986,14 @@ pub(super) fn encode_with(
         let (outer, heads) = attention::grid_batch(&a.batch);
 
         // Decode attention runs one threadgroup per query, otherwise one of `forward_groups`
-        // simdgroups per 8 of them.
+        // simdgroups per `forward_rows` of them.
         let groups = crate::codegen::attention::mps::forward_groups(&a);
+        let rows = crate::codegen::attention::mps::forward_rows(&a);
 
         let grid = match decodes(&a) {
             true => Grid::Groups([a.sq, heads, outer]),
             false => Grid::GroupsOf {
-                groups: [a.sq.div_ceil(8 * groups), heads, outer],
+                groups: [a.sq.div_ceil(rows * groups), heads, outer],
                 threads: 32 * groups,
             },
         };

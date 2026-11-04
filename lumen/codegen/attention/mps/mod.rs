@@ -206,6 +206,22 @@ impl AttentionCodegen for Mps {
                     maxima, sums, os,
                     group.x, group.z, group.y, {heads}u, sg, lane, tid.y * 16 + tid.x{epi});"
             ),
+            // Half and bfloat16 multiply on Metal Performance Primitives where they fit.
+            false if mpp(a) => {
+                let groups = forward_groups(a);
+
+                formatdoc!(
+                    "
+                    threadgroup float scratch[{groups} * (16 * 32 + 2 * 16)];
+                    threadgroup {t} probs[{groups} * 16 * 32];
+                    flash_attention_mpp<{t}, {o}, {h}u, {hv}u, {groups}u, {causal}, {raw}, {lse},
+                                        NAME_ix, NAME_score, {w}>(
+                        {q}, {k}, {v}, out, {raw_arg}, {lse_arg},
+                        NAME_ix(), {sq}u, {sk}u, NAME_score(), {offset},
+                        scratch, probs,
+                        group.x, group.z, group.y, {heads}u, sg, lane{epi});"
+                )
+            }
             false => {
                 let (bk, groups) = (key_block(a), forward_groups(a));
 
