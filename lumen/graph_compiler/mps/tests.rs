@@ -36,7 +36,7 @@ fn fuse(g: &Graph) -> Graph {
 
     fusion::fuse(
         g,
-        &super::diamonds::diamonds(g),
+        &crate::graph_compiler::common::diamonds::diamonds(g, super::fusion::fusible),
         &[],
         &config,
         |body, by_value| {
@@ -1281,7 +1281,7 @@ fn dots_fuse_their_epilogue() {
 
     let unfused = fusion::fuse(
         &g,
-        &super::diamonds::diamonds(&g),
+        &crate::graph_compiler::common::diamonds::diamonds(&g, super::fusion::fusible),
         &[],
         &config,
         |body, by_value| {

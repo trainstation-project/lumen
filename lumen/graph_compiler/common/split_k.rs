@@ -15,7 +15,7 @@ const CHUNK_ALIGN: usize = 8;
 
 /// A backend's rules for splitting K.
 pub(crate) struct Rules<'a> {
-    /// Output tiles (threadgroups or programs) an `m` x `n` matmul runs as.
+    /// Output tiles an `m` x `n` matmul runs as, each one kernel instance.
     pub(crate) tiles: &'a dyn Fn(usize, usize) -> usize,
     /// Tiles a split aims to fill the GPU with; a matmul of half as many or more is not split.
     pub(crate) target: usize,

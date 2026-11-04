@@ -22,6 +22,7 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 use super::common::alone::{Alone, Lone};
 use super::common::chunked_cross_entropy::ChunkedCrossEntropy;
 use super::common::clamp_indices::ClampIndices;
+use super::common::diamonds::{Diamonds, RowsModule};
 use super::common::dot_strength::DotStrength;
 use super::common::linear_cross_entropy::LinearCrossEntropy;
 use super::common::linear_reordering::LinearReordering;
@@ -195,6 +196,12 @@ impl Lone for MpsModule<'_> {
     }
 }
 
+impl RowsModule for MpsModule<'_> {
+    fn rows_mut(&mut self) -> &mut Vec<diamonds::Row> {
+        &mut self.rows
+    }
+}
+
 impl Module for MpsModule<'_> {
     fn graph(&self) -> &Graph {
         &self.graph
@@ -300,7 +307,10 @@ fn pipeline<'a>(config: &CompilerConfig) -> Pipeline<MpsModule<'a>> {
 
     if config.fuse {
         if config.normalization_diamonds {
-            p.add(diamonds::Diamonds);
+            p.add(Diamonds {
+                fusible: fusion::fusible,
+                partials: diamonds::PARTIALS,
+            });
         }
 
         p.add(PlaceConcats);
