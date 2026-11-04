@@ -128,7 +128,7 @@ impl<'a> Emitter<'a> {
             Cbrt => format!("cute.math.cbrt({a})"),
             Abs => format!("cute.math.abs({a})"),
             Sign => format!(
-                "cutlass.select_(({a} == {f}(0.0)) | ({a} != {a}), {a}, cutlass.select_({a} > {f}(0.0), {f}(1.0), {f}(-1.0)))"
+                "{f}(cutlass.select_(({a} == {f}(0.0)) | ({a} != {a}), {a}, cutlass.select_({a} > {f}(0.0), {f}(1.0), {f}(-1.0))))"
             ),
             IsFinite => return format!("cute.math.isfinite({a})"),
             ErfInv => self.erf_inv(&a, f),
@@ -154,18 +154,43 @@ impl<'a> Emitter<'a> {
             let (a, _) = self.computed(&x, operand);
 
             let value = match op {
-                // Integer exponents: an int32 power, i64 exponents clamped to int32 keeping their parity.
+                Pow if !other.is_float() && operand == DType::F64 => {
+                    format!("cute.math.pow({a}, {y}.to(cutlass.Float64))")
+                }
+                // Integer exponents, as MPS's `pow_op` (and Triton's): held within int32 keeping their
+                // parity (i64/u64 past it are 0, inf or 1 but for |a| = 1), then a float pow, exact in
+                // float32 up to 2^24; past it `a^hi * a^lo` with `lo = n % 128` of n's sign, both exact
+                // in float32 (CuTe's `fpowi` has no lowering).
                 Pow if !other.is_float() => {
                     let most = (1u32 << 31) - 2;
 
-                    let n = match other {
-                        DType::I64 | DType::U64 => self.local(format!(
-                            "cutlass.select_({y} > {most}, {most} + ({y} & 1), cutlass.select_({y} < -{most}, -{most} - ({y} & 1), {y}))"
-                        )),
-                        _ => y.clone(),
+                    let n = match other.bits() < 32 || other == DType::I32 {
+                        true => self.local(format!("{y}.to(cutlass.Int32)")),
+                        false => {
+                            let u = cute_type(other).expect("a CuTe dtype");
+
+                            let low = match other {
+                                DType::I64 => format!(
+                                    "cutlass.select_({y} < -{most}, -{most} - ({y} & 1), {y})"
+                                ),
+                                _ => y.clone(),
+                            };
+
+                            self.local(format!(
+                                "{u}(cutlass.select_({y} > {most}, {most} + ({y} & 1), {low})).to(cutlass.Int32)"
+                            ))
+                        }
                     };
 
-                    format!("cute.math.fpowi({a}, {n}.to(cutlass.Int32))")
+                    let exact = 1u32 << 24;
+                    let lo = self.local(format!("{n} % 128"));
+
+                    format!(
+                        "cutlass.Float32(cutlass.select_(({n} <= {exact}) & ({n} >= -{exact}), \
+                         cute.math.pow({a}, {n}.to(cutlass.Float32)), \
+                         cute.math.pow({a}, ({n} - {lo}).to(cutlass.Float32)) \
+                         * cute.math.pow({a}, {lo}.to(cutlass.Float32))))"
+                    )
                 }
                 Pow => format!("cute.math.pow({a}, {})", self.computed(&y, operand).0),
                 Rem => format!("cute.math.rem({a}, {})", self.computed(&y, operand).0),
@@ -209,7 +234,7 @@ impl<'a> Emitter<'a> {
             // Out-of-range shift amounts give 0 (or the sign fill for arithmetic shifts) like XLA.
             ShiftLeft | ShiftRightLogical | ShiftRightArithmetic => {
                 let in_range = self.local(format!("({y} >= 0) & ({y} < {bits})"));
-                let shift = self.local(format!("cutlass.select_({in_range}, {y}, {t}(0))"));
+                let shift = self.local(format!("{t}(cutlass.select_({in_range}, {y}, {t}(0)))"));
                 let u = unsigned(bits);
 
                 match op {
@@ -270,12 +295,12 @@ impl<'a> Emitter<'a> {
         let near = self.local(format!("{w} < {f}(5.0)"));
 
         let at = self.local(format!(
-            "cutlass.select_({near}, cute.math.add({w}, {f}(-2.5), {RN}), cute.math.add(cute.math.sqrt({w}), {f}(-3.0), {RN}))"
+            "{f}(cutlass.select_({near}, cute.math.add({w}, {f}(-2.5), {RN}), cute.math.add(cute.math.sqrt({w}), {f}(-3.0), {RN})))"
         ));
 
         let coefficient = |k: usize| {
             format!(
-                "cutlass.select_({near}, {f}({}), {f}({}))",
+                "{f}(cutlass.select_({near}, {f}({}), {f}({})))",
                 SMALL[k], LARGE[k]
             )
         };
@@ -287,7 +312,7 @@ impl<'a> Emitter<'a> {
         }
 
         format!(
-            "cutlass.select_(cute.math.abs({a}) == {one}, cute.math.mul({a}, {f}(float(\"inf\")), {RN}), cute.math.mul({p}, {a}, {RN}))"
+            "{f}(cutlass.select_(cute.math.abs({a}) == {one}, cute.math.mul({a}, {f}(float(\"inf\")), {RN}), cute.math.mul({p}, {a}, {RN})))"
         )
     }
 

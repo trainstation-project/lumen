@@ -9,9 +9,10 @@ import cutlass
 import cutlass.cute as cute
 from cutlass import Int32, Int64
 
-# Threads per block, and elements each thread computes per step of its walk (independent loads in flight).
+# Threads per block.
 THREADS = 256
-UNROLL = 4
+# Bytes of its narrowest tensor a thread computes a step.
+STEP_BYTES = 16
 
 
 class ElementwiseKernel:
@@ -25,24 +26,42 @@ class ElementwiseKernel:
 
     @cute.kernel
     def kernel(self, ins: list, outs: list):
-        """Walks each segment's indices grid-strided, `UNROLL` a step, computing the outputs at each."""
+        """Walks each segment's indices grid-strided: whole tiles of `THREADS * V` elements with no bounds
+        checks, each thread `V` elements `THREADS` apart (`STEP_BYTES` of its narrowest tensor, each of a
+        warp's loads reading consecutive elements), then the tail element by element. Indices are 32-bit
+        when they reach every element."""
         THREAD_ID, _, _ = cute.arch.thread_idx()
         BLOCK_ID, _, _ = cute.arch.block_idx()
         NUM_BLOCKS, _, _ = cute.arch.grid_dim()
-        step = Int64(NUM_BLOCKS) * THREADS
+
+        # Booleans are 1-bit types stored in a byte.
+        narrowest = min(max(t.element_type.width, 8) for t in list(ins) + list(outs))
+        V = max(STEP_BYTES * 8 // narrowest, 1)
+        tile = THREADS * V
 
         for SEGMENT in cutlass.range_constexpr(len(self.segments)):
             n = self.segments[SEGMENT]
-            i = Int64(BLOCK_ID) * THREADS + Int64(THREAD_ID)
+            Index = Int32 if n < 2**31 - tile else Int64
+            tiles = n // tile
+            step = Index(NUM_BLOCKS)
 
-            while i < n:
-                for u in cutlass.range_constexpr(UNROLL):
-                    j = i + Int64(u) * step
+            t = Index(BLOCK_ID)
 
-                    if j < n:
-                        self.body(ins, outs, j, SEGMENT)
+            while t < tiles:
+                base = t * tile + Index(THREAD_ID)
 
-                i += step * UNROLL
+                for v in cutlass.range_constexpr(V):
+                    self.body(ins, outs, base + v * THREADS, SEGMENT)
+
+                t += step
+
+            # The tail past the last whole tile, an element a thread.
+            if cutlass.const_expr(tiles * tile < n):
+                j = Index(tiles * tile) + Index(BLOCK_ID) * THREADS + Index(THREAD_ID)
+
+                while j < n:
+                    self.body(ins, outs, j, SEGMENT)
+                    j += step * THREADS
 
     @cute.jit
     def launch(self, ins: list, outs: list, blocks: Int32, stream: cuda.CUstream):

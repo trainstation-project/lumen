@@ -247,6 +247,7 @@ const GPUS = [["a100", "A100"], ["h100", "H100"], ["h200", "H200"], ["b200", "B2
 const DEVICES = [
   ...STATUS.map(([key, label]) => ({ key, label, status: key, perf: key === "mps" ? "elementwise_mps" : null, runnable: key === "mps" })),
   ...GPUS.map(([gpu, label]) => ({ key: `triton-${gpu}`, label: `Triton · ${label}`, status: "triton", perf: `elementwise_triton/${gpu}`, runnable: false })),
+  ...GPUS.map(([gpu, label]) => ({ key: `cute-${gpu}`, label: `CuTe · ${label}`, status: "cuda", perf: `elementwise_cute/${gpu}`, runnable: false })),
 ];
 const deviceOf = (key) => DEVICES.find((d) => d.key === key);
 const PERFS = {};

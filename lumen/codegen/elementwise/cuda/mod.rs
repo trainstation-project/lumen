@@ -13,8 +13,8 @@ use crate::codegen::utils::cuda::Cuda;
 use crate::graph::Graph;
 use crate::graph_compiler::common::horizontal::segments;
 
-/// Threads per block and elements per thread per step of `ElementwiseKernel` (`kernel.py`'s
-/// `THREADS` and `UNROLL`), which size its grid.
+/// Threads per block of `ElementwiseKernel` (`kernel.py`'s `THREADS`) and elements a thread computes
+/// a step (16 bytes of float32), which size its grid.
 const THREADS: usize = 256;
 const UNROLL: usize = 4;
 

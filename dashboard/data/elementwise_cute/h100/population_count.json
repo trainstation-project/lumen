@@ -1,0 +1,54 @@
+{
+ "rows": [
+  {
+   "op": "population_count",
+   "dtype": "int32",
+   "n": 4096,
+   "error": "population_count: the CUDA (CuTe DSL) backend has no kernel for it yet; turn config.compiler.use_triton_backend on to run it on Triton"
+  },
+  {
+   "op": "population_count",
+   "dtype": "int32",
+   "n": 16384,
+   "error": "population_count: the CUDA (CuTe DSL) backend has no kernel for it yet; turn config.compiler.use_triton_backend on to run it on Triton"
+  },
+  {
+   "op": "population_count",
+   "dtype": "int32",
+   "n": 65536,
+   "error": "population_count: the CUDA (CuTe DSL) backend has no kernel for it yet; turn config.compiler.use_triton_backend on to run it on Triton"
+  },
+  {
+   "op": "population_count",
+   "dtype": "int32",
+   "n": 262144,
+   "error": "population_count: the CUDA (CuTe DSL) backend has no kernel for it yet; turn config.compiler.use_triton_backend on to run it on Triton"
+  },
+  {
+   "op": "population_count",
+   "dtype": "int32",
+   "n": 1048576,
+   "error": "population_count: the CUDA (CuTe DSL) backend has no kernel for it yet; turn config.compiler.use_triton_backend on to run it on Triton"
+  },
+  {
+   "op": "population_count",
+   "dtype": "int32",
+   "n": 4194304,
+   "error": "population_count: the CUDA (CuTe DSL) backend has no kernel for it yet; turn config.compiler.use_triton_backend on to run it on Triton"
+  },
+  {
+   "op": "population_count",
+   "dtype": "int32",
+   "n": 16777216,
+   "error": "population_count: the CUDA (CuTe DSL) backend has no kernel for it yet; turn config.compiler.use_triton_backend on to run it on Triton"
+  },
+  {
+   "op": "population_count",
+   "dtype": "int32",
+   "n": 67108864,
+   "error": "population_count: the CUDA (CuTe DSL) backend has no kernel for it yet; turn config.compiler.use_triton_backend on to run it on Triton"
+  }
+ ],
+ "code": null,
+ "measured_at": "2026-11-04T05:28:24+00:00"
+}
