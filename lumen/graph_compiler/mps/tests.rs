@@ -3243,6 +3243,110 @@ fn gemv_lanes_sum_in_a_bfloat_accumulator() {
     }
 }
 
+/// A large GEMM reading a slice of its operand in place (a strided view) tunes the MPP kernels too, and
+/// each of them reads the view through its strides.
+#[test]
+fn strided_gemms_tune_mpp() {
+    use super::autotune::{Gemms, matmul_of};
+    use crate::codegen::dot_general::mps::Algorithm;
+    use crate::graph_compiler::common::autotune::Kernels;
+
+    if !available() || !super::mpp_available() {
+        return;
+    }
+
+    let (m, k, n) = (512, 256, 512);
+    let mut g = Graph::new();
+    let a = g.input(ty(DType::BF16, &[m, 2 * k]));
+    let w = g.input(ty(DType::BF16, &[k, n]));
+
+    let left = Slice {
+        start_indices: vec![0, 0],
+        limit_indices: vec![m, k],
+        view: false,
+    };
+
+    let dot = DotGeneral {
+        lhs_contracting: vec![1],
+        rhs_contracting: vec![0],
+        lhs_batch: vec![],
+        rhs_batch: vec![],
+        accum_dtype: DType::F32,
+        output_dtype: DType::BF16,
+    };
+
+    let s = apply(&mut g, left, &[a]);
+    let out = apply(&mut g, dot, &[s, w]);
+    g.set_outputs(&[out]).unwrap();
+
+    let inputs: Vec<Tensor> = g
+        .inputs()
+        .iter()
+        .enumerate()
+        .map(|(seed, &v)| {
+            let t = g.type_of(v);
+            values(t.dtype, &t.shape, seed as u64 + 1)
+        })
+        .collect();
+
+    let expected: Vec<f32> = reference::run(&g, &inputs).unwrap()[0]
+        .to_dtype(DType::F32)
+        .unwrap()
+        .to_vec::<f32>();
+
+    let on_mps: Vec<Tensor> = inputs.iter().map(|t| t.to(Device::Mps(0))).collect();
+
+    let mut options = crate::graph_compiler::Options::default();
+    options.config.autotune = false;
+    let mut plan = crate::graph_compiler::compile_with(&g, Device::Mps(0), &options).unwrap();
+
+    let at = plan
+        .steps()
+        .iter()
+        .position(|s| matmul_of(s).is_some())
+        .expect("a matmul step");
+
+    let step = plan.steps()[at].clone();
+    assert!(
+        step.views.iter().any(Option::is_some),
+        "the slice is read in place: {plan}"
+    );
+
+    let mut gemms = Gemms::new(&CompilerConfig::default());
+
+    let configs: Vec<_> = gemms
+        .configs(&step)
+        .into_iter()
+        .filter(|c| c.algorithm == Algorithm::Mpp)
+        .collect();
+
+    assert!(!configs.is_empty(), "no MPP candidate for a strided GEMM");
+
+    let built: Vec<_> = configs
+        .into_iter()
+        .map(|config| (config, gemms.build(&step, config)))
+        .collect();
+
+    gemms.compile().unwrap();
+
+    let scale = expected.iter().fold(0f32, |m, v| m.max(v.abs()));
+
+    for (config, tuned) in built {
+        plan.steps_mut()[at].tuned = Some(tuned);
+        let got = plan.run(&on_mps).unwrap()[0]
+            .to_dtype(DType::F32)
+            .unwrap()
+            .to_vec::<f32>();
+
+        for (e, (w, v)) in expected.iter().zip(&got).enumerate() {
+            assert!(
+                (w - v).abs() <= scale * 1e-2,
+                "{config:?} [{e}]: {v} != {w}"
+            );
+        }
+    }
+}
+
 /// A dot written as multiply and sum, feeding an RMS norm over other rows, stays its own kernel: no fusion holds two sums.
 #[test]
 fn a_reduction_feeding_a_norm_of_other_rows_is_its_own_kernel() {
