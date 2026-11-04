@@ -1,8 +1,6 @@
 //! Device-independent graph passes shared by the backend compilers.
 
 pub(crate) mod alone;
-#[cfg_attr(not(all(feature = "python", lumen_mps_linked)), allow(dead_code))]
-pub(crate) mod attention;
 pub(crate) mod canonicalize_dots;
 pub(crate) mod cse;
 pub(crate) mod diamonds;
@@ -27,6 +25,7 @@ pub(crate) mod chunked_cross_entropy;
 #[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
 pub(crate) mod clamp_indices;
 pub(crate) mod dot_strength;
+#[cfg_attr(not(all(feature = "python", lumen_mps_linked)), allow(dead_code))]
 pub(crate) mod flash_attention;
 #[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
 pub(crate) mod linear_cross_entropy;

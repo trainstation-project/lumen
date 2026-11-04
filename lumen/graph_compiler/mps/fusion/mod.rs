@@ -155,7 +155,7 @@ const HORIZONTAL_BUFFERS: usize = 30;
 /// Whether horizontal fusion may merge `node`: an elementwise node the fusion can fuse, or a fusion without
 /// reductions, attention, GEMMs or updates.
 fn horizontal_candidate(graph: &Graph, node: &Node) -> bool {
-    use crate::graph_compiler::common::attention;
+    use crate::graph_compiler::common::flash_attention;
 
     match &node.primitive {
         Primitive::Fusion { name, .. } if name == crate::graph::UPDATES => false,
@@ -168,8 +168,8 @@ fn horizontal_candidate(graph: &Graph, node: &Node) -> bool {
             });
 
             !reduces
-                && attention::of_body(body).is_none()
-                && attention::backward_of_body(body).is_none()
+                && flash_attention::of_body(body).is_none()
+                && flash_attention::backward_of_body(body).is_none()
                 && crate::codegen::kinds::gemm_dot(body).is_none()
         }
         p => elementwise(p) && fusible(graph, node),

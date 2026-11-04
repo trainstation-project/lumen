@@ -1,7 +1,8 @@
-//! Builds `flash_attention_backward` fusions and adapts attention fusion outputs to TPU kernel layouts.
+//! Adapts flash-attention fusions to the TPU kernels' layouts: folds output layout chains and the backward's
+//! `delta` dot into the fusions, then checks the TPU codegen takes each.
 use super::TpuModule;
 use crate::graph::{Graph, Node, Primitive, Var};
-use crate::graph_compiler::common::attention;
+use crate::graph_compiler::common::flash_attention;
 use crate::graph_compiler::pass::CompilerPass;
 
 /// Moves the dot computing a backward fusion's `delta` input inside the fusion body.
@@ -44,7 +45,7 @@ fn delta_inside(graph: &Graph) -> Graph {
 
         if let Primitive::Fusion { name, label, body } = &node.primitive
             && name == "flash_attention_backward"
-            && let Some(b) = attention::backward_of_body(body)
+            && let Some(b) = flash_attention::backward_of_body(body)
             && let Some(k) = body.inputs().iter().position(|&v| v == b.delta.base)
             && let Some(dot) = producer(node.inputs[k])
             && matches!(dot.primitive, Primitive::DotGeneral { .. })
@@ -131,19 +132,19 @@ fn delta_inside(graph: &Graph) -> Graph {
 
 /// Indices of the attention fusion's outputs written with rows narrower than their last axis.
 fn unreadable(body: &Graph, forward: bool) -> Vec<usize> {
-    let wide = |acc: &attention::Access| {
+    let wide = |acc: &flash_attention::Access| {
         let shape = &body.type_of(acc.base).shape;
         shape.len() >= 3 && acc.row != shape[shape.len() - 1]
     };
 
-    let index = |acc: &attention::Access| body.outputs().iter().position(|&o| o == acc.base);
+    let index = |acc: &flash_attention::Access| body.outputs().iter().position(|&o| o == acc.base);
 
-    let accesses: Vec<attention::Access> = match forward {
-        true => attention::of_body(body)
+    let accesses: Vec<flash_attention::Access> = match forward {
+        true => flash_attention::of_body(body)
             .map(|a| a.out)
             .into_iter()
             .collect(),
-        false => attention::backward_of_body(body)
+        false => flash_attention::backward_of_body(body)
             .map(|b| {
                 [b.dq_out, b.dk_out, b.dv_out]
                     .into_iter()
@@ -480,18 +481,18 @@ fn attentions(graph: &Graph) -> Result<(), String> {
     Ok(())
 }
 
-/// Fuses flash-attention backward, folds output layout chains and the `delta` dot into the fusions.
-pub(super) struct FlashAttentionBackward;
+/// Folds the flash-attention fusions' output layout chains and the backward's `delta` dot into the fusions, and
+/// checks the TPU codegen takes each.
+pub(super) struct AttentionLayouts;
 
-impl CompilerPass<TpuModule<'_>> for FlashAttentionBackward {
+impl CompilerPass<TpuModule<'_>> for AttentionLayouts {
+    /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
-        "flash_attention_backward"
+        "attention_layouts"
     }
 
+    /// Rewrites the graph's attention fusions for the TPU kernels and checks each.
     fn apply(&mut self, m: &mut TpuModule<'_>) -> Result<(), String> {
-        m.graph =
-            attention::fuse_backward(&m.graph, |_| false, |_| "flash_attention_backward".into());
-
         m.graph = delta_inside(&reshaped_outputs(&merged_outputs(&m.graph)));
         attentions(&m.graph)
     }

@@ -15,7 +15,7 @@ use crate::codegen::emitter::mps::Emitter;
 use crate::codegen::random::RandomCodegen;
 use crate::codegen::utils::mps::*;
 use crate::graph::{Graph, Var};
-use crate::graph_compiler::common::attention::{
+use crate::graph_compiler::common::flash_attention::{
     Access, Attention, Backward, Dropout, Score, Strides, Term, grid_batch,
 };
 use crate::{DType, Scalar};

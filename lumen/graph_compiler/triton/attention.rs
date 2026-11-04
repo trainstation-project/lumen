@@ -8,7 +8,7 @@ use crate::codegen::attention::AttentionCodegen;
 use crate::codegen::attention::triton::{AttentionConfig, untuned_attention};
 use crate::codegen::utils::triton as codegen;
 use crate::graph::{Primitive, Var};
-use crate::graph_compiler::common::attention::{self, Backward, Strides};
+use crate::graph_compiler::common::flash_attention::{self, Backward, Strides};
 use crate::graph_compiler::common::flash_attention::{AttentionBackwards, Attentions};
 use crate::plan::Step;
 use crate::{Scalar, Tensor, TensorOptions};
@@ -157,7 +157,7 @@ struct Prepared {
 /// A launch's sizes: the grid's batch for `batch` (outer count, head count), then the query and key
 /// counts and the head dims of Q/K and of V.
 fn sizes(batch: &[usize], [sq, sk, h, hv]: [usize; 4]) -> [usize; 6] {
-    let (outer, heads) = attention::grid_batch(batch);
+    let (outer, heads) = flash_attention::grid_batch(batch);
     [outer, heads, sq, sk, h, hv]
 }
 
@@ -186,7 +186,8 @@ fn prepare(step: &Step, strides: &Strides) -> Result<Prepared, String> {
     let labeled = |e: String| format!("{}: {e}", step.label);
 
     if name == FORWARD {
-        let a = attention::of_body_strided(body, strides).ok_or("a forward flash attention")?;
+        let a =
+            flash_attention::of_body_strided(body, strides).ok_or("a forward flash attention")?;
         let root = body.nodes()[a.root].output;
         let lse = a.lse.map(|n| output(body.nodes()[n].output));
         // The body's inputs but the offset, which the epilogue may read, then the attention values
@@ -226,8 +227,8 @@ fn prepare(step: &Step, strides: &Strides) -> Result<Prepared, String> {
         });
     }
 
-    let b =
-        attention::backward_of_body_strided(body, strides).ok_or("a backward flash attention")?;
+    let b = flash_attention::backward_of_body_strided(body, strides)
+        .ok_or("a backward flash attention")?;
 
     let gradients = crate::codegen::attention::triton::gradients(&b);
 

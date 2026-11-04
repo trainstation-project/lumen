@@ -576,7 +576,7 @@ fn a_pipeline_runs_its_passes_in_order_and_dumps_each() {
 /// `Strides::of` keeps only the operands not laid out contiguously in their own buffers.
 #[test]
 fn attention_strides_record_only_strided_operands() {
-    use super::common::attention::Strides;
+    use super::common::flash_attention::Strides;
     let mut g = Graph::new();
     let a = g.input(ty(&[2, 3]));
     let b = g.input(ty(&[2, 3]));

@@ -1,5 +1,5 @@
 //! TPU graph compiler: the pass pipeline that rewrites a traced graph into TPU kernels and plans its buffers.
-mod flash_attention_backward;
+mod attention_layouts;
 mod fusion;
 #[cfg(test)]
 mod tests;
@@ -9,13 +9,15 @@ use crate::graph_compiler::common::canonicalize_dots::CanonicalizeDots;
 use crate::graph_compiler::common::diamonds::FusedDiamonds;
 use crate::graph_compiler::common::horizontal::{Grouping, HorizontalFusion};
 use crate::graph_compiler::common::place_concats::{PlaceConcats, Slots};
-use flash_attention_backward::FlashAttentionBackward;
+use attention_layouts::AttentionLayouts;
 use fusion::{DotRows, FuseDots, Fusion};
 
-use super::common::attention;
 use super::common::clamp_indices::ClampIndices;
 use super::common::dot_strength::DotStrength;
-use super::common::flash_attention::{Attentions, FlashAttention};
+use super::common::flash_attention;
+use super::common::flash_attention::{
+    AttentionBackwards, Attentions, Backward, FlashAttention, FlashAttentionBackward,
+};
 use super::common::fold_dot_reshapes::FoldDotReshapes;
 use super::common::merge_dots::{Blocks, MergeDots, Packs, Target};
 use super::common::merge_dots_backward::MergeDotsBackward;
@@ -77,13 +79,25 @@ impl Module for TpuModule<'_> {
 }
 
 /// Flash-attention matching for TPU: scalar epilogue leaves, no extra scalars, static offsets.
+impl AttentionBackwards for TpuModule<'_> {
+    /// None: the TPU backward runs dK/dV and dQ as separate kernels.
+    fn together(&self) -> impl Fn(&Backward) -> bool + 'static {
+        |_| false
+    }
+
+    /// Names the backward fusion `flash_attention_backward`.
+    fn backward_kernel(&mut self) -> String {
+        "flash_attention_backward".into()
+    }
+}
+
 impl Attentions for TpuModule<'_> {
     fn contraction_epilogues(&self) -> bool {
         self.options.config.contraction_epilogues
     }
 
-    fn epilogues(&self) -> attention::Epilogues {
-        attention::Epilogues {
+    fn epilogues(&self) -> flash_attention::Epilogues {
+        flash_attention::Epilogues {
             leaves: |graph, v| graph.type_of(v).shape.is_empty(),
             reshaped: true,
             transposed: false,
@@ -126,7 +140,10 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
     }
 
     if options.config.flash_attention {
-        pipeline.add(FlashAttention).add(FlashAttentionBackward);
+        pipeline
+            .add(FlashAttention)
+            .add(FlashAttentionBackward)
+            .add(AttentionLayouts);
     }
 
     if options.config.safe_kernels {

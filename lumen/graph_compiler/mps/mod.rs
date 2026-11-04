@@ -41,7 +41,7 @@ use crate::codegen::row::mps::row_groups;
 use crate::codegen::store::mps::strided_load;
 use crate::codegen::utils::mps::Mps;
 use crate::graph::{Graph, Node, Primitive, TensorType, Var, View};
-use crate::graph_compiler::common::attention::{self, Backward};
+use crate::graph_compiler::common::flash_attention::{self, Backward};
 use crate::graph_compiler::common::flash_attention::{
     AttentionBackwards, Attentions, FlashAttention, FlashAttentionBackward,
 };
@@ -624,9 +624,9 @@ pub(crate) fn launch_of(body: &Graph) -> Launch {
 
     if updating && body.nodes().iter().all(update) {
         Launch::Updates
-    } else if attention::of_body(body).is_some() {
+    } else if flash_attention::of_body(body).is_some() {
         Launch::Attention
-    } else if attention::backward_of_body(body).is_some() {
+    } else if flash_attention::backward_of_body(body).is_some() {
         Launch::AttentionBackward
     } else if gemm_dot(body).is_some() {
         Launch::Gemm
@@ -850,7 +850,7 @@ fn strided_variant(step: &Step, name: &str, body: &Graph) -> Result<Option<Strin
 }
 
 /// The strides attention step `step` (of fused `body`) reads its operands and writes its outputs at.
-pub(crate) fn attention_strides(step: &Step, body: &Graph) -> attention::Strides {
+pub(crate) fn attention_strides(step: &Step, body: &Graph) -> flash_attention::Strides {
     let outputs: Vec<(usize, Vec<usize>)> = std::iter::once(&step.output)
         .chain(&step.extra_outputs)
         .zip(&step.output_views)
@@ -860,7 +860,7 @@ pub(crate) fn attention_strides(step: &Step, body: &Graph) -> attention::Strides
         })
         .collect();
 
-    attention::Strides::of(body, &step.input_strides(), &outputs)
+    flash_attention::Strides::of(body, &step.input_strides(), &outputs)
 }
 
 /// Name of attention kernel `name` generated for the step's operand layouts (any strides but a
@@ -895,11 +895,12 @@ fn attention_variant(
 
     let (variant, source) = match launch {
         Launch::Attention => {
-            let a = attention::of_body_strided(body, &strides).ok_or_else(unmatched)?;
+            let a = flash_attention::of_body_strided(body, &strides).ok_or_else(unmatched)?;
             Mps::forward(body, &a, &strides)?
         }
         _ => {
-            let b = attention::backward_of_body_strided(body, &strides).ok_or_else(unmatched)?;
+            let b =
+                flash_attention::backward_of_body_strided(body, &strides).ok_or_else(unmatched)?;
             Mps::backward(body, &b, &strides)?
         }
     };
@@ -1020,8 +1021,8 @@ pub(crate) fn encode_with(
     }
 
     if kind == Launch::Attention {
-        let a = attention::of_body(body).expect("an attention");
-        let (outer, heads) = attention::grid_batch(&a.batch);
+        let a = flash_attention::of_body(body).expect("an attention");
+        let (outer, heads) = flash_attention::grid_batch(&a.batch);
 
         // Decode attention runs one threadgroup per query, otherwise one of its tuning's simdgroups per
         // its rows of them.
@@ -1043,8 +1044,8 @@ pub(crate) fn encode_with(
     }
 
     if kind == Launch::AttentionBackward {
-        let b = attention::backward_of_body(body).expect("an attention backward");
-        let (outer, heads) = attention::grid_batch(&b.batch);
+        let b = flash_attention::backward_of_body(body).expect("an attention backward");
+        let (outer, heads) = flash_attention::grid_batch(&b.batch);
         let rows = if b.dv_out.is_some() { b.sk } else { b.sq };
         let buffers = attention_buffers(b.dropout.is_some())?;
 

@@ -2,7 +2,7 @@
 //! tunings.
 
 use crate::DType;
-use crate::graph_compiler::common::attention::{Attention, Backward, grid_batch};
+use crate::graph_compiler::common::flash_attention::{Attention, Backward, grid_batch};
 
 /// Query rows per block for the backward kernel, the largest that fits in threadgroup memory.
 pub(crate) fn backward_block(b: &Backward) -> usize {
