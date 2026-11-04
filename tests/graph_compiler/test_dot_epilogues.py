@@ -668,3 +668,40 @@ def test_linear_reordering_runs_rms_norm_as_coda():
     assert combine["inputs"] == [("float32", [m, tiles])] and combine["outputs"] == [("float32", [m])], combine
     for g, w in zip(got, want):
         np.testing.assert_allclose(g, w, rtol=1e-5, atol=1e-5 * np.abs(w).max())
+
+
+@pytest.mark.mps
+def test_linear_reordering_keeps_a_norm_in_its_profiler_range():
+    """The nodes ``linear_reordering`` rebuilds keep the scope of the ones
+    they replace: a norm's rows scaled by its weight (``x · γ``) and its
+    statistics stay in the norm's ``record_function`` range, not the next
+    matmul's, so the CODA step reading the residual projection runs in the
+    norm's range, and the next projection (``1 / rms`` in its epilogue) in
+    its own."""
+    from lumen.profiler import record_function
+
+    m, d = 256, 640
+    rng = np.random.default_rng(0)
+    shapes = [(m, d), (d, d), (m, d), (d,), (512, d)]
+    try:
+        args = [lumen.from_numpy(rng.standard_normal(s).astype(np.float32) / 8).to("mps") for s in shapes]
+    except RuntimeError as e:
+        pytest.skip(str(e))
+
+    def block(a, wo, r, g, wg):
+        """``_coda_block`` with its norm and next projection in ranges of their own."""
+        x = (r + F.matmul(a.bfloat16(), wo.t().bfloat16(), "float32", "float32")).bfloat16()
+        with record_function("norm"):
+            h = F.rms_norm(x.float(), d, g).bfloat16()
+        with record_function("projection"):
+            return F.matmul(h, wg.t().bfloat16(), "float32", "float32"), x
+
+    lumen.config.compiler.mps.linear_reordering = True
+    try:
+        steps = lumen.graph_compiler.Plan(lumen.make_graph(block)(*args), "mps").steps()
+    finally:
+        lumen.config.compiler.reset()
+    (norm,) = [s for s in steps if "rsqrt" in s["label"]]
+    (projection,) = [s for s in steps if s["label"].endswith("broadcast_in_dim → mul")]
+    assert norm["scope"] == ["norm"], (norm["label"], norm["scope"])
+    assert projection["scope"] == ["projection"], (projection["label"], projection["scope"])
