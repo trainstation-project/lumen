@@ -1,5 +1,4 @@
 //! TPU graph compiler: the pass pipeline that rewrites a traced graph into TPU kernels and plans its buffers.
-mod diamonds;
 mod flash_attention_backward;
 mod fusion;
 mod place_concats;
@@ -7,7 +6,7 @@ mod place_concats;
 mod tests;
 
 use super::common::updates::Updates;
-use diamonds::Diamonds;
+use crate::graph_compiler::common::diamonds::FusedDiamonds;
 use flash_attention_backward::FlashAttentionBackward;
 use fusion::{DotRows, FuseDots, Fusion, HorizontalFusion};
 use place_concats::PlaceConcats;
@@ -143,7 +142,12 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
     }
 
     if options.config.normalization_diamonds {
-        pipeline.add(Diamonds).add(DotRows);
+        pipeline
+            .add(FusedDiamonds {
+                fusible: crate::codegen::row::tpu::fusible,
+                fits: crate::codegen::row::tpu::fits,
+            })
+            .add(DotRows);
     }
 
     pipeline

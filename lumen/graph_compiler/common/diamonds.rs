@@ -1252,6 +1252,27 @@ impl<M: RowsModule> CompilerPass<M> for Diamonds {
     }
 }
 
+/// Compiler pass replacing each normalization row the backend's row kernel can take (`fusible` nodes, a
+/// body that `fits`) with a `row` fusion of its own.
+pub(crate) struct FusedDiamonds {
+    pub fusible: Fusible,
+    pub fits: fn(&Graph) -> bool,
+}
+
+impl<M: Module> CompilerPass<M> for FusedDiamonds {
+    /// Pass name used in profiler ranges and dumps.
+    fn name(&self) -> &'static str {
+        "normalization_diamonds"
+    }
+
+    /// Rewrites the graph with each row fused.
+    fn apply(&mut self, m: &mut M) -> Result<(), String> {
+        let rows = diamonds(m.graph(), self.fusible);
+        *m.graph_mut() = fused(m.graph(), &rows, self.fusible, self.fits);
+        Ok(())
+    }
+}
+
 /// Splits column sums that can share a row kernel into a per-group partial sum attached to that row
 /// and a final sum over the groups, within `limits`; returns the rewritten graph and rows with
 /// remapped node indices.
