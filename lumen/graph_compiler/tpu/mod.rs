@@ -6,6 +6,7 @@ mod place_concats;
 mod tests;
 
 use super::common::updates::Updates;
+use crate::graph_compiler::common::canonicalize_dots::CanonicalizeDots;
 use crate::graph_compiler::common::diamonds::FusedDiamonds;
 use crate::graph_compiler::common::horizontal::{Grouping, HorizontalFusion};
 use flash_attention_backward::FlashAttentionBackward;
@@ -22,7 +23,7 @@ use super::common::merge_dots_backward::MergeDotsBackward;
 use super::common::simplify::Simplify;
 use super::pass::{Module, Pipeline};
 use super::{CompilerConfig, Options, plan_options, positions};
-use crate::graph::{Graph, Var};
+use crate::graph::{Graph, Primitive, TensorType, Var};
 use crate::graph_compiler::{Plan, PlanOptions};
 use crate::plan::DeviceLayout;
 
@@ -142,6 +143,11 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         });
     }
 
+    // Matmul operands the TPU kernel can't read as laid out are transposed into its form first.
+    pipeline.add(CanonicalizeDots {
+        readable: reads_as_laid_out,
+    });
+
     if options.config.normalization_diamonds {
         pipeline
             .add(FusedDiamonds {
@@ -195,4 +201,33 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
     plan.packed = packed;
     plan.interleaved = interleaved;
     Ok(plan)
+}
+
+/// Whether the TPU matmul kernel reads operand `k` of `dot` over `operands` as laid out: its batch dimensions
+/// lead it, and the lhs is batch, free dimensions, then one contracting one (or batch, contracting, free), the
+/// rhs batch, then one contracting and one free dimension in either order.
+fn reads_as_laid_out(dot: &Primitive, operands: [&TensorType; 2], k: usize) -> bool {
+    let Primitive::DotGeneral {
+        lhs_contracting,
+        rhs_contracting,
+        lhs_batch,
+        rhs_batch,
+        ..
+    } = dot
+    else {
+        unreachable!("a dot_general")
+    };
+
+    let leads = |batch: &[usize]| batch.iter().enumerate().all(|(i, &d)| d == i);
+    let nb = lhs_batch.len();
+    let rank = operands[k].shape.len();
+
+    match k {
+        0 => {
+            let last = *lhs_contracting == [rank - 1];
+            let transposed = rank == nb + 2 && *lhs_contracting == [nb];
+            leads(lhs_batch) && rank >= nb + 2 && (last || transposed)
+        }
+        _ => leads(rhs_batch) && rank == nb + 2 && rhs_contracting.len() == 1,
+    }
 }

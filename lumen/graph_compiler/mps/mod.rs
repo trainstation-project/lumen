@@ -2,7 +2,6 @@
 //! and the encoder that launches each fused step with the right grid.
 
 pub(crate) mod ane;
-mod canonicalize_dots;
 pub(crate) mod fusion;
 pub(crate) mod kernel_codegen;
 mod place_concats;
@@ -17,6 +16,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
 use super::common::alone::{Alone, Lone};
+use super::common::canonicalize_dots::CanonicalizeDots;
 use super::common::chunked_cross_entropy::ChunkedCrossEntropy;
 use super::common::clamp_indices::ClampIndices;
 use super::common::diamonds::{Diamonds, Row, RowsModule};
@@ -54,9 +54,6 @@ use crate::runtime::mps::{
 };
 use crate::tensor::contiguous_strides;
 use crate::{DType, Scalar, Tensor};
-use canonicalize_dots::CanonicalizeDots;
-#[cfg(test)]
-use canonicalize_dots::canonicalize_dots;
 use kernel_codegen::Codegen;
 use place_concats::PlaceConcats;
 use place_views::PlaceViews;
@@ -293,7 +290,10 @@ fn pipeline<'a>(config: &CompilerConfig) -> Pipeline<MpsModule<'a>> {
         p.add(split_k::SplitK);
     }
 
-    p.add(CanonicalizeDots);
+    // Matmul operands the GEMM kernels can't read as three strides are transposed first.
+    p.add(CanonicalizeDots {
+        readable: reads_contiguous,
+    });
 
     if config.fuse {
         p.add(Updates {
@@ -504,6 +504,12 @@ const MPP: &str = concat!(
     include_str!("../../codegen/dot_general/mps/mpp/kernel.metal"),
     include_str!("../../codegen/attention/mps/forward_mpp_kernel.metal"),
 );
+
+/// Whether the GEMM kernels read operand `k` of `dot` as laid out (contiguously): each of its batch, free and
+/// contracting dimension groups merges into one stride.
+fn reads_contiguous(dot: &Primitive, operands: [&TensorType; 2], k: usize) -> bool {
+    gemm::reads_strided(dot, operands, k, &contiguous_strides(&operands[k].shape))
+}
 
 /// Compiles `sources`, attention kernels on Metal Performance Primitives against their templates and the rest
 /// against the standard prelude.

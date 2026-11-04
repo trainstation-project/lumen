@@ -3,6 +3,7 @@
 pub(crate) mod alone;
 #[cfg_attr(not(all(feature = "python", lumen_mps_linked)), allow(dead_code))]
 pub(crate) mod attention;
+pub(crate) mod canonicalize_dots;
 pub(crate) mod cse;
 pub(crate) mod diamonds;
 pub(crate) mod dot_rows;
