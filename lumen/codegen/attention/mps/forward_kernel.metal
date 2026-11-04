@@ -36,7 +36,9 @@ inline void load_tile(threadgroup T *dst, device const T *src, uint r0, uint n, 
 
 /// Computes attention for block `BLOCK_ID_M` of BLOCK_SIZE_M (`GROUPS` simdgroups of ATTN_ROWS) queries of head
 /// `BLOCK_ID_H` of batch `BLOCK_ID_B` with 8x8 simdgroup matrices, streaming BLOCK_SIZE_N keys at a time through
-/// threadgroup memory with an online softmax.
+/// threadgroup memory with an online softmax in base 2 (scores times log2(e), so each exponential is one `exp2`).
+/// Only key blocks crossing the end of the keys or a simdgroup's causal diagonal are masked element by element,
+/// and a simdgroup skips blocks wholly past its diagonal.
 /// Writes `epi` of the output, optionally the raw output (`RAW`) and the row log-sum-exp (`LSE`).
 /// `offset` shifts the causal diagonal so query `i` sees keys up to `i + offset`.
 template <typename T,
@@ -95,6 +97,7 @@ inline void flash_attention(device const T *q,
     }
     simdgroup_matrix<float, 8, 8> om[DV / 8];
     ATTN_UNROLL for (uint c = 0; c < DV / 8; ++c) { om[c] = simdgroup_matrix<float, 8, 8>(0); }
+    // The running maximum is of scores in base 2 (times log2(e)).
     float m = -INFINITY, l = 0;
     // Causal blocks stop at the last key their last query can see.
     uint last = sk;
@@ -110,6 +113,12 @@ inline void flash_attention(device const T *q,
         load_tile<T, BLOCK_SIZE_N, D, LK, Ix::K_ROW, Ix::K_COL, GROUPS * 32>(ks, k, k0, sk, t);
         load_tile<T, BLOCK_SIZE_N, DV, LV, Ix::V_ROW, Ix::V_COL, GROUPS * 32>(vs, v, k0, sk, t);
         threadgroup_barrier(mem_flags::mem_threadgroup);
+        // A block wholly past this simdgroup's diagonal adds nothing to its rows.
+        if (CAUSAL && long(k0) > long(r0) + ATTN_ROWS - 1 + offset) {
+            continue;
+        }
+        // A block wholly within the keys and at or before the diagonal needs no mask.
+        const bool whole = k0 + BLOCK_SIZE_N <= sk && (!CAUSAL || long(k0) + BLOCK_SIZE_N - 1 <= long(r0) + offset);
         simdgroup_matrix<float, 8, 8> s[BLOCK_SIZE_N / 8];
         float mx = -INFINITY;
         ATTN_UNROLL for (uint jc = 0; jc < BLOCK_SIZE_N / 8; ++jc) {
@@ -122,8 +131,8 @@ inline void flash_attention(device const T *q,
             thread auto &e = frag(s[jc]);
             ATTN_UNROLL for (uint u = 0; u < 2; ++u) {
                 int key = int(k0 + jc * 8 + fc + u);
-                bool seen = key < int(sk) && (!CAUSAL || key <= int(row) + offset);
-                e[u] = seen ? score(e[u]) : -INFINITY;
+                bool seen = whole || (key < int(sk) && (!CAUSAL || key <= int(row) + offset));
+                e[u] = seen ? score(e[u]) * M_LOG2E_F : -INFINITY;
                 mx = max(mx, e[u]);
             }
         }
@@ -132,12 +141,12 @@ inline void flash_attention(device const T *q,
         mx = max(mx, simd_shuffle_xor(mx, 8));
         // Rescale the running sum and output to the new running maximum.
         float m_new = max(m, mx);
-        float factor = m_new == -INFINITY ? 1.0f : exp(m - m_new);
+        float factor = m_new == -INFINITY ? 1.0f : exp2(m - m_new);
         simdgroup_matrix<T, 8, 8> pm[BLOCK_SIZE_N / 8];
         float sum = 0;
         ATTN_UNROLL for (uint jc = 0; jc < BLOCK_SIZE_N / 8; ++jc) {
             thread auto &e = frag(s[jc]);
-            float2 p = m_new == -INFINITY ? float2(0) : exp(e - m_new);
+            float2 p = m_new == -INFINITY ? float2(0) : exp2(e - m_new);
             sum += p.x + p.y;
             vec<T, 2> pr = vec<T, 2>(p);
             uint key = k0 + jc * 8 + fc;
@@ -157,7 +166,7 @@ inline void flash_attention(device const T *q,
         }
     }
     if (LSE && in_rows && fc == 0) {
-        lse[ulong(bh) * sq + row] = m + log(l);
+        lse[ulong(bh) * sq + row] = (m + log2(l)) * M_LN2_F;
     }
     if (in_rows) {
         ATTN_UNROLL for (uint c = 0; c < DV / 8; ++c) {
