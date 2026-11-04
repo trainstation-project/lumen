@@ -12,7 +12,10 @@ const PACKAGES: [(&str, Register); 12] = [
     ("tensor", crate::tensor::python::register),
     ("config", crate::config::python::register),
     ("graph_compiler", crate::graph_compiler::python::register),
-    ("graph_compiler.config", crate::graph_compiler::config::register),
+    (
+        "graph_compiler.config",
+        crate::graph_compiler::config::register,
+    ),
     ("profiler", crate::profiler::python::register),
     ("stream", crate::stream::python::register),
     ("custom_op", crate::custom_op::python::register),
