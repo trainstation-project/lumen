@@ -26,23 +26,23 @@ class ElementwiseKernel:
     @cute.kernel
     def kernel(self, ins: list, outs: list):
         """Walks each segment's indices grid-strided, `UNROLL` a step, computing the outputs at each."""
-        THREAD, _, _ = cute.arch.thread_idx()
-        BLOCK, _, _ = cute.arch.block_idx()
-        BLOCKS, _, _ = cute.arch.grid_dim()
-        STEP = Int64(BLOCKS) * THREADS
+        THREAD_ID, _, _ = cute.arch.thread_idx()
+        BLOCK_ID, _, _ = cute.arch.block_idx()
+        NUM_BLOCKS, _, _ = cute.arch.grid_dim()
+        step = Int64(NUM_BLOCKS) * THREADS
 
         for SEGMENT in cutlass.range_constexpr(len(self.segments)):
             n = self.segments[SEGMENT]
-            i = Int64(BLOCK) * THREADS + Int64(THREAD)
+            i = Int64(BLOCK_ID) * THREADS + Int64(THREAD_ID)
 
             while i < n:
                 for u in cutlass.range_constexpr(UNROLL):
-                    j = i + Int64(u) * STEP
+                    j = i + Int64(u) * step
 
                     if j < n:
                         self.body(ins, outs, j, SEGMENT)
 
-                i += STEP * UNROLL
+                i += step * UNROLL
 
     @cute.jit
     def launch(self, ins: list, outs: list, blocks: Int32, stream: cuda.CUstream):
