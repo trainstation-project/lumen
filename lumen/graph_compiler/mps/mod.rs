@@ -361,13 +361,7 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
 
     pipeline(config).run(&mut module)?;
 
-    // Kernels on Metal Performance Primitives compile against their templates, the rest against the prelude.
-    let (mpp, sources): (BTreeMap<_, _>, BTreeMap<_, _>) = std::mem::take(&mut module.sources)
-        .into_iter()
-        .partition(|(_, source)| source.contains("flash_attention_mpp"));
-
-    compile_kernels(sources)?;
-    compile_mpp_kernels(mpp)?;
+    compile_routed(std::mem::take(&mut module.sources))?;
 
     let MpsModule {
         graph: fused,
@@ -398,6 +392,7 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
 
         tuner.tune(&mut elementwise, &mut plan)?;
         tuner.tune(&mut autotune::Gemms::new(config), &mut plan)?;
+        tuner.tune(&mut autotune::Attentions::default(), &mut plan)?;
     }
 
     // Relabel dots reading packed weight blocks (directly or through same-sized elementwise steps) as `Nx dot_general`.
@@ -502,6 +497,17 @@ const MPP: &str = concat!(
     include_str!("../../codegen/dot_general/mps/mpp/kernel.metal"),
     include_str!("../../codegen/attention/mps/forward_mpp_kernel.metal"),
 );
+
+/// Compiles `sources`, attention kernels on Metal Performance Primitives against their templates and the rest
+/// against the standard prelude.
+fn compile_routed(sources: BTreeMap<String, String>) -> Result<(), String> {
+    let (mpp, sources): (BTreeMap<_, _>, BTreeMap<_, _>) = sources
+        .into_iter()
+        .partition(|(_, source)| source.contains("flash_attention_mpp"));
+
+    compile_kernels(sources)?;
+    compile_mpp_kernels(mpp)
+}
 
 /// Compiles `sources` against the standard prelude.
 fn compile_kernels(sources: BTreeMap<String, String>) -> Result<(), String> {
@@ -818,14 +824,8 @@ fn strided_variant(step: &Step, name: &str, body: &Graph) -> Result<Option<Strin
     Ok(Some(variant))
 }
 
-/// Name of attention kernel `name` generated for the step's operand layouts (any strides but a
-/// contiguous last dim), compiling it on first use.
-fn attention_variant(
-    step: &Step,
-    name: &str,
-    body: &Graph,
-    launch: Launch,
-) -> Result<String, String> {
+/// The strides attention step `step` (of fused `body`) reads its operands and writes its outputs at.
+pub(super) fn attention_strides(step: &Step, body: &Graph) -> attention::Strides {
     let outputs: Vec<(usize, Vec<usize>)> = std::iter::once(&step.output)
         .chain(&step.extra_outputs)
         .zip(&step.output_views)
@@ -835,7 +835,18 @@ fn attention_variant(
         })
         .collect();
 
-    let strides = attention::Strides::of(body, &step.input_strides(), &outputs);
+    attention::Strides::of(body, &step.input_strides(), &outputs)
+}
+
+/// Name of attention kernel `name` generated for the step's operand layouts (any strides but a
+/// contiguous last dim), compiling it on first use.
+fn attention_variant(
+    step: &Step,
+    name: &str,
+    body: &Graph,
+    launch: Launch,
+) -> Result<String, String> {
+    let strides = attention_strides(step, body);
     let mut layout: Vec<_> = strides.inputs.iter().collect();
     layout.sort();
     let mut views: Vec<_> = strides.outputs.iter().collect();
@@ -874,7 +885,7 @@ fn attention_variant(
         .contains_key(&variant);
 
     if !compiled {
-        compile_kernels(BTreeMap::from([(variant.clone(), source)]))?;
+        compile_routed(BTreeMap::from([(variant.clone(), source)]))?;
     }
 
     let launch = launch_kind(name, body);
@@ -904,15 +915,17 @@ pub(crate) fn encode(
         unreachable!("a fusion")
     };
 
-    encode_with(step, name, None, inputs, output, scratch, keep)
+    encode_with(step, name, None, None, inputs, output, scratch, keep)
 }
 
-/// Encodes a fused step, launching the tuned GEMM variant `gemm` when given.
-/// `inputs` holds the body inputs followed by extra output pointers.
+/// Encodes a fused step, launching the tuned GEMM variant `gemm` or attention variant `attention_tuned`
+/// (its kernel and tuning) when given. `inputs` holds the body inputs followed by extra output pointers.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn encode_with(
     step: &Step,
     name: &str,
     gemm: Option<(&str, GemmConfig)>,
+    attention_tuned: Option<(&str, crate::codegen::attention::mps::Tuning)>,
     inputs: &[*const u8],
     output: *mut u8,
     scratch: *mut u8,
@@ -985,10 +998,10 @@ pub(super) fn encode_with(
         let a = attention::of_body(body).expect("an attention");
         let (outer, heads) = attention::grid_batch(&a.batch);
 
-        // Decode attention runs one threadgroup per query, otherwise one of `forward_groups`
-        // simdgroups per `forward_rows` of them.
-        let groups = crate::codegen::attention::mps::forward_groups(&a);
-        let rows = crate::codegen::attention::mps::forward_rows(&a);
+        // Decode attention runs one threadgroup per query, otherwise one of its tuning's simdgroups per
+        // its rows of them.
+        let t = attention_tuned.map_or_else(|| crate::codegen::attention::mps::tuning(&a), |(_, t)| t);
+        let (groups, rows) = (t.groups, t.rows());
 
         let grid = match decodes(&a) {
             true => Grid::Groups([a.sq, heads, outer]),
@@ -998,6 +1011,7 @@ pub(super) fn encode_with(
             },
         };
 
+        let name = attention_tuned.map_or(name, |(kernel, _)| kernel);
         let buffers = attention_buffers(a.dropout.is_some())?;
         return launch(name, &buffers, &scalars, grid, keep, step.label);
     }
