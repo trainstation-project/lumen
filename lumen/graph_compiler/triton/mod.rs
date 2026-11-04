@@ -3,7 +3,6 @@
 
 mod attention;
 mod cross_entropy;
-mod diamonds;
 #[cfg(all(feature = "python", lumen_cuda_linked))]
 pub(crate) mod direct;
 mod fusion;
@@ -23,7 +22,6 @@ pub(crate) use crate::codegen::dot_general::triton::Config;
 use attention::Tiles;
 #[cfg(feature = "python")]
 pub(crate) use attention::{Launch, set_attention};
-use diamonds::Diamonds;
 use fusion::{Fusion, PlaceViews};
 #[cfg(feature = "python")]
 pub(crate) use gemm::{Epilogue, set_gemm};
@@ -63,7 +61,7 @@ use crate::codegen::scan::triton::Scan;
 use crate::codegen::store::triton::{load, store};
 use crate::codegen::utils::triton as codegen;
 use crate::graph::{Graph, Primitive, TensorType, UPDATES};
-use crate::graph_compiler::common::diamonds::Row;
+use crate::graph_compiler::common::diamonds::{Diamonds, Row, RowsModule};
 use crate::graph_compiler::common::horizontal::segments;
 use crate::plan::{Buffer, Step, Tuned};
 use crate::{DType, Device, Scalar, Tensor, TensorOptions};
@@ -303,6 +301,12 @@ impl Module for TritonModule<'_> {
     }
 }
 
+impl RowsModule for TritonModule<'_> {
+    fn rows_mut(&mut self) -> &mut Vec<Row> {
+        &mut self.rows
+    }
+}
+
 impl Blocks for TritonModule<'_> {
     fn blocks(&mut self) -> (&mut Packs, &mut Vec<Vec<usize>>) {
         (&mut self.packed, &mut self.interleaved)
@@ -375,8 +379,12 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
             most: usize::MAX,
         });
 
+        // Normalization rows for the fusion, as MPS finds them.
         if config.normalization_diamonds {
-            pipeline.add(Diamonds);
+            pipeline.add(Diamonds {
+                fusible: fusion::fusible,
+                partials: crate::codegen::row::triton::ROW_PARTIALS,
+            });
         }
 
         pipeline.add(PlaceConcats);
