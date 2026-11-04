@@ -248,6 +248,7 @@ const DEVICES = [
   ...STATUS.map(([key, label]) => ({ key, label, status: key, perf: key === "mps" ? "elementwise_mps" : null, runnable: key === "mps" })),
   ...GPUS.map(([gpu, label]) => ({ key: `triton-${gpu}`, label: `Triton · ${label}`, status: "triton", perf: `elementwise_triton/${gpu}`, runnable: false })),
   ...GPUS.map(([gpu, label]) => ({ key: `cute-${gpu}`, label: `CuTe · ${label}`, status: "cuda", perf: `elementwise_cute/${gpu}`, runnable: false })),
+  { key: "tpu-v6e", label: "TPU · v6e", status: "tpu", perf: "elementwise_tpu/v6e", runnable: false, baseline: ["jax_us", "JAX"] },
 ];
 const deviceOf = (key) => DEVICES.find((d) => d.key === key);
 const PERFS = {};
@@ -303,7 +304,9 @@ function detail(r, who, us, timing, bw) {
   return { title: `${who} · ${r.op} · ${r.dtype} · ${fmt.int(r.n)} elements`, rows };
 }
 const maybe = (v, f) => v == null || Number.isNaN(v) ? "—" : f(v);
-const speedup = (r) => r.torch_us && r.lumen_us ? r.torch_us / r.lumen_us : null;
+// The current device's baseline: its rows' time key and its name (PyTorch, or JAX on TPU).
+const baseline = () => current.device.baseline ?? ["torch_us", "PyTorch"];
+const speedup = (r) => r[baseline()[0]] && r.lumen_us ? r[baseline()[0]] / r.lumen_us : null;
 
 // Benchmark progress per op on MPS, shown in its status chips while it runs.
 const PROGRESS = {};
@@ -472,7 +475,8 @@ function legend(items) {
   return box;
 }
 
-const IMPLS = [[(r) => r.lumen_us, "lumen", "var(--s1)"], [(r) => r.torch_us, "PyTorch", "var(--s2)"]];
+// What each chart draws: lumen's times and the current device's baseline's.
+const impls = () => [[(r) => r.lumen_us, "lumen", "var(--s1)"], [(r) => r[baseline()[0]], baseline()[1], "var(--s2)"]];
 
 /** The charts of `op`'s throughput per dtype on the device `v` describes: bandwidth, or a roofline when compute bound. */
 function charts(op, v) {
@@ -489,7 +493,7 @@ function charts(op, v) {
     grid.append(cell);
     drawn.push(() => {
       const lines = [], points = [];
-      for (const [us, who, color] of IMPLS) {
+      for (const [us, who, color] of impls()) {
         const rs = rows.filter((r) => r.dtype === dtype && us(r) != null);
         if (!rs.length) continue;
         const at = (r) => compute ? intensity(r) : r.n;
@@ -516,7 +520,7 @@ function charts(op, v) {
         y: throughputAxis([...values, v.peak || 0], "TFLOP/s"), lines, points });
     });
   }
-  const key = legend([...IMPLS.map(([, who, color]) => [who, color]), [compute ? "roofline" : "device bandwidth", "var(--roof)", true]]);
+  const key = legend([...impls().map(([, who, color]) => [who, color]), [compute ? "roofline" : "device bandwidth", "var(--roof)", true]]);
   return { label: compute ? "Roofline" : "Bandwidth", nodes: [key, grid], draw: () => drawn.forEach((d) => d()) };
 }
 
@@ -560,7 +564,7 @@ const MEASURE_COLUMNS = [
   { key: "dtype", label: "dtype" }, { key: "n", label: "Elements", kind: "num", render: (r) => fmt.int(r.n) },
   { key: "gbs", label: "Throughput", kind: "num", sort: (r) => r.compute_bound ? r.flops / r.lumen_us : r.gbs,
     render: (r) => r.error ? "" : r.compute_bound ? fmt.tflops(r.flops / r.lumen_us / 1e6) : fmt.gbs(r.gbs) },
-  { key: "speedup", label: "Speedup over PyTorch", kind: "num", sort: speedup,
+  { key: "speedup", get label() { return `Speedup over ${baseline()[1]}`; }, kind: "num", sort: speedup,
     render: (r) => r.error ? "" : maybe(speedup(r), (v) => `${v.toFixed(2)}×`) },
   { key: "kernels", label: "Kernels", kind: "num", render: (r) => r.kernels ?? "" },
 ];

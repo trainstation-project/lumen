@@ -1,0 +1,104 @@
+{
+ "rows": [
+  {
+   "op": "dot_general",
+   "dtype": "float32",
+   "n": 4096,
+   "error": "dot_general() takes 4 positional arguments but 5 were given",
+   "jax_us": 46.265
+  },
+  {
+   "op": "dot_general",
+   "dtype": "float32",
+   "n": 16384,
+   "error": "dot_general() takes 4 positional arguments but 5 were given",
+   "jax_us": 45.447
+  },
+  {
+   "op": "dot_general",
+   "dtype": "float32",
+   "n": 65536,
+   "error": "dot_general() takes 4 positional arguments but 5 were given",
+   "jax_us": 44.945
+  },
+  {
+   "op": "dot_general",
+   "dtype": "float32",
+   "n": 262144,
+   "error": "dot_general() takes 4 positional arguments but 5 were given",
+   "jax_us": 41.975
+  },
+  {
+   "op": "dot_general",
+   "dtype": "float32",
+   "n": 1048576,
+   "error": "dot_general() takes 4 positional arguments but 5 were given",
+   "jax_us": 41.588
+  },
+  {
+   "op": "dot_general",
+   "dtype": "float32",
+   "n": 4194304,
+   "error": "dot_general() takes 4 positional arguments but 5 were given",
+   "jax_us": 49.714
+  },
+  {
+   "op": "dot_general",
+   "dtype": "float32",
+   "n": 16777216,
+   "error": "dot_general() takes 4 positional arguments but 5 were given",
+   "jax_us": 222.663
+  },
+  {
+   "op": "dot_general",
+   "dtype": "bfloat16",
+   "n": 4096,
+   "error": "dot_general() takes 4 positional arguments but 5 were given",
+   "jax_us": 30.185
+  },
+  {
+   "op": "dot_general",
+   "dtype": "bfloat16",
+   "n": 16384,
+   "error": "dot_general() takes 4 positional arguments but 5 were given",
+   "jax_us": 30.918
+  },
+  {
+   "op": "dot_general",
+   "dtype": "bfloat16",
+   "n": 65536,
+   "error": "dot_general() takes 4 positional arguments but 5 were given",
+   "jax_us": 30.582
+  },
+  {
+   "op": "dot_general",
+   "dtype": "bfloat16",
+   "n": 262144,
+   "error": "dot_general() takes 4 positional arguments but 5 were given",
+   "jax_us": 29.205
+  },
+  {
+   "op": "dot_general",
+   "dtype": "bfloat16",
+   "n": 1048576,
+   "error": "dot_general() takes 4 positional arguments but 5 were given",
+   "jax_us": 30.372
+  },
+  {
+   "op": "dot_general",
+   "dtype": "bfloat16",
+   "n": 4194304,
+   "error": "dot_general() takes 4 positional arguments but 5 were given",
+   "jax_us": 40.501
+  },
+  {
+   "op": "dot_general",
+   "dtype": "bfloat16",
+   "n": 16777216,
+   "error": "dot_general() takes 4 positional arguments but 5 were given",
+   "jax_us": 198.423
+  }
+ ],
+ "code": null,
+ "measured_at": "2026-11-04T09:26:08+00:00"
+}

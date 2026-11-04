@@ -1,0 +1,104 @@
+{
+ "rows": [
+  {
+   "op": "scatter_add",
+   "dtype": "float32",
+   "n": 4096,
+   "error": "scatter_add does not run on TPU yet",
+   "jax_us": 45.992
+  },
+  {
+   "op": "scatter_add",
+   "dtype": "float32",
+   "n": 16384,
+   "error": "scatter_add does not run on TPU yet",
+   "jax_us": 42.162
+  },
+  {
+   "op": "scatter_add",
+   "dtype": "float32",
+   "n": 65536,
+   "error": "scatter_add does not run on TPU yet",
+   "jax_us": 39.075
+  },
+  {
+   "op": "scatter_add",
+   "dtype": "float32",
+   "n": 262144,
+   "error": "scatter_add does not run on TPU yet",
+   "jax_us": 39.629
+  },
+  {
+   "op": "scatter_add",
+   "dtype": "float32",
+   "n": 1048576,
+   "error": "scatter_add does not run on TPU yet",
+   "jax_us": 64.76
+  },
+  {
+   "op": "scatter_add",
+   "dtype": "float32",
+   "n": 4194304,
+   "error": "scatter_add does not run on TPU yet",
+   "jax_us": 273.21
+  },
+  {
+   "op": "scatter_add",
+   "dtype": "float32",
+   "n": 16777216,
+   "error": "scatter_add does not run on TPU yet",
+   "jax_us": 1063.538
+  },
+  {
+   "op": "scatter_add",
+   "dtype": "bfloat16",
+   "n": 4096,
+   "error": "scatter_add does not run on TPU yet",
+   "jax_us": 46.576
+  },
+  {
+   "op": "scatter_add",
+   "dtype": "bfloat16",
+   "n": 16384,
+   "error": "scatter_add does not run on TPU yet",
+   "jax_us": 45.994
+  },
+  {
+   "op": "scatter_add",
+   "dtype": "bfloat16",
+   "n": 65536,
+   "error": "scatter_add does not run on TPU yet",
+   "jax_us": 40.637
+  },
+  {
+   "op": "scatter_add",
+   "dtype": "bfloat16",
+   "n": 262144,
+   "error": "scatter_add does not run on TPU yet",
+   "jax_us": 39.272
+  },
+  {
+   "op": "scatter_add",
+   "dtype": "bfloat16",
+   "n": 1048576,
+   "error": "scatter_add does not run on TPU yet",
+   "jax_us": 41.968
+  },
+  {
+   "op": "scatter_add",
+   "dtype": "bfloat16",
+   "n": 4194304,
+   "error": "scatter_add does not run on TPU yet",
+   "jax_us": 199.655
+  },
+  {
+   "op": "scatter_add",
+   "dtype": "bfloat16",
+   "n": 16777216,
+   "error": "scatter_add does not run on TPU yet",
+   "jax_us": 768.985
+  }
+ ],
+ "code": null,
+ "measured_at": "2026-11-04T09:50:27+00:00"
+}

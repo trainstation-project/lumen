@@ -1,0 +1,118 @@
+{
+ "rows": [
+  {
+   "op": "concatenate",
+   "dtype": "float32",
+   "n": 4096,
+   "error": "concatenate does not run on TPU yet",
+   "jax_us": 31.059
+  },
+  {
+   "op": "concatenate",
+   "dtype": "float32",
+   "n": 16384,
+   "error": "concatenate does not run on TPU yet",
+   "jax_us": 31.936
+  },
+  {
+   "op": "concatenate",
+   "dtype": "float32",
+   "n": 65536,
+   "error": "concatenate does not run on TPU yet",
+   "jax_us": 29.372
+  },
+  {
+   "op": "concatenate",
+   "dtype": "float32",
+   "n": 262144,
+   "error": "concatenate does not run on TPU yet",
+   "jax_us": 26.915
+  },
+  {
+   "op": "concatenate",
+   "dtype": "float32",
+   "n": 1048576,
+   "error": "concatenate does not run on TPU yet",
+   "jax_us": 28.315
+  },
+  {
+   "op": "concatenate",
+   "dtype": "float32",
+   "n": 4194304,
+   "error": "concatenate does not run on TPU yet",
+   "jax_us": 32.874
+  },
+  {
+   "op": "concatenate",
+   "dtype": "float32",
+   "n": 16777216,
+   "error": "concatenate does not run on TPU yet",
+   "jax_us": 99.523
+  },
+  {
+   "op": "concatenate",
+   "dtype": "float32",
+   "n": 67108864,
+   "error": "concatenate does not run on TPU yet",
+   "jax_us": 387.232
+  },
+  {
+   "op": "concatenate",
+   "dtype": "bfloat16",
+   "n": 4096,
+   "error": "concatenate does not run on TPU yet",
+   "jax_us": 31.152
+  },
+  {
+   "op": "concatenate",
+   "dtype": "bfloat16",
+   "n": 16384,
+   "error": "concatenate does not run on TPU yet",
+   "jax_us": 31.797
+  },
+  {
+   "op": "concatenate",
+   "dtype": "bfloat16",
+   "n": 65536,
+   "error": "concatenate does not run on TPU yet",
+   "jax_us": 31.051
+  },
+  {
+   "op": "concatenate",
+   "dtype": "bfloat16",
+   "n": 262144,
+   "error": "concatenate does not run on TPU yet",
+   "jax_us": 28.4
+  },
+  {
+   "op": "concatenate",
+   "dtype": "bfloat16",
+   "n": 1048576,
+   "error": "concatenate does not run on TPU yet",
+   "jax_us": 27.268
+  },
+  {
+   "op": "concatenate",
+   "dtype": "bfloat16",
+   "n": 4194304,
+   "error": "concatenate does not run on TPU yet",
+   "jax_us": 28.409
+  },
+  {
+   "op": "concatenate",
+   "dtype": "bfloat16",
+   "n": 16777216,
+   "error": "concatenate does not run on TPU yet",
+   "jax_us": 53.142
+  },
+  {
+   "op": "concatenate",
+   "dtype": "bfloat16",
+   "n": 67108864,
+   "error": "concatenate does not run on TPU yet",
+   "jax_us": 191.762
+  }
+ ],
+ "code": null,
+ "measured_at": "2026-11-04T09:27:37+00:00"
+}
