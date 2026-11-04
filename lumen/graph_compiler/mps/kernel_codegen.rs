@@ -19,7 +19,7 @@ use crate::codegen::utils::mps::Mps;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::common::alone::wrapped;
-use crate::graph_compiler::common::flash_attention::{self, Strides};
+use crate::graph_compiler::common::attention::{self, Strides};
 use crate::graph_compiler::common::place_concats::in_place_concats;
 use crate::graph_compiler::common::place_views;
 use crate::graph_compiler::pass::CompilerPass;
@@ -129,7 +129,7 @@ impl<'a> CompilerPass<MpsModule<'a>> for Codegen {
                     (kernel, source)
                 }
                 Kernel::Attention => {
-                    let a = flash_attention::of_body(body).expect("an attention");
+                    let a = attention::of_body(body).expect("an attention");
                     Mps::forward(body, &a, &Strides::default())?
                 }
                 Kernel::AttentionBackward => {
@@ -138,7 +138,7 @@ impl<'a> CompilerPass<MpsModule<'a>> for Codegen {
                         ..Strides::default()
                     };
 
-                    let b = flash_attention::backward_of_body_strided(body, &strides)
+                    let b = attention::backward_of_body_strided(body, &strides)
                         .expect("an attention backward");
 
                     Mps::backward(body, &b, &strides)?
@@ -246,7 +246,7 @@ pub(super) fn slot_writes(
             let atomic = body.outputs().len() == 3 && index == 2;
             let at = m.graph.slot(concat, k);
             let views = HashMap::from([(index, (at.offset, at.strides))]);
-            !atomic && flash_attention::backward_of_body_into(body, views).is_some()
+            !atomic && attention::backward_of_body_into(body, views).is_some()
         }
         (Some(Kernel::Fusion(_)), Primitive::Fusion { body, .. }) => writes_views(body),
         (None, p) if before_fusion => {
@@ -281,8 +281,8 @@ pub(crate) fn loads_strided(body: &Graph, k: usize) -> bool {
 
     let template = |p: &Primitive| matches!(p, Primitive::DotGeneral { .. });
 
-    flash_attention::of_body(body).is_none()
-        && flash_attention::backward_of_body(body).is_none()
+    attention::of_body(body).is_none()
+        && attention::backward_of_body(body).is_none()
         && !body
             .nodes()
             .iter()
@@ -306,15 +306,14 @@ pub(crate) fn loads_views(step: &Step) -> bool {
 /// kernel is generated for the layout when it runs).
 pub(crate) fn attention_reads_strided(body: &Graph, strides: &[usize]) -> bool {
     strides.last().is_none_or(|&s| s == 1)
-        && (flash_attention::of_body(body).is_some()
-            || flash_attention::backward_of_body(body).is_some())
+        && (attention::of_body(body).is_some() || attention::backward_of_body(body).is_some())
 }
 
 /// Whether GEMM fusion input `k` is read only by the dot, as one operand, in a layout MPS's matmul
 /// kernels stride through: an attention's dots are its kernel's, not a GEMM's.
 pub(crate) fn fusion_reads_strided(body: &Graph, k: usize, strides: &[usize]) -> bool {
-    flash_attention::of_body(body).is_none()
-        && flash_attention::backward_of_body(body).is_none()
+    attention::of_body(body).is_none()
+        && attention::backward_of_body(body).is_none()
         && place_views::fusion_reads_strided(
             body,
             k,

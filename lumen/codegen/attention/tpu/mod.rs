@@ -10,7 +10,7 @@ use crate::DType;
 use crate::codegen::utils::tpu::Tpu;
 use crate::device::tpu::layout::Layout;
 use crate::graph::{Graph, Node, Primitive, TensorType, Var};
-use crate::graph_compiler::common::flash_attention::{
+use crate::graph_compiler::common::attention::{
     self, Access, Attention, Backward, Dropout, Score, Strides,
 };
 use crate::graph_compiler::elementwise;
@@ -199,13 +199,13 @@ pub(crate) fn kernel(name: &str, body: &Graph) -> Result<(&'static str, String),
 
     match name {
         "flash_attention" => {
-            let a = flash_attention::of_body(body)
+            let a = attention::of_body(body)
                 .ok_or("flash attention on TPU: no attention in its body")?;
 
             Tpu::forward(body, &a, &strides)
         }
         _ => {
-            let b = flash_attention::backward_of_body(body)
+            let b = attention::backward_of_body(body)
                 .ok_or("flash attention backward on TPU: no attention backward in its body")?;
 
             Tpu::backward(body, &b, &strides)

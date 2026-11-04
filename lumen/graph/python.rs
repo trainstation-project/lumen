@@ -304,7 +304,7 @@ impl PyGraph {
     /// second dot and output values (the output its rounding cast's when it narrows the dot), the softmax
     /// max/sum, the score chain, causal mask, dropout and member nodes.
     fn attentions<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
-        use crate::graph_compiler::common::flash_attention::{Score, traced};
+        use crate::graph_compiler::common::attention::{Score, traced};
         let nodes = self.inner.nodes();
 
         traced(&self.inner)

@@ -1,6 +1,11 @@
 //! Flash attention forward: matching attention in traced graphs and the rewrite replacing each with a
 //! `flash_attention` fusion.
 
+#[cfg(lumen_mps_linked)]
+mod mps;
+mod tpu;
+mod triton;
+
 use super::{Access, Dropout, Matcher, Score, Strides, body_of, fits32};
 use crate::DType;
 use crate::graph::{FUSION_SEPARATOR, Graph, Primitive, Var};

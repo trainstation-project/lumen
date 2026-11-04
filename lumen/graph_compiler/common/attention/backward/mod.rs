@@ -1,6 +1,11 @@
 //! Flash attention backward: matching attention's gradients in traced graphs and the rewrite replacing
 //! them with `flash_attention_backward` fusions.
 
+#[cfg(lumen_mps_linked)]
+mod mps;
+pub(super) mod tpu;
+mod triton;
+
 use std::collections::HashMap;
 
 use super::{Access, Dropout, Matcher, Score, Strides, body_of, fits32};

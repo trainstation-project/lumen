@@ -112,7 +112,7 @@ fn device_compile(graph: &Graph, device: Device, options: &Options) -> Result<Pl
 }
 
 /// Indices of the `true` entries of `mask`.
-fn positions(mask: &[bool]) -> Vec<usize> {
+pub(crate) fn positions(mask: &[bool]) -> Vec<usize> {
     (0..mask.len()).filter(|&i| mask[i]).collect()
 }
 

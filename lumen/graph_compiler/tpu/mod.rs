@@ -1,5 +1,4 @@
 //! TPU graph compiler: the pass pipeline that rewrites a traced graph into TPU kernels and plans its buffers.
-mod attention;
 mod fusion;
 #[cfg(test)]
 mod tests;
@@ -9,22 +8,19 @@ use crate::graph_compiler::common::canonicalize_dots::CanonicalizeDots;
 use crate::graph_compiler::common::diamonds::FusedDiamonds;
 use crate::graph_compiler::common::horizontal::{Grouping, HorizontalFusion};
 use crate::graph_compiler::common::place_concats::{PlaceConcats, Slots};
-use attention::AttentionLayouts;
 use fusion::{DotRows, FuseDots, Fusion};
 
+use super::common::attention::tpu::AttentionLayouts;
+use super::common::attention::{FlashAttention, FlashAttentionBackward};
 use super::common::clamp_indices::ClampIndices;
 use super::common::dot_strength::DotStrength;
-use super::common::flash_attention;
-use super::common::flash_attention::{
-    AttentionBackwards, Attentions, Backward, FlashAttention, FlashAttentionBackward,
-};
 use super::common::fold_dot_reshapes::FoldDotReshapes;
 use super::common::merge_dots::{Blocks, MergeDots, Packs, Target};
 use super::common::merge_dots_backward::MergeDotsBackward;
 use super::common::simplify::Simplify;
 use super::pass::{Module, Pipeline};
 use super::{CompilerConfig, Options, plan_options, positions};
-use crate::graph::{Graph, Node, Primitive, TensorType, Var};
+use crate::graph::{Graph, Node, Primitive, TensorType};
 use crate::graph_compiler::{Plan, PlanOptions};
 use crate::plan::DeviceLayout;
 
@@ -43,9 +39,9 @@ const LAYOUT: DeviceLayout = DeviceLayout {
 };
 
 /// Graph being compiled plus the state the TPU passes carry between them.
-struct TpuModule<'a> {
-    graph: Graph,
-    options: &'a Options,
+pub(crate) struct TpuModule<'a> {
+    pub(crate) graph: Graph,
+    pub(crate) options: &'a Options,
     /// Packed weight blocks built by dot merging, appended as the graph's last inputs.
     packed: Packs,
     /// Per-pack region layout of interleaved members, parallel to `packed`.
@@ -75,45 +71,6 @@ impl Module for TpuModule<'_> {
 
     fn config(&self) -> &CompilerConfig {
         &self.options.config
-    }
-}
-
-/// Flash-attention matching for TPU: scalar epilogue leaves, no extra scalars, static offsets.
-impl AttentionBackwards for TpuModule<'_> {
-    /// None: the TPU backward runs dK/dV and dQ as separate kernels.
-    fn together(&self) -> impl Fn(&Backward) -> bool + 'static {
-        |_| false
-    }
-
-    /// Names the backward fusion `flash_attention_backward`.
-    fn backward_kernel(&mut self) -> String {
-        "flash_attention_backward".into()
-    }
-}
-
-impl Attentions for TpuModule<'_> {
-    fn contraction_epilogues(&self) -> bool {
-        self.options.config.contraction_epilogues
-    }
-
-    fn epilogues(&self) -> flash_attention::Epilogues {
-        flash_attention::Epilogues {
-            leaves: |graph, v| graph.type_of(v).shape.is_empty(),
-            reshaped: true,
-            transposed: false,
-        }
-    }
-
-    fn scalars(&self) -> Vec<Var> {
-        Vec::new()
-    }
-
-    fn kernel(&mut self) -> String {
-        "flash_attention".into()
-    }
-
-    fn runtime_offsets(&self) -> bool {
-        false
     }
 }
 

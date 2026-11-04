@@ -1,7 +1,6 @@
 //! The Triton backend for CUDA: pass pipeline, plan compilation, autotuning, and running steps
 //! through Triton kernels launched from Python.
 
-pub(crate) mod attention;
 mod cross_entropy;
 #[cfg(all(feature = "python", lumen_cuda_linked))]
 pub(crate) mod direct;
@@ -16,9 +15,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 #[cfg(feature = "python")]
-pub(crate) use crate::codegen::dot_general::triton::Config;
+pub(crate) use super::common::attention::triton::{Launch, set_attention};
 #[cfg(feature = "python")]
-pub(crate) use attention::{Launch, set_attention};
+pub(crate) use crate::codegen::dot_general::triton::Config;
 use fusion::Fusion;
 #[cfg(feature = "python")]
 pub(crate) use gemm::{Epilogue, set_gemm};
@@ -27,10 +26,10 @@ use split_k::SplitK;
 use wide_rows::WideRows;
 
 use super::common::alone::Alone;
+use super::common::attention::{self, FlashAttention, FlashAttentionBackward};
 use super::common::chunked_cross_entropy::ChunkedCrossEntropy;
 use super::common::clamp_indices::ClampIndices;
 use super::common::dot_strength::DotStrength;
-use super::common::flash_attention::{FlashAttention, FlashAttentionBackward};
 use super::common::linear_cross_entropy::LinearCrossEntropy;
 use super::common::linear_reordering::LinearReordering;
 use super::common::merge_dots::{Blocks, MergeDots, Packs, Target};
@@ -210,7 +209,7 @@ pub struct Function {
 
 impl Function {
     /// Binds the generated `(name, source)` to parameter `param`.
-    fn new(param: impl Into<String>, (name, source): (String, String)) -> Self {
+    pub(crate) fn new(param: impl Into<String>, (name, source): (String, String)) -> Self {
         Function {
             param: param.into(),
             name,
@@ -268,9 +267,9 @@ fn unsupported(graph: &Graph) -> Result<(), String> {
 }
 
 /// A graph compiled for Triton, with the packs merge_dots creates.
-struct TritonModule<'a> {
-    graph: Graph,
-    options: &'a Options,
+pub(crate) struct TritonModule<'a> {
+    pub(crate) graph: Graph,
+    pub(crate) options: &'a Options,
     /// Inputs concatenated into each packed block.
     packed: Packs,
     /// Interleaved region sizes of each packed block.
@@ -637,7 +636,9 @@ pub(crate) fn run(
     outs: &[Tensor],
 ) -> Result<(), String> {
     match (&step.primitive, kernel) {
-        (p, _) if attention::is_attention(p) => attention::run(step, inputs, out, outs),
+        (p, _) if attention::triton::is_attention(p) => {
+            attention::triton::run(step, inputs, out, outs)
+        }
         _ if gemm::is_gemm(step) => gemm::run(step, inputs, out, outs),
         #[cfg(lumen_cuda_linked)]
         (p, _) if p.is_collective() => crate::distributed::nccl::run(p, inputs, out),

@@ -377,7 +377,7 @@ impl Kernels for Attentions {
 
         let strides = crate::graph_compiler::mps::attention_strides(step, body);
 
-        match crate::graph_compiler::common::flash_attention::of_body_strided(body, &strides) {
+        match crate::graph_compiler::common::attention::of_body_strided(body, &strides) {
             Some(a) => crate::codegen::attention::mps::tunings(&a),
             None => Vec::new(),
         }
@@ -390,7 +390,7 @@ impl Kernels for Attentions {
         };
 
         let strides = crate::graph_compiler::mps::attention_strides(step, body);
-        let a = crate::graph_compiler::common::flash_attention::of_body_strided(body, &strides)
+        let a = crate::graph_compiler::common::attention::of_body_strided(body, &strides)
             .expect("an attention it was tuned for");
 
         let (kernel, source) = crate::codegen::attention::mps::forward_with(body, &a, tuning)

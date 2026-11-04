@@ -1,9 +1,13 @@
 //! Flash attention: pattern matching of attention (forward and backward) in traced graphs and the rewrites
 //! replacing each match with a fusion kernel. The matcher and operand layouts both directions share live
-//! here; each direction's matching, rewrite and pass live in `forward` and `backward`.
+//! here; each direction's matching, rewrite and pass live in `forward` and `backward`, with each backend's
+//! answers to that pass in their `mps`, `tpu` and `triton` files. `tpu` and `triton` here hold what those
+//! backends do with the fusions after matching: TPU's layout folding and Triton's kernel launches.
 
 mod backward;
 mod forward;
+pub(crate) mod tpu;
+pub(crate) mod triton;
 
 #[cfg(lumen_mps_linked)]
 pub(crate) use backward::backward_of_body_into;
