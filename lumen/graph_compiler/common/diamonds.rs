@@ -23,6 +23,9 @@ pub(crate) struct Row {
     pub outputs: Vec<usize>,
     /// Partial column sums a backend attached to the row.
     pub partials: Vec<usize>,
+    /// Whether the row is a matmul's rows and per-row values of one reduction of them, whose result
+    /// leaves the row only per row (CODA's statistics): it may write whole rows other kernels read.
+    pub statistics: bool,
 }
 
 /// Every row kernel in `graph`, built from diamonds and then grown backwards and forwards.
@@ -112,116 +115,152 @@ fn grown(finder: &Finder, rows: &mut Vec<Row>) {
         let ty = graph.type_of(root.output);
         let rows_of: &[Row] = rows;
 
-        // Flood-fill earlier nodes that fit a layout of `rows` elements with rows of `n`.
-        let grow = |rows: usize, n: usize| -> (Vec<bool>, Vec<usize>, Vec<usize>) {
-            let each = rows / n;
-            let shaped = |v: Var| {
-                let t = graph.type_of(v);
-                t.numel() == rows && t.shape.last() == Some(&n)
-            };
-            let per_row = |v: Var| graph.type_of(v).numel() == each;
-            let mut inside = vec![false; nodes.len()];
-            inside[i] = true;
-            let mut absorbed: Vec<usize> = Vec::new();
-            let mut outputs: Vec<usize> = Vec::new();
-            if let Some(r) = own {
-                let row = &rows_of[r];
-
-                for &m in row.inner.iter().chain(&row.reductions) {
-                    inside[m] = true;
-                }
-
-                absorbed.push(r);
-            }
-            for k in (0..i).rev() {
-                let node = &nodes[k];
-                let v = node.output;
-
-                let read_inside = !finder.output[v]
-                    && !finder.readers[v].is_empty()
-                    && finder.readers[v].iter().all(|&r| inside[r]);
-
-                // Per-row values may also be read after the root: they become row outputs.
-                let read_after = !finder.output[v]
-                    && per_row(v)
-                    && finder.readers[v].iter().any(|&r| inside[r])
-                    && finder.readers[v].iter().all(|&r| inside[r] || r > i);
-
-                // Index arithmetic is recomputed by readers rather than claimed by the row.
-                let shared = !read_inside && indices(graph, &finder.producer, v);
-
-                if !finder.live[k] || inside[k] || !(read_inside || read_after) || shared {
-                    continue;
-                }
-
-                let own_reads = |r: &Row| {
-                    r.outputs.iter().all(|&o| {
-                        let w = nodes[o].output;
-
-                        !finder.output[w]
-                            && finder.readers[w].iter().all(|&u| {
-                                inside[u]
-                                    || u == r.root
-                                    || r.inner.contains(&u)
-                                    || r.reductions.contains(&u)
-                            })
-                    })
+        // Flood-fill earlier nodes that fit a layout of `rows` elements with rows of `n`; with
+        // `statistics`, values of the rows themselves read after the root are written too.
+        let grow =
+            |rows: usize, n: usize, statistics: bool| -> (Vec<bool>, Vec<usize>, Vec<usize>) {
+                let each = rows / n;
+                let shaped = |v: Var| {
+                    let t = graph.type_of(v);
+                    t.numel() == rows && t.shape.last() == Some(&n)
                 };
-
-                let earlier = rows_of
-                    .iter()
-                    .position(|r| r.root == k && shaped(v) && own_reads(r));
-
-                if let Some(r) = earlier {
+                let per_row = |v: Var| graph.type_of(v).numel() == each;
+                let mut inside = vec![false; nodes.len()];
+                inside[i] = true;
+                let mut absorbed: Vec<usize> = Vec::new();
+                let mut outputs: Vec<usize> = Vec::new();
+                if let Some(r) = own {
                     let row = &rows_of[r];
 
-                    for &m in std::iter::once(&row.root)
-                        .chain(&row.inner)
-                        .chain(&row.reductions)
-                    {
+                    for &m in row.inner.iter().chain(&row.reductions) {
                         inside[m] = true;
                     }
 
                     absorbed.push(r);
-                    continue;
                 }
+                for k in (0..i).rev() {
+                    let node = &nodes[k];
+                    let v = node.output;
 
-                if taken[k] || !(finder.fusible)(graph, node) {
-                    continue;
-                }
+                    let read_inside = !finder.output[v]
+                        && !finder.readers[v].is_empty()
+                        && finder.readers[v].iter().all(|&r| inside[r]);
 
-                inside[k] = match &node.primitive {
-                    Primitive::ReduceSum { axes, .. } | Primitive::ReduceMax { axes } => {
-                        let x = node.inputs[0];
+                    // Per-row values may also be read after the root: they become row outputs; in a
+                    // statistics row so may the rows themselves (a matmul's rows, a residual stream).
+                    let rows_written = statistics && shaped(v);
 
-                        shaped(x)
-                            && axes.as_slice() == [graph.type_of(x).shape.len() - 1]
-                            && per_row(v)
+                    let read_after = (!finder.output[v] || rows_written)
+                        && (per_row(v) || rows_written)
+                        && finder.readers[v].iter().any(|&r| inside[r])
+                        && finder.readers[v].iter().all(|&r| inside[r] || r > i);
+
+                    // Index arithmetic is recomputed by readers rather than claimed by the row.
+                    let shared = !read_inside && indices(graph, &finder.producer, v);
+
+                    if !finder.live[k] || inside[k] || !(read_inside || read_after) || shared {
+                        continue;
                     }
-                    _ => shaped(v) || per_row(v) || graph.type_of(v).numel() == 1,
-                };
 
-                if inside[k] && !read_inside {
-                    outputs.push(k);
+                    let own_reads = |r: &Row| {
+                        r.outputs.iter().all(|&o| {
+                            let w = nodes[o].output;
+
+                            !finder.output[w]
+                                && finder.readers[w].iter().all(|&u| {
+                                    inside[u]
+                                        || u == r.root
+                                        || r.inner.contains(&u)
+                                        || r.reductions.contains(&u)
+                                })
+                        })
+                    };
+
+                    let earlier = rows_of
+                        .iter()
+                        .position(|r| r.root == k && shaped(v) && own_reads(r));
+
+                    if let Some(r) = earlier {
+                        let row = &rows_of[r];
+
+                        for &m in std::iter::once(&row.root)
+                            .chain(&row.inner)
+                            .chain(&row.reductions)
+                        {
+                            inside[m] = true;
+                        }
+
+                        absorbed.push(r);
+                        continue;
+                    }
+
+                    if taken[k] || !(finder.fusible)(graph, node) {
+                        continue;
+                    }
+
+                    inside[k] = match &node.primitive {
+                        Primitive::ReduceSum { axes, .. } | Primitive::ReduceMax { axes } => {
+                            let x = node.inputs[0];
+
+                            shaped(x)
+                                && axes.as_slice() == [graph.type_of(x).shape.len() - 1]
+                                && per_row(v)
+                        }
+                        _ => shaped(v) || per_row(v) || graph.type_of(v).numel() == 1,
+                    };
+
+                    if inside[k] && !read_inside {
+                        outputs.push(k);
+                    }
                 }
-            }
-            (inside, absorbed, outputs)
-        };
+                (inside, absorbed, outputs)
+            };
 
         let reduces = |inside: &[bool]| (0..i).any(|k| inside[k] && is_reduction(k));
 
         // Prefer the root's own row length; a per-row root takes the length of a reduction feeding it.
         let mut grown = match ty.shape.last() {
-            Some(&n) if n > 1 => Some(grow(ty.numel(), n)),
+            Some(&n) if n > 1 => Some(grow(ty.numel(), n, false)),
             _ => None,
         };
 
+        // A per-row root's row needs several reductions, or one over a matmul's rows whose result
+        // leaves the row only per row (a statistics row): a row node reads a matmul, so the fusion
+        // makes the row its epilogue, and the row writes rows another kernel reads, which it then
+        // doesn't read again (a lone statistic is a reduction kernel's).
+        let dot = |inside: &[bool]| {
+            let matmul = |v: Var| {
+                finder.producer[v]
+                    .is_some_and(|p| matches!(nodes[p].primitive, Primitive::DotGeneral { .. }))
+            };
+
+            (0..i).any(|k| inside[k] && nodes[k].inputs.iter().any(|&v| matmul(v)))
+        };
+
+        let count = |inside: &[bool]| (0..i).filter(|&k| inside[k] && is_reduction(k)).count();
+        let mut statistics = false;
+
         if !grown.as_ref().is_some_and(|(inside, _, _)| reduces(inside)) {
             grown = row_length(finder, i)
-                .map(|n| grow(ty.numel() * n, n))
-                .filter(|(inside, _, _)| {
-                    (0..i).filter(|&k| inside[k] && is_reduction(k)).count() > 1
+                .map(|n| grow(ty.numel() * n, n, false))
+                .filter(|(inside, _, _)| count(inside) > 1);
+        }
+
+        if grown.is_none() && own.is_none() {
+            let rows_out = |outputs: &[usize]| {
+                outputs.iter().any(|&k| {
+                    let t = graph.type_of(nodes[k].output);
+                    t.numel() > ty.numel() && t.numel().is_multiple_of(ty.numel())
+                })
+            };
+
+            grown = row_length(finder, i)
+                .map(|n| grow(ty.numel() * n, n, true))
+                .filter(|(inside, _, outputs)| {
+                    count(inside) == 1 && dot(inside) && rows_out(outputs)
                 });
+
+            statistics = grown.is_some();
         }
 
         let Some((inside, mut absorbed, mut outputs)) = grown else {
@@ -259,6 +298,7 @@ fn grown(finder: &Finder, rows: &mut Vec<Row>) {
             inner,
             outputs,
             partials: Vec::new(),
+            statistics,
         });
     }
 }
@@ -293,6 +333,7 @@ fn consumed(finder: &Finder, rows: &mut [Row]) {
 
     for r in 0..rows.len() {
         let row = &rows[r];
+        let statistics = row.statistics;
 
         let Some(&first) = row.reductions.first() else {
             continue;
@@ -398,7 +439,10 @@ fn consumed(finder: &Finder, rows: &mut [Row]) {
                     .collect();
 
                 if finder.output[v] || !readers.is_empty() {
-                    if graph.type_of(v).numel() != each {
+                    // Per-row values, or (in a statistics row) the rows themselves, are written.
+                    let written = graph.type_of(v).numel() == each || statistics && shaped(v);
+
+                    if !written {
                         return None;
                     }
 
@@ -745,6 +789,7 @@ impl<'a> Finder<'a> {
             inner,
             outputs,
             partials: Vec::new(),
+            statistics: false,
         };
 
         Some((row, producer))

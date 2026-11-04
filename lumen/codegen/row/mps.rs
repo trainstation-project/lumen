@@ -8,7 +8,9 @@ use indoc::{formatdoc, writedoc};
 
 use crate::DType;
 use crate::codegen::dot_general::mps::GemmConfig;
-use crate::codegen::dot_general::mps::{ROW_TILE, gemm_rows, gemm_tiles, read_staged};
+use crate::codegen::dot_general::mps::{
+    Cut, ROW_TILE, cut, early_outputs, gemm_rows, gemm_tiles, read_staged,
+};
 use crate::codegen::emitter::Emit;
 use crate::codegen::emitter::mps::Emitter;
 pub(crate) use crate::codegen::kinds::{row_partials, row_reductions};
@@ -197,10 +199,35 @@ pub(crate) fn row_kernel(
         })
         .collect();
 
+    // Wide matmul rows write outputs that read no reduction in the partials pass, not here.
+    let early = match tile.is_some() && n > ROW_TILE {
+        true => early_outputs(body),
+        false => Vec::new(),
+    };
+
+    let root_early = early.contains(&0);
+
+    // A wide combine reads its rows from the partials pass's cut, never past it (the dot, the inputs
+    // before it): an output written there, or a value kept in scratch.
+    let cut = match tile.is_some() && n > ROW_TILE {
+        true => cut(body, body.inputs()[body.inputs().len() - 1]),
+        false => Cut::Dot,
+    };
+
+    let loaded: Option<(Var, String)> = match cut {
+        Cut::Output(0) => Some((out, "out[j]".to_owned())),
+        Cut::Output(k) => Some((body.outputs()[k], format!("out{k}[j]"))),
+        Cut::Scratch(u) => Some((u, "cutv[j]".to_owned())),
+        Cut::Dot | Cut::Nothing => None,
+    };
+
     let roots: Vec<Vec<Var>> = passes
         .iter()
         .map(|pass| pass.iter().map(|&(k, _)| reductions[k].inputs[0]).collect())
-        .chain([std::iter::once(out).chain(summed.iter().copied()).collect()])
+        .chain([std::iter::once(out)
+            .filter(|_| !root_early)
+            .chain(summed.iter().copied())
+            .collect()])
         .collect();
 
     let simd = simd_rows(body);
@@ -270,6 +297,10 @@ pub(crate) fn row_kernel(
 
         for (m, &(v, _)) in kept.iter().enumerate().filter(|(_, (_, p))| *p < k) {
             e.values.insert((v, "j".into()), format!("kept{m}[e]"));
+        }
+
+        if let Some((v, load)) = &loaded {
+            e.values.insert((*v, "j".into()), load.clone());
         }
 
         let values: Vec<String> = roots[k].iter().map(|&v| e.value(v, "j".into())).collect();
@@ -437,13 +468,17 @@ pub(crate) fn row_kernel(
     }
 
     let (values, _) = pass(&mut e, passes.len());
-    let value = &values[0];
+    let value = values.first().cloned().unwrap_or_default();
     let (mut once, mut each) = (String::new(), String::new());
     let (mut init, mut written) = (String::new(), String::new());
 
     // Column partial outputs accumulate per thread across the group's rows, then sum across SIMD
     // groups before the store.
     for (k, &v) in body.outputs()[1..].iter().enumerate() {
+        if early.contains(&(k + 1)) {
+            continue;
+        }
+
         if let Some(p) = partials.iter().position(|p| p.output == v) {
             let a = metal_type(body.type_of(v).dtype);
             let value = e.value(summed[p], "j".into());
@@ -549,6 +584,7 @@ pub(crate) fn row_kernel(
         }
         false => {
             let write = match out_type.numel() == rows {
+                _ if root_early => String::new(),
                 true => formatdoc!(
                     "
                     if (c == 0u) {{
@@ -580,10 +616,15 @@ pub(crate) fn row_kernel(
         format!("device const {a} *tiles{k}")
     };
 
-    let extra: Vec<String> = match wide {
+    let mut extra: Vec<String> = match wide {
         true => passes[0].iter().map(partials_of).collect(),
         false => Vec::new(),
     };
+
+    if let Cut::Scratch(u) = cut {
+        let ty = metal_type(body.type_of(u).dtype);
+        extra.push(format!("device const {ty} *cutv"));
+    }
 
     let (params, _) = io_params(body, by_value, metal_type(out_type.dtype), &extra);
     // A wide row matmul's row kernel combines the partials pass's tiles.

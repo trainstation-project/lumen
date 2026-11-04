@@ -11,8 +11,8 @@ pub(crate) mod dot_rows;
 pub(crate) mod elementwise;
 pub(crate) mod fold_dot_reshapes;
 pub(crate) mod fusion;
-pub(crate) mod gemm_linear_reordering;
 pub(crate) mod horizontal;
+pub(crate) mod linear_reordering;
 pub(crate) mod multi_output;
 pub(crate) mod place_views;
 #[cfg_attr(not(feature = "python"), allow(dead_code))]

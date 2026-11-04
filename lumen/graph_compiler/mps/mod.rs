@@ -23,8 +23,8 @@ use super::common::alone::{Alone, Lone};
 use super::common::chunked_cross_entropy::ChunkedCrossEntropy;
 use super::common::clamp_indices::ClampIndices;
 use super::common::dot_strength::DotStrength;
-use super::common::gemm_linear_reordering::GemmLinearReordering;
 use super::common::linear_cross_entropy::LinearCrossEntropy;
+use super::common::linear_reordering::LinearReordering;
 use super::common::merge_dots::{Blocks, MergeDots, Packs, Target};
 use super::common::merge_dots_backward::MergeDotsBackward;
 use super::common::simplify::Simplify;
@@ -279,8 +279,10 @@ fn pipeline<'a>(config: &MpsConfig) -> Pipeline<MpsModule<'a>> {
     }
 
     // A matmul operand's factor along the kept axes (a norm's 1 / rms, a weight's per-channel scale) moves to its output, for its epilogue.
-    if config.gemm_linear_reordering {
-        p.add(GemmLinearReordering);
+    if config.linear_reordering {
+        p.add(LinearReordering {
+            tile: crate::codegen::dot_general::mps::ROW_TILE,
+        });
     }
 
     if config.split_k {
@@ -1062,6 +1064,8 @@ pub(super) fn encode_with(
         if let Some((offsets, _)) = gemm::tile_scratch(body) {
             let at = |o: usize| scratch.wrapping_add(o).cast_const();
 
+            // The dot's value, then each tile reduction's partials and a cut kept in scratch, bound in
+            // that order after both kernels' outputs.
             let (dotv, tiles): (*const u8, Vec<*const u8>) = (
                 at(offsets[0]),
                 offsets[1..].iter().map(|&o| at(o)).collect(),
@@ -1088,6 +1092,18 @@ pub(super) fn encode_with(
             let passes = gemm::tile_passes(body).expect("a multi-tile row matmul");
             let strides = step.input_strides();
 
+            // The step's outputs the partials pass writes (`early`), or the combine the rest.
+            let written = |early: bool| -> (Vec<TensorType>, Vec<Vec<usize>>) {
+                let outputs = std::iter::once(&step.output).chain(&step.extra_outputs);
+
+                outputs
+                    .zip(step.output_strides())
+                    .enumerate()
+                    .filter(|(k, _)| passes.early.contains(k) == early)
+                    .map(|(_, ((_, ty), strides))| (ty.clone(), strides))
+                    .unzip()
+            };
+
             let io = |reads: &[usize], scratch: &[TensorType]| {
                 let types = reads.iter().map(|&i| step.inputs[i].1.clone());
                 let read_strides = reads.iter().map(|&i| strides[i].clone());
@@ -1104,15 +1120,19 @@ pub(super) fn encode_with(
                 crate::graph::intern(format!("{} (partials)", step.label)),
                 || {
                     let (inputs, input_strides) = io(&passes.partials, &[]);
+                    let (outputs, output_strides) = written(true);
+                    let scratch = passes.scratch.iter();
 
                     crate::profiler::IoTypes {
                         inputs,
-                        outputs: passes.scratch.clone(),
+                        outputs: outputs
+                            .into_iter()
+                            .chain(scratch.clone().cloned())
+                            .collect(),
                         input_strides,
-                        output_strides: passes
-                            .scratch
-                            .iter()
-                            .map(|t| contiguous_strides(&t.shape))
+                        output_strides: output_strides
+                            .into_iter()
+                            .chain(scratch.map(|t| contiguous_strides(&t.shape)))
                             .collect(),
                     }
                 },
@@ -1130,14 +1150,22 @@ pub(super) fn encode_with(
             crate::profiler::next_launch(
                 crate::graph::intern(format!("{} (combine)", step.label)),
                 || {
-                    let (inputs, input_strides) = io(&passes.combine, &passes.scratch);
-                    let outputs = std::iter::once(&step.output).chain(&step.extra_outputs);
+                    let (mut inputs, mut input_strides) = io(&passes.combine, &passes.scratch);
+                    let (outputs, output_strides) = written(false);
+
+                    // A cut that is an output, written by the partials pass, read back here.
+                    if let Some(k) = passes.read {
+                        let all = std::iter::once(&step.output).chain(&step.extra_outputs);
+                        let (_, ty) = all.clone().nth(k).expect("the cut output");
+                        inputs.push(ty.clone());
+                        input_strides.push(step.output_strides()[k].clone());
+                    }
 
                     crate::profiler::IoTypes {
                         inputs,
-                        outputs: outputs.map(|(_, ty)| ty.clone()).collect(),
+                        outputs,
                         input_strides,
-                        output_strides: step.output_strides(),
+                        output_strides,
                     }
                 },
             );

@@ -657,10 +657,10 @@ fn row_scaled_matmul(extra_output: bool) -> Graph {
 /// program's to bfloat16 rounding.
 #[test]
 fn row_scale_moves_past_its_matmul() {
-    use super::common::gemm_linear_reordering::gemm_linear_reordering;
+    use super::common::linear_reordering::linear_reordering;
 
     let g = row_scaled_matmul(false);
-    let out = gemm_linear_reordering(&g);
+    let out = linear_reordering(&g, None);
     let nodes = out.nodes();
     let dot = nodes
         .iter()
@@ -700,7 +700,7 @@ fn row_scale_moves_past_its_matmul() {
 /// division; the values the traced program's to float32 rounding.
 #[test]
 fn row_division_moves_past_its_matmul() {
-    use super::common::gemm_linear_reordering::gemm_linear_reordering;
+    use super::common::linear_reordering::linear_reordering;
 
     let mut g = Graph::new();
     let x = g.input(ty(&[8, 32]));
@@ -716,7 +716,7 @@ fn row_division_moves_past_its_matmul() {
     let normalized = apply(&mut g, Div, &[x, rms]);
     let y = apply(&mut g, matmul(), &[normalized, w]);
     g.set_outputs(&[y]).unwrap();
-    let out = gemm_linear_reordering(&g);
+    let out = linear_reordering(&g, None);
 
     assert_eq!(
         names(&out),
@@ -738,10 +738,10 @@ fn row_division_moves_past_its_matmul() {
 /// and stays.
 #[test]
 fn shared_lhs_and_column_scales_stay() {
-    use super::common::gemm_linear_reordering::gemm_linear_reordering;
+    use super::common::linear_reordering::linear_reordering;
 
     let g = row_scaled_matmul(true);
-    assert_eq!(names(&gemm_linear_reordering(&g)), names(&g));
+    assert_eq!(names(&linear_reordering(&g, None)), names(&g));
 
     let mut g = Graph::new();
     let x = g.input(ty(&[8, 32]));
@@ -758,7 +758,7 @@ fn shared_lhs_and_column_scales_stay() {
     let y = apply(&mut g, matmul(), &[scaled, w]);
     g.set_outputs(&[y]).unwrap();
 
-    assert_eq!(names(&gemm_linear_reordering(&g)), names(&g));
+    assert_eq!(names(&linear_reordering(&g, None)), names(&g));
 }
 
 /// A weight's per-output-channel scale (`x · (q · s)`, a dequantized weight's) moves to the matmul's
@@ -766,7 +766,7 @@ fn shared_lhs_and_column_scales_stay() {
 /// rounding.
 #[test]
 fn column_scale_of_the_weight_moves_past_its_matmul() {
-    use super::common::gemm_linear_reordering::gemm_linear_reordering;
+    use super::common::linear_reordering::linear_reordering;
 
     let mut g = Graph::new();
     let x = g.input(ty(&[8, 32]));
@@ -782,7 +782,7 @@ fn column_scale_of_the_weight_moves_past_its_matmul() {
     let w = apply(&mut g, Mul, &[q, s]);
     let y = apply(&mut g, matmul(), &[x, w]);
     g.set_outputs(&[y]).unwrap();
-    let out = gemm_linear_reordering(&g);
+    let out = linear_reordering(&g, None);
 
     assert_eq!(
         names(&out),
@@ -913,14 +913,14 @@ fn assert_reordered(g: &Graph, out: &Graph, shapes: &[Vec<usize>], moved: usize,
 /// size or kept with its operand's rank; the values the traced program's to float32 rounding.
 #[test]
 fn factors_move_past_their_matmul_in_every_layout() {
-    use super::common::gemm_linear_reordering::gemm_linear_reordering;
+    use super::common::linear_reordering::linear_reordering;
 
     for (xt, wt) in [(false, false), (false, true), (true, false), (true, true)] {
         for keepdim in [false, true] {
             for (row, col) in [(true, false), (false, true), (true, true)] {
                 let case = format!("xt {xt} wt {wt} keepdim {keepdim} row {row} col {col}");
                 let (g, shapes) = factored_matmul(xt, wt, keepdim, row, col);
-                let out = gemm_linear_reordering(&g);
+                let out = linear_reordering(&g, None);
                 let moved = usize::from(row) + usize::from(col);
                 assert_reordered(&g, &out, &shapes, moved, &case);
             }
@@ -932,7 +932,7 @@ fn factors_move_past_their_matmul_in_every_layout() {
 /// `W · t` of `x W`) does not commute with the matmul and stays, on either side in every layout.
 #[test]
 fn contracted_axis_factors_stay_in_every_layout() {
-    use super::common::gemm_linear_reordering::gemm_linear_reordering;
+    use super::common::linear_reordering::linear_reordering;
 
     for (xt, wt) in [(false, false), (false, true), (true, false), (true, true)] {
         for side in 0..2 {
@@ -960,7 +960,7 @@ fn contracted_axis_factors_stay_in_every_layout() {
             g.set_outputs(&[y]).unwrap();
 
             let case = format!("xt {xt} wt {wt} side {side}");
-            assert_eq!(names(&gemm_linear_reordering(&g)), names(&g), "{case}");
+            assert_eq!(names(&linear_reordering(&g, None)), names(&g), "{case}");
         }
     }
 }
@@ -970,7 +970,7 @@ fn contracted_axis_factors_stay_in_every_layout() {
 /// program's to float32 rounding.
 #[test]
 fn batched_rows_move_past_their_matmul() {
-    use super::common::gemm_linear_reordering::gemm_linear_reordering;
+    use super::common::linear_reordering::linear_reordering;
 
     for wt in [false, true] {
         for keepdim in [false, true] {
@@ -1000,8 +1000,57 @@ fn batched_rows_move_past_their_matmul() {
                 .iter()
                 .map(|&v| g.type_of(v).shape.clone())
                 .collect();
-            let out = gemm_linear_reordering(&g);
+            let out = linear_reordering(&g, None);
             assert_reordered(&g, &out, &shapes, 2, &format!("wt {wt} keepdim {keepdim}"));
         }
     }
+}
+
+/// `x` (`[8, 128]`) scaled per row by `1 / sqrt(sum(x²))` over its 128-wide rows (a norm's), times `w`
+/// (`[128, 16]`).
+fn norm_scaled_matmul() -> Graph {
+    let mut g = Graph::new();
+    let x = g.input(ty(&[8, 128]));
+    let w = g.input(ty(&[128, 16]));
+
+    let squares = apply(&mut g, Mul, &[x, x]);
+
+    let sum = ReduceSum {
+        axes: vec![1],
+        accum_dtype: DType::F32,
+    };
+
+    let sum = apply(&mut g, sum, &[squares]);
+    let r = apply(&mut g, Unary(crate::graph::UnaryOp::Rsqrt), &[sum]);
+
+    let spread = BroadcastInDim {
+        shape: vec![8, 128],
+        broadcast_dimensions: vec![0],
+    };
+
+    let r = apply(&mut g, spread, &[r]);
+    let scaled = apply(&mut g, Mul, &[x, r]);
+    let y = apply(&mut g, matmul(), &[scaled, w]);
+    g.set_outputs(&[y]).unwrap();
+    g
+}
+
+/// With a tile width, the pass moves only a factor of a reduction over rows wider than the tile (a
+/// norm's `1 / rms` over 128-wide rows past 64-wide tiles), whose rows would otherwise take a pass of
+/// their own after the GEMM; not over rows a tile holds whole (256-wide tiles), nor a factor that is an
+/// input (a per-row scale, a weight's dequantization scale); without one, any factor moves.
+#[test]
+fn reordering_moves_only_factors_of_cross_tile_reductions() {
+    use super::common::linear_reordering::linear_reordering;
+
+    let g = norm_scaled_matmul();
+    let moved = |out: &Graph| names(out).ends_with(&["dot_general", "broadcast_in_dim", "mul"]);
+
+    assert!(moved(&linear_reordering(&g, Some(64))), "{g}");
+    assert_eq!(names(&linear_reordering(&g, Some(256))), names(&g));
+    assert!(moved(&linear_reordering(&g, None)));
+
+    let (g, _) = factored_matmul(false, false, false, true, true);
+    assert_eq!(names(&linear_reordering(&g, Some(64))), names(&g));
+    assert_ne!(names(&linear_reordering(&g, None)), names(&g));
 }

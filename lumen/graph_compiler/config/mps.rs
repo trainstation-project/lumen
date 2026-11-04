@@ -13,7 +13,7 @@ device_config! {
         online_softmax, set_online_softmax: bool = true;
         fused_linear_cross_entropy, set_fused_linear_cross_entropy: bool = true;
         split_k, set_split_k: bool = true;
-        gemm_linear_reordering, set_gemm_linear_reordering: bool = false;
+        linear_reordering, set_linear_reordering: bool = false;
         deterministic, set_deterministic: bool = false;
         neural_engine, set_neural_engine: bool = false;
         row_cache, set_row_cache: usize = 8;

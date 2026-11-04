@@ -4,7 +4,7 @@
 //! rhs column (a weight's per-channel dequantization scale), scales the matmul's output rows or columns
 //! instead, in its epilogue, so the scaled operand is never needed whole. The rounding moves with it: a
 //! cast between the factor and the matmul then rounds the unscaled value, so results differ from the
-//! traced program's in the last bits; `gemm_linear_reordering` (off by default) turns it on.
+//! traced program's in the last bits; `linear_reordering` (off by default) turns it on.
 
 use crate::DType;
 use crate::graph::{Graph, Node, Primitive, Var};
@@ -252,10 +252,40 @@ fn spread(
     apply(out, broadcast, &[f])
 }
 
+/// Whether `f` depends on a reduction over the last axis of rows wider than `tile`: a reduction a GEMM's
+/// tiles don't hold whole, so applying `f` to its rows would take a pass over them of its own.
+fn crosses_tiles(graph: &Graph, uses: &Uses, f: Var, tile: usize) -> bool {
+    let nodes = graph.nodes();
+    let (mut stack, mut seen) = (vec![f], vec![false; graph.types.len()]);
+
+    while let Some(v) = stack.pop() {
+        let Some(p) = uses.producer[v].filter(|_| !std::mem::replace(&mut seen[v], true)) else {
+            continue;
+        };
+
+        let node = &nodes[p];
+
+        if let Primitive::ReduceSum { axes, .. } | Primitive::ReduceMax { axes } = &node.primitive {
+            let x = graph.type_of(node.inputs[0]);
+            let last = x.shape.len().saturating_sub(1);
+
+            if *axes == [last] && x.shape.get(last).is_some_and(|&n| n > tile) {
+                return true;
+            }
+        }
+
+        stack.extend(&node.inputs);
+    }
+
+    false
+}
+
 /// Rewrites each matmul whose operand, read only by such matmuls, carries a factor constant along the
 /// contracted axis: the matmul of the operands without their factors, in its accumulation dtype, times
-/// (or divided by) each factor per output row or column, rounded once to its output dtype.
-pub(crate) fn gemm_linear_reordering(graph: &Graph) -> Graph {
+/// (or divided by) each factor per output row or column, rounded once to its output dtype. With `tile`,
+/// only a factor of a reduction over rows wider than `tile` moves ([`crosses_tiles`]): it is what would
+/// otherwise take a pass over the rows after their GEMM's tiles; every other factor stays as traced.
+pub(crate) fn linear_reordering(graph: &Graph, tile: Option<usize>) -> Graph {
     let nodes = graph.nodes();
 
     let mut uses = Uses {
@@ -274,7 +304,11 @@ pub(crate) fn gemm_linear_reordering(graph: &Graph) -> Graph {
     // Each reorderable matmul's operands without their factors, by node index.
     let reordered: Vec<[Option<Stripped>; 2]> = (0..nodes.len())
         .map(|k| match plain(graph, &nodes[k]) {
-            true => [0, 1].map(|side| stripped(graph, &uses, k, side)),
+            true => [0, 1].map(|side| {
+                stripped(graph, &uses, k, side).filter(|(_, (f, _))| {
+                    tile.is_none_or(|tile| crosses_tiles(graph, &uses, *f, tile))
+                })
+            }),
             false => [None, None],
         })
         .collect();
@@ -361,18 +395,21 @@ pub(crate) fn gemm_linear_reordering(graph: &Graph) -> Graph {
     out.prune().0
 }
 
-/// Compiler pass running [`gemm_linear_reordering`].
-pub(crate) struct GemmLinearReordering;
+/// Compiler pass running [`linear_reordering`].
+pub(crate) struct LinearReordering {
+    /// The widest row the backend's GEMM tiles hold whole; only factors of wider rows' reductions move.
+    pub(crate) tile: usize,
+}
 
-impl<M: Module> CompilerPass<M> for GemmLinearReordering {
+impl<M: Module> CompilerPass<M> for LinearReordering {
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
-        "gemm_linear_reordering"
+        "linear_reordering"
     }
 
     /// Replaces the module's graph with its reordered version.
     fn apply(&mut self, m: &mut M) -> Result<(), String> {
-        *m.graph_mut() = gemm_linear_reordering(m.graph());
+        *m.graph_mut() = linear_reordering(m.graph(), Some(self.tile));
         Ok(())
     }
 }

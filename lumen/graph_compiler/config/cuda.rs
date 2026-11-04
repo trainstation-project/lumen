@@ -11,7 +11,7 @@ device_config! {
         horizontal_fusion, set_horizontal_fusion: bool = true;
         multi_output_fusion, set_multi_output_fusion: bool = true;
         split_k, set_split_k: bool = true;
-        gemm_linear_reordering, set_gemm_linear_reordering: bool = false;
+        linear_reordering, set_linear_reordering: bool = false;
         normalization_diamonds, set_normalization_diamonds: bool = true;
         fused_linear_cross_entropy, set_fused_linear_cross_entropy: bool = true;
         deterministic, set_deterministic: bool = false;

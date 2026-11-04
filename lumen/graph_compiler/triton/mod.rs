@@ -39,8 +39,8 @@ use super::common::chunked_cross_entropy::ChunkedCrossEntropy;
 use super::common::clamp_indices::ClampIndices;
 use super::common::dot_strength::DotStrength;
 use super::common::flash_attention::{FlashAttention, FlashAttentionBackward};
-use super::common::gemm_linear_reordering::GemmLinearReordering;
 use super::common::linear_cross_entropy::LinearCrossEntropy;
+use super::common::linear_reordering::LinearReordering;
 use super::common::merge_dots::{Blocks, MergeDots, Packs, Target};
 use super::common::merge_dots_backward::MergeDotsBackward;
 use super::common::simplify::Simplify;
@@ -358,8 +358,10 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
     pipeline.add(Simplify { matched: true }).add(DotStrength);
 
     // As on MPS: a matmul operand's factor along the kept axes moves to its output.
-    if config.gemm_linear_reordering {
-        pipeline.add(GemmLinearReordering);
+    if config.linear_reordering {
+        pipeline.add(LinearReordering {
+            tile: crate::codegen::dot_general::triton::MOST_GEMM_ROW,
+        });
     }
 
     if config.split_k {
