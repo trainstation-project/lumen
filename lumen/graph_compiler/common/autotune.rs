@@ -6,7 +6,7 @@ use std::sync::{LazyLock, Mutex, PoisonError};
 use crate::device::Device;
 use crate::graph::Primitive;
 use crate::graph_compiler::Plan;
-use crate::graph_compiler::plan::{Step, Tuned};
+use crate::plan::{Step, Tuned};
 use crate::stream::{event_for, hold};
 
 /// A backend's source of kernel candidates for plan steps.

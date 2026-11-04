@@ -21,10 +21,10 @@ use super::common::merge_dots::{Blocks, MergeDots, Packs, Target};
 use super::common::merge_dots_backward::MergeDotsBackward;
 use super::common::simplify::Simplify;
 use super::pass::{Module, Pipeline};
-use super::plan::DeviceLayout;
 use super::{CompilerConfig, Options, plan_options, positions};
 use crate::graph::{Graph, Var};
 use crate::graph_compiler::{Plan, PlanOptions};
+use crate::plan::DeviceLayout;
 
 /// Vector lane width of a TPU register; concatenated and merged dot widths are aligned to it.
 const LANES: usize = 128;

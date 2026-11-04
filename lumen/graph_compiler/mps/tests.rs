@@ -20,10 +20,8 @@ use super::fusion;
 use crate::graph::Primitive::*;
 use crate::graph::{Graph, Primitive, TensorType, Var};
 use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::plan_tests::mps::{
-    available, check, check_within, exact_values, values,
-};
-use crate::graph_compiler::plan_tests::{data, mlp};
+use crate::plan::tests::mps::{available, check, check_within, exact_values, values};
+use crate::plan::tests::{data, mlp};
 use crate::reference;
 use crate::{DType, Device, Scalar, Tensor};
 

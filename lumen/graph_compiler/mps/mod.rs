@@ -49,8 +49,8 @@ use crate::graph_compiler::common::flash_attention::{
 };
 use crate::graph_compiler::common::horizontal::segments;
 use crate::graph_compiler::common::updates::Updates;
-use crate::graph_compiler::plan::{Buffer, Step};
 use crate::graph_compiler::{Plan, PlanOptions};
+use crate::plan::{Buffer, Step};
 use crate::runtime::mps::{
     Grid, dims_arg, element_arg, elementwise_grid, launch, scratch_bytes, u32_arg,
 };

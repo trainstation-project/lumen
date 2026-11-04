@@ -2,7 +2,7 @@
 //! operand into the output, then adds the updates in.
 
 use crate::graph::{Primitive, TensorType};
-use crate::graph_compiler::plan::Step;
+use crate::plan::Step;
 use crate::runtime::mps::{Grid, element_arg, elementwise_grid, launch, u32_arg, u64_arg};
 use crate::{DType, Scalar, Tensor};
 

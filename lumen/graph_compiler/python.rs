@@ -6,12 +6,12 @@ use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
 use super::Plan;
-use super::plan::Buffer;
 use crate::DType;
 use crate::device::Device;
 use crate::device::python::resolve_device;
 use crate::graph::python::{PyGraph, primitive_dict, scope_names};
 use crate::graph::{Primitive, TensorType};
+use crate::plan::Buffer;
 use crate::tensor::python::{PyTensor, dtype_name};
 
 /// A compiled plan of a traced graph, runnable on tensors from Python.

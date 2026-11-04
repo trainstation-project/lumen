@@ -4,7 +4,7 @@
 pub(crate) mod transpose;
 
 use crate::Tensor;
-use crate::graph_compiler::plan::Step;
+use crate::plan::Step;
 
 /// Encodes a reshape step, the copy the plan writes an output aliasing another buffer with: the input's
 /// bytes copied whole, a reshape keeping their order.

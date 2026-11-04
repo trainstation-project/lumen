@@ -10,7 +10,7 @@ use crate::codegen::elementwise::ElementwiseCodegen;
 use crate::codegen::utils::tpu::Tpu;
 use crate::device::tpu::{error, ffi};
 use crate::graph::Primitive;
-use crate::graph_compiler::plan::Step;
+use crate::plan::Step;
 
 /// Mosaic source of `module`'s kernel for JSON `spec`, lowered by `lumen.codegen.utils.tpu.pallas`.
 #[cfg(feature = "python")]

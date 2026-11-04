@@ -4,7 +4,7 @@ use crate::DType;
 use crate::codegen::dot_general::tpu::block;
 use crate::device::tpu::layout::Layout;
 use crate::graph::Primitive;
-use crate::graph_compiler::plan::Step;
+use crate::plan::Step;
 use crate::runtime::tpu::{Indices, Launch, SPARSE_CORE_MESH, SparseCore, Values, launch};
 
 /// TPU lane width.

@@ -1,5 +1,9 @@
 //! Lowers a graph to a `Plan`: an ordered list of kernel steps whose values are placed in
 //! caller inputs, fresh outputs or one shared workspace, and runs it on a device.
+
+#[cfg(test)]
+pub(crate) mod tests;
+
 use std::any::Any;
 use std::cmp::Reverse;
 use std::fmt;
@@ -280,7 +284,7 @@ pub struct Plan {
     /// Set when the program runs as host and device stages instead of `steps`.
     pub(crate) staged: Option<Box<Staged>>,
     /// Per step, the compiled Triton kernel used on CUDA.
-    pub(crate) triton: Option<Vec<Option<super::triton::Kernel>>>,
+    pub(crate) triton: Option<Vec<Option<crate::graph_compiler::triton::Kernel>>>,
     /// Whether the CUDA (CuTe DSL) backend runs the steps, each a kernel generated at its launch.
     pub(crate) cuda: bool,
     /// MPS launches captured per step, replayed on later runs.
@@ -379,7 +383,10 @@ impl Plan {
         let mut best = (graph.clone(), Self::compile_in_order(graph, options));
 
         // Try the traced order plus list and DFS schedules.
-        for order in [super::schedule::list(graph), super::schedule::dfs(graph)] {
+        for order in [
+            crate::graph_compiler::schedule::list(graph),
+            crate::graph_compiler::schedule::dfs(graph),
+        ] {
             let scheduled = graph.reordered(&order);
             let plan = Self::compile_in_order(&scheduled, options);
 
@@ -392,7 +399,7 @@ impl Plan {
 
         match options.memory_limit {
             Some(limit) if plan.workspace_bytes > limit => {
-                super::remat::rematerialize(&scheduled, limit, |g| {
+                crate::graph_compiler::remat::rematerialize(&scheduled, limit, |g| {
                     Self::compile_in_order(g, options)
                 })
             }
@@ -403,7 +410,7 @@ impl Plan {
     /// Compiles `graph` in its node order: aliases values onto shared buffers, assigns
     /// inputs and outputs, and packs the rest into the workspace by live range.
     fn compile_in_order(graph: &Graph, options: &PlanOptions) -> Self {
-        let graph = &graph.reordered(&super::schedule::overlap(graph));
+        let graph = &graph.reordered(&crate::graph_compiler::schedule::overlap(graph));
         let n = graph.types.len();
         let ty = |v: Var| graph.type_of(v).clone();
 
@@ -1220,7 +1227,8 @@ impl Plan {
                 && self.steps.iter().all(|s| {
                     s.inputs.iter().all(|&(b, ref ty)| {
                         b != at
-                            || ty.shape == self.inputs[i].shape && super::triton::reads_strided(s)
+                            || ty.shape == self.inputs[i].shape
+                                && crate::graph_compiler::triton::reads_strided(s)
                     })
                 });
         }
@@ -1594,13 +1602,15 @@ impl Plan {
                     let outs: Vec<Tensor> = outputs.collect();
                     let kernel = kernels.get(at).and_then(Option::as_ref);
                     let run = || match self.cuda {
-                        true => super::cuda::run(step, &inputs, &out, &outs),
-                        false => super::triton::run(kernel, step, &inputs, &out, &outs),
+                        true => crate::graph_compiler::cuda::run(step, &inputs, &out, &outs),
+                        false => {
+                            crate::graph_compiler::triton::run(kernel, step, &inputs, &out, &outs)
+                        }
                     };
 
                     // Captured into a CUDA graph, the nodes it adds are the step's, by name.
                     #[cfg(all(feature = "python", lumen_cuda_linked))]
-                    let run = || super::triton::direct::counted(step.label, run);
+                    let run = || crate::graph_compiler::triton::direct::counted(step.label, run);
 
                     // Profiled, the step's kernels are timed under its name (each keeps its own as `kernel`).
                     #[cfg(lumen_cupti_linked)]

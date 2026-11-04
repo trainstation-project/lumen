@@ -18,7 +18,7 @@ use crate::device::tpu::layout::Layout as Tiles;
 use crate::graph::Var;
 use crate::graph::{Graph, Node, Primitive, TensorType};
 #[cfg(lumen_tpu_linked)]
-use crate::graph_compiler::plan::Step;
+use crate::plan::Step;
 #[cfg(lumen_tpu_linked)]
 use crate::runtime::tpu::{Launch, launch};
 

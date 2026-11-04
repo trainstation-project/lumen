@@ -35,7 +35,7 @@ Autograd               lumen/autograd: JVP rules per primitive, linearize,
 graph_compiler         lumen/graph_compiler: a pass pipeline per device
       |                (cse, simplify, then e.g. MPS dot merging, loop
       v                fusion, flash attention, horizontal fusion)
-Plan                   graph_compiler/plan.rs: every value placed in one
+Plan                   lumen/plan: every value placed in one
       |                workspace allocated once; the steps to run
       v
 Kernels                lumen/reference/mod.rs (CPU reference: what each

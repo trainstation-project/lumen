@@ -7,7 +7,7 @@ pub(crate) mod row;
 
 use crate::codegen::utils::tpu::Tpu;
 use crate::graph::Primitive;
-use crate::graph_compiler::plan::Step;
+use crate::plan::Step;
 use crate::runtime::tpu::{Launch, launch};
 
 /// The largest block dividing `n` that is a multiple of `unit` and at most `cap`; `n` itself when it fits.
