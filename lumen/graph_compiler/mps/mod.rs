@@ -4,7 +4,6 @@
 pub(crate) mod ane;
 pub(crate) mod fusion;
 pub(crate) mod kernel_codegen;
-mod split_k;
 #[cfg(test)]
 mod tests;
 
@@ -14,15 +13,15 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
 use super::common::alone::{Alone, Lone};
-use super::common::canonicalize_dots::CanonicalizeDots;
 use super::common::chunked_cross_entropy::ChunkedCrossEntropy;
 use super::common::clamp_indices::ClampIndices;
 use super::common::diamonds::{Diamonds, Row, RowsModule};
-use super::common::dot_strength::DotStrength;
+use super::common::dot::canonicalize::CanonicalizeDots;
+use super::common::dot::split_k::mps::SplitK;
+use super::common::dot::strength::DotStrength;
 use super::common::linear_cross_entropy::LinearCrossEntropy;
 use super::common::linear_reordering::LinearReordering;
-use super::common::merge_dots::{Blocks, MergeDots, Packs, Target};
-use super::common::merge_dots_backward::MergeDotsBackward;
+use super::common::merge_dots::{Blocks, MergeDots, MergeDotsBackward, Packs, Target};
 use super::common::place_concats::{PlaceConcats, Slots};
 use super::common::place_views::PlaceViews;
 use super::common::simplify::Simplify;
@@ -261,7 +260,7 @@ fn pipeline<'a>(config: &CompilerConfig) -> Pipeline<MpsModule<'a>> {
     }
 
     if config.split_k {
-        p.add(split_k::SplitK);
+        p.add(SplitK);
     }
 
     // Matmul operands the GEMM kernels can't read as three strides are transposed first.

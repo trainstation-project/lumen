@@ -1,6 +1,10 @@
 //! Split-K shared by the backends: long-K matmuls with too few output tiles become partial products
 //! over K chunks summed over the chunks.
 
+#[cfg(lumen_mps_linked)]
+pub(crate) mod mps;
+pub(crate) mod triton;
+
 use crate::graph::{Graph, Primitive, TensorType, Var};
 
 /// Most K chunks a matmul is split into.

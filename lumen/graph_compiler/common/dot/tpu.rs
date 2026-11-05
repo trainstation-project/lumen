@@ -1,11 +1,12 @@
 //! Fuses each TPU matmul with the slices that split it, the concat stacking its lhs and its elementwise epilogues.
 use std::collections::HashMap;
 
-use super::super::{LANES, TpuModule};
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
 use crate::graph_compiler::common::place_concats::in_place_concats;
 use crate::graph_compiler::elementwise;
 use crate::graph_compiler::pass::CompilerPass;
+use crate::graph_compiler::tpu::fusion::slot_writes;
+use crate::graph_compiler::tpu::{LANES, TpuModule};
 
 /// Most equal-width slices of one dot an epilogue may combine.
 const MAX_TOGETHER: usize = 4;
@@ -142,7 +143,7 @@ fn fused(graph: &Graph, epilogues: bool) -> Vec<Option<Fused>> {
     // Concatenations placed in place, which their producers write rather than a dot's fusion building them.
     let placed = in_place_concats(
         graph,
-        |c, k, p, _| super::slot_writes(graph, c, k, p),
+        |c, k, p, _| slot_writes(graph, c, k, p),
         |_, _, _, _| true,
     );
 
@@ -500,13 +501,15 @@ fn fuse_dots(graph: &Graph, epilogues: bool) -> Graph {
 }
 
 /// Fuses dots with their splitting slices, stacked lhs and, when enabled, elementwise epilogues.
-pub(in crate::graph_compiler::tpu) struct FuseDots;
+pub(crate) struct FuseDots;
 
 impl CompilerPass<TpuModule<'_>> for FuseDots {
+    /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "fuse_dots"
     }
 
+    /// Fuses the module's matmuls with their slices, stacked lhs and epilogues.
     fn apply(&mut self, m: &mut TpuModule<'_>) -> Result<(), String> {
         m.graph = fuse_dots(&m.graph, m.options.config.contraction_epilogues);
         Ok(())
