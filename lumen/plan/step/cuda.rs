@@ -5,9 +5,10 @@ use std::ops::{Deref, DerefMut};
 use super::triton::traced;
 use super::{unsupported, viewed};
 use crate::codegen::elementwise::cuda::Layouts;
+use crate::graph::Primitive;
 use crate::plan::run::Buffers;
 use crate::plan::{Step, StepBase};
-use crate::runtime::kernel::cuda::LAUNCH;
+use crate::runtime::kernel::cuda::{GEMM, LAUNCH};
 use crate::{Device, Tensor};
 
 /// A step of a CUDA (CuTe DSL) kernel, generated for its tensors' layouts and kept in its memo.
@@ -54,8 +55,8 @@ impl Step for CudaStep {
 }
 
 impl CudaStep {
-    /// Runs the step on the given tensors: an elementwise fusion, or an output's copy (a reshape), through the kernel
-    /// generated for the tensors' layouts (kept in the step's memo) and launched by Python.
+    /// Runs the step on the given tensors: a matmul through the GEMM, or an elementwise fusion or an output's copy (a
+    /// reshape) through the kernel generated for the tensors' layouts (kept in the step's memo), launched by Python.
     pub(crate) fn run_raw(
         &self,
         inputs: &[Tensor],
@@ -63,6 +64,37 @@ impl CudaStep {
         outs: &[Tensor],
     ) -> Result<(), String> {
         let step = &self.0;
+
+        // A matmul runs on the GEMM, A as (.., m, k) and B as (.., k, n) whichever of their dims contract.
+        if let Primitive::DotGeneral {
+            lhs_contracting,
+            rhs_contracting,
+            ..
+        } = &step.primitive
+        {
+            let gemm = GEMM.get().ok_or(
+                "the CUDA backend's GEMM runs from Python (lumen.codegen.dot_general.cuda): none is installed",
+            )?;
+
+            if out.numel() == 0 {
+                return Ok(());
+            }
+
+            let rank = inputs[0].ndim();
+
+            let a = match lhs_contracting[0] == rank - 1 {
+                true => inputs[0].clone(),
+                false => inputs[0].transpose(rank - 2, rank - 1),
+            };
+
+            let b = match rhs_contracting[0] == rank - 2 {
+                true => inputs[1].clone(),
+                false => inputs[1].transpose(rank - 2, rank - 1),
+            };
+
+            return gemm(&a, &b, out);
+        }
+
         let launch = LAUNCH.get().ok_or(
             "the CUDA backend launches from Python (lumen.codegen.utils.cuda): none is installed",
         )?;

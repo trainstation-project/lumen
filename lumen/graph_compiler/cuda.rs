@@ -1,6 +1,7 @@
 //! The CUDA backend, CUDA's default (`config.compiler.use_triton_backend` off): kernels in
 //! NVIDIA's CuTe DSL, generated per step (`codegen::cuda`) and launched by `runtime::kernel::cuda`. It runs elementwise fusions (any layout: broadcasts, transposes, slices and strided inputs
-//! read through index math) and errors on graphs needing any other kernel.
+//! read through index math) and plain matmuls (the Ampere GEMM, `lumen.codegen.dot_general.cuda`), and errors on
+//! graphs needing any other kernel.
 
 use super::config::CompilerConfig;
 use super::passes::alone::{Alone, Lone};
@@ -55,6 +56,46 @@ pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
 
     let typed = |v: &Var| cute_type(graph.type_of(*v).dtype).is_some();
     op && node.inputs.iter().chain([&node.output]).all(typed)
+}
+
+/// Whether `node` is a matmul the GEMM runs: float16 or bfloat16 operands of rank 2, or 3 with a leading batch dim,
+/// contracting one dim each, accumulated in float32 and written as float16, bfloat16 or float32, every extent a
+/// multiple of 8 (its tiles move 16-byte vectors along whichever dim is contiguous).
+fn matmul(graph: &Graph, node: &Node) -> bool {
+    use crate::DType::{BF16, F16, F32};
+
+    let Primitive::DotGeneral {
+        lhs_contracting,
+        rhs_contracting,
+        lhs_batch,
+        rhs_batch,
+        accum_dtype,
+        ..
+    } = &node.primitive
+    else {
+        return false;
+    };
+
+    let (lhs, rhs) = (graph.type_of(node.inputs[0]), graph.type_of(node.inputs[1]));
+    let out = graph.type_of(node.output);
+    let rank = lhs.shape.len();
+
+    let batched = match rank {
+        2 => lhs_batch.is_empty() && rhs_batch.is_empty(),
+        3 => *lhs_batch == [0] && *rhs_batch == [0],
+        _ => false,
+    };
+
+    let contracting = matches!((lhs_contracting.as_slice(), rhs_contracting.as_slice()), ([l], [r]) if *l >= rank - 2 && *r >= rank - 2);
+    let typed = lhs.dtype == rhs.dtype && matches!(lhs.dtype, F16 | BF16) && *accum_dtype == F32;
+    let extents = lhs.shape[rank - 2..].iter().chain(&rhs.shape[rank - 2..]);
+
+    batched
+        && contracting
+        && rhs.shape.len() == rank
+        && typed
+        && matches!(out.dtype, F16 | BF16 | F32)
+        && extents.into_iter().all(|&d| d > 0 && d % 8 == 0)
 }
 
 /// The shared fusion's view of the CUDA backend: elementwise loops only (no reductions, GEMMs or
@@ -167,7 +208,7 @@ pub(crate) fn compile(
         !matches!(
             n.primitive,
             Primitive::Fusion { .. } | Primitive::FusionOutput { .. } | Primitive::Reshape { .. }
-        )
+        ) && !matmul(&fused, n)
     }) {
         return Err(format!(
             "{}: the CUDA (CuTe DSL) backend has no kernel for it yet; turn \

@@ -1,5 +1,5 @@
 //! Launching CUDA kernels: a compiled kernel (a Triton or CuTe cubin) enqueued with `cuLaunchKernel` straight from
-//! Rust, through the driver entry points `driver` loads; and the CuTe launcher Python installs.
+//! Rust, through the driver entry points `driver` loads; and the CuTe launcher and GEMM Python installs.
 
 #[cfg(all(feature = "python", lumen_cuda_linked))]
 pub(crate) mod driver;
@@ -33,6 +33,19 @@ pub(crate) static LAUNCH: OnceLock<Launcher> = OnceLock::new();
 #[cfg_attr(not(feature = "python"), allow(dead_code))]
 pub(crate) fn set_launch(launch: Launcher) {
     let _ = LAUNCH.set(launch);
+}
+
+/// Writes `a @ b` into `d`, tensors (m, k), (k, n) and (m, n), or batched (l, m, k), (l, k, n) and (l, m, n), each laid
+/// out as given, compiling its GEMM on first use.
+pub type Gemm = fn(a: &Tensor, b: &Tensor, d: &Tensor) -> Result<(), String>;
+
+/// The GEMM installed from Python (`lumen.codegen.dot_general.cuda.launch`).
+pub(crate) static GEMM: OnceLock<Gemm> = OnceLock::new();
+
+/// Installs the GEMM; later calls are ignored.
+#[cfg_attr(not(feature = "python"), allow(dead_code))]
+pub(crate) fn set_gemm(gemm: Gemm) {
+    let _ = GEMM.set(gemm);
 }
 
 #[cfg(all(feature = "python", lumen_cuda_linked))]

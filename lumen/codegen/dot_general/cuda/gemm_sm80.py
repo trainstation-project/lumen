@@ -26,9 +26,11 @@
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-# lumen: the `TensorOpGemm` kernel class of CUTLASS's CuTe DSL Ampere dense GEMM example
+# lumen: `AmpereGemm` is the `TensorOpGemm` kernel class of CUTLASS's CuTe DSL Ampere dense GEMM example
 # (examples/python/CuTeDSL/cute/ampere/kernel/dense_gemm/tensorop_gemm.py, CUTLASS commit 954c8d7b), copied as is;
 # the example's argument parsing, torch tensor setup and benchmarking are left out.
+
+from __future__ import annotations
 
 import math
 from typing import Tuple, Type
@@ -37,6 +39,8 @@ import cuda.bindings.driver as cuda
 import cutlass
 import cutlass.cute as cute
 import cutlass.utils as utils
+
+from lumen.kernels.cuda import layout_utils
 
 """
 A dense GEMM (C = A * B) example for the NVIDIA Ampere architecture using CUTE DSL.
@@ -60,32 +64,6 @@ The Ampere tensor core instruction used operates as follows:
 - Read matrix B from SMEM
 - Perform MMA operation and store the result in Accumulator(register)
 
-To run this example:
-
-.. code-block:: bash
-
-    python examples/cute/ampere/kernel/dense_gemm/tensorop_gemm.py                                  \
-      --mnkl 8192,8192,8192,1 --atom_layout_mnk 2,2,1                        \
-      --ab_dtype Float16                                                     \
-      --c_dtype Float16 --acc_dtype Float32                                  \
-      --a_major m --b_major n --c_major n
-
-The above example command computes with M=8192, N=8192, K=8192,
-batch_count=1. The atom layout's shape is 2x2x1 and the input, mma
-accumulator, and output data type are set as fp16, fp32 and fp16,
-respectively.
-
-To collect performance with NCU profiler:
-
-.. code-block:: bash
-
-    ncu python examples/cute/ampere/kernel/dense_gemm/tensorop_gemm.py                              \
-      --mnkl 8192,8192,8192,1 --atom_layout_mnk 2,2,1                        \
-      --ab_dtype Float16                                                     \
-      --c_dtype Float16 --acc_dtype Float32                                  \
-      --a_major m --b_major n --c_major n                                    \
-      --skip_ref_check --iterations 2
-
 Constraints:
 * Supported input data types: fp16/bf16/fp8
 * Supported output data types: fp16
@@ -98,7 +76,7 @@ Constraints:
 """
 
 
-class TensorOpGemm:
+class AmpereGemm:
     _FP16_BF16_DTYPES = (cutlass.Float16, cutlass.BFloat16)
     _FP8_DTYPES = (cutlass.Float8E4M3FN, cutlass.Float8E5M2)
     _MMA_SHAPE_FP16_BF16 = (16, 8, 16)
@@ -113,7 +91,7 @@ class TensorOpGemm:
         acc_dtype: Type[cutlass.Numeric],
         atom_layout_mnk: Tuple[int, int, int],
         is_m_major_c: bool = False,
-    ):
+    ) -> AmpereGemm:
         self.ab_dtype = ab_dtype
         self.c_dtype = c_dtype
         self.acc_dtype = acc_dtype
@@ -138,6 +116,7 @@ class TensorOpGemm:
         else:
             assert self.bM % (atom_lay_M * mmaM) == 0, "bM must be divisible by MMA instruction"
             assert self.bN % (atom_lay_N * mmaN) == 0, "bN must be divisible by MMA instruction"
+
         assert atom_lay_K == 1, "this example does not support atom layout K > 1"
         assert self.bK % mmaK == 0, "bK must be divisible by MMA instruction"
         assert self.num_stages >= 3, "num_stages must be greater than or equal to 3"
@@ -151,6 +130,15 @@ class TensorOpGemm:
         stream: cuda.CUstream,
         epilogue_op: cutlass.Constexpr = lambda x: x,
     ):
+        # lumen, after QuACK's GemmBase.rotate_batch_last: the operands cross in the caller's order, A (l, m, k),
+        # B (l, k, n) and C (l, m, n), or unbatched (m, k), (k, n) and (m, n), and are rotated here, at trace time, to
+        # the kernel's (m, k, l), (n, k, l) and (m, n, l), so callers pass their tensors as they are.
+        mA = self._batch_last(mA)
+        mB = self._batch_last(mB)
+        mC = self._batch_last(mC)
+
+        mB = layout_utils.select(mB, [1, 0, 2])
+
         # The grid divides the problems's M, N, and L dimensions by the
         # respective modes of the tile shape (bM, bN, 1). The K dimension is
         # handled within a block via a multistage process.
@@ -859,6 +847,14 @@ class TensorOpGemm:
             else cute.make_layout((copy_elems, 1))
         )
         return cute.make_tiled_copy_tv(atom_copy, thread_layout, value_layout)
+
+    @staticmethod
+    def _batch_last(t: cute.Tensor) -> cute.Tensor:
+        """Batched `t` (l, x, y) as (x, y, l), or unbatched `t` (x, y) with a size-1 batch (lumen, after QuACK's
+        GemmBase.permute_batch_last)."""
+        if cutlass.const_expr(cute.rank(t) == 3):
+            return layout_utils.select(t, [1, 2, 0])
+        return layout_utils.expand(t, 2, 1)
 
     def raster_tile(self, i, j, f):
         new_i = i // f

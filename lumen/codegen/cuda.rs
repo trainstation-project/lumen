@@ -68,7 +68,10 @@ pub(crate) fn codegen(plan: CpuPlan, _: &Options) -> Result<CudaPlan, String> {
     for step in plan.steps() {
         let outputs = std::iter::once(&step.output).chain(&step.extra_outputs);
 
-        if outputs.clone().all(|(_, ty)| ty.numel() == 0) {
+        // A matmul runs on the GEMM, compiled at its first launch for its operands' majors.
+        if outputs.clone().all(|(_, ty)| ty.numel() == 0)
+            || matches!(step.primitive, Primitive::DotGeneral { .. })
+        {
             continue;
         }
 

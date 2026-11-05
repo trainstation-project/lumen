@@ -1,51 +1,31 @@
-"""Runs lumen's matmuls on CUDA through CUTLASS's Ampere GEMM (`gemm_sm80`): compiled once per dtypes and layouts
-(any M, N and K whose contiguous dimensions are 16-byte multiples), then called on lumen tensors through DLPack."""
+"""Runs lumen's matmuls on CUDA through the Ampere GEMM (`gemm_sm80.AmpereGemm`), the way QuACK hosts its GEMMs: compiled
+once per dtypes, majors and batching against fake tensors whose extents and strides are symbolic (only each operand's
+contiguous dimension static, its other strides 16-byte multiples), then called on lumen tensors through DLPack, each
+passed as it is: A (m, k), B (k, n) and D (m, n), or batched (l, m, k), (l, k, n) and (l, m, n)."""
 
 import functools
 
 import cuda.bindings.driver as cuda
 import cutlass
 import cutlass.cute as cute
-from cutlass.cute.runtime import make_fake_compact_tensor, make_fake_stream
 
-from lumen.codegen.dot_general.cuda.gemm_sm80 import TensorOpGemm
+from lumen.codegen.dot_general.cuda.gemm_sm80 import AmpereGemm
+from lumen.kernels.cuda.compile_utils import div_for_dtype, fake_batched
 
 # The CuTe type of each dtype a GEMM reads or writes, by lumen's name for it.
 DTYPES = {"float16": cutlass.Float16, "bfloat16": cutlass.BFloat16, "float32": cutlass.Float32}
 
-# Bytes each operand's contiguous dimension and start must be a multiple of: the kernel moves 16-byte vectors.
-VECTOR_BYTES = 16
 
-
-@cute.jit
-def _matmul(gemm: cutlass.Constexpr, a: cute.Tensor, b: cute.Tensor, d: cute.Tensor, stream: cuda.CUstream):
-    """``d = a @ b`` for ``a`` (m, k), ``b`` (k, n) and ``d`` (m, n), viewed as the kernel's (m, k, l), (n, k, l)
-    and (m, n, l) with one batch."""
-    a = cute.make_tensor(a.iterator, cute.make_layout((*a.layout.shape, 1), stride=(*a.layout.stride, 0)))
-    b = cute.make_tensor(
-        b.iterator,
-        cute.make_layout(
-            (b.layout.shape[1], b.layout.shape[0], 1), stride=(b.layout.stride[1], b.layout.stride[0], 0)
-        ),
-    )
-    d = cute.make_tensor(d.iterator, cute.make_layout((*d.layout.shape, 1), stride=(*d.layout.stride, 0)))
-    gemm(a, b, d, stream)
-
-
-def _operand(dtype, contiguous_last):
-    """A fake 2-D tensor of `dtype` with symbolic extents, contiguous along its last dimension when
-    `contiguous_last`, else its first, that dimension a multiple of a 16-byte vector."""
-    vector = VECTOR_BYTES * 8 // dtype.width
-    rows = cute.sym_int(divisibility=1 if contiguous_last else vector)
-    columns = cute.sym_int(divisibility=vector if contiguous_last else 1)
-    order = (1, 0) if contiguous_last else (0, 1)
-    return make_fake_compact_tensor(dtype, (rows, columns), stride_order=order, assumed_align=VECTOR_BYTES)
+def _major(t, rows, columns):
+    """The label of `t`'s contiguous dimension: `columns` when it is its last, else `rows` (QuACK's `_get_major`)."""
+    return columns if t.strides[-1] == 1 else rows
 
 
 @functools.lru_cache(maxsize=None)
-def compiled(a_dtype, b_dtype, d_dtype, a_row_major, b_row_major, d_row_major):
-    """The GEMM compiled for operands of dtypes named `a_dtype`, `b_dtype` and `d_dtype`, each row-major (its last
-    dimension contiguous) or column-major as given, accumulating in float32."""
+def compiled(a_dtype, b_dtype, d_dtype, a_major, b_major, d_major, batched):
+    """The GEMM compiled for operands of dtypes named `a_dtype`, `b_dtype` and `d_dtype` with majors `a_major` ("m" or
+    "k"), `b_major` ("k" or "n", of B as the caller's (k, n)) and `d_major` ("m" or "n"), batched or not, accumulating
+    in float32."""
     if a_dtype != b_dtype or a_dtype not in ("float16", "bfloat16"):
         raise RuntimeError(
             f"dot_general: the CUDA GEMM takes two float16 or bfloat16 operands, got {a_dtype} and {b_dtype}"
@@ -55,21 +35,22 @@ def compiled(a_dtype, b_dtype, d_dtype, a_row_major, b_row_major, d_row_major):
         raise RuntimeError(f"dot_general: the CUDA GEMM writes float16, bfloat16 or float32, got {d_dtype}")
 
     ab, out = DTYPES[a_dtype], DTYPES[d_dtype]
-    gemm = TensorOpGemm(ab, out, cutlass.Float32, (2, 2, 1), is_m_major_c=not d_row_major)
+    gemm = AmpereGemm(ab, out, cutlass.Float32, (2, 2, 1), is_m_major_c=d_major == "m")
 
-    a = _operand(ab, a_row_major)
-    b = _operand(ab, b_row_major)
-    d = _operand(out, d_row_major)
-    return cute.compile(_matmul, gemm, a, b, d, make_fake_stream(), options="--enable-tvm-ffi")
+    # One symbolic extent per problem dimension, shared by the operands that have it.
+    m, n, k = cute.sym_int(), cute.sym_int(), cute.sym_int()
+    l = cute.sym_int() if batched else None  # noqa: E741
 
+    a = fake_batched(ab, m, k, l, 1 if a_major == "k" else 0, div_for_dtype(ab))
+    b = fake_batched(ab, k, n, l, 1 if b_major == "n" else 0, div_for_dtype(ab))
+    d = fake_batched(out, m, n, l, 1 if d_major == "n" else 0, div_for_dtype(out))
 
-def _row_major(t):
-    """Whether 2-D tensor `t` is contiguous along its last dimension (else along its first)."""
-    return t.strides[1] == 1
+    return cute.compile(gemm, a, b, d, cute.runtime.make_fake_stream(), options="--enable-tvm-ffi")
 
 
 def matmul(a, b, d, stream):
-    """Writes ``a @ b`` into ``d`` (lumen tensors (m, k), (k, n) and (m, n) on one CUDA device) on CUDA stream
-    `stream` (its handle as an int)."""
-    gemm = compiled(a.dtype, b.dtype, d.dtype, _row_major(a), _row_major(b), _row_major(d))
+    """Writes ``a @ b`` into ``d``, lumen tensors on one CUDA device, (m, k), (k, n) and (m, n) or batched (l, m, k),
+    (l, k, n) and (l, m, n), on CUDA stream `stream` (its handle as an int)."""
+    majors = _major(a, "m", "k"), _major(b, "k", "n"), _major(d, "m", "n")
+    gemm = compiled(a.dtype, b.dtype, d.dtype, *majors, len(a.shape) == 3)
     gemm(a, b, d, cuda.CUstream(stream))

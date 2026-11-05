@@ -821,6 +821,32 @@ fn triton_attention(
     Python::attach(|py| call(py, None).map(|_| ())).map_err(|e| e.to_string())
 }
 
+/// Writes `a @ b` into `d` (the CUDA backend's matmul, tensors (m, k), (k, n) and (m, n) or batched) on lumen's
+/// stream through `lumen.codegen.dot_general.cuda.launch.matmul`, which compiles its GEMM once for their dtypes and
+/// majors.
+#[cfg_attr(not(lumen_cuda_linked), allow(unused_variables))]
+fn cuda_gemm(a: &crate::Tensor, b: &crate::Tensor, d: &crate::Tensor) -> Result<(), String> {
+    current(a);
+    crate::profiler::launched::launched("dot_general", || None);
+
+    #[cfg(lumen_cuda_linked)]
+    {
+        let stream = crate::runtime::stream::cuda::launch_stream() as usize;
+        let [a, b, d] = [a, b, d].map(|t| PyTensor::wrap(t.clone()));
+
+        Python::attach(|py| {
+            py.import("lumen.codegen.dot_general.cuda.launch")?
+                .getattr("matmul")?
+                .call1((a, b, d, stream))
+                .map(|_| ())
+        })
+        .map_err(|e: PyErr| e.to_string())
+    }
+
+    #[cfg(not(lumen_cuda_linked))]
+    Err("dot_general: CUDA kernels launch only where lumen links CUDA".into())
+}
+
 /// Launches the CUDA backend's kernel `name` of module `source` on `tensors` (inputs, then its `outputs`
 /// outputs, each a flat view) over `n` elements, as a Triton kernel launches:
 /// `lumen.codegen.utils.cuda.compile` compiles it once for its tensors' dtypes and 16-byte alignment and
@@ -1023,6 +1049,7 @@ fn tuned(
 /// Registers the Triton and CUDA launch hooks and the module's Python functions and class.
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     crate::runtime::kernel::cuda::set_launch(cuda_launch);
+    crate::runtime::kernel::cuda::set_gemm(cuda_gemm);
     crate::codegen::dot_general::triton::launch::set_gemm(triton_gemm);
     crate::runtime::kernel::triton::set_loop(triton_loop);
     crate::codegen::attention::triton::launch::set_attention(triton_attention);
