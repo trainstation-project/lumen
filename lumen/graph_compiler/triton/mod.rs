@@ -1,11 +1,6 @@
 //! The Triton backend for CUDA: pass pipeline, plan compilation, autotuning, and running steps
 //! through Triton kernels launched from Python.
 
-pub(crate) mod cross_entropy;
-#[cfg(all(feature = "python", lumen_cuda_linked))]
-pub(crate) mod direct;
-pub(crate) mod scatter_add;
-
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -411,7 +406,9 @@ pub(crate) fn run(
             }
 
             if let Some(Template::ScatterAdd { .. }) = kernel.template {
-                return scatter_add::run(kernel, launches, inputs, out);
+                return crate::graph_compiler::common::scatter_add::triton::run(
+                    kernel, launches, inputs, out,
+                );
             }
 
             let n = n.unwrap_or(0);
@@ -681,7 +678,7 @@ pub(crate) fn reads_strided(step: &Step) -> bool {
 
 /// Launches `kernel` over `n` outputs, with enough programs for the block size, lanes and splits; its
 /// compiled kernels are kept in `launches`.
-fn launch(
+pub(crate) fn launch(
     kernel: &Kernel,
     config: &LoopConfig,
     functions: &[Function],

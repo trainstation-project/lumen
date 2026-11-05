@@ -2,12 +2,12 @@
 //! cross-entropy epilogue writing each output tile's per-row max and sum of exponentials (and the label's
 //! logit), then a kernel combining a row's tiles into its loss and `logsumexp`.
 
-use super::{Function, Launches};
 use crate::codegen::dot_general::triton::{self as codegen, Config};
 use crate::codegen::elementwise::triton::{LOOP_CONFIGS, UNTUNED_LOOP};
 use crate::codegen::triton::{Kernel, Template};
 use crate::graph::Primitive;
 use crate::graph_compiler::common::dot::triton::{Epilogue, Gemm};
+use crate::graph_compiler::triton::{Function, Launches, launch, layouts};
 use crate::plan::Step;
 use crate::tensor::contiguous_strides;
 use crate::{DType, Device, Tensor, TensorOptions};
@@ -81,7 +81,7 @@ pub(crate) fn run(
         unreachable!("linear_cross_entropy reads h, w and the labels")
     };
 
-    let key = super::layouts(inputs.iter().chain([out]));
+    let key = layouts(inputs.iter().chain([out]));
     let prepared = step.memo.get(key, || Ok(prepare(h, w, target)))?;
     let [_, rows, _, classes] = prepared.sizes;
 
@@ -153,7 +153,7 @@ pub(crate) fn run(
         template: Some(Template::CrossEntropyCombine { tiles }),
     };
 
-    super::launch(
+    launch(
         &kernel,
         &loop_config,
         &[],

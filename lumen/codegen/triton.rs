@@ -14,7 +14,7 @@ use crate::codegen::utils::triton as codegen;
 use crate::graph::{Primitive, UPDATES};
 use crate::graph_compiler::Options;
 use crate::graph_compiler::common::horizontal::segments;
-use crate::graph_compiler::triton::scatter_add::Scatter;
+use crate::graph_compiler::common::scatter_add::triton::Scatter;
 use crate::plan::{Buffer, Plan, Step};
 
 /// A generated Triton loop kernel for one plan step.

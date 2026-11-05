@@ -5,6 +5,8 @@ pub(crate) mod alone;
 pub(crate) mod ane;
 pub(crate) mod cse;
 pub(crate) mod diamonds;
+#[cfg(all(feature = "python", lumen_cuda_linked))]
+pub(crate) mod direct;
 pub(crate) mod dot;
 pub(crate) mod elementwise;
 pub(crate) mod fusion;
@@ -17,6 +19,7 @@ pub(crate) mod place_views;
 pub(crate) mod preserve_precision;
 #[cfg_attr(not(feature = "python"), allow(dead_code))]
 pub(crate) mod rms_norm;
+pub(crate) mod scatter_add;
 pub(crate) mod simplify;
 pub(crate) mod updates;
 

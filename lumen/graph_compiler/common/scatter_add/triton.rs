@@ -2,10 +2,10 @@
 //! `deterministic`, or a dtype Triton has no atomic add for, a counting sort of the picks by position,
 //! then a program a block of each position's entries adding its updates in pick order (as MPS's).
 
-use super::{Launches, fill, launch};
 use crate::codegen::elementwise::triton::LoopConfig;
 use crate::codegen::scatter_add::triton::{ELEMENTS, SEGMENT, STARTS, rows};
 use crate::codegen::triton::{Kernel, Template};
+use crate::graph_compiler::triton::{Launches, fill, launch};
 use crate::{DType, Scalar, Tensor, TensorOptions};
 
 /// A Triton scatter-add kernel (lumen.codegen.scatter_add.triton.kernel).
@@ -44,7 +44,7 @@ impl Scatter {
 
 /// Adds the updates of `inputs` (`[operand, indices, updates]`) into `out`, which already holds the operand,
 /// with step kernel `kernel`: its atomic kernel, or its picks sorted by position then its rows kernel.
-pub(super) fn run(
+pub(crate) fn run(
     kernel: &Kernel,
     launches: &Launches,
     inputs: &[Tensor],

@@ -707,7 +707,7 @@ impl Plan {
 
                     // Captured into a CUDA graph, the nodes it adds are the step's, by name.
                     #[cfg(all(feature = "python", lumen_cuda_linked))]
-                    let run = || crate::graph_compiler::triton::direct::counted(step.label, run);
+                    let run = || crate::graph_compiler::common::direct::counted(step.label, run);
 
                     // Profiled, the step's kernels are timed under its name (each keeps its own as `kernel`).
                     #[cfg(lumen_cupti_linked)]

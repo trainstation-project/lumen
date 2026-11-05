@@ -273,8 +273,8 @@ struct Entry {
     config: [usize; 6],
     constexprs: Vec<(&'static str, crate::codegen::triton::Constexpr)>,
     device: usize,
-    classes: Vec<super::triton::direct::Class>,
-    kernel: std::sync::Arc<super::triton::direct::Compiled>,
+    classes: Vec<super::common::direct::Class>,
+    kernel: std::sync::Arc<super::common::direct::Compiled>,
 }
 
 /// Launches a Triton kernel from Rust when it compiles to a plain launch, returning whether it did (or
@@ -292,11 +292,11 @@ fn direct(
     constexprs: &[(&'static str, crate::codegen::triton::Constexpr)],
     identity: impl FnOnce() -> String,
     on: &crate::Tensor,
-    values: &[super::triton::direct::Value],
+    values: &[super::common::direct::Value],
     grid: [usize; 3],
     compile: impl for<'py> FnOnce(Python<'py>, Bound<'py, PyDict>) -> PyResult<Py<PyAny>>,
 ) -> Result<bool, String> {
-    use super::triton::direct;
+    use super::common::direct;
     use std::sync::PoisonError;
 
     let Device::Cuda(device) = on.device() else {
@@ -472,7 +472,7 @@ fn triton_gemm(
 
     #[cfg(lumen_cuda_linked)]
     {
-        use super::triton::direct::Value;
+        use super::common::direct::Value;
         let [l, m, _, n] = sizes;
         let flags = epilogue.flags;
         let halves = flags.group > 1 && !flags.interleaved;
@@ -654,7 +654,7 @@ fn triton_loop(
 
     #[cfg(lumen_cuda_linked)]
     {
-        use super::triton::direct::Value;
+        use super::common::direct::Value;
         let scalar = |k: usize| kernel.by_value.get(k).copied().unwrap_or(false);
         let values: Vec<Value> = inputs
             .iter()
@@ -743,7 +743,7 @@ fn triton_attention(launch: &super::triton::Launch) -> Result<(), String> {
 
     #[cfg(lumen_cuda_linked)]
     {
-        use super::triton::direct::Value;
+        use super::common::direct::Value;
         let [batch, heads, sq, sk, h, hv] = launch.sizes;
         // The dK/dV kernel always takes a dQ; one it doesn't read, like any absent tensor, is the first.
         let mut tensors: Vec<Option<&crate::Tensor>> =
@@ -823,7 +823,7 @@ fn cuda_launch(
 
     #[cfg(lumen_cuda_linked)]
     {
-        use super::triton::direct::{self, Class, Value};
+        use super::common::direct::{self, Class, Value};
         use crate::codegen::elementwise::cuda::{Shape, UNTUNED, blocks};
 
         let Device::Cuda(device) = tensors[0].device() else {
@@ -903,9 +903,9 @@ fn tuned(
     outputs: usize,
     build: impl Fn(
         crate::codegen::elementwise::cuda::Shape,
-    ) -> Result<(std::sync::Arc<super::triton::direct::Compiled>, usize), String>,
+    ) -> Result<(std::sync::Arc<super::common::direct::Compiled>, usize), String>,
 ) -> Result<crate::codegen::elementwise::cuda::Shape, String> {
-    use super::triton::direct::{self, Value};
+    use super::common::direct::{self, Value};
     use crate::codegen::elementwise::cuda::{Shape, shapes};
     use std::collections::HashMap;
     use std::sync::{Mutex, PoisonError};
