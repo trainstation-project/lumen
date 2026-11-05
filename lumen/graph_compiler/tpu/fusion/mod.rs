@@ -1,11 +1,7 @@
-//! TPU fusion passes: dot epilogues, row-wise dot fusion, elementwise/reduction fusion and horizontal fusion.
-mod dot_epilogues;
-mod dot_rows;
+//! TPU fusion passes: elementwise/reduction fusion and horizontal fusion (its dot fusions live in
+//! `common::dot`).
 mod emit;
 mod groups;
-
-pub(super) use dot_epilogues::FuseDots;
-pub(super) use dot_rows::DotRows;
 
 use super::TpuModule;
 use crate::graph::{Graph, Node, Primitive};
@@ -53,7 +49,7 @@ pub(super) fn horizontal_candidate(graph: &Graph, node: &Node) -> bool {
 /// straight into its slot: the concat joins its last axis, the operand's width fills whole lanes, and its
 /// producer's kernel writes a strided slice of the shared buffer (a dot, an elementwise fusion, a fill, a
 /// scalar broadcast or an elementwise op).
-pub(super) fn slot_writes(graph: &Graph, concat: &Node, k: usize, producer: &Node) -> bool {
+pub(crate) fn slot_writes(graph: &Graph, concat: &Node, k: usize, producer: &Node) -> bool {
     let Primitive::Concatenate { dimension, .. } = concat.primitive else {
         return false;
     };

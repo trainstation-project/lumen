@@ -6,7 +6,7 @@ use crate::codegen::dot_general::triton::{self as codegen, CONFIGS, Config};
 use crate::codegen::elementwise::triton::{LoopConfig, loop_configs};
 use crate::graph::{Primitive, TensorType};
 use crate::graph_compiler::common::attention::triton::{attention, is_attention};
-use crate::graph_compiler::triton::gemm::{DOT_ROW, Run, gemm, is_gemm};
+use crate::graph_compiler::common::dot::triton::{DOT_ROW, Run, gemm, is_gemm};
 use crate::graph_compiler::triton::{Kernel, Template, loop_kernel, run};
 use crate::plan::{Buffer, Step, Tuned};
 use crate::{Device, Tensor, TensorOptions};

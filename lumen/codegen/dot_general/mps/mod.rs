@@ -21,7 +21,7 @@ pub(crate) use tiled::*;
 use crate::Tensor;
 use crate::graph::Primitive;
 use crate::graph::TensorType;
-use crate::graph_compiler::common::canonicalize_dots::matmul_order;
+use crate::graph_compiler::common::dot::canonicalize::matmul_order;
 use crate::plan::Step;
 use crate::runtime::mps::{Grid, dims_arg, launch};
 use crate::tensor::contiguous_strides;

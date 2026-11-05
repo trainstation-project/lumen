@@ -1,8 +1,8 @@
-//! Triton split-K: the shared pass (`common::split_k`) with Triton's tiles, its partials always
+//! Triton split-K: the shared pass (`split_k`) with Triton's tiles, its partials always
 //! summed by a reduction (no atomics), so results stay deterministic.
 
+use super::{Rules, split_k};
 use crate::codegen::dot_general::triton::{CONFIGS, UNTUNED};
-use crate::graph_compiler::common::split_k::{Rules, split_k};
 use crate::graph_compiler::pass::{CompilerPass, Module};
 
 /// Tiles a Triton split aims for: on an H100, outputs of 64 or more 128x128 tiles already keep the
@@ -10,7 +10,7 @@ use crate::graph_compiler::pass::{CompilerPass, Module};
 const TARGET: usize = 128;
 
 /// Compiler pass splitting long-K matmuls with too few output tiles.
-pub(super) struct SplitK;
+pub(crate) struct SplitK;
 
 impl<M: Module> CompilerPass<M> for SplitK {
     /// Pass name used in profiler ranges and dumps.

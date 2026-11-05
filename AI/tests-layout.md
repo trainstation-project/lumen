@@ -13,7 +13,7 @@ description: Use whenever adding, moving or changing tests. Tests mirror the lum
    `lumen/profiler/` → `tests/profiler/`. A top-level module
    (`lumen/nn.py`, `lumen/random.py`) is tested in `tests/test_<module>.py`.
    Name the file after the module or the topic it covers
-   (`tests/graph_compiler/test_merge_dots.py` for `common/merge_dots.rs`).
+   (`tests/graph_compiler/test_merge_dots.py` for `common/merge_dots/`).
 2. **Unique file names.** `tests/` folders have no `__init__.py`, so every
    test file's name is unique across the tree (`test_dot_epilogues.py`, not
    a second `test_epilogues.py`).

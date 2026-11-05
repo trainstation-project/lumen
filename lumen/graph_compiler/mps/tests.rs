@@ -323,7 +323,7 @@ fn dot_operands_are_put_in_matmul_form_by_a_transpose_step() {
 
     let y = apply(&mut g, dot, &[a, b]);
     g.set_outputs(&[y]).unwrap();
-    let canonical = crate::graph_compiler::common::canonicalize_dots::canonicalize_dots(
+    let canonical = crate::graph_compiler::common::dot::canonicalize::canonicalize_dots(
         &g,
         super::reads_contiguous,
     );
@@ -355,7 +355,7 @@ fn dot_operands_are_put_in_matmul_form_by_a_transpose_step() {
     g.set_outputs(&[y]).unwrap();
     assert_eq!(
         names(
-            &crate::graph_compiler::common::canonicalize_dots::canonicalize_dots(
+            &crate::graph_compiler::common::dot::canonicalize::canonicalize_dots(
                 &g,
                 super::reads_contiguous
             )
@@ -2102,7 +2102,7 @@ fn vector_dots_are_reduced() {
 
     let d = apply(&mut g, dot, &[a, b]);
     g.set_outputs(&[d]).unwrap();
-    let reduced = crate::graph_compiler::common::dot_strength::reduce_vector_dots(&g);
+    let reduced = crate::graph_compiler::common::dot::strength::reduce_vector_dots(&g);
     let names: Vec<&str> = reduced.nodes().iter().map(|n| n.primitive.name()).collect();
     assert_eq!(names, ["mul", "reduce_sum"], "{reduced}");
     let inputs = [data(&[4, 6, 16], 1), data(&[4, 6, 16], 2)];
@@ -2140,7 +2140,7 @@ fn skinny_dots_split_their_contraction() {
 
     let build = |m: usize, n: usize, k: usize, dtype: DType| build_with(m, n, k, dtype, DType::F32);
     let g = build(8, 256, 4096, DType::F32);
-    let split = super::split_k::split_k(&g);
+    let split = crate::graph_compiler::common::dot::split_k::mps::split_k(&g);
     let names: Vec<&str> = split.nodes().iter().map(|n| n.primitive.name()).collect();
 
     assert_eq!(
@@ -2160,7 +2160,12 @@ fn skinny_dots_split_their_contraction() {
         assert!((w - g).abs() <= 4096.0 * 4.0 * f32::EPSILON, "{w} {g}");
     }
 
-    let split = super::split_k::split_k(&build(8, 256, 4096, DType::BF16));
+    let split = crate::graph_compiler::common::dot::split_k::mps::split_k(&build(
+        8,
+        256,
+        4096,
+        DType::BF16,
+    ));
     let names: Vec<&str> = split.nodes().iter().map(|n| n.primitive.name()).collect();
 
     assert_eq!(
@@ -2169,7 +2174,12 @@ fn skinny_dots_split_their_contraction() {
     );
 
     // Partials outweighing the operands split the same way: a product, then a sum.
-    let split = super::split_k::split_k(&build(352, 352, 2048, DType::BF16));
+    let split = crate::graph_compiler::common::dot::split_k::mps::split_k(&build(
+        352,
+        352,
+        2048,
+        DType::BF16,
+    ));
     let names: Vec<&str> = split.nodes().iter().map(|n| n.primitive.name()).collect();
 
     assert_eq!(
@@ -2179,7 +2189,7 @@ fn skinny_dots_split_their_contraction() {
     );
 
     let g = build_with(352, 352, 2048, DType::BF16, DType::BF16);
-    let split = super::split_k::split_k(&g);
+    let split = crate::graph_compiler::common::dot::split_k::mps::split_k(&g);
     let names: Vec<&str> = split.nodes().iter().map(|n| n.primitive.name()).collect();
 
     assert_eq!(
@@ -2227,7 +2237,7 @@ fn skinny_dots_split_their_contraction() {
         build(4, 256, 2049, DType::F32),
         build(4, 256, 1024, DType::F32),
     ] {
-        let split = super::split_k::split_k(&g);
+        let split = crate::graph_compiler::common::dot::split_k::mps::split_k(&g);
         assert_eq!(split.nodes().len(), 1, "{split}");
     }
 }

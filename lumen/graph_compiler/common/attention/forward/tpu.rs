@@ -1,6 +1,6 @@
 //! How TPU fuses forward attention: its answers to the forward `FlashAttention` pass.
 
-use crate::graph::Var;
+use crate::graph::{Graph, Var};
 use crate::graph_compiler::common::attention::{self, Attentions};
 use crate::graph_compiler::tpu::TpuModule;
 
@@ -34,4 +34,14 @@ impl Attentions for TpuModule<'_> {
     fn runtime_offsets(&self) -> bool {
         false
     }
+}
+
+/// How a forward fusion `body` writes its output.
+pub(in crate::graph_compiler::common::attention) fn outputs(
+    body: &Graph,
+) -> Vec<attention::Access> {
+    attention::of_body(body)
+        .map(|a| a.out)
+        .into_iter()
+        .collect()
 }

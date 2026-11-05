@@ -3,6 +3,9 @@
 //! elementwise op may sit between them (a residual added to the product), its value written too where
 //! it is read again.
 
+pub(crate) mod tpu;
+pub(crate) mod triton;
+
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
 use crate::graph_compiler::elementwise;
 

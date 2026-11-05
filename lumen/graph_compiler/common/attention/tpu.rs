@@ -15,20 +15,9 @@ fn unreadable(body: &Graph, forward: bool) -> Vec<usize> {
 
     let index = |acc: &attention::Access| body.outputs().iter().position(|&o| o == acc.base);
 
-    let accesses: Vec<attention::Access> = match forward {
-        true => attention::of_body(body)
-            .map(|a| a.out)
-            .into_iter()
-            .collect(),
-        false => attention::backward_of_body(body)
-            .map(|b| {
-                [b.dq_out, b.dk_out, b.dv_out]
-                    .into_iter()
-                    .flatten()
-                    .map(|(_, acc)| acc)
-                    .collect()
-            })
-            .unwrap_or_default(),
+    let accesses = match forward {
+        true => super::forward::tpu::outputs(body),
+        false => super::backward::tpu::outputs(body),
     };
 
     accesses
