@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::codegen::tpu::{Kernel, Rows};
+use crate::codegen::tpu::{Kernel, Rows, kernel};
 use crate::device::tpu::{error, ffi};
 use crate::graph::Primitive;
 use crate::plan::Step;
@@ -835,13 +835,17 @@ pub(crate) fn encode(
         return Ok(());
     }
 
-    // A step keeps the kernel codegen generated for it; one without has nothing to launch.
+    // A step keeps the kernel codegen generated for it; one without has nothing to launch, or is a gather
+    // neither kernel takes, which fails with its TensorCore kernel's error.
     let Some(kernel) = step
         .kernel
         .as_deref()
         .and_then(|k| k.downcast_ref::<Kernel>())
     else {
-        return Ok(());
+        return match step.primitive {
+            Primitive::Gather { .. } => kernel(step).map(|_| ()),
+            _ => Ok(()),
+        };
     };
 
     let n = step.inputs.len();
