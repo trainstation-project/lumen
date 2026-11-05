@@ -446,7 +446,7 @@ impl Timer for Mps {
     /// Encodes one launch, rotating through input copies so repeats read cold memory.
     fn run(&self, buffers: &Buffers, step: &Step, rep: usize) -> Result<(), String> {
         let inputs = &buffers.copies[rep % buffers.copies.len()];
-        crate::plan::run::mps::encode(step, inputs, buffers.output, buffers.scratch, Vec::new())
+        crate::plan::run::mps::run(step, inputs, buffers.output, buffers.scratch, Vec::new())
     }
 }
 
