@@ -7,6 +7,7 @@ pub(crate) mod cuda;
 #[cfg(lumen_mps_linked)]
 pub(crate) mod mps;
 pub(crate) mod passes;
+pub(crate) mod pipeline;
 #[cfg(feature = "python")]
 pub(crate) mod python;
 pub(crate) mod remat;
@@ -27,7 +28,7 @@ use passes::cse::Cse;
 use passes::merge_dots::Packs;
 use passes::preserve_precision::PreservePrecision;
 use passes::simplify::Simplify;
-use passes::{GraphModule, Pipeline};
+use pipeline::{GraphModule, Pipeline};
 
 /// Per-compilation options: compiler configs and how the graph's inputs may be used.
 #[derive(Debug, Clone)]

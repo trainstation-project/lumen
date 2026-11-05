@@ -3,8 +3,8 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use super::{CompilerPass, Module};
 use crate::graph::Graph;
+use crate::graph_compiler::passes::{CompilerPass, Module};
 use crate::graph_compiler::{CompilerConfig, Options};
 
 /// A graph being compiled with the caller's options.

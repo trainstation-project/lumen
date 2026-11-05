@@ -9,6 +9,7 @@ use std::ffi::{CString, c_char, c_void};
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
+use super::passes::Module;
 use super::passes::alone::{Alone, Lone};
 use super::passes::ane::mps as ane;
 use super::passes::chunked_cross_entropy::ChunkedCrossEntropy;
@@ -26,7 +27,7 @@ use super::passes::place_concats::{PlaceConcats, Slots};
 use super::passes::place_views::PlaceViews;
 use super::passes::simplify::Simplify;
 use super::passes::take_along_axis::TakeAlongAxis;
-use super::passes::{Module, Pipeline};
+use super::pipeline::Pipeline;
 use super::{CompilerConfig, Options};
 use crate::codegen::attention::AttentionCodegen;
 use crate::codegen::attention::mps::decodes;

@@ -1,5 +1,5 @@
 //! Graph passes: the interface every pass implements (`CompilerPass`, rewriting a `Module`) and the passes the
-//! backend compilers run; `pipeline` runs them.
+//! backend compilers run (in a `graph_compiler::pipeline::Pipeline`).
 
 pub(crate) mod alone;
 #[cfg(lumen_mps_linked)]
@@ -23,7 +23,6 @@ pub(crate) mod linear_cross_entropy;
 pub(crate) mod linear_reordering;
 pub(crate) mod merge_dots;
 pub(crate) mod multi_output;
-pub(crate) mod pipeline;
 pub(crate) mod place_concats;
 pub(crate) mod place_views;
 pub(crate) mod preserve_precision;
@@ -34,8 +33,6 @@ pub(crate) mod simplify;
 #[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
 pub(crate) mod take_along_axis;
 pub(crate) mod updates;
-
-pub(crate) use pipeline::{GraphModule, Pipeline};
 
 use super::{CompilerConfig, Options};
 use crate::graph::Graph;

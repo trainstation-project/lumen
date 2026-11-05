@@ -12,6 +12,7 @@ pub(crate) use super::passes::dot::triton::{Epilogue, set_gemm};
 #[cfg(feature = "python")]
 pub(crate) use crate::codegen::dot_general::triton::Config;
 
+use super::passes::Module;
 use super::passes::alone::Alone;
 use super::passes::attention::{self, FlashAttention, FlashAttentionBackward};
 use super::passes::chunked_cross_entropy::ChunkedCrossEntropy;
@@ -27,7 +28,7 @@ use super::passes::merge_dots::{Blocks, MergeDots, MergeDotsBackward, Packs, Tar
 use super::passes::simplify::Simplify;
 use super::passes::take_along_axis::TakeAlongAxis;
 use super::passes::updates::Updates;
-use super::passes::{Module, Pipeline};
+use super::pipeline::Pipeline;
 use super::{CompilerConfig, Options, Plan, plan_options, positions};
 use crate::autotune::Autotuner;
 use crate::autotune::triton::{Events, Gemms, Loops, Tiles};

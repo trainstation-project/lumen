@@ -1,7 +1,7 @@
 //! CPU graph compiler: simplifies the graph and plans it for the host kernels.
 
 use super::passes::simplify::Simplify;
-use super::passes::{GraphModule, Pipeline};
+use super::pipeline::{GraphModule, Pipeline};
 use super::{Options, positions};
 use crate::graph::Graph;
 use crate::graph_compiler::{Plan, PlanOptions};

@@ -11,6 +11,7 @@ use crate::graph_compiler::passes::dot::canonicalize::CanonicalizeDots;
 use crate::graph_compiler::passes::horizontal::{Grouping, HorizontalFusion};
 use crate::graph_compiler::passes::place_concats::{PlaceConcats, Slots};
 
+use super::passes::Module;
 use super::passes::attention::tpu::AttentionLayouts;
 use super::passes::attention::{FlashAttention, FlashAttentionBackward};
 use super::passes::clamp_indices::ClampIndices;
@@ -18,7 +19,7 @@ use super::passes::dot::fold_reshapes::FoldDotReshapes;
 use super::passes::dot::strength::DotStrength;
 use super::passes::merge_dots::{Blocks, MergeDots, MergeDotsBackward, Packs, Target};
 use super::passes::simplify::Simplify;
-use super::passes::{Module, Pipeline};
+use super::pipeline::Pipeline;
 use super::{CompilerConfig, Options, plan_options, positions};
 use crate::graph::{Graph, Node, Primitive, TensorType};
 use crate::graph_compiler::{Plan, PlanOptions};
