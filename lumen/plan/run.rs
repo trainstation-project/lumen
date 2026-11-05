@@ -327,7 +327,7 @@ impl Plan {
                     s.inputs.iter().all(|&(b, ref ty)| {
                         b != at
                             || ty.shape == self.inputs[i].shape
-                                && crate::graph_compiler::triton::reads_strided(s)
+                                && crate::runtime::triton::reads_strided(s)
                     })
                 });
         }
@@ -699,15 +699,13 @@ impl Plan {
                         .as_deref()
                         .and_then(|k| k.downcast_ref::<crate::codegen::triton::Kernel>());
                     let run = || match self.cuda {
-                        true => crate::graph_compiler::cuda::run(step, &inputs, &out, &outs),
-                        false => {
-                            crate::graph_compiler::triton::run(kernel, step, &inputs, &out, &outs)
-                        }
+                        true => crate::runtime::cuda::run(step, &inputs, &out, &outs),
+                        false => crate::runtime::triton::run(kernel, step, &inputs, &out, &outs),
                     };
 
                     // Captured into a CUDA graph, the nodes it adds are the step's, by name.
                     #[cfg(all(feature = "python", lumen_cuda_linked))]
-                    let run = || crate::graph_compiler::passes::direct::counted(step.label, run);
+                    let run = || crate::runtime::triton::direct::counted(step.label, run);
 
                     // Profiled, the step's kernels are timed under its name (each keeps its own as `kernel`).
                     #[cfg(lumen_cupti_linked)]

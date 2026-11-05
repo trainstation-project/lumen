@@ -7,7 +7,6 @@
 mod backward;
 mod forward;
 pub(crate) mod tpu;
-pub(crate) mod triton;
 
 #[cfg(lumen_mps_linked)]
 pub(crate) use backward::backward_of_body_into;
@@ -22,6 +21,12 @@ pub(crate) use forward::{
 };
 
 use std::collections::HashMap;
+
+/// Name of a forward flash-attention fusion.
+pub(crate) const FORWARD: &str = "flash_attention";
+
+/// Name of a backward flash-attention fusion.
+pub(crate) const BACKWARD: &str = "flash_attention_backward";
 
 use crate::DType;
 use crate::graph::{Graph, Node, Primitive, Var};

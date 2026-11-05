@@ -1,6 +1,6 @@
 //! How Triton fuses attention's backward: its answers to the `FlashAttentionBackward` pass.
 
-use crate::graph_compiler::passes::attention::triton::BACKWARD;
+use crate::graph_compiler::passes::attention::BACKWARD;
 use crate::graph_compiler::passes::attention::{AttentionBackwards, Backward};
 use crate::graph_compiler::triton::TritonModule;
 

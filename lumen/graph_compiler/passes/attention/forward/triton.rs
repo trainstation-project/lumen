@@ -2,7 +2,7 @@
 
 use crate::graph::Var;
 use crate::graph_compiler::passes::attention::Attentions;
-use crate::graph_compiler::passes::attention::triton::FORWARD;
+use crate::graph_compiler::passes::attention::FORWARD;
 use crate::graph_compiler::positions;
 use crate::graph_compiler::triton::TritonModule;
 

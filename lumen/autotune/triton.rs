@@ -1,15 +1,15 @@
 //! Triton autotuning: the candidate configs of attention, GEMM and loop kernels, timed with CUDA events.
 
 use super::{Kernels, Timer};
+use crate::codegen::attention::triton::launch::{attention, is_attention};
 use crate::codegen::attention::triton::{ATTENTION_CONFIGS, AttentionConfig};
+use crate::codegen::dot_general::triton::launch::{DOT_ROW, Run, gemm, is_gemm};
 use crate::codegen::dot_general::triton::{self as codegen, CONFIGS, Config};
 use crate::codegen::elementwise::triton::{LoopConfig, loop_configs};
 use crate::codegen::triton::{Kernel, Template};
 use crate::graph::{Primitive, TensorType};
-use crate::graph_compiler::passes::attention::triton::{attention, is_attention};
-use crate::graph_compiler::passes::dot::triton::{DOT_ROW, Run, gemm, is_gemm};
-use crate::graph_compiler::triton::run;
 use crate::plan::{Buffer, Step, Tuned};
+use crate::runtime::triton::run;
 use crate::{Device, Tensor, TensorOptions};
 
 /// Autotuning candidates for flash-attention steps.

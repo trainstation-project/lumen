@@ -7,16 +7,10 @@ use crate::codegen::attention::AttentionCodegen;
 use crate::codegen::attention::triton::{AttentionConfig, untuned_attention};
 use crate::codegen::utils::triton as codegen;
 use crate::graph::{Primitive, Var};
-use crate::graph_compiler::passes::attention::{self, Strides};
-use crate::graph_compiler::triton::{Function, Launches, copy, fill, layouts};
+use crate::graph_compiler::passes::attention::{self, BACKWARD, FORWARD, Strides};
 use crate::plan::Step;
+use crate::runtime::triton::{Function, Launches, copy, fill, layouts};
 use crate::{Scalar, Tensor, TensorOptions};
-
-/// Name of a forward flash-attention fusion.
-pub(super) const FORWARD: &str = "flash_attention";
-
-/// Name of a backward flash-attention fusion.
-pub(super) const BACKWARD: &str = "flash_attention_backward";
 
 /// One launch of a flash-attention kernel.
 #[cfg_attr(not(feature = "python"), allow(dead_code))]

@@ -248,7 +248,7 @@ fn _kernel_source(name: &str) -> Option<String> {
 }
 
 /// Triton helper functions as `(parameter, name, source)` triples for the Python launcher.
-fn triton_functions(functions: &[super::triton::Function]) -> Vec<(&str, &str, &str)> {
+fn triton_functions(functions: &[crate::runtime::triton::Function]) -> Vec<(&str, &str, &str)> {
     functions
         .iter()
         .map(|f| (f.param.as_str(), f.name.as_str(), f.source.as_str()))
@@ -256,7 +256,7 @@ fn triton_functions(functions: &[super::triton::Function]) -> Vec<(&str, &str, &
 }
 
 /// Kernel source preceded by the helper functions passed to it, for launch capture.
-fn triton_code(kernel: &str, functions: &[super::triton::Function]) -> String {
+fn triton_code(kernel: &str, functions: &[crate::runtime::triton::Function]) -> String {
     let passed: Vec<String> = functions
         .iter()
         .map(|f| format!("# {} = {}\n{}", f.param, f.name, f.source))
@@ -273,8 +273,8 @@ struct Entry {
     config: [usize; 6],
     constexprs: Vec<(&'static str, crate::codegen::triton::Constexpr)>,
     device: usize,
-    classes: Vec<super::passes::direct::Class>,
-    kernel: std::sync::Arc<super::passes::direct::Compiled>,
+    classes: Vec<crate::runtime::triton::direct::Class>,
+    kernel: std::sync::Arc<crate::runtime::triton::direct::Compiled>,
 }
 
 /// Launches a Triton kernel from Rust when it compiles to a plain launch, returning whether it did (or
@@ -286,17 +286,17 @@ struct Entry {
 #[cfg(lumen_cuda_linked)]
 #[allow(clippy::too_many_arguments)]
 fn direct(
-    launches: &super::triton::Launches,
+    launches: &crate::runtime::triton::Launches,
     name: &str,
     config: [usize; 6],
     constexprs: &[(&'static str, crate::codegen::triton::Constexpr)],
     identity: impl FnOnce() -> String,
     on: &crate::Tensor,
-    values: &[super::passes::direct::Value],
+    values: &[crate::runtime::triton::direct::Value],
     grid: [usize; 3],
     compile: impl for<'py> FnOnce(Python<'py>, Bound<'py, PyDict>) -> PyResult<Py<PyAny>>,
 ) -> Result<bool, String> {
-    use super::passes::direct;
+    use crate::runtime::triton::direct;
     use std::sync::PoisonError;
 
     let Device::Cuda(device) = on.device() else {
@@ -393,7 +393,7 @@ fn direct(
 
 /// The names of a launch's generated helper functions, which content-hash their sources.
 #[cfg(lumen_cuda_linked)]
-fn names(functions: &[super::triton::Function]) -> String {
+fn names(functions: &[crate::runtime::triton::Function]) -> String {
     let names: Vec<&str> = functions.iter().map(|f| f.name.as_str()).collect();
     names.join(",")
 }
@@ -410,10 +410,10 @@ fn triton_gemm(
     tensors: [&crate::Tensor; 3],
     sizes: [usize; 4],
     accum_dtype: DType,
-    config: &super::triton::Config,
-    functions: &[super::triton::Function],
-    launches: &super::triton::Launches,
-    epilogue: &super::triton::Epilogue,
+    config: &crate::runtime::triton::Config,
+    functions: &[crate::runtime::triton::Function],
+    launches: &crate::runtime::triton::Launches,
+    epilogue: &crate::codegen::dot_general::triton::launch::Epilogue,
 ) -> Result<(), String> {
     crate::profiler::launched::launched("dot_general", || {
         let template = format!(
@@ -472,7 +472,7 @@ fn triton_gemm(
 
     #[cfg(lumen_cuda_linked)]
     {
-        use super::passes::direct::Value;
+        use crate::runtime::triton::direct::Value;
         let [l, m, _, n] = sizes;
         let flags = epilogue.flags;
         let halves = flags.group > 1 && !flags.interleaved;
@@ -542,8 +542,8 @@ fn triton_gemm(
 fn triton_loop(
     kernel: &crate::codegen::triton::Kernel,
     config: &crate::codegen::elementwise::triton::LoopConfig,
-    functions: &[super::triton::Function],
-    launches: &super::triton::Launches,
+    functions: &[crate::runtime::triton::Function],
+    launches: &crate::runtime::triton::Launches,
     inputs: &[crate::Tensor],
     out: &crate::Tensor,
     n: usize,
@@ -654,7 +654,7 @@ fn triton_loop(
 
     #[cfg(lumen_cuda_linked)]
     {
-        use super::passes::direct::Value;
+        use crate::runtime::triton::direct::Value;
         let scalar = |k: usize| kernel.by_value.get(k).copied().unwrap_or(false);
         let values: Vec<Value> = inputs
             .iter()
@@ -697,7 +697,9 @@ fn triton_loop(
 }
 
 /// Launches one of lumen's Triton flash-attention kernels (`launch.kernel`) with its tile config.
-fn triton_attention(launch: &super::triton::Launch) -> Result<(), String> {
+fn triton_attention(
+    launch: &crate::codegen::attention::triton::launch::Launch,
+) -> Result<(), String> {
     let config = launch.config;
 
     crate::profiler::launched::launched("flash_attention", || {
@@ -743,7 +745,7 @@ fn triton_attention(launch: &super::triton::Launch) -> Result<(), String> {
 
     #[cfg(lumen_cuda_linked)]
     {
-        use super::passes::direct::Value;
+        use crate::runtime::triton::direct::Value;
         let [batch, heads, sq, sk, h, hv] = launch.sizes;
         // The dK/dV kernel always takes a dQ; one it doesn't read, like any absent tensor, is the first.
         let mut tensors: Vec<Option<&crate::Tensor>> =
@@ -823,8 +825,8 @@ fn cuda_launch(
 
     #[cfg(lumen_cuda_linked)]
     {
-        use super::passes::direct::{self, Class, Value};
         use crate::codegen::elementwise::cuda::{Shape, UNTUNED, blocks};
+        use crate::runtime::triton::direct::{self, Class, Value};
 
         let Device::Cuda(device) = tensors[0].device() else {
             return Err(format!("{name}: a CUDA kernel launched on a host tensor"));
@@ -903,10 +905,16 @@ fn tuned(
     outputs: usize,
     build: impl Fn(
         crate::codegen::elementwise::cuda::Shape,
-    ) -> Result<(std::sync::Arc<super::passes::direct::Compiled>, usize), String>,
+    ) -> Result<
+        (
+            std::sync::Arc<crate::runtime::triton::direct::Compiled>,
+            usize,
+        ),
+        String,
+    >,
 ) -> Result<crate::codegen::elementwise::cuda::Shape, String> {
-    use super::passes::direct::{self, Value};
     use crate::codegen::elementwise::cuda::{Shape, shapes};
+    use crate::runtime::triton::direct::{self, Value};
     use std::collections::HashMap;
     use std::sync::{Mutex, PoisonError};
 
@@ -986,10 +994,10 @@ fn tuned(
 
 /// Registers the Triton and CUDA launch hooks and the module's Python functions and class.
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    super::cuda::set_launch(cuda_launch);
-    super::triton::set_gemm(triton_gemm);
-    super::triton::set_loop(triton_loop);
-    super::triton::set_attention(triton_attention);
+    crate::runtime::cuda::set_launch(cuda_launch);
+    crate::codegen::dot_general::triton::launch::set_gemm(triton_gemm);
+    crate::runtime::triton::set_loop(triton_loop);
+    crate::codegen::attention::triton::launch::set_attention(triton_attention);
     m.add_function(wrap_pyfunction!(_capture_launches, m)?)?;
     m.add_function(wrap_pyfunction!(_captured_launches, m)?)?;
     m.add_function(wrap_pyfunction!(_kernel_source, m)?)?;

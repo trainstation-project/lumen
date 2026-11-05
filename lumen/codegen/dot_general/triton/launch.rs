@@ -3,13 +3,13 @@
 use std::sync::OnceLock;
 
 use crate::codegen::dot_general::GemmCodegen;
+use crate::codegen::dot_general::triton::cross_entropy;
 use crate::codegen::dot_general::triton::{self as codegen, CONFIGS, Config, UNTUNED};
 use crate::codegen::utils::triton::Triton;
 use crate::graph::{Graph, Node, Primitive};
-use crate::graph_compiler::passes::linear_cross_entropy::triton as cross_entropy;
-use crate::graph_compiler::triton::{Function, Launches, layouts};
 use crate::plan::Buffer;
 use crate::plan::Step;
+use crate::runtime::triton::{Function, Launches, layouts};
 use crate::tensor::contiguous_strides;
 use crate::{DType, Tensor};
 
@@ -287,7 +287,7 @@ pub(crate) fn is_gemm(step: &Step) -> bool {
     match &step.primitive {
         Primitive::DotGeneral { .. } | Primitive::LinearCrossEntropy => true,
         p @ Primitive::Fusion { body, .. } => {
-            !crate::graph_compiler::passes::attention::triton::is_attention(p)
+            !crate::codegen::attention::triton::launch::is_attention(p)
                 && codegen::gemm_dot(body).is_some()
         }
         _ => false,

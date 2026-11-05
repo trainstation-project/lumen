@@ -10,11 +10,11 @@ use crate::codegen::reduction::ReductionCodegen;
 use crate::codegen::row::RowCodegen;
 use crate::codegen::scan::ScanCodegen;
 use crate::codegen::scan::triton::Scan;
+use crate::codegen::scatter_add::triton::launch::Scatter;
 use crate::codegen::utils::triton as codegen;
 use crate::graph::{Primitive, UPDATES};
 use crate::graph_compiler::Options;
 use crate::graph_compiler::passes::horizontal::segments;
-use crate::graph_compiler::passes::scatter_add::triton::Scatter;
 use crate::plan::{Buffer, Plan, Step};
 
 /// A generated Triton loop kernel for one plan step.
