@@ -8,7 +8,7 @@ use crate::codegen::row::tpu::{Kind, kinds, readable, row_node, rows};
 use crate::device::tpu::layout::Layout;
 use crate::graph::{Graph, Primitive, Var};
 use crate::plan::Step;
-use crate::runtime::tpu::{Launch, launch};
+use crate::runtime::tpu::{Kernel, Rows};
 
 /// VMEM budget, in bytes, a GEMM-row block may use.
 const VMEM: usize = 88 << 20;
@@ -41,14 +41,9 @@ fn row_part(body: &Graph) -> Graph {
     row
 }
 
-/// Launches the dot-then-row fusion `step` on TPU `index`: each block of rows computes its full
+/// The kernel of the dot-then-row fusion `step`: each block of rows computes its full
 /// `n`-wide GEMM output in VMEM and applies the row nodes to it.
-pub(crate) fn encode(
-    index: usize,
-    step: &Step,
-    inputs: &[*const u8],
-    output: *mut u8,
-) -> Result<(), String> {
+pub(crate) fn kernel(step: &Step) -> Result<Kernel, String> {
     let Primitive::Fusion { body, .. } = &step.primitive else {
         unreachable!("a dot_row fusion")
     };
@@ -194,24 +189,13 @@ pub(crate) fn encode(
         outputs.join(", "),
     );
 
-    let n_in = step.inputs.len();
-
-    let rows_of: Vec<*const u8> = inputs[..n_in]
-        .iter()
-        .copied()
-        .chain([output.cast_const()])
-        .chain(inputs[n_in..].iter().copied())
-        .collect();
-
-    let launched = Launch {
-        module: "lumen.codegen.dot_general.tpu.row_kernel",
-        kernel: format!("matmul_row_{}_{height}x{n}x{k}_{bm}x{bk}", lhs.dtype),
+    let mut kernel = Kernel::new(
+        "lumen.codegen.dot_general.tpu.row_kernel",
+        format!("matmul_row_{}_{height}x{n}x{k}_{bm}x{bk}", lhs.dtype),
         spec,
-        rows: &rows_of,
-        scalars: &[],
-        host: &[],
-        sparse: None,
-    };
+        Rows::Split,
+    );
 
-    launch(index, launched).map_err(|e| failed(&e))
+    kernel.context = Some(format!("{} on TPU", step.label));
+    Ok(kernel)
 }

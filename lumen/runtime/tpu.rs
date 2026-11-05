@@ -563,8 +563,9 @@ fn cached(key: String, lower: impl FnOnce() -> Result<String, String>) -> Result
 
 /// A kernel lowered and ready to chain into a program.
 struct Lowered {
-    module: String,
-    spec: String,
+    module: &'static str,
+    /// The kernel's full JSON spec, or a generated program's source.
+    spec: Arc<str>,
     /// Mosaic source of the kernel.
     mosaic: Arc<str>,
     /// Row offsets of its buffers, then its scalars.
@@ -583,11 +584,12 @@ fn compiled(
     static CACHE: OnceLock<Mutex<HashMap<String, Executable>>> = OnceLock::new();
     let mut key = format!("{index} {host:?} {rows}");
 
+    // Lowering is cached per kernel, so one Mosaic is one allocation: its address names it.
     for l in launches {
         key += &format!(
-            "\n{} {} {} {:?}",
+            "\n{} {:p} {} {:?}",
             l.module,
-            l.spec,
+            Arc::as_ptr(&l.mosaic),
             l.scalars.len(),
             l.sparse
         );
@@ -604,14 +606,7 @@ fn compiled(
 
     let kernels: Vec<(&str, &str, usize, Option<&SparseCore>)> = launches
         .iter()
-        .map(|l| {
-            (
-                l.module.as_str(),
-                &*l.mosaic,
-                l.scalars.len(),
-                l.sparse.as_deref(),
-            )
-        })
+        .map(|l| (l.module, &*l.mosaic, l.scalars.len(), l.sparse.as_deref()))
         .collect();
 
     let code = program(&kernels, host, rows);
@@ -634,7 +629,7 @@ fn run(index: usize, launches: &[Lowered], host: &[u8]) -> Result<(), String> {
     }
 
     let what = || {
-        let modules: Vec<&str> = launches.iter().map(|l| l.module.as_str()).collect();
+        let modules: Vec<&str> = launches.iter().map(|l| l.module).collect();
         modules.join(", ")
     };
 
@@ -707,7 +702,7 @@ impl Drop for Batch {
 /// One kernel launch request.
 pub(crate) struct Launch<'a> {
     /// Python module whose `program(spec)` lowers the kernel, or `GENERATED` for a generated program.
-    pub(crate) module: &'a str,
+    pub(crate) module: &'static str,
     /// Name shown in profiles.
     pub(crate) kernel: String,
     /// JSON object fields describing the kernel (without braces), to which the device fields are added; a
@@ -723,35 +718,51 @@ pub(crate) struct Launch<'a> {
     pub(crate) sparse: Option<SparseCore>,
 }
 
-/// Lowers `launch` and adds it to the open batch on device `index`, or runs it now. A launch with host
-/// data runs on its own after flushing the batch.
-pub(crate) fn launch(index: usize, launch: Launch) -> Result<(), String> {
+/// Mosaic of a kernel of `module` with spec `fields` on device `index`, `scalars` scalars and `host` host rows,
+/// and the full spec it was lowered from.
+fn lowering(
+    index: usize,
+    module: &str,
+    fields: &str,
+    scalars: usize,
+    host: Option<usize>,
+) -> Result<(Arc<str>, Arc<str>), String> {
     let rows = crate::allocator::tpu::rows(index)?;
-    let scalars = launch.rows.len() + launch.scalars.len();
-    let host = (!launch.host.is_empty()).then_some(launch.host.len() / crate::allocator::tpu::ROW);
 
     let device = format!(
         "\"scalars\": {scalars}, \"host_rows\": {}, \"rows\": {rows}",
         host.map_or("null".to_string(), |h| h.to_string())
     );
 
-    let spec = match (launch.module, launch.spec.as_str()) {
+    let spec = match (module, fields) {
         (GENERATED, source) => source.to_owned(),
         (_, "") => format!("{{{device}}}"),
         (_, fields) => format!("{{{fields}, {device}}}"),
     };
 
     // A generated program's Mosaic depends on the device's memory as well as its source.
-    let mosaic = match launch.module {
+    let mosaic = match module {
         GENERATED => cached(format!("{scalars} {host:?} {rows}\n{spec}"), || {
             lower_source(&spec, scalars, host, rows)
         }),
         module => lowered(module, &spec),
-    };
+    }?;
+
+    Ok((mosaic, spec.into()))
+}
+
+/// Lowers `launch` and adds it to the open batch on device `index`, or runs it now. A launch with host
+/// data runs on its own after flushing the batch.
+pub(crate) fn launch(index: usize, launch: Launch) -> Result<(), String> {
+    let scalars = launch.rows.len() + launch.scalars.len();
+    let host = (!launch.host.is_empty()).then_some(launch.host.len() / crate::allocator::tpu::ROW);
+
+    let (mosaic, spec) = lowering(index, launch.module, &launch.spec, scalars, host)
+        .map_err(|e| format!("{}: {e}", launch.kernel))?;
 
     let lowered = Lowered {
-        mosaic: mosaic.map_err(|e| format!("{}: {e}", launch.kernel))?,
-        module: launch.module.to_owned(),
+        mosaic,
+        module: launch.module,
         spec,
         scalars: [
             crate::allocator::tpu::rows_of(index, launch.rows)?.as_slice(),
@@ -761,13 +772,22 @@ pub(crate) fn launch(index: usize, launch: Launch) -> Result<(), String> {
         sparse: launch.sparse.map(Box::new),
     };
 
-    crate::profiler::tpu::launched(index, &launch.kernel);
+    enqueue(index, &launch.kernel, lowered, launch.host)
+}
 
-    crate::profiler::launched::templated(&launch.kernel, || {
+/// Adds `lowered`, named `kernel` in profiles, to the open batch on device `index`, or runs it now. A launch
+/// with `host` data runs on its own after flushing the batch.
+fn enqueue(index: usize, kernel: &str, lowered: Lowered, host: &[u8]) -> Result<(), String> {
+    crate::profiler::tpu::launched(index, kernel);
+
+    crate::profiler::launched::templated(kernel, || {
         // A generated program's script is its source, run on this device's memory.
-        let template = match launch.module {
+        let template = match lowered.module {
             GENERATED => {
+                let rows = crate::allocator::tpu::rows(index).unwrap_or_default();
+                let host = (!host.is_empty()).then_some(host.len() / crate::allocator::tpu::ROW);
                 let host = host.map_or("None".to_string(), |h| h.to_string());
+                let scalars = lowered.scalars.len();
 
                 let device =
                     format!("{{\"scalars\": {scalars}, \"host_rows\": {host}, \"rows\": {rows}}}");
@@ -775,14 +795,14 @@ pub(crate) fn launch(index: usize, launch: Launch) -> Result<(), String> {
                 let script = format!("{}\nmosaic = program({device})\n", lowered.spec);
                 (GENERATED.to_owned(), script)
             }
-            _ => (lowered.module.clone(), lowered.spec.clone()),
+            _ => (lowered.module.to_owned(), lowered.spec.to_string()),
         };
 
         (Some(lowered.mosaic.to_string()), Some(template))
     });
 
     let batched = BATCHES.with(|b| match b.borrow_mut().last_mut() {
-        Some((i, launches)) if *i == index => match launch.host.is_empty() {
+        Some((i, launches)) if *i == index => match host.is_empty() {
             true => {
                 launches.push(lowered);
                 Ok(None)
@@ -796,25 +816,67 @@ pub(crate) fn launch(index: usize, launch: Launch) -> Result<(), String> {
         Ok(None) => Ok(()),
         Ok(Some((before, lowered))) => {
             run(index, &before, &[])?;
-            run(index, std::slice::from_ref(&lowered), launch.host)
+            run(index, std::slice::from_ref(&lowered), host)
         }
-        Err(lowered) => run(index, std::slice::from_ref(&lowered), launch.host),
+        Err(lowered) => run(index, std::slice::from_ref(&lowered), host),
     }
 }
 
-/// Launches the elementwise fusion `step` on TPU `index`, writing into `output`.
-fn encode_elementwise(
-    index: usize,
-    step: &Step,
-    inputs: &[*const u8],
-    output: *mut u8,
-) -> Result<(), String> {
+/// Memo key of a step's TPU kernel.
+const KERNEL: u64 = u64::MAX;
+
+/// How a kernel's buffers are ordered among a step's input and output buffers.
+#[derive(Clone, Copy)]
+pub(crate) enum Rows {
+    /// The step's inputs, its output, then its extra buffers.
+    Split,
+    /// Every input buffer, then the output.
+    Last,
+    /// The step's inputs, then its output.
+    Step,
+}
+
+/// A step's TPU kernel: generated once, when its plan compiles, and lowered once per device.
+pub(crate) struct Kernel {
+    /// Python module whose `program(spec)` lowers the kernel, or `GENERATED` for a generated program.
+    pub(crate) module: &'static str,
+    /// Name shown in profiles.
+    pub(crate) kernel: String,
+    /// JSON object fields describing the kernel (without braces), or a generated program's source.
+    pub(crate) spec: String,
+    /// The spec for when the step's first input isn't its output buffer, so the kernel copies it first.
+    pub(crate) copied: Option<String>,
+    /// Extra `i32` scalars after the row offsets.
+    pub(crate) scalars: Vec<i32>,
+    /// How its buffers are ordered.
+    pub(crate) rows: Rows,
+    /// What a failed launch's error starts with.
+    pub(crate) context: Option<String>,
+}
+
+impl Kernel {
+    /// A kernel of `module` named `kernel` with `spec`, its buffers ordered by `rows`.
+    pub(crate) fn new(module: &'static str, kernel: String, spec: String, rows: Rows) -> Kernel {
+        Kernel {
+            module,
+            kernel,
+            spec,
+            copied: None,
+            scalars: Vec::new(),
+            rows,
+            context: None,
+        }
+    }
+}
+
+/// The elementwise fusion `step`'s kernel; `None` when it writes nothing.
+fn elementwise(step: &Step) -> Result<Option<Kernel>, String> {
     let Primitive::Fusion { body, .. } = &step.primitive else {
         unreachable!("an elementwise fusion")
     };
 
     if step.output.1.numel() == 0 {
-        return Ok(());
+        return Ok(None);
     }
 
     let views: HashMap<usize, (usize, Vec<usize>)> = step
@@ -828,92 +890,143 @@ fn encode_elementwise(
         Tpu::elementwise(body, &[], &views, &()).map_err(|e| format!("{}: {e}", step.label))?;
 
     // An indexed elementwise kernel takes its inputs, then its output; a plain one its output after the step's own inputs.
-    let n = match code.indexed {
-        true => inputs.len(),
-        false => step.inputs.len(),
+    let rows = match code.indexed {
+        true => Rows::Last,
+        false => Rows::Split,
     };
 
-    let rows: Vec<*const u8> = inputs[..n]
-        .iter()
-        .copied()
-        .chain([output.cast_const()])
-        .chain(inputs[n..].iter().copied())
-        .collect();
-
-    let launched = Launch {
-        module: GENERATED,
-        kernel: code.kernel,
-        spec: code.source,
-        rows: &rows,
-        scalars: &[],
-        host: &[],
-        sparse: None,
-    };
-
-    launch(index, launched)
+    Ok(Some(Kernel::new(GENERATED, code.kernel, code.source, rows)))
 }
 
-/// Runs plan `step` on TPU device `index`, dispatching to the kernel for its primitive or fusion kind.
+/// Plan `step`'s TPU kernel, by its primitive or fusion kind; `None` when it has nothing to launch.
+fn kernel(step: &Step) -> Result<Option<Kernel>, String> {
+    match step.primitive {
+        Primitive::Fusion { ref name, .. } if name.starts_with("flash_attention") => {
+            crate::codegen::attention::tpu::step_kernel(step).map(Some)
+        }
+        Primitive::Fusion { ref name, .. } if name == "reduction" => {
+            crate::codegen::reduction::tpu::kernel(step).map(Some)
+        }
+        Primitive::Fusion { ref name, .. } if name == "dot_row" => {
+            crate::codegen::dot_general::tpu::row::kernel(step).map(Some)
+        }
+        Primitive::Fusion { ref name, .. } if name == "row" => {
+            crate::codegen::row::tpu::kernel(step).map(Some)
+        }
+        Primitive::Fusion { ref name, .. } if name == crate::graph::UPDATES => {
+            crate::codegen::dynamic_slice::tpu::kernel(step)
+        }
+        Primitive::Fusion { ref name, .. } if name == "elementwise" => elementwise(step),
+        Primitive::DotGeneral { .. } | Primitive::Fusion { .. } => {
+            crate::codegen::dot_general::tpu::kernel(step)
+        }
+        Primitive::Reshape { .. } => crate::codegen::layout::tpu::kernel(step).map(Some),
+        Primitive::Gather { .. } => crate::codegen::gather::tpu::kernel(step).map(Some),
+        Primitive::DynamicUpdateSlice => crate::codegen::dynamic_slice::tpu::kernel(step),
+        Primitive::PallasCall { kernel, .. } => {
+            // Pallas kernels see their inputs, then the output, then any scratch buffers.
+            let mut pallas = Kernel::new(
+                "lumen.pallas",
+                step.primitive.name().to_owned(),
+                format!("\"kernel\": {kernel}"),
+                Rows::Split,
+            );
+
+            pallas.context = Some(step.label.to_string());
+            Ok(Some(pallas))
+        }
+        _ => Err(format!("{} does not run on TPU yet", step.primitive.name())),
+    }
+}
+
+/// Generates the kernel of each step of `plan` (and of its device stages), so runs only launch them.
+pub(crate) fn bake(plan: &crate::plan::Plan) {
+    let staged = plan.staged.iter().flat_map(|s| &s.stages);
+
+    for step in plan.steps() {
+        // A step its kernel fails on keeps failing, with the same error, when it runs.
+        let _ = step.memo.get(KERNEL, || kernel(step));
+    }
+
+    for stage in staged.filter(|s| !s.host) {
+        bake(&stage.plan);
+    }
+}
+
+/// Runs plan `step` on TPU device `index`: its kernel generated once, lowered once per device.
 pub(crate) fn encode(
     index: usize,
     step: &Step,
     inputs: &[*const u8],
     output: *mut u8,
 ) -> Result<(), String> {
-    match step.primitive {
-        Primitive::Fusion { ref name, .. } if name.starts_with("flash_attention") => {
-            crate::codegen::attention::tpu::encode(index, step, inputs, output)
-        }
-        Primitive::Fusion { ref name, .. } if name == "reduction" => {
-            crate::codegen::reduction::tpu::encode(index, step, inputs, output)
-        }
-        Primitive::Fusion { ref name, .. } if name == "dot_row" => {
-            crate::codegen::dot_general::tpu::row::encode(index, step, inputs, output)
-        }
-        Primitive::Fusion { ref name, .. } if name == "row" => {
-            crate::codegen::row::tpu::encode(index, step, inputs, output)
-        }
-        Primitive::Fusion { ref name, .. } if name == crate::graph::UPDATES => {
-            crate::codegen::dynamic_slice::tpu::encode(index, step, inputs, output)
-        }
-        Primitive::Fusion { ref name, .. } if name == "elementwise" => {
-            encode_elementwise(index, step, inputs, output)
-        }
-        Primitive::DotGeneral { .. } | Primitive::Fusion { .. } => {
-            crate::codegen::dot_general::tpu::encode(index, step, inputs, output)
-        }
-        Primitive::Reshape { .. } => {
-            crate::codegen::layout::tpu::encode(index, step, inputs, output)
-        }
-        Primitive::Gather { .. } => {
-            crate::codegen::gather::tpu::encode(index, step, inputs, output)
-        }
-        Primitive::DynamicUpdateSlice => {
-            crate::codegen::dynamic_slice::tpu::encode(index, step, inputs, output)
-        }
-        Primitive::PallasCall { kernel, .. } => {
-            // Pallas kernels see their inputs, then the output, then any scratch buffers.
-            let n = step.inputs.len();
+    // A gather runs on the SparseCore when its buffers' rows allow, known only at launch.
+    if let Primitive::Gather { .. } = step.primitive
+        && crate::codegen::gather::tpu::sparse_core(index, step, inputs, output)?
+    {
+        return Ok(());
+    }
 
-            let rows: Vec<*const u8> = inputs[..n]
-                .iter()
-                .copied()
-                .chain(std::iter::once(output.cast_const()))
-                .chain(inputs[n..].iter().copied())
-                .collect();
+    let kernel = step.memo.get(KERNEL, || kernel(step))?;
 
-            let launched = Launch {
-                module: "lumen.pallas",
-                kernel: step.primitive.name().to_owned(),
-                spec: format!("\"kernel\": {kernel}"),
-                rows: &rows,
-                scalars: &[],
-                host: &[],
-                sparse: None,
+    let Some(kernel) = kernel.as_ref() else {
+        return Ok(());
+    };
+
+    let n = step.inputs.len();
+    let output = output.cast_const();
+
+    let rows: Vec<*const u8> = match kernel.rows {
+        Rows::Split => inputs[..n]
+            .iter()
+            .copied()
+            .chain([output])
+            .chain(inputs[n..].iter().copied())
+            .collect(),
+        Rows::Last => inputs.iter().copied().chain([output]).collect(),
+        Rows::Step => inputs[..n].iter().copied().chain([output]).collect(),
+    };
+
+    let copy = kernel.copied.is_some() && inputs[0] != output;
+    let scalars = rows.len() + kernel.scalars.len();
+    let device = crate::allocator::tpu::rows(index)?;
+
+    let key = {
+        use std::hash::{Hash, Hasher};
+
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (index, device, copy).hash(&mut h);
+        h.finish()
+    };
+
+    let launched = || -> Result<(), String> {
+        let (mosaic, spec) = &*step.memo.get(key, || {
+            let fields = match (copy, &kernel.copied) {
+                (true, Some(copied)) => copied,
+                _ => &kernel.spec,
             };
 
-            launch(index, launched).map_err(|e| format!("{}: {e}", step.label))
-        }
-        _ => Err(format!("{} does not run on TPU yet", step.primitive.name())),
-    }
+            lowering(index, kernel.module, fields, scalars, None)
+                .map_err(|e| format!("{}: {e}", kernel.kernel))
+        })?;
+
+        let lowered = Lowered {
+            mosaic: Arc::clone(mosaic),
+            module: kernel.module,
+            spec: Arc::clone(spec),
+            scalars: [
+                crate::allocator::tpu::rows_of(index, &rows)?.as_slice(),
+                &kernel.scalars,
+            ]
+            .concat(),
+            sparse: None,
+        };
+
+        enqueue(index, &kernel.kernel, lowered, &[])
+    };
+
+    launched().map_err(|e| match &kernel.context {
+        Some(context) => format!("{context}: {e}"),
+        None => e,
+    })
 }

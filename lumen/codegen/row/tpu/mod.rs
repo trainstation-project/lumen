@@ -18,7 +18,7 @@ use crate::graph::{Graph, Node, Primitive, TensorType};
 #[cfg(lumen_tpu_linked)]
 use crate::plan::Step;
 #[cfg(lumen_tpu_linked)]
-use crate::runtime::tpu::{Launch, launch};
+use crate::runtime::tpu::{Kernel, Rows};
 
 /// Most bytes a minimal float32 block of rows (16 rows of `n`) may take.
 pub(crate) const ROW_BYTES: usize = 1 << 21;
@@ -375,37 +375,19 @@ pub(crate) fn block_rows(rows: usize, n: usize, unit: usize) -> Result<usize, St
     block(rows, unit, cap).ok_or_else(|| "its rows have no block of whole tiles".into())
 }
 
-/// Launches the row fusion `step` on TPU `index`, writing into `output`.
+/// The kernel of the row fusion `step`.
 #[cfg(lumen_tpu_linked)]
-pub(crate) fn encode(
-    index: usize,
-    step: &Step,
-    inputs: &[*const u8],
-    output: *mut u8,
-) -> Result<(), String> {
+pub(crate) fn kernel(step: &Step) -> Result<Kernel, String> {
     let Primitive::Fusion { body, .. } = &step.primitive else {
         unreachable!("a row fusion")
     };
 
     let (kernel, spec) = Tpu::row(body, &[], &()).map_err(|e| format!("{}: {e}", step.label))?;
-    let n_in = step.inputs.len();
 
-    let rows_of: Vec<*const u8> = inputs[..n_in]
-        .iter()
-        .copied()
-        .chain([output.cast_const()])
-        .chain(inputs[n_in..].iter().copied())
-        .collect();
-
-    let launched = Launch {
-        module: "lumen.codegen.row.tpu.kernel",
+    Ok(Kernel::new(
+        "lumen.codegen.row.tpu.kernel",
         kernel,
         spec,
-        rows: &rows_of,
-        scalars: &[],
-        host: &[],
-        sparse: None,
-    };
-
-    launch(index, launched)
+        Rows::Split,
+    ))
 }

@@ -8,7 +8,7 @@ pub(crate) mod row;
 use crate::codegen::utils::tpu::Tpu;
 use crate::graph::Primitive;
 use crate::plan::Step;
-use crate::runtime::tpu::{Launch, launch};
+use crate::runtime::tpu::{Kernel, Rows};
 
 /// The largest block dividing `n` that is a multiple of `unit` and at most `cap`; `n` itself when it fits.
 pub(crate) fn block(n: usize, unit: usize, cap: usize) -> Option<usize> {
@@ -31,17 +31,12 @@ pub(crate) fn caps(dtype: DType, k: usize) -> (usize, usize, usize) {
     }
 }
 
-/// Launches the dot (or dot-plus-epilogue fusion) of a plan step on TPU device `index`.
-pub(crate) fn encode(
-    index: usize,
-    step: &Step,
-    inputs: &[*const u8],
-    output: *mut u8,
-) -> Result<(), String> {
+/// The kernel of a plan step's dot (or dot-plus-epilogue fusion); `None` when its output is empty.
+pub(crate) fn kernel(step: &Step) -> Result<Option<Kernel>, String> {
     let out = &step.output.1;
 
     if out.numel() == 0 {
-        return Ok(());
+        return Ok(None);
     }
 
     let (kernel, spec) = match &step.primitive {
@@ -64,24 +59,10 @@ pub(crate) fn encode(
         )?,
     };
 
-    let n = step.inputs.len();
-
-    let rows: Vec<*const u8> = inputs[..n]
-        .iter()
-        .copied()
-        .chain([output.cast_const()])
-        .chain(inputs[n..].iter().copied())
-        .collect();
-
-    let launched = Launch {
-        module: "lumen.codegen.dot_general.tpu.gemm_kernel",
+    Ok(Some(Kernel::new(
+        "lumen.codegen.dot_general.tpu.gemm_kernel",
         kernel,
         spec,
-        rows: &rows,
-        scalars: &[],
-        host: &[],
-        sparse: None,
-    };
-
-    launch(index, launched)
+        Rows::Split,
+    )))
 }
