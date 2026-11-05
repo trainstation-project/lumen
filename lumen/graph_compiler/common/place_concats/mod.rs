@@ -1,5 +1,9 @@
 //! In-place concatenation: operands written straight into their slot of the result by the kernels producing
-//! them, so the concatenate copies nothing.
+//! them, so the concatenate copies nothing. `mps` holds MPS's slot rules and its pass, after fusion, copying
+//! the concatenations fusion left unable to be written in place.
+
+#[cfg(lumen_mps_linked)]
+pub(crate) mod mps;
 
 use crate::graph::{Graph, Node, Primitive};
 use crate::graph_compiler::pass::{CompilerPass, Module};
