@@ -35,7 +35,7 @@ unsafe extern "C" {
     fn lumen_mps_pipeline(name: *const c_char) -> *mut c_void;
 
     /// Dispatches an already-built pipeline; `groups` says whether `grid` counts threadgroups, `group` is the threadgroup size (0 for the default).
-    fn lumen_mps_launch_pipeline(
+    pub(crate) fn lumen_mps_launch_pipeline(
         pipeline: *mut c_void,
         buffers: *const *const u8,
         nbuffers: usize,
@@ -53,12 +53,9 @@ unsafe extern "C" {
 
 /// A kernel launch recorded by `capture` instead of dispatched, with its raw buffer addresses.
 pub(crate) struct Captured {
-    pub(crate) pipeline: *mut c_void,
     pub(crate) buffers: Vec<*const u8>,
     pub(crate) args: Vec<Vec<u8>>,
-    pub(crate) sizes: [usize; 3],
-    pub(crate) groups: bool,
-    pub(crate) group: usize,
+    pub(crate) grid: Grid,
     pub(crate) kernel: String,
     pub(crate) label: &'static str,
 }
@@ -77,13 +74,9 @@ enum Slot {
 /// A captured launch with its buffers rewritten as `Slot`s so it can run against other allocations.
 #[derive(Debug, Clone)]
 struct Replay {
-    /// The compute pipeline pointer, stored as an integer.
-    pipeline: usize,
     buffers: Vec<Slot>,
     args: Vec<Vec<u8>>,
-    sizes: [usize; 3],
-    groups: bool,
-    group: usize,
+    grid: Grid,
     kernel: String,
     label: &'static str,
 }
@@ -158,12 +151,9 @@ pub(crate) fn prepare(captured: Vec<Captured>, at: &Pointers) -> Result<Prepared
             .collect::<Result<_, _>>()?;
 
         Ok(Replay {
-            pipeline: c.pipeline as usize,
             buffers,
             args: c.args,
-            sizes: c.sizes,
-            groups: c.groups,
-            group: c.group,
+            grid: c.grid,
             kernel: c.kernel,
             label: c.label,
         })
@@ -183,17 +173,15 @@ pub(crate) fn replay(prepared: &Prepared, at: &Pointers, keep: Vec<Tensor>) -> R
     for (r, keep) in first.iter().map(|r| (r, Vec::new())).chain([(last, keep)]) {
         buffers.clear();
         buffers.extend(r.buffers.iter().map(|&slot| at.pointer(slot)));
-        let launch = (r.sizes, r.groups, r.group);
 
-        dispatch(
-            r.pipeline as *mut c_void,
-            &buffers,
-            &r.args,
-            launch,
+        Mps::launch(MpsLaunch {
+            kernel: &r.kernel,
+            buffers: &buffers,
+            args: &r.args,
+            grid: r.grid,
             keep,
-            r.label,
-            &r.kernel,
-        )?;
+            name: r.label,
+        })?;
     }
 
     Ok(())
@@ -487,50 +475,5 @@ pub(crate) fn mark_event(
     }
 
     mps::fence();
-    Ok(())
-}
-
-/// Submits one pipeline dispatch to the MPS stream, with `keep` held until it completes.
-pub(crate) fn dispatch(
-    pipeline: *mut c_void,
-    buffers: &[*const u8],
-    args: &[Vec<u8>],
-    (sizes, groups, group): ([usize; 3], bool, usize),
-    keep: Vec<Tensor>,
-    name: &'static str,
-    kernel: &str,
-) -> Result<(), String> {
-    let mut pointers = [std::ptr::null::<u8>(); MAX_ARGS];
-    let mut lens = [0usize; MAX_ARGS];
-
-    for (k, a) in args.iter().enumerate() {
-        pointers[k] = a.as_ptr();
-        lens[k] = a.len();
-    }
-
-    let (context, done, timed) = mps::submit(keep, name, kernel);
-
-    let status = unsafe {
-        lumen_mps_launch_pipeline(
-            pipeline,
-            buffers.as_ptr(),
-            buffers.len(),
-            pointers.as_ptr(),
-            lens.as_ptr(),
-            args.len(),
-            sizes.as_ptr(),
-            groups.into(),
-            group,
-            timed.into(),
-            done,
-            context,
-        )
-    };
-
-    if status != 0 {
-        mps::cancel(context);
-        return Err(format!("the MPS kernel {kernel} could not run ({status})"));
-    }
-
     Ok(())
 }

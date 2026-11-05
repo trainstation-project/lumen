@@ -189,12 +189,13 @@ pub(crate) fn sparse_core(
     let launched = TpuLaunch {
         device: index,
         module: "lumen.codegen.gather.tpu.kernel",
-        kernel: format!("gather_sparse_core_{}_{k}x{words}", table.dtype),
+        kernel: &format!("gather_sparse_core_{}_{k}x{words}", table.dtype),
         spec,
         rows: &operands,
         scalars: &[],
         host: &[],
         sparse: Some(sparse),
+        lowered: None,
     };
 
     Tpu::launch(launched).map_err(|e| format!("{}: {e}", step.label))?;

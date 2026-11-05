@@ -7,9 +7,12 @@ use std::ffi::c_void;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use crate::codegen::tpu::{Kernel, Rows, kernel};
+use crate::codegen::utils::tpu::Tpu;
 use crate::device::tpu::{error, ffi};
 use crate::graph::Primitive;
 use crate::plan::Step;
+use crate::runtime::kernel::Launch as _;
+use crate::runtime::kernel::tpu::TpuLaunch;
 
 /// Mosaic source of `module`'s kernel for JSON `spec`, lowered by `lumen.codegen.utils.tpu.pallas`.
 #[cfg(feature = "python")]
@@ -562,15 +565,15 @@ fn cached(key: String, lower: impl FnOnce() -> Result<String, String>) -> Result
 
 /// A kernel lowered and ready to chain into a program.
 pub(crate) struct Lowered {
-    module: &'static str,
+    pub(crate) module: &'static str,
     /// The kernel's full JSON spec, or a generated program's source.
-    spec: Arc<str>,
+    pub(crate) spec: Arc<str>,
     /// Mosaic source of the kernel.
-    mosaic: Arc<str>,
+    pub(crate) mosaic: Arc<str>,
     /// Row offsets of its buffers, then its scalars.
-    scalars: Vec<i32>,
+    pub(crate) scalars: Vec<i32>,
     /// Set when the kernel runs on the SparseCore.
-    sparse: Option<Box<SparseCore>>,
+    pub(crate) sparse: Option<Box<SparseCore>>,
 }
 
 /// The executable running `launches` on device `index`, compiled once per launch sequence.
@@ -622,7 +625,7 @@ fn compiled(
 }
 
 /// Runs `launches` as one executable on device `index`, with `host` bytes as extra rows.
-fn run(index: usize, launches: &[Lowered], host: &[u8]) -> Result<(), String> {
+pub(crate) fn run(index: usize, launches: &[Lowered], host: &[u8]) -> Result<(), String> {
     if launches.is_empty() {
         return Ok(());
     }
@@ -651,7 +654,7 @@ fn run(index: usize, launches: &[Lowered], host: &[u8]) -> Result<(), String> {
 
 // Per thread, the stack of open batches: device index and the launches collected so far.
 thread_local! {
-    static BATCHES: RefCell<Vec<(usize, Vec<Lowered>)>> = const { RefCell::new(Vec::new()) };
+    pub(crate) static BATCHES: RefCell<Vec<(usize, Vec<Lowered>)>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Collects TPU launches on one device so they run as a single executable; dropping it unrun
@@ -731,58 +734,6 @@ pub(crate) fn lowering(
     Ok((mosaic, spec.into()))
 }
 
-/// Adds `lowered`, named `kernel` in profiles, to the open batch on device `index`, or runs it now. A launch
-/// with `host` data runs on its own after flushing the batch.
-pub(crate) fn enqueue(
-    index: usize,
-    kernel: &str,
-    lowered: Lowered,
-    host: &[u8],
-) -> Result<(), String> {
-    crate::profiler::tpu::launched(index, kernel);
-
-    crate::profiler::launched::templated(kernel, || {
-        // A generated program's script is its source, run on this device's memory.
-        let template = match lowered.module {
-            GENERATED => {
-                let rows = crate::allocator::tpu::rows(index).unwrap_or_default();
-                let host = (!host.is_empty()).then_some(host.len() / crate::allocator::tpu::ROW);
-                let host = host.map_or("None".to_string(), |h| h.to_string());
-                let scalars = lowered.scalars.len();
-
-                let device =
-                    format!("{{\"scalars\": {scalars}, \"host_rows\": {host}, \"rows\": {rows}}}");
-
-                let script = format!("{}\nmosaic = program({device})\n", lowered.spec);
-                (GENERATED.to_owned(), script)
-            }
-            _ => (lowered.module.to_owned(), lowered.spec.to_string()),
-        };
-
-        (Some(lowered.mosaic.to_string()), Some(template))
-    });
-
-    let batched = BATCHES.with(|b| match b.borrow_mut().last_mut() {
-        Some((i, launches)) if *i == index => match host.is_empty() {
-            true => {
-                launches.push(lowered);
-                Ok(None)
-            }
-            false => Ok(Some((std::mem::take(launches), lowered))),
-        },
-        _ => Err(lowered),
-    });
-
-    match batched {
-        Ok(None) => Ok(()),
-        Ok(Some((before, lowered))) => {
-            run(index, &before, &[])?;
-            run(index, std::slice::from_ref(&lowered), host)
-        }
-        Err(lowered) => run(index, std::slice::from_ref(&lowered), host),
-    }
-}
-
 /// Runs plan `step` on TPU device `index`: its kernel generated once, lowered once per device.
 pub(crate) fn encode(
     index: usize,
@@ -847,19 +798,17 @@ pub(crate) fn encode(
                 .map_err(|e| format!("{}: {e}", kernel.kernel))
         })?;
 
-        let lowered = Lowered {
-            mosaic: Arc::clone(mosaic),
+        Tpu::launch(TpuLaunch {
+            device: index,
             module: kernel.module,
-            spec: Arc::clone(spec),
-            scalars: [
-                crate::allocator::tpu::rows_of(index, &rows)?.as_slice(),
-                &kernel.scalars,
-            ]
-            .concat(),
+            kernel: &kernel.kernel,
+            spec: String::new(),
+            rows: &rows,
+            scalars: &kernel.scalars,
+            host: &[],
             sparse: None,
-        };
-
-        enqueue(index, &kernel.kernel, lowered, &[])
+            lowered: Some((Arc::clone(mosaic), Arc::clone(spec))),
+        })
     };
 
     launched().map_err(|e| match &kernel.context {

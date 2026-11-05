@@ -3,7 +3,10 @@
 use super::Launch;
 use crate::Tensor;
 use crate::codegen::utils::mps::Mps;
-use crate::runtime::mps::{CAPTURED, Captured, Grid, MAX_ARGS, dispatch, pipeline};
+use crate::runtime::mps::{
+    CAPTURED, Captured, Grid, MAX_ARGS, lumen_mps_launch_pipeline, pipeline,
+};
+use crate::stream::mps;
 
 /// One Metal launch: a kernel by name, its buffers and by-value arguments, its grid, the tensors its command
 /// buffer keeps alive, and the step label it is profiled under.
@@ -54,12 +57,9 @@ impl Launch for Mps {
         let captured = CAPTURED.with_borrow_mut(|c| {
             c.as_mut().map(|c| {
                 c.push(Captured {
-                    pipeline,
                     buffers: buffers.to_vec(),
                     args: args.to_vec(),
-                    sizes,
-                    groups,
-                    group,
+                    grid,
                     kernel: kernel.to_owned(),
                     label: name,
                 })
@@ -70,14 +70,38 @@ impl Launch for Mps {
             return Ok(());
         }
 
-        dispatch(
-            pipeline,
-            buffers,
-            args,
-            (sizes, groups, group),
-            keep,
-            name,
-            kernel,
-        )
+        let mut pointers = [std::ptr::null::<u8>(); MAX_ARGS];
+        let mut lens = [0usize; MAX_ARGS];
+
+        for (k, a) in args.iter().enumerate() {
+            pointers[k] = a.as_ptr();
+            lens[k] = a.len();
+        }
+
+        let (context, done, timed) = mps::submit(keep, name, kernel);
+
+        let status = unsafe {
+            lumen_mps_launch_pipeline(
+                pipeline,
+                buffers.as_ptr(),
+                buffers.len(),
+                pointers.as_ptr(),
+                lens.as_ptr(),
+                args.len(),
+                sizes.as_ptr(),
+                groups.into(),
+                group,
+                timed.into(),
+                done,
+                context,
+            )
+        };
+
+        if status != 0 {
+            mps::cancel(context);
+            return Err(format!("the MPS kernel {kernel} could not run ({status})"));
+        }
+
+        Ok(())
     }
 }

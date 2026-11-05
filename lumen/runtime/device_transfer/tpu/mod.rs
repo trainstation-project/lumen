@@ -30,12 +30,13 @@ pub(super) fn copy_h2d(dst: &Tensor, src: &Tensor) {
     let launched = TpuLaunch {
         device: index,
         module: "lumen.runtime.device_transfer.tpu",
-        kernel: "copy_h2d".to_owned(),
+        kernel: "copy_h2d",
         spec: String::new(),
         rows: &[dst.data_ptr().cast_const()],
         scalars: &[],
         host: &host,
         sparse: None,
+        lowered: None,
     };
 
     Tpu::launch(launched)

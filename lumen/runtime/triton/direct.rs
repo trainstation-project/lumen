@@ -179,7 +179,7 @@ unsafe extern "C" {
 }
 
 /// `cuLaunchKernel`: function, grid, block, dynamic shared bytes, stream, parameters, extra.
-type LaunchKernel = unsafe extern "C" fn(
+pub(crate) type LaunchKernel = unsafe extern "C" fn(
     *mut c_void,
     c_uint,
     c_uint,
@@ -194,7 +194,7 @@ type LaunchKernel = unsafe extern "C" fn(
 ) -> c_int;
 
 /// `cuGetErrorString`: a driver error's message.
-type ErrorString = unsafe extern "C" fn(c_int, *mut *const c_char) -> c_int;
+pub(crate) type ErrorString = unsafe extern "C" fn(c_int, *mut *const c_char) -> c_int;
 
 /// `cuStreamGetCaptureInfo_v2`: stream, status, capture id, graph, dependencies, their count.
 type CaptureInfo = unsafe extern "C" fn(
@@ -210,9 +210,9 @@ type CaptureInfo = unsafe extern "C" fn(
 type GraphNodes = unsafe extern "C" fn(*mut c_void, *mut *mut c_void, *mut usize) -> c_int;
 
 /// The CUDA driver entry points this module calls.
-struct Driver {
-    launch: LaunchKernel,
-    error: ErrorString,
+pub(crate) struct Driver {
+    pub(crate) launch: LaunchKernel,
+    pub(crate) error: ErrorString,
     capture_info: CaptureInfo,
     graph_nodes: GraphNodes,
 }
