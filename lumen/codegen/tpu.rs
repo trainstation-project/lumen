@@ -125,11 +125,11 @@ pub(crate) fn kernel(step: &Step) -> Result<Option<Kernel>, String> {
     }
 }
 
-/// Generates the kernel of each step of `plan`, kept on the step, so runs only launch them. A step its kernel
-/// fails on keeps none and fails, with the same error, when it runs.
+/// Generates the kernel of each step of `plan`, kept on the step, so runs only launch them; fails on a step no
+/// TPU kernel takes.
 pub(crate) fn codegen(plan: &mut Plan, _: &Options) -> Result<(), String> {
     for step in plan.steps_mut() {
-        if let Ok(Some(kernel)) = kernel(step) {
+        if let Some(kernel) = kernel(step)? {
             step.kernel = Some(Arc::new(kernel));
         }
     }

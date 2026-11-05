@@ -759,7 +759,7 @@ fn run_loop(
     };
 
     let config = super::config::config();
-    let (name, source) = crate::codegen::mps::kernel(&body, &[by_value], &config, &views, None);
+    let (name, source) = crate::codegen::mps::kernel(&body, &[by_value], &config, &views, None)?;
 
     let compiled = SOURCES
         .lock()

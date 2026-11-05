@@ -39,7 +39,9 @@ fn fuse(g: &Graph) -> Graph {
         &[],
         &config,
         |body, by_value| {
-            crate::codegen::mps::kernel(body, by_value, &config, &Default::default(), None).0
+            crate::codegen::mps::kernel(body, by_value, &config, &Default::default(), None)
+                .unwrap()
+                .0
         },
     )
 }
@@ -89,6 +91,7 @@ fn gathers_from_tables_past_u32_index_in_ulong() {
             &Default::default(),
             None,
         )
+        .unwrap()
         .1
     };
 
@@ -534,6 +537,7 @@ fn transposes_in_fusions_are_tiled() {
                 &Default::default(),
                 None,
             )
+            .unwrap()
             .1;
 
             assert_eq!(transpose_tiling(body).is_some(), tiled, "{shape:?}");
@@ -589,6 +593,7 @@ fn reductions_are_normalized() {
             &Default::default(),
             None,
         )
+        .unwrap()
         .1;
 
         assert!(
@@ -655,6 +660,7 @@ fn hierarchical_reductions_keep_their_dtype() {
                     &Default::default(),
                     None,
                 )
+                .unwrap()
                 .1;
 
                 match accum_dtype {
@@ -721,6 +727,7 @@ fn hierarchical_reductions_keep_their_dtype() {
                 &Default::default(),
                 None,
             )
+            .unwrap()
             .1;
 
             assert!(!mentions(&source, "float"), "{source}");
@@ -1272,6 +1279,7 @@ fn dots_fuse_their_epilogue() {
         &Default::default(),
         None,
     )
+    .unwrap()
     .1;
 
     assert!(
@@ -1295,7 +1303,9 @@ fn dots_fuse_their_epilogue() {
         &[],
         &config,
         |body, by_value| {
-            crate::codegen::mps::kernel(body, by_value, &config, &Default::default(), None).0
+            crate::codegen::mps::kernel(body, by_value, &config, &Default::default(), None)
+                .unwrap()
+                .0
         },
     );
 
@@ -1512,6 +1522,7 @@ fn reductions_apply_their_epilogue() {
                 &Default::default(),
                 None,
             )
+            .unwrap()
             .1;
 
             assert!(source.contains("operator()(float r)"), "{source}");
@@ -1555,6 +1566,7 @@ fn reductions_apply_an_epilogue_reading_them_twice() {
             &Default::default(),
             None,
         )
+        .unwrap()
         .1;
         assert_eq!(source.contains("_final("), split, "{source}");
 
@@ -1898,6 +1910,7 @@ fn division_by_sqrt_is_as_traced() {
         &Default::default(),
         None,
     )
+    .unwrap()
     .1;
 
     assert!(
@@ -1938,6 +1951,7 @@ fn division_by_sqrt_is_as_traced() {
         &Default::default(),
         None,
     )
+    .unwrap()
     .1;
 
     assert!(

@@ -342,19 +342,15 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
     plan.packed = packed;
     plan.interleaved = interleaved;
     crate::codegen::triton::codegen(&mut plan, options)?;
-    let deterministic = config.deterministic;
 
     if options.config.autotune {
         let tuner = Autotuner {
-            timer: Events {
-                device,
-                deterministic,
-            },
+            timer: Events { device },
         };
 
         tuner.tune(&mut Gemms, &mut plan)?;
         tuner.tune(&mut Tiles, &mut plan)?;
-        tuner.tune(&mut Loops { deterministic }, &mut plan)?;
+        tuner.tune(&mut Loops, &mut plan)?;
     }
 
     Ok(plan)

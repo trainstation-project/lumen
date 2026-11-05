@@ -4,7 +4,7 @@ use super::{Kernels, Timer};
 use crate::codegen::attention::triton::{ATTENTION_CONFIGS, AttentionConfig};
 use crate::codegen::dot_general::triton::{self as codegen, CONFIGS, Config};
 use crate::codegen::elementwise::triton::{LoopConfig, loop_configs};
-use crate::codegen::triton::{Kernel, Template, loop_kernel};
+use crate::codegen::triton::{Kernel, Template};
 use crate::graph::{Primitive, TensorType};
 use crate::graph_compiler::passes::attention::triton::{attention, is_attention};
 use crate::graph_compiler::passes::dot::triton::{DOT_ROW, Run, gemm, is_gemm};
@@ -62,9 +62,14 @@ impl Kernels for Gemms {
     }
 }
 
-/// Autotuning candidates for loop kernels, of the plan's `deterministic`.
-pub(crate) struct Loops {
-    pub(crate) deterministic: bool,
+/// Autotuning candidates for loop kernels, the ones codegen kept on the steps.
+pub(crate) struct Loops;
+
+/// The loop kernel codegen kept on `step`, if it has one.
+fn loop_kernel(step: &Step) -> Option<&Kernel> {
+    step.kernel
+        .as_deref()
+        .and_then(|k| k.downcast_ref::<Kernel>())
 }
 
 impl Kernels for Loops {
@@ -72,7 +77,7 @@ impl Kernels for Loops {
 
     /// Loop configs whose block covers the kernel's lanes and splits; none for a scatter-add.
     fn configs(&self, step: &Step) -> Vec<LoopConfig> {
-        let Some(kernel) = loop_kernel(step, self.deterministic) else {
+        let Some(kernel) = loop_kernel(step) else {
             return Vec::new();
         };
 
@@ -91,10 +96,9 @@ impl Kernels for Loops {
     }
 }
 
-/// Times steps on `device` with CUDA events, their loop kernels those of the plan's `deterministic`.
+/// Times steps on `device` with CUDA events, with the loop kernels codegen kept on them.
 pub(crate) struct Events {
     pub(crate) device: Device,
-    pub(crate) deterministic: bool,
 }
 
 impl Timer for Events {
@@ -134,12 +138,7 @@ impl Timer for Events {
             .map(|(_, ty)| zeros(ty, self.device))
             .collect();
 
-        Ok(Some((
-            loop_kernel(step, self.deterministic),
-            inputs,
-            out,
-            outs,
-        )))
+        Ok(Some((loop_kernel(step).cloned(), inputs, out, outs)))
     }
 
     /// One run of the step.
