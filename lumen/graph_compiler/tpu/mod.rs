@@ -14,7 +14,6 @@ use crate::graph_compiler::passes::place_concats::{PlaceConcats, Slots};
 use super::passes::Module;
 use super::passes::attention::tpu::AttentionLayouts;
 use super::passes::attention::{FlashAttention, FlashAttentionBackward};
-use super::passes::clamp_indices::ClampIndices;
 use super::passes::dot::fold_reshapes::FoldDotReshapes;
 use super::passes::dot::strength::DotStrength;
 use super::passes::merge_dots::{Blocks, MergeDots, MergeDotsBackward, Packs, Target};
@@ -105,11 +104,6 @@ impl Passes for TpuModule<'_> {
     /// With `flash_attention`.
     fn attention_layouts(config: &CompilerConfig) -> Pass<Self> {
         when(config.flash_attention, AttentionLayouts)
-    }
-
-    /// With `safe_kernels`.
-    fn clamp_indices(config: &CompilerConfig) -> Pass<Self> {
-        when(config.safe_kernels, ClampIndices)
     }
 
     /// Always.

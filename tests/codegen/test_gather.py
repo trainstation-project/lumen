@@ -1,4 +1,4 @@
-"""Tests for gather, scatter_add and take_along_axis: values with clamped indices, fusion, gradients, determinism and operand checks."""
+"""Tests for gather, scatter_add and take_along_axis: values, fusion, gradients, determinism and operand checks."""
 
 import pathlib
 import tempfile
@@ -15,13 +15,12 @@ DEVICES = ["cpu", MPS, CUDA, TPU]
 
 
 @pytest.fixture(autouse=True)
-def safe_kernels():
-    """Each test with its indices clamped (out of range here too), CUDA's
-    programs on the Triton backend."""
+def triton_backend():
+    """Each test with CUDA's programs on the Triton backend."""
     compiler = lumen.config.compiler
-    compiler.safe_kernels = compiler.use_triton_backend = True
+    compiler.use_triton_backend = True
     yield
-    compiler.safe_kernels = compiler.use_triton_backend = False
+    compiler.use_triton_backend = False
 
 
 def _tensor(a, device, dtype=None):
@@ -33,8 +32,8 @@ def _tensor(a, device, dtype=None):
     return t if dtype is None else t.to(dtype=dtype)
 
 
-# Indices along a size-4 or size-5 axis, including out-of-range ones (9 and -2) that the kernels clamp.
-IDS = np.array([[3, 0, 3], [1, 9, -2]])
+# Indices in range of every axis gathered along (3 to 5 long), repeating some and leaving the last rows unread.
+IDS = np.array([[2, 0, 2], [1, 0, 1]])
 
 
 @pytest.mark.parametrize("device", DEVICES)
@@ -42,7 +41,7 @@ IDS = np.array([[3, 0, 3], [1, 9, -2]])
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16", "int32"])
 @pytest.mark.parametrize("axis", [0, 1])
 def test_gather(device, index_dtype, dtype, axis):
-    """The entries the indices pick along the axis (clamped into it), the
+    """The entries the indices pick along the axis, the
     axis replaced by the indices' shape, for any dtype; ``weight[ids]`` is
     one along the first."""
     x = (np.random.default_rng(0).standard_normal((4, 5, 3)) * 4).astype(np.float32)
@@ -50,7 +49,7 @@ def test_gather(device, index_dtype, dtype, axis):
     x = lumen.to_numpy(xt.to(dtype="float32"))
     ids = _tensor(IDS.astype(index_dtype), device)
     got = lumen.compile(lambda x, i: prims.gather(x, i, axis))(xt, ids)
-    want = np.take(x, IDS, axis=axis, mode="clip")
+    want = np.take(x, IDS, axis=axis)
     np.testing.assert_array_equal(lumen.to_numpy(got.to(dtype="float32")), want)
     if axis == 0:
         got = lumen.compile(lambda x, i: x[i])(xt, ids)
@@ -63,7 +62,7 @@ def test_gather(device, index_dtype, dtype, axis):
 def test_gather_fuses(device, index_dtype, axis):
     """A gather computes its elements in the kernel reading them (an elementwise
     fusion's, or a row kernel's: an embedding's lookup, its positions added,
-    then normalized), reading the operand at each picked (clamped) index:
+    then normalized), reading the operand at each picked index:
     no kernel of its own; the values the CPU's."""
     rng = np.random.default_rng(3)
     x = rng.standard_normal((4, 5, 3)).astype(np.float32)
@@ -112,26 +111,25 @@ def test_gather_of_a_table_of_as_many_elements_as_rows(device):
 @pytest.mark.parametrize("dtype", ["float32", "int32"])
 @pytest.mark.parametrize("axis", [0, 1])
 def test_scatter_add(device, dtype, axis):
-    """Each update added at its index (clamped as the gather's), those at
+    """Each update added at its index, those at
     one entry summed."""
     rng = np.random.default_rng(1)
     x = (rng.standard_normal((4, 5, 3)) * 4).astype(np.float32)
-    u = (rng.standard_normal(np.take(x, IDS, axis=axis, mode="clip").shape) * 4).astype(np.float32)
+    u = (rng.standard_normal(np.take(x, IDS, axis=axis).shape) * 4).astype(np.float32)
     xt, ut = _tensor(x, device, dtype), _tensor(u, device, dtype)
     x, u = (lumen.to_numpy(t.to(dtype="float32")) for t in (xt, ut))
     ids = _tensor(IDS.astype(np.int64), device)
     got = lumen.compile(lambda x, i, u: prims.scatter_add(x, i, u, axis))(xt, ids, ut)
     want = x.copy()
-    clipped = np.clip(IDS, 0, x.shape[axis] - 1)
-    np.add.at(want, (slice(None),) * axis + (clipped,), u)
+    np.add.at(want, (slice(None),) * axis + (IDS,), u)
     np.testing.assert_allclose(lumen.to_numpy(got.to(dtype="float32")), want, rtol=1e-6)
 
 
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
 def test_gather_gradient(device, dtype):
-    """A lookup's gradient: each row's cotangent summed over its reads (the
-    clamped ones too), zeros where none read it, accumulated in float32."""
+    """A lookup's gradient: each row's cotangent summed over its reads,
+    zeros where none read it, accumulated in float32."""
     rng = np.random.default_rng(2)
     w, c = rng.standard_normal((4, 3)).astype(np.float32), rng.standard_normal((2, 3, 3)).astype(np.float32)
     wt, ct = _tensor(w, device, dtype), _tensor(c, device, dtype)
@@ -140,7 +138,7 @@ def test_gather_gradient(device, dtype):
     grad = lumen.grad(lambda w, i, c: F.sum((w[i] * c).float()))
     got = lumen.compile(grad)(wt, ids, ct)
     want = np.zeros_like(w)
-    np.add.at(want, np.clip(IDS, 0, 3), c)
+    np.add.at(want, IDS, c)
     assert got.dtype == dtype
     tol = {"float32": 1e-6, "bfloat16": 1e-2}[dtype]
     np.testing.assert_allclose(lumen.to_numpy(got.to(dtype="float32")), want, rtol=tol, atol=tol)

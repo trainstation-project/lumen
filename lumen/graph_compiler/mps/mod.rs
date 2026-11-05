@@ -15,7 +15,6 @@ use super::passes::Module;
 use super::passes::alone::{Alone, Lone};
 use super::passes::ane::mps as ane;
 use super::passes::chunked_cross_entropy::ChunkedCrossEntropy;
-use super::passes::clamp_indices::ClampIndices;
 use super::passes::diamonds::{Diamonds, Row, RowsModule};
 use super::passes::dot::canonicalize::CanonicalizeDots;
 use super::passes::dot::split_k::mps::SplitK;
@@ -273,11 +272,6 @@ impl Passes for MpsModule<'_> {
             config.fuse && config.fused_linear_cross_entropy,
             LinearCrossEntropy,
         )
-    }
-
-    /// With `safe_kernels`.
-    fn clamp_indices(config: &CompilerConfig) -> Pass<Self> {
-        when(config.safe_kernels, ClampIndices)
     }
 
     /// Always.
