@@ -2,13 +2,13 @@
 //! cross-entropy epilogue writing each output tile's per-row max and sum of exponentials (and the label's
 //! logit), then a kernel combining a row's tiles into its loss and `logsumexp`.
 
+use crate::codegen::dot_general::triton::launch::{Epilogue, Gemm};
 use crate::codegen::dot_general::triton::{self as codegen, Config};
 use crate::codegen::elementwise::triton::{LOOP_CONFIGS, UNTUNED_LOOP};
 use crate::codegen::triton::{Kernel, Template};
 use crate::graph::Primitive;
-use crate::graph_compiler::passes::dot::triton::{Epilogue, Gemm};
-use crate::graph_compiler::triton::{Function, Launches, launch, layouts};
-use crate::plan::Step;
+use crate::plan::StepBase;
+use crate::runtime::triton::{Function, Launches, launch, layouts};
 use crate::tensor::contiguous_strides;
 use crate::{DType, Device, Tensor, TensorOptions};
 
@@ -72,7 +72,7 @@ fn prepare(h: &Tensor, w: &Tensor, target: &Tensor) -> Prepared {
 /// `BLOCK_SIZE_N` classes, then one program a row combines them.
 pub(crate) fn run(
     gemm: Gemm,
-    step: &Step,
+    step: &StepBase,
     inputs: &[Tensor],
     out: &Tensor,
     config: &Config,

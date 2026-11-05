@@ -5,7 +5,8 @@ use super::passes::simplify::Simplify;
 use super::pipeline::{GraphModule, Pass, Passes, pipeline};
 use super::{Options, positions};
 use crate::graph::Graph;
-use crate::graph_compiler::{Plan, PlanOptions};
+use crate::graph_compiler::PlanOptions;
+use crate::plan::CpuPlan;
 
 /// The CPU's passes: it interprets the graph as simplified.
 impl Passes for GraphModule<'_> {
@@ -18,7 +19,7 @@ impl Passes for GraphModule<'_> {
 }
 
 /// Simplifies `graph` and plans it for execution on the CPU.
-pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> {
+pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<CpuPlan, String> {
     let mut module = GraphModule {
         graph: graph.clone(),
         options,
@@ -30,7 +31,7 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
 }
 
 /// Plans `graph` as given, with no scratch region, kernel blocks or device layout.
-pub(crate) fn plan(graph: &Graph, options: &Options) -> Plan {
+pub(crate) fn plan(graph: &Graph, options: &Options) -> CpuPlan {
     let plan = PlanOptions {
         scratch: None,
         donate: options.donate.clone(),
@@ -42,5 +43,5 @@ pub(crate) fn plan(graph: &Graph, options: &Options) -> Plan {
         layout: None,
     };
 
-    Plan::compile_with(graph, &plan)
+    CpuPlan::compile_with(graph, &plan)
 }

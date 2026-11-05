@@ -9,4 +9,3 @@ pub(crate) mod rows;
 pub(crate) mod split_k;
 pub(crate) mod strength;
 pub(crate) mod tpu;
-pub(crate) mod triton;

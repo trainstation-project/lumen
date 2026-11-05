@@ -9,7 +9,7 @@ use crate::codegen::dot_general::tpu::{block, caps};
 use crate::codegen::utils::tpu::{Tpu, window};
 use crate::device::tpu::layout::Layout;
 use crate::graph::{Graph, Node, Primitive, TensorType, Var};
-use crate::plan::Step;
+use crate::plan::StepBase;
 
 /// A fused GEMM's structure: a concatenated lhs, the dot output's slices and the nodes applied to them.
 pub(crate) struct Epilogue {
@@ -303,7 +303,7 @@ fn tile_rows(dtype: DType, what: &str) -> Result<usize, String> {
 /// The Pallas kernel's name and spec for the dot `dot` of `lhs` and `rhs`, computing `value`s, of the plan
 /// step `step`, followed by `epilogue` (writing the dot output unchanged when `None`).
 pub(crate) fn spec(
-    step: &Step,
+    step: &StepBase,
     dot: &Primitive,
     lhs: &TensorType,
     rhs: &TensorType,
@@ -501,10 +501,15 @@ impl GemmCodegen for Tpu {
     /// The kernel's name and spec.
     type Code = (String, String);
     /// The plan step the fusion runs as: where its outputs are written.
-    type Options = Step;
+    type Options = StepBase;
 
     /// The spec of the GEMM fusion `body` with dot `dot`. Inputs are read as their buffers.
-    fn gemm(body: &Graph, dot: &Node, _: &[bool], step: &Step) -> Result<(String, String), String> {
+    fn gemm(
+        body: &Graph,
+        dot: &Node,
+        _: &[bool],
+        step: &StepBase,
+    ) -> Result<(String, String), String> {
         let (epilogue, _) = Epilogue::of(body);
         let ty = |v: Var| body.type_of(v);
 

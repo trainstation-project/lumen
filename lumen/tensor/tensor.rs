@@ -178,7 +178,7 @@ impl Tensor {
         }
 
         if let Device::Cuda(_) = self.device() {
-            return crate::graph_compiler::triton::fill(self, value)
+            return crate::runtime::triton::fill(self, value)
                 .unwrap_or_else(|e| panic!("fill_: {e}"));
         }
 
@@ -814,7 +814,7 @@ impl Tensor {
             && src.device() == self.device()
         {
             if self.numel() > 0 {
-                crate::graph_compiler::triton::copy(self, src)?;
+                crate::runtime::triton::copy(self, src)?;
             }
 
             return Ok(self);
@@ -853,7 +853,7 @@ impl Tensor {
         }
 
         if let Device::Cuda(_) = self.device() {
-            crate::graph_compiler::triton::copy(self, &host.copy_to(self.device()))?;
+            crate::runtime::triton::copy(self, &host.copy_to(self.device()))?;
             return Ok(self);
         }
 

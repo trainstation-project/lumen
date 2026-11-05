@@ -1,8 +1,6 @@
 //! Pass replacing an unfused `cross_entropy(h @ w, target)` with one `LinearCrossEntropy` op that
 //! never materializes the logits.
 
-pub(crate) mod triton;
-
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::passes::{CompilerPass, Module};
 use crate::{DType, Scalar};

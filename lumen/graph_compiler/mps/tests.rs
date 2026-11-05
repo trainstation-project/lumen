@@ -19,6 +19,7 @@ use super::fusion;
 use crate::graph::Primitive::*;
 use crate::graph::{Graph, Primitive, TensorType, Var};
 use crate::graph_compiler::CompilerConfig;
+use crate::plan::Plan as _;
 use crate::plan::tests::mps::{available, check, check_within, exact_values, values};
 use crate::plan::tests::{data, mlp};
 use crate::reference;
@@ -392,8 +393,8 @@ fn mps_plans_hold_kernel_scratch() {
     let (_, bytes) = plan.steps()[0].scratch.expect("partials in the workspace");
     assert!(bytes > 0 && plan.workspace_bytes() >= bytes, "{plan}");
     let input = values(DType::F16, &[4, 50_000], 1).to(crate::Device::Mps(0));
-    let generic = crate::graph_compiler::Plan::compile(&g).run(std::slice::from_ref(&input));
-    assert!(generic.unwrap_err().contains("compile the graph for MPS"));
+    let generic = crate::plan::CpuPlan::compile(&g).run(std::slice::from_ref(&input));
+    assert!(generic.unwrap_err().contains("compiled for the CPU"));
 }
 
 /// Two slices of one input fuse into the kernel reading them.
@@ -2318,8 +2319,11 @@ fn every_gemm_candidate_matches_the_reference() {
                 let scale = expected.iter().fold(0f32, |m, v| m.max(v.abs()));
                 let on_mps: Vec<Tensor> = inputs.iter().map(|t| t.to(Device::Mps(0))).collect();
 
-                let mut plan =
-                    crate::graph_compiler::compile_with(&g, Device::Mps(0), &options).unwrap();
+                let mut plan = super::compile(
+                    &crate::graph_compiler::frontend(&g, &options).unwrap(),
+                    &options,
+                )
+                .unwrap();
 
                 let at = plan
                     .steps()
@@ -2532,7 +2536,11 @@ fn every_tiled_gemm_stores_regions_halves_and_expansions_along_rows_and_columns(
             .collect();
 
         let on_mps: Vec<Tensor> = inputs.iter().map(|t| t.to(Device::Mps(0))).collect();
-        let mut plan = crate::graph_compiler::compile_with(&g, Device::Mps(0), &options).unwrap();
+        let mut plan = super::compile(
+            &crate::graph_compiler::frontend(&g, &options).unwrap(),
+            &options,
+        )
+        .unwrap();
         assert_eq!(plan.steps().len(), 1, "{case}: {plan}");
         let step = plan.steps()[0].clone();
         assert!(matmul_of(&step).is_some(), "{case}: {plan}");
@@ -2724,8 +2732,11 @@ fn every_tuned_paired_and_wide_norm_gemm_matches_the_reference() {
 
             let on_mps: Vec<Tensor> = inputs.iter().map(|t| t.to(Device::Mps(0))).collect();
 
-            let mut plan =
-                crate::graph_compiler::compile_with(&g, Device::Mps(0), &options).unwrap();
+            let mut plan = super::compile(
+                &crate::graph_compiler::frontend(&g, &options).unwrap(),
+                &options,
+            )
+            .unwrap();
 
             let at = plan
                 .steps()
@@ -3040,8 +3051,11 @@ fn every_tuned_gemm_kernel_stores_every_epilogue() {
 
             let on_mps: Vec<Tensor> = inputs.iter().map(|t| t.to(Device::Mps(0))).collect();
 
-            let mut plan =
-                crate::graph_compiler::compile_with(&g, Device::Mps(0), &options).unwrap();
+            let mut plan = super::compile(
+                &crate::graph_compiler::frontend(&g, &options).unwrap(),
+                &options,
+            )
+            .unwrap();
 
             let at = plan
                 .steps()
@@ -3152,8 +3166,11 @@ fn every_gemm_candidate_accumulates_in_the_accum_dtype() {
 
             let on_mps = [ones(&[m, k]), ones(&[k, n])];
 
-            let mut plan =
-                crate::graph_compiler::compile_with(&g, Device::Mps(0), &options).unwrap();
+            let mut plan = super::compile(
+                &crate::graph_compiler::frontend(&g, &options).unwrap(),
+                &options,
+            )
+            .unwrap();
 
             let at = plan
                 .steps()
@@ -3241,7 +3258,11 @@ fn gemv_lanes_sum_in_a_bfloat_accumulator() {
         Tensor::ones(&[n, k], options_on.dtype(DType::BF16)),
     ];
 
-    let mut plan = crate::graph_compiler::compile_with(&g, Device::Mps(0), &options).unwrap();
+    let mut plan = super::compile(
+        &crate::graph_compiler::frontend(&g, &options).unwrap(),
+        &options,
+    )
+    .unwrap();
 
     let at = plan
         .steps()
@@ -3335,7 +3356,11 @@ fn strided_gemms_tune_mpp() {
 
     let mut options = crate::graph_compiler::Options::default();
     options.config.autotune = false;
-    let mut plan = crate::graph_compiler::compile_with(&g, Device::Mps(0), &options).unwrap();
+    let mut plan = super::compile(
+        &crate::graph_compiler::frontend(&g, &options).unwrap(),
+        &options,
+    )
+    .unwrap();
 
     let at = plan
         .steps()
@@ -3762,7 +3787,11 @@ fn every_gemv_candidate_stores_every_epilogue() {
             .collect();
 
         let on_mps: Vec<Tensor> = inputs.iter().map(|t| t.to(Device::Mps(0))).collect();
-        let mut plan = crate::graph_compiler::compile_with(&g, Device::Mps(0), &options).unwrap();
+        let mut plan = super::compile(
+            &crate::graph_compiler::frontend(&g, &options).unwrap(),
+            &options,
+        )
+        .unwrap();
 
         let at = plan
             .steps()

@@ -2,17 +2,16 @@
 //! memo; the runtime lowers it once per device and launches it.
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use crate::codegen::elementwise::ElementwiseCodegen;
 use crate::codegen::utils::tpu::Tpu;
 use crate::graph::Primitive;
 use crate::graph_compiler::Options;
-use crate::plan::{Plan, Step};
+use crate::plan::{CpuPlan, Step as _, StepBase, TpuPlan, TpuStep};
 use crate::runtime::tpu::GENERATED;
 
 /// How a kernel's buffers are ordered among a step's input and output buffers.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) enum Rows {
     /// The step's inputs, its output, then its extra buffers.
     Split,
@@ -23,6 +22,7 @@ pub(crate) enum Rows {
 }
 
 /// A step's TPU kernel: generated once, when its plan compiles, and lowered once per device.
+#[derive(Debug, Clone)]
 pub(crate) struct Kernel {
     /// Python module whose `program(spec)` lowers the kernel, or `GENERATED` for a generated program.
     pub(crate) module: &'static str,
@@ -56,7 +56,7 @@ impl Kernel {
 }
 
 /// The elementwise fusion `step`'s kernel; `None` when it writes nothing.
-fn elementwise(step: &Step) -> Result<Option<Kernel>, String> {
+fn elementwise(step: &StepBase) -> Result<Option<Kernel>, String> {
     let Primitive::Fusion { body, .. } = &step.primitive else {
         unreachable!("an elementwise fusion")
     };
@@ -85,7 +85,7 @@ fn elementwise(step: &Step) -> Result<Option<Kernel>, String> {
 }
 
 /// Plan `step`'s TPU kernel, by its primitive or fusion kind; `None` when it has nothing to launch.
-pub(crate) fn kernel(step: &Step) -> Result<Option<Kernel>, String> {
+pub(crate) fn kernel(step: &StepBase) -> Result<Option<Kernel>, String> {
     match step.primitive {
         Primitive::Fusion { ref name, .. } if name.starts_with("flash_attention") => {
             crate::codegen::attention::tpu::step_kernel(step).map(Some)
@@ -127,18 +127,17 @@ pub(crate) fn kernel(step: &Step) -> Result<Option<Kernel>, String> {
     }
 }
 
-/// Generates the kernel of each step of `plan`, kept on the step, so runs only launch them; fails on a step no
+/// The TPU plan of `plan`: each step with its kernel, generated now so runs only launch them; fails on a step no
 /// TPU kernel takes (a gather, only once its launch finds the SparseCore can't run it either).
-pub(crate) fn codegen(plan: &mut Plan, _: &Options) -> Result<(), String> {
-    for step in plan.steps_mut() {
-        match kernel(step) {
-            Ok(Some(kernel)) => step.kernel = Some(Arc::new(kernel)),
-            Ok(None) => {}
+pub(crate) fn codegen(plan: CpuPlan, _: &Options) -> Result<TpuPlan, String> {
+    plan.map(|step| {
+        let kernel = match kernel(&step) {
+            Ok(kernel) => kernel,
             // A gather its TensorCore kernel can't take may still run on the SparseCore, which its launch decides.
-            Err(_) if matches!(step.primitive, Primitive::Gather { .. }) => {}
+            Err(_) if matches!(step.primitive, Primitive::Gather { .. }) => None,
             Err(e) => return Err(e),
-        }
-    }
+        };
 
-    Ok(())
+        Ok(TpuStep::new(step.into_base(), kernel))
+    })
 }

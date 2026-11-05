@@ -3,7 +3,6 @@
 //! elementwise) each fused body lowers to.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
 
 use crate::autotune::mps::Tunable;
 use crate::codegen::attention::AttentionCodegen;
@@ -21,16 +20,17 @@ use crate::graph_compiler::mps::{Kernel, compile_routed, record_launch};
 use crate::graph_compiler::passes::attention::{self, Strides};
 use crate::graph_compiler::passes::place_views;
 use crate::graph_compiler::{CompilerConfig, Options};
-use crate::plan::{Buffer, Plan, Step};
+use crate::plan::{Buffer, CpuPlan, MpsPlan, MpsStep, Step as _, StepBase};
 
-/// Generates and compiles each pending fusion step's kernel in `plan`, writing its outputs through the step's
-/// output views and reading its by-value inputs as scalars, and names the step after it. An elementwise
-/// fusion keeps what the autotuner needs to regenerate it as its step's kernel.
-pub(crate) fn codegen(plan: &mut Plan, options: &Options) -> Result<(), String> {
+/// The MPS plan of `plan`: generates and compiles each pending fusion step's kernel, writing its outputs through
+/// the step's output views and reading its by-value inputs as scalars, and names the step after it. An
+/// elementwise fusion keeps what the autotuner needs to regenerate it as its step's kernel.
+pub(crate) fn codegen(mut plan: CpuPlan, options: &Options) -> Result<MpsPlan, String> {
     let config = &options.config;
     let mut sources = BTreeMap::new();
+    let mut kernels: Vec<Option<Tunable>> = plan.steps().iter().map(|_| None).collect();
 
-    for step in plan.steps_mut() {
+    for (at, step) in plan.steps_mut().iter_mut().map(|s| &mut s.0).enumerate() {
         // Output views, keyed by output index, of a fusion writing straight into a placed buffer.
         let mut views: HashMap<usize, (usize, Vec<usize>)> = step
             .output_views
@@ -67,7 +67,7 @@ pub(crate) fn codegen(plan: &mut Plan, options: &Options) -> Result<(), String> 
             Kernel::Fusion => {
                 let (kernel, source) = kernel(body, &by_value, config, &views, None)
                     .map_err(|e| format!("{}: {e}", step.label))?;
-                step.kernel = Some(Arc::new(Tunable { by_value, views }));
+                kernels[at] = Some(Tunable { by_value, views });
                 (kernel, source)
             }
             Kernel::Attention => {
@@ -92,7 +92,9 @@ pub(crate) fn codegen(plan: &mut Plan, options: &Options) -> Result<(), String> 
         *name = kernel;
     }
 
-    compile_routed(sources)
+    compile_routed(sources)?;
+    let mut kernels = kernels.into_iter();
+    plan.map(|step| Ok(MpsStep::new(step.into_base(), kernels.next().flatten())))
 }
 
 /// Default launch tuning when `body` lowers to the elementwise kernel, else `None`.
@@ -180,7 +182,7 @@ pub(crate) fn loads_strided(body: &Graph, k: usize) -> bool {
 
 /// Whether some input of `step` is a view its kernel loads element by element (a strided variant of the
 /// kernel), which tuned kernels don't; views a GEMM's dot strides through need none.
-pub(crate) fn loads_views(step: &Step) -> bool {
+pub(crate) fn loads_views(step: &StepBase) -> bool {
     let Primitive::Fusion { body, .. } = &step.primitive else {
         return step.views.iter().any(Option::is_some);
     };

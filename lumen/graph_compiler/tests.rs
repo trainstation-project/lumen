@@ -422,7 +422,7 @@ fn host_values_run_in_a_host_stage() {
     };
 
     let plan = super::compile(&to_host_graph(), device).unwrap();
-    let staged = plan.staged.as_ref().expect("a staged plan");
+    let staged = plan.staged().expect("a staged plan");
     let hosts: Vec<bool> = staged.stages.iter().map(|s| s.host).collect();
     assert_eq!(hosts, [false, true]);
 
@@ -457,7 +457,7 @@ fn values_copied_back_at_once_pass_through_a_host_stage() {
     let z = apply(&mut g, Mul, &[d, two]);
     g.set_outputs(&[z]).unwrap();
     let plan = super::compile(&g, device).unwrap();
-    let staged = plan.staged.as_ref().expect("a staged plan");
+    let staged = plan.staged().expect("a staged plan");
     let hosts: Vec<bool> = staged.stages.iter().map(|s| s.host).collect();
     assert_eq!(hosts, [false, true, false]);
 
@@ -483,7 +483,7 @@ fn programs_without_host_values_are_one_plan() {
     let y = apply(&mut g, Mul, &[d, x]);
     g.set_outputs(&[y]).unwrap();
     let plan = super::compile(&g, crate::Device::Meta(0)).unwrap();
-    assert!(plan.staged.is_none());
+    assert!(plan.staged().is_none());
     let steps: Vec<_> = plan.steps().iter().map(|s| s.primitive.name()).collect();
     assert_eq!(steps, ["mul"]);
 }

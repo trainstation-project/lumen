@@ -11,7 +11,7 @@ use super::mil;
 use crate::graph::{FUSION_SEPARATOR, Graph, NEURAL_ENGINE, Primitive, TensorType, Var, intern};
 use crate::graph_compiler::mps::MpsModule;
 use crate::graph_compiler::passes::CompilerPass;
-use crate::plan::Step;
+use crate::plan::StepBase;
 use crate::tensor::contiguous_strides;
 use crate::{DType, Tensor};
 
@@ -651,7 +651,7 @@ fn contiguous(data: *const u8, ty: &TensorType, strides: &[usize]) -> Vec<u8> {
 /// Queues the Neural Engine fusion `step` on the Core ML thread, compiling it with its weights on first use.
 /// The Metal stream signals before the job runs and waits until it finishes; `keep` stays alive until then.
 pub(crate) fn encode(
-    step: &Step,
+    step: &StepBase,
     inputs: &[*const u8],
     output: *mut u8,
     keep: Vec<Tensor>,
@@ -833,7 +833,7 @@ fn run(job: Job) {
 
 #[cfg(feature = "python")]
 /// Forgets the compiled programs of `steps` so their next run recompiles with fresh weights.
-pub(crate) fn invalidate<'a>(steps: impl IntoIterator<Item = &'a Step>) {
+pub(crate) fn invalidate<'a>(steps: impl IntoIterator<Item = &'a StepBase>) {
     let mut programs = programs();
 
     for step in steps {

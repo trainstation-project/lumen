@@ -17,7 +17,7 @@ use crate::graph_compiler::passes::attention::{
     self, Access, Attention, Backward, Dropout, Score, Strides,
 };
 #[cfg(lumen_tpu_linked)]
-use crate::plan::Step;
+use crate::plan::StepBase;
 use crate::tensor::contiguous_strides;
 use config::blocks;
 
@@ -782,7 +782,7 @@ fn written_at(
 
 /// The kernel of an attention fusion step, binding its inputs, then its output, then any extra outputs.
 #[cfg(lumen_tpu_linked)]
-pub(crate) fn step_kernel(step: &Step) -> Result<Kernel, String> {
+pub(crate) fn step_kernel(step: &StepBase) -> Result<Kernel, String> {
     let Primitive::Fusion { name, body, .. } = &step.primitive else {
         unreachable!("an attention fusion")
     };

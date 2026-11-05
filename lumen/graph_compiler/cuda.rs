@@ -1,8 +1,6 @@
 //! The CUDA backend, CUDA's default (`config.compiler.use_triton_backend` off): kernels in
-//! NVIDIA's CuTe DSL, generated per step and compiled at their first launch. It runs elementwise fusions (any layout: broadcasts, transposes, slices and strided inputs
+//! NVIDIA's CuTe DSL, generated per step (`codegen::cuda`) and launched by `runtime::cuda`. It runs elementwise fusions (any layout: broadcasts, transposes, slices and strided inputs
 //! read through index math) and errors on graphs needing any other kernel.
-
-use std::sync::OnceLock;
 
 use super::config::CompilerConfig;
 use super::passes::alone::{Alone, Lone};
@@ -10,30 +8,10 @@ use super::passes::fusion::{Backend, fuse};
 use super::passes::{CompilerPass, Module};
 use super::pipeline::{Pass, Passes, pipeline, when};
 use super::{Options, plan_options};
-use crate::codegen::elementwise::cuda::Layouts;
+use crate::Device;
 use crate::codegen::utils::cuda::cute_type;
 use crate::graph::{Graph, Node, Primitive, Var};
-use crate::plan::{Plan, Step};
-use crate::{Device, Tensor};
-
-/// Launches kernel `name` of module `source` (compiling it on its first launch) on `tensors`, its
-/// inputs then its `outputs` outputs, each a flat view of the elements it spans, over `n` elements.
-pub type Launch = fn(
-    name: &str,
-    source: &str,
-    tensors: &[Tensor],
-    outputs: usize,
-    n: usize,
-) -> Result<(), String>;
-
-/// The launcher installed from Python (`lumen.codegen.utils.cuda`).
-static LAUNCH: OnceLock<Launch> = OnceLock::new();
-
-/// Installs the launcher; later calls are ignored.
-#[cfg_attr(not(feature = "python"), allow(dead_code))]
-pub(crate) fn set_launch(launch: Launch) {
-    let _ = LAUNCH.set(launch);
-}
+use crate::plan::{CpuPlan, CudaPlan};
 
 /// Name of an elementwise fusion.
 const ELEMENTWISE: &str = "elementwise";
@@ -169,7 +147,11 @@ impl Passes for CudaModule<'_> {
 
 /// Compiles `graph` for the CUDA backend on `device`: fuses its elementwise work and plans it, every
 /// runtime scalar a 0-d device input; errors on an op it has no kernel for.
-pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Result<Plan, String> {
+pub(crate) fn compile(
+    graph: &Graph,
+    device: Device,
+    options: &Options,
+) -> Result<CudaPlan, String> {
     let _ = device;
 
     let mut module = CudaModule {
@@ -196,43 +178,5 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
 
     let config = &options.config;
     let plan = plan_options(&fused, options, config, &Vec::new(), Vec::new());
-    let mut plan = Plan::compile_with(&fused, &plan);
-    crate::codegen::cuda::codegen(&mut plan, options)?;
-    Ok(plan)
-}
-
-/// Runs `step` on its buffers: an elementwise fusion, or an output's copy (a reshape), through the kernel
-/// generated for the tensors' layouts (kept in the step's memo) and launched by Python.
-pub(crate) fn run(
-    step: &Step,
-    inputs: &[Tensor],
-    out: &Tensor,
-    outs: &[Tensor],
-) -> Result<(), String> {
-    let launch = LAUNCH.get().ok_or(
-        "the CUDA backend launches from Python (lumen.codegen.utils.cuda): none is installed",
-    )?;
-
-    let outputs: Vec<&Tensor> = std::iter::once(out).chain(outs).collect();
-    let n = outputs.iter().map(|t| t.numel()).max().unwrap_or(0);
-
-    if n == 0 {
-        return Ok(());
-    }
-
-    let tensors: Vec<Tensor> = inputs
-        .iter()
-        .chain(outputs.iter().copied())
-        .map(Tensor::flat)
-        .collect();
-
-    let layouts = Layouts {
-        inputs: inputs.iter().map(|t| t.strides().to_vec()).collect(),
-        outputs: outputs.iter().map(|t| t.strides().to_vec()).collect(),
-        spans: tensors.iter().map(Tensor::numel).collect(),
-    };
-
-    let code = crate::codegen::cuda::generated(step, layouts)?;
-    let (name, source) = code.as_ref();
-    launch(name, source, &tensors, outputs.len(), n)
+    crate::codegen::cuda::codegen(CpuPlan::compile_with(&fused, &plan), options)
 }

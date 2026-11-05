@@ -1,8 +1,6 @@
 //! Triton codegen: each planned step's loop kernel, generated once when the plan compiles (its `BODY`, for a
 //! templated kernel, generated with its tensors' layouts at launch).
 
-use std::sync::Arc;
-
 use crate::DType;
 use crate::codegen::kinds::{gemm_dot, reduction_root};
 use crate::codegen::layout::{TILE, transpose_tiling};
@@ -10,12 +8,12 @@ use crate::codegen::reduction::ReductionCodegen;
 use crate::codegen::row::RowCodegen;
 use crate::codegen::scan::ScanCodegen;
 use crate::codegen::scan::triton::Scan;
+use crate::codegen::scatter_add::triton::launch::Scatter;
 use crate::codegen::utils::triton as codegen;
 use crate::graph::{Primitive, UPDATES};
 use crate::graph_compiler::Options;
 use crate::graph_compiler::passes::horizontal::segments;
-use crate::graph_compiler::passes::scatter_add::triton::Scatter;
-use crate::plan::{Buffer, Plan, Step};
+use crate::plan::{Buffer, CpuPlan, Step as _, StepBase, TritonPlan, TritonStep};
 
 /// A generated Triton loop kernel for one plan step.
 #[derive(Debug, Clone)]
@@ -156,19 +154,14 @@ pub enum Constexpr {
 /// Name of a normalization row fusion.
 pub(crate) const ROW: &str = "row";
 
-/// Generates each step's loop kernel, kept on the step (none for a step another kernel runs), and marks `plan`
-/// as Triton's.
-pub(crate) fn codegen(plan: &mut Plan, options: &Options) -> Result<(), String> {
+/// Triton's plan of `plan`: each step with its loop kernel (none for a step another kernel runs).
+pub(crate) fn codegen(plan: CpuPlan, options: &Options) -> Result<TritonPlan, String> {
     let deterministic = options.config.deterministic;
 
-    for step in plan.steps_mut() {
-        if let Some(kernel) = loop_kernel(step, deterministic)? {
-            step.kernel = Some(Arc::new(kernel));
-        }
-    }
-
-    plan.triton = true;
-    Ok(())
+    plan.map(|step| {
+        let kernel = loop_kernel(&step, deterministic)?;
+        Ok(TritonStep::new(step.into_base(), kernel))
+    })
 }
 
 /// The name of a templated kernel: `kind` plus a hash of `key`, what its `BODY` is generated from (the
@@ -200,7 +193,7 @@ fn atomic_add(dtype: DType) -> bool {
 /// Generates the loop kernel for `step`, or `None` for GEMMs and steps without a Triton loop kernel;
 /// unless `deterministic`, a scatter-add of a dtype with atomic adds adds each update element atomically,
 /// otherwise it sorts its picks by position and adds a row's in order. Fails on a body no kernel takes.
-pub(crate) fn loop_kernel(step: &Step, deterministic: bool) -> Result<Option<Kernel>, String> {
+pub(crate) fn loop_kernel(step: &StepBase, deterministic: bool) -> Result<Option<Kernel>, String> {
     let by_value: Vec<bool> = step
         .inputs
         .iter()
@@ -336,7 +329,7 @@ pub(crate) fn loop_kernel(step: &Step, deterministic: bool) -> Result<Option<Ker
 }
 
 /// How the scan template tiles cumsum `step`.
-fn scan(step: &Step) -> Result<Scan, String> {
+fn scan(step: &StepBase) -> Result<Scan, String> {
     let Primitive::Cumsum {
         axis,
         reverse,

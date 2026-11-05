@@ -3,6 +3,7 @@
 //! layout, and the traced score ops.
 
 mod config;
+pub(crate) mod launch;
 
 pub(crate) use config::*;
 

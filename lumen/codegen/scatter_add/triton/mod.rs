@@ -3,5 +3,6 @@
 //! fuses into a scatter-add, so there is no code to generate.
 
 mod config;
+pub(crate) mod launch;
 
 pub(crate) use config::*;

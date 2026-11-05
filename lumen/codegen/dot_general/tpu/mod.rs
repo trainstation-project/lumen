@@ -8,7 +8,7 @@ pub(crate) mod row;
 use crate::codegen::tpu::{Kernel, Rows};
 use crate::codegen::utils::tpu::Tpu;
 use crate::graph::Primitive;
-use crate::plan::Step;
+use crate::plan::StepBase;
 
 /// The largest block dividing `n` that is a multiple of `unit` and at most `cap`; `n` itself when it fits.
 pub(crate) fn block(n: usize, unit: usize, cap: usize) -> Option<usize> {
@@ -32,7 +32,7 @@ pub(crate) fn caps(dtype: DType, k: usize) -> (usize, usize, usize) {
 }
 
 /// The kernel of a plan step's dot (or dot-plus-epilogue fusion); `None` when its output is empty.
-pub(crate) fn kernel(step: &Step) -> Result<Option<Kernel>, String> {
+pub(crate) fn kernel(step: &StepBase) -> Result<Option<Kernel>, String> {
     let out = &step.output.1;
 
     if out.numel() == 0 {

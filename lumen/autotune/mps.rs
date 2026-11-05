@@ -15,11 +15,12 @@ use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::mps::{
     SOURCES, compile_kernels, compile_mpp_kernels, compile_routed, record_launch,
 };
-use crate::plan::{Buffer, Step, Tuned};
-use crate::runtime::mps::Encode;
+use crate::plan::step::mps::Encode;
+use crate::plan::{Buffer, MpsStep, Tuned};
 use crate::tensor::contiguous_strides;
 
 /// What a tunable elementwise fusion needs to regenerate its kernel under another tuning.
+#[derive(Debug, Clone)]
 pub(crate) struct Tunable {
     /// Per fusion input, whether it is passed by value.
     pub by_value: Vec<bool>,
@@ -28,10 +29,8 @@ pub(crate) struct Tunable {
 }
 
 /// What a tunable elementwise fusion `step` keeps as its kernel, or `None` for any other step.
-fn tunable(step: &Step) -> Option<&Tunable> {
-    step.kernel
-        .as_deref()
-        .and_then(|k| k.downcast_ref::<Tunable>())
+fn tunable(step: &MpsStep) -> Option<&Tunable> {
+    step.kernel.as_ref()
 }
 
 /// Byte alignment of each buffer carved out of the timing scratch.
@@ -53,10 +52,11 @@ fn uncompiled(sources: &mut BTreeMap<String, String>) -> BTreeMap<String, String
 }
 
 impl Kernels for Elementwise<'_> {
+    type Step = MpsStep;
     type Config = Tuning;
 
     /// Tunings to try for a tunable fusion of a mid-sized output, or none.
-    fn configs(&self, step: &Step) -> Vec<Tuning> {
+    fn configs(&self, step: &MpsStep) -> Vec<Tuning> {
         let Primitive::Fusion { body, .. } = &step.primitive else {
             return Vec::new();
         };
@@ -68,7 +68,7 @@ impl Kernels for Elementwise<'_> {
     }
 
     /// Generates the fusion's kernel under `tuning` and an encoder that launches it.
-    fn build(&mut self, step: &Step, tuning: Tuning) -> Tuned {
+    fn build(&mut self, step: &MpsStep, tuning: Tuning) -> Tuned {
         let Primitive::Fusion { body, .. } = &step.primitive else {
             unreachable!("a fusion")
         };
@@ -132,7 +132,7 @@ const TUNED_OUTPUTS: usize = 64 << 10;
 
 /// The dot of a GEMM fusion with its lhs, rhs and output types.
 pub(crate) fn matmul_of(
-    step: &Step,
+    step: &MpsStep,
 ) -> Option<(&Primitive, &TensorType, &TensorType, &TensorType)> {
     let Primitive::Fusion { body, .. } = &step.primitive else {
         return None;
@@ -151,7 +151,7 @@ pub(crate) fn matmul_of(
 
 /// Whether `step` is a float GEMM fusion that the tiled GEMM kernels can run, with views only on its dot's
 /// operands (read through their strides).
-fn tiled_gemm(step: &Step) -> bool {
+fn tiled_gemm(step: &MpsStep) -> bool {
     let float = step.output.1.dtype.is_float();
     let views = !crate::codegen::mps::loads_views(step);
 
@@ -169,10 +169,11 @@ fn tiled_gemm(step: &Step) -> bool {
 }
 
 impl Kernels for Gemms {
+    type Step = MpsStep;
     type Config = GemmConfig;
 
     /// Candidate GEMM configs for `step`, filtered to those its epilogue fits in threadgroup memory.
-    fn configs(&self, step: &Step) -> Vec<GemmConfig> {
+    fn configs(&self, step: &MpsStep) -> Vec<GemmConfig> {
         let Some((dot, lhs, rhs, out)) = matmul_of(step) else {
             return Vec::new();
         };
@@ -321,7 +322,7 @@ impl Kernels for Gemms {
     }
 
     /// Generates the GEMM variant for `config` and an encoder that launches it.
-    fn build(&mut self, step: &Step, config: GemmConfig) -> Tuned {
+    fn build(&mut self, step: &MpsStep, config: GemmConfig) -> Tuned {
         let Primitive::Fusion { body, .. } = &step.primitive else {
             unreachable!("a GEMM fusion")
         };
@@ -373,10 +374,11 @@ pub(crate) struct Attentions {
 }
 
 impl Kernels for Attentions {
+    type Step = MpsStep;
     type Config = crate::codegen::attention::mps::Tuning;
 
     /// The tunings of an attention forward step's matched attention, laid out as the step reads it.
-    fn configs(&self, step: &Step) -> Vec<Self::Config> {
+    fn configs(&self, step: &MpsStep) -> Vec<Self::Config> {
         let Primitive::Fusion { body, .. } = &step.primitive else {
             return Vec::new();
         };
@@ -390,7 +392,7 @@ impl Kernels for Attentions {
     }
 
     /// Generates the forward for `tuning` and an encoder launching it.
-    fn build(&mut self, step: &Step, tuning: Self::Config) -> Tuned {
+    fn build(&mut self, step: &MpsStep, tuning: Self::Config) -> Tuned {
         let Primitive::Fusion { body, .. } = &step.primitive else {
             unreachable!("an attention fusion")
         };
@@ -432,6 +434,7 @@ impl Kernels for Attentions {
 pub(crate) struct Mps;
 
 impl Timer for Mps {
+    type Step = MpsStep;
     type Buffers = Buffers;
 
     fn device(&self) -> Device {
@@ -439,14 +442,14 @@ impl Timer for Mps {
     }
 
     /// Allocates the timing buffers for `step`.
-    fn buffers(&self, step: &Step) -> Result<Option<Buffers>, String> {
+    fn buffers(&self, step: &MpsStep) -> Result<Option<Buffers>, String> {
         Ok(Buffers::new(step))
     }
 
     /// Encodes one launch, rotating through input copies so repeats read cold memory.
-    fn run(&self, buffers: &Buffers, step: &Step, rep: usize) -> Result<(), String> {
+    fn run(&self, buffers: &Buffers, step: &MpsStep, rep: usize) -> Result<(), String> {
         let inputs = &buffers.copies[rep % buffers.copies.len()];
-        crate::runtime::mps::encode(step, inputs, buffers.output, buffers.scratch, Vec::new())
+        step.run_raw(inputs, buffers.output, buffers.scratch, Vec::new())
     }
 }
 
@@ -491,7 +494,7 @@ fn aligned(bytes: usize) -> usize {
 
 impl Buffers {
     /// Lays out the buffers for `step`, halving the copy count until the allocation succeeds.
-    fn new(step: &Step) -> Option<Self> {
+    fn new(step: &MpsStep) -> Option<Self> {
         let inputs: Vec<usize> = step
             .inputs
             .iter()

@@ -8,7 +8,7 @@ use crate::codegen::row::tpu::{Kind, kinds, readable, row_node, rows};
 use crate::codegen::tpu::{Kernel, Rows};
 use crate::device::tpu::layout::Layout;
 use crate::graph::{Graph, Primitive, Var};
-use crate::plan::Step;
+use crate::plan::StepBase;
 
 /// VMEM budget, in bytes, a GEMM-row block may use.
 const VMEM: usize = 88 << 20;
@@ -43,7 +43,7 @@ fn row_part(body: &Graph) -> Graph {
 
 /// The kernel of the dot-then-row fusion `step`: each block of rows computes its full
 /// `n`-wide GEMM output in VMEM and applies the row nodes to it.
-pub(crate) fn kernel(step: &Step) -> Result<Kernel, String> {
+pub(crate) fn kernel(step: &StepBase) -> Result<Kernel, String> {
     let Primitive::Fusion { body, .. } = &step.primitive else {
         unreachable!("a dot_row fusion")
     };

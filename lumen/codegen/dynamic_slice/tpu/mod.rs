@@ -7,7 +7,7 @@ use crate::codegen::tpu::{Kernel, Rows};
 use crate::codegen::utils::tpu::Tpu;
 use crate::device::tpu::layout::Layout;
 use crate::graph::{Graph, Primitive, TensorType};
-use crate::plan::Step;
+use crate::plan::StepBase;
 use crate::tensor::scalar::Scalar;
 
 /// Lane width of a TPU tile.
@@ -259,7 +259,7 @@ impl DynamicSliceCodegen for Tpu {
 
 /// The `dynamic_update_slice` kernel for `step`: one update at runtime int32 starts, or a fusion of
 /// several updates at constant starts (clamped into range here); `None` when the update is empty.
-pub(crate) fn kernel(step: &Step) -> Result<Option<Kernel>, String> {
+pub(crate) fn kernel(step: &StepBase) -> Result<Option<Kernel>, String> {
     let (operand, update) = (&step.inputs[0].1, &step.inputs[1].1);
     let fixed = matches!(step.primitive, Primitive::Fusion { .. });
 

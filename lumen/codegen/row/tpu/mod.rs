@@ -18,7 +18,7 @@ use crate::device::tpu::layout::Layout;
 use crate::graph::Var;
 use crate::graph::{Graph, Node, Primitive, TensorType};
 #[cfg(lumen_tpu_linked)]
-use crate::plan::Step;
+use crate::plan::StepBase;
 
 /// Most bytes a minimal float32 block of rows (16 rows of `n`) may take.
 pub(crate) const ROW_BYTES: usize = 1 << 21;
@@ -377,7 +377,7 @@ pub(crate) fn block_rows(rows: usize, n: usize, unit: usize) -> Result<usize, St
 
 /// The kernel of the row fusion `step`.
 #[cfg(lumen_tpu_linked)]
-pub(crate) fn kernel(step: &Step) -> Result<Kernel, String> {
+pub(crate) fn kernel(step: &StepBase) -> Result<Kernel, String> {
     let Primitive::Fusion { body, .. } = &step.primitive else {
         unreachable!("a row fusion")
     };

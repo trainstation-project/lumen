@@ -1,14 +1,14 @@
 //! Compiling a graph into a plan: placing every value in caller inputs, fresh outputs or the shared
 //! workspace, and the steps that run it.
 
-use std::cmp::Reverse;
-#[cfg(lumen_mps_linked)]
-use std::sync::OnceLock;
-
-use super::{ALIGNMENT, Buffer, Memo, Plan, PlanOptions, Staged, Step, lcm};
+use super::{
+    ALIGNMENT, Buffer, CpuPlan, CpuStep, DevicePlan, Memo, PlanBase, PlanOptions, Staged,
+    StagedPlan, StepBase, lcm,
+};
 use crate::graph::{Graph, NEURAL_ENGINE, Node, Primitive, TensorType, UPDATES, Var, View};
+use std::cmp::Reverse;
 
-impl Plan {
+impl CpuPlan {
     /// Compiles `graph` with default options.
     pub fn compile(graph: &Graph) -> Self {
         Self::compile_with(graph, &PlanOptions::default())
@@ -481,10 +481,10 @@ impl Plan {
             })
             .collect();
 
-        let mut steps: Vec<Step> = nodes
+        let mut steps: Vec<StepBase> = nodes
             .iter()
             .zip(scratch_at)
-            .map(|(node, scratch)| Step {
+            .map(|(node, scratch)| StepBase {
                 primitive: node.primitive.clone(),
                 label: graph.label(node),
                 inputs: node.inputs.iter().map(|&v| slot(v)).collect(),
@@ -511,14 +511,13 @@ impl Plan {
                     sources
                 },
                 tuned: None,
-                kernel: None,
                 memo: Memo::default(),
             })
             .collect();
 
         // Outputs that alias another buffer are copied out at the end.
         for (k, v) in copies {
-            steps.push(Step {
+            steps.push(StepBase {
                 primitive: Primitive::Reshape {
                     new_sizes: ty(v).shape,
                 },
@@ -532,58 +531,52 @@ impl Plan {
                 scope: &[],
                 sources: Vec::new(),
                 tuned: None,
-                kernel: None,
                 memo: Memo::default(),
             });
         }
 
-        Plan {
-            inputs: graph.inputs().iter().map(|&v| ty(v)).collect(),
-            outputs: graph.outputs().iter().map(|&v| ty(v)).collect(),
-            aliases,
-            inputs_at,
-            arguments,
-            outputs_at,
-            steps,
-            workspace_bytes,
-            workspace_alignment,
-            packed: Vec::new(),
-            interleaved: Vec::new(),
-            staged: None,
-            triton: false,
-            cuda: false,
-            #[cfg(lumen_mps_linked)]
-            launches: OnceLock::new(),
+        DevicePlan {
+            base: PlanBase {
+                inputs: graph.inputs().iter().map(|&v| ty(v)).collect(),
+                outputs: graph.outputs().iter().map(|&v| ty(v)).collect(),
+                aliases,
+                inputs_at,
+                arguments,
+                outputs_at,
+                workspace_bytes,
+                workspace_alignment,
+                packed: Vec::new(),
+                interleaved: Vec::new(),
+            },
+            steps: steps.into_iter().map(CpuStep).collect(),
         }
     }
+}
 
+impl StagedPlan {
     /// Builds a staged plan whose stages run in order on the host or device.
-    pub(crate) fn staged(
+    pub(crate) fn new(
         inputs: Vec<TensorType>,
         outputs: Vec<TensorType>,
         staged: Staged,
-        steps: Vec<Step>,
         (workspace_bytes, workspace_alignment): (usize, usize),
         packed: Vec<(Vec<usize>, usize)>,
         interleaved: Vec<Vec<usize>>,
-    ) -> Plan {
-        Plan {
-            aliases: vec![None; outputs.len()],
-            inputs,
-            outputs,
-            inputs_at: Vec::new(),
-            arguments: Vec::new(),
-            outputs_at: Vec::new(),
-            steps,
-            workspace_bytes,
-            workspace_alignment,
-            packed,
-            interleaved,
-            staged: Some(Box::new(staged)),
-            triton: false,
-            cuda: false,
-            #[cfg(lumen_mps_linked)]
-            launches: OnceLock::new(),
+    ) -> Self {
+        StagedPlan {
+            base: PlanBase {
+                aliases: vec![None; outputs.len()],
+                inputs,
+                outputs,
+                inputs_at: Vec::new(),
+                arguments: Vec::new(),
+                outputs_at: Vec::new(),
+                workspace_bytes,
+                workspace_alignment,
+                packed,
+                interleaved,
+            },
+            staged,
         }
     }
 }
