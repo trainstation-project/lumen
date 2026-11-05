@@ -7,7 +7,7 @@ from dataclasses import dataclass, fields
 from functools import lru_cache
 from typing import Tuple, get_origin
 
-import torch
+import cuda.bindings.driver as cuda
 
 try:
     from triton.tools.disasm import extract
@@ -66,23 +66,6 @@ def _patched_convert_single_arg(arg, arg_name, arg_type, ctx):
 _converter_module._convert_single_arg = _patched_convert_single_arg
 
 
-torch2cute_dtype_map = {
-    torch.uint8: cutlass.Uint8,
-    # Packed fp4: dlpack presents the logical (doubled) K extent to the DSL.
-    torch.float4_e2m1fn_x2: cutlass.Float4E2M1FN,
-    torch.float8_e4m3fn: Float8E4M3FN,
-    torch.float8_e5m2: Float8E5M2,
-    torch.float8_e4m3fn: cutlass.Float8E4M3FN,
-    torch.float8_e5m2: cutlass.Float8E5M2,
-    torch.float8_e8m0fnu: cutlass.Float8E8M0FNU,
-    torch.float16: Float16,
-    torch.bfloat16: BFloat16,
-    torch.float32: Float32,
-    torch.int32: Int32,
-    torch.int64: Int64,
-}
-
-
 @lru_cache
 def get_device_multiprocessor_count(device_id: int = 0) -> int:
     return cutlass.utils.HardwareInfo(device_id).get_device_multiprocessor_count()
@@ -112,9 +95,27 @@ def _parse_arch_str(arch_str: str) -> Tuple[int, int]:
     return int(major), int(minor)
 
 
+def _device_capability(device: int = 0) -> Tuple[int, int]:
+    """(major, minor) compute capability of CUDA device `device`, read from the driver (lumen: instead of torch)."""
+
+    def checked(result):
+        """The value of driver call `result`, raising when it failed."""
+        status, *values = result
+        if status != cuda.CUresult.CUDA_SUCCESS:
+            raise RuntimeError(f"reading CUDA device {device}'s compute capability failed ({status.name})")
+        return values[0] if values else None
+
+    checked(cuda.cuInit(0))
+    handle = checked(cuda.cuDeviceGet(device))
+    attribute = cuda.CUdevice_attribute
+    major = checked(cuda.cuDeviceGetAttribute(attribute.CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR, handle))
+    minor = checked(cuda.cuDeviceGetAttribute(attribute.CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR, handle))
+    return major, minor
+
+
 @lru_cache
-def _get_device_capacity_cached(device: torch.device = None) -> Tuple[int, int]:
-    """Return (major, minor) device capability.
+def get_device_capacity(device: int | None = None) -> Tuple[int, int]:
+    """Return (major, minor) device capability of CUDA device `device` (the first when None).
 
     Override with QUACK_ARCH (e.g. 'sm_90' or '90') for CPU-only compilation
     without a GPU present.
@@ -122,24 +123,7 @@ def _get_device_capacity_cached(device: torch.device = None) -> Tuple[int, int]:
     arch_override = os.environ.get("QUACK_ARCH")
     if arch_override is not None:
         return _parse_arch_str(arch_override)
-    return torch.cuda.get_device_capability(device)
-
-
-def get_device_capacity(
-    device: torch.device | torch.Tensor | None = None,
-) -> Tuple[int, int]:
-    """Return (major, minor) device capability.
-
-    Override with QUACK_ARCH (e.g. 'sm_90' or '90') for CPU-only compilation
-    without a GPU present.
-
-    Accepts either a ``torch.device`` or a tensor and canonicalizes to the
-    underlying device before consulting the cached helper. This avoids leaking
-    tensors through the LRU cache key.
-    """
-    if isinstance(device, torch.Tensor):
-        device = device.device
-    return _get_device_capacity_cached(device)
+    return _device_capability(device or 0)
 
 
 @lru_cache
@@ -159,8 +143,10 @@ def get_compile_target_capacity() -> Tuple[int, int]:
     cute_arch = os.environ.get("CUTE_DSL_ARCH")
     if cute_arch is not None:
         return _parse_arch_str(cute_arch)
-    if torch.cuda.is_available():
-        return torch.cuda.get_device_capability()
+    try:
+        return _device_capability()
+    except RuntimeError:
+        pass
     arch_override = os.environ.get("QUACK_ARCH")
     if arch_override is not None:
         return _parse_arch_str(arch_override)
