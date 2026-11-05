@@ -19,7 +19,7 @@ use super::passes::dot::fold_reshapes::FoldDotReshapes;
 use super::passes::dot::strength::DotStrength;
 use super::passes::merge_dots::{Blocks, MergeDots, MergeDotsBackward, Packs, Target};
 use super::passes::simplify::Simplify;
-use super::pipeline::Pipeline;
+use super::pipeline::{Pass, Passes, pipeline, when};
 use super::{CompilerConfig, Options, plan_options, positions};
 use crate::graph::{Graph, Node, Primitive, TensorType};
 use crate::graph_compiler::{Plan, PlanOptions};
@@ -82,6 +82,122 @@ impl Blocks for TpuModule<'_> {
     }
 }
 
+/// TPU's passes, with optional ones enabled by `config`.
+impl Passes for TpuModule<'_> {
+    const NAME: &'static str = "tpu";
+
+    /// With `merge_dots`.
+    fn merge_dots_backward(config: &CompilerConfig) -> Pass<Self> {
+        when(config.merge_dots, MergeDotsBackward)
+    }
+
+    /// With `flash_attention`.
+    fn flash_attention(config: &CompilerConfig) -> Pass<Self> {
+        when(config.flash_attention, FlashAttention)
+    }
+
+    /// With `flash_attention`.
+    fn flash_attention_backward(config: &CompilerConfig) -> Pass<Self> {
+        when(config.flash_attention, FlashAttentionBackward)
+    }
+
+    /// With `flash_attention`.
+    fn attention_layouts(config: &CompilerConfig) -> Pass<Self> {
+        when(config.flash_attention, AttentionLayouts)
+    }
+
+    /// With `safe_kernels`.
+    fn clamp_indices(config: &CompilerConfig) -> Pass<Self> {
+        when(config.safe_kernels, ClampIndices)
+    }
+
+    /// Always.
+    fn fold_dot_reshapes(_: &CompilerConfig) -> Pass<Self> {
+        Box::new(FoldDotReshapes)
+    }
+
+    /// Always.
+    fn simplify(_: &CompilerConfig) -> Pass<Self> {
+        Box::new(Simplify { matched: true })
+    }
+
+    /// Always.
+    fn dot_strength(_: &CompilerConfig) -> Pass<Self> {
+        Box::new(DotStrength)
+    }
+
+    /// With `merge_dots`, packing whole vector lanes.
+    fn merge_dots_late(config: &CompilerConfig) -> Pass<Self> {
+        let merge = MergeDots {
+            target: Target {
+                reads: |_, _| true,
+                views: false,
+                lanes: LANES,
+                columns: 1,
+            },
+        };
+
+        when(config.merge_dots, merge)
+    }
+
+    /// Always: matmul operands the TPU kernel can't read as laid out are transposed into its form first.
+    fn canonicalize_dots(_: &CompilerConfig) -> Pass<Self> {
+        Box::new(CanonicalizeDots {
+            readable: reads_as_laid_out,
+        })
+    }
+
+    /// With `normalization_diamonds`.
+    fn fused_diamonds(config: &CompilerConfig) -> Pass<Self> {
+        let diamonds = FusedDiamonds {
+            fusible: crate::codegen::row::tpu::fusible,
+            fits: crate::codegen::row::tpu::fits,
+        };
+
+        when(config.normalization_diamonds, diamonds)
+    }
+
+    /// With `normalization_diamonds`.
+    fn dot_rows(config: &CompilerConfig) -> Pass<Self> {
+        when(config.normalization_diamonds, DotRows)
+    }
+
+    /// Always.
+    fn updates(_: &CompilerConfig) -> Pass<Self> {
+        Box::new(Updates {
+            least: 1,
+            most: usize::MAX,
+        })
+    }
+
+    /// Always.
+    fn fuse_dots(_: &CompilerConfig) -> Pass<Self> {
+        Box::new(FuseDots)
+    }
+
+    /// Always.
+    fn place_concats(_: &CompilerConfig) -> Pass<Self> {
+        Box::new(PlaceConcats)
+    }
+
+    /// Always.
+    fn fusion(_: &CompilerConfig) -> Pass<Self> {
+        Box::new(Fusion)
+    }
+
+    /// With `horizontal_fusion`.
+    fn horizontal_fusion(config: &CompilerConfig) -> Pass<Self> {
+        let horizontal = HorizontalFusion {
+            candidate: fusion::horizontal_candidate,
+            grouping: Grouping::Shape,
+            buffers: fusion::HORIZONTAL_BUFFERS,
+            name: "elementwise",
+        };
+
+        when(config.horizontal_fusion, horizontal)
+    }
+}
+
 /// Runs the TPU pass pipeline over `graph` and plans its buffers with the TPU tiled layout.
 pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> {
     let mut module = TpuModule {
@@ -91,72 +207,7 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         interleaved: Vec::new(),
     };
 
-    let mut pipeline = Pipeline::new("tpu");
-
-    if options.config.merge_dots {
-        pipeline.add(MergeDotsBackward);
-    }
-
-    if options.config.flash_attention {
-        pipeline
-            .add(FlashAttention)
-            .add(FlashAttentionBackward)
-            .add(AttentionLayouts);
-    }
-
-    if options.config.safe_kernels {
-        pipeline.add(ClampIndices);
-    }
-
-    pipeline
-        .add(FoldDotReshapes)
-        .add(Simplify { matched: true })
-        .add(DotStrength);
-
-    if options.config.merge_dots {
-        pipeline.add(MergeDots {
-            target: Target {
-                reads: |_, _| true,
-                views: false,
-                lanes: LANES,
-                columns: 1,
-            },
-        });
-    }
-
-    // Matmul operands the TPU kernel can't read as laid out are transposed into its form first.
-    pipeline.add(CanonicalizeDots {
-        readable: reads_as_laid_out,
-    });
-
-    if options.config.normalization_diamonds {
-        pipeline
-            .add(FusedDiamonds {
-                fusible: crate::codegen::row::tpu::fusible,
-                fits: crate::codegen::row::tpu::fits,
-            })
-            .add(DotRows);
-    }
-
-    pipeline
-        .add(Updates {
-            least: 1,
-            most: usize::MAX,
-        })
-        .add(FuseDots)
-        .add(PlaceConcats)
-        .add(Fusion);
-
-    if options.config.horizontal_fusion {
-        pipeline.add(HorizontalFusion {
-            candidate: fusion::horizontal_candidate,
-            grouping: Grouping::Shape,
-            buffers: fusion::HORIZONTAL_BUFFERS,
-            name: "elementwise",
-        });
-    }
-
-    pipeline.run(&mut module)?;
+    pipeline::<TpuModule>(&options.config).run(&mut module)?;
 
     let TpuModule {
         graph,

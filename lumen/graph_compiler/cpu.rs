@@ -1,10 +1,21 @@
 //! CPU graph compiler: simplifies the graph and plans it for the host kernels.
 
+use super::config::CompilerConfig;
 use super::passes::simplify::Simplify;
-use super::pipeline::{GraphModule, Pipeline};
+use super::pipeline::{GraphModule, Pass, Passes, pipeline};
 use super::{Options, positions};
 use crate::graph::Graph;
 use crate::graph_compiler::{Plan, PlanOptions};
+
+/// The CPU's passes: it interprets the graph as simplified.
+impl Passes for GraphModule<'_> {
+    const NAME: &'static str = "cpu";
+
+    /// Always.
+    fn simplify(_: &CompilerConfig) -> Pass<Self> {
+        Box::new(Simplify { matched: true })
+    }
+}
 
 /// Simplifies `graph` and plans it for execution on the CPU.
 pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> {
@@ -13,9 +24,7 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         options,
     };
 
-    Pipeline::new("cpu")
-        .add(Simplify { matched: true })
-        .run(&mut module)?;
+    pipeline::<GraphModule>(&options.config).run(&mut module)?;
 
     Ok(plan(&module.graph, options))
 }

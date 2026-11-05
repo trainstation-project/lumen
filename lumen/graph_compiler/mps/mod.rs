@@ -27,7 +27,7 @@ use super::passes::place_concats::{PlaceConcats, Slots};
 use super::passes::place_views::PlaceViews;
 use super::passes::simplify::Simplify;
 use super::passes::take_along_axis::TakeAlongAxis;
-use super::pipeline::Pipeline;
+use super::pipeline::{Pass, Passes, pipeline, when};
 use super::{CompilerConfig, Options};
 use crate::codegen::attention::AttentionCodegen;
 use crate::codegen::attention::mps::decodes;
@@ -215,91 +215,154 @@ pub(crate) fn request(kernel: Kernel) -> String {
     kernel.pending().to_owned()
 }
 
-/// The MPS pass pipeline, with optional passes enabled by `config`.
-fn pipeline<'a>(config: &CompilerConfig) -> Pipeline<MpsModule<'a>> {
-    let mut p = Pipeline::new("mps");
-    p.add(TakeAlongAxis);
+/// MPS's passes, with optional ones enabled by `config`.
+impl Passes for MpsModule<'_> {
+    const NAME: &'static str = "mps";
 
-    if config.fuse && config.fused_linear_cross_entropy {
-        p.add(ChunkedCrossEntropy);
+    /// Always.
+    fn take_along_axis(_: &CompilerConfig) -> Pass<Self> {
+        Box::new(TakeAlongAxis)
     }
 
-    if config.fuse && config.merge_dots && config.contraction_epilogues {
-        p.add(MergeDotsBackward);
+    /// With `fuse` and `fused_linear_cross_entropy`.
+    fn chunked_cross_entropy(config: &CompilerConfig) -> Pass<Self> {
+        when(
+            config.fuse && config.fused_linear_cross_entropy,
+            ChunkedCrossEntropy,
+        )
     }
 
-    if config.fuse && config.merge_dots {
-        p.add(MergeDots {
+    /// With `fuse`, `merge_dots` and `contraction_epilogues`.
+    fn merge_dots_backward(config: &CompilerConfig) -> Pass<Self> {
+        let on = config.fuse && config.merge_dots && config.contraction_epilogues;
+        when(on, MergeDotsBackward)
+    }
+
+    /// With `fuse` and `merge_dots`, packing for the GEMM epilogue's row columns.
+    fn merge_dots(config: &CompilerConfig) -> Pass<Self> {
+        let merge = MergeDots {
             target: Target {
                 reads: fusion::fusible,
                 views: true,
                 lanes: 1,
                 columns: crate::codegen::regions::ROW_COLUMNS,
             },
-        });
+        };
+
+        when(config.fuse && config.merge_dots, merge)
     }
 
-    if config.fuse && config.flash_attention {
-        p.add(FlashAttention).add(FlashAttentionBackward);
+    /// With `fuse` and `flash_attention`.
+    fn flash_attention(config: &CompilerConfig) -> Pass<Self> {
+        when(config.fuse && config.flash_attention, FlashAttention)
     }
 
-    if config.fuse && config.fused_linear_cross_entropy {
-        p.add(LinearCrossEntropy);
+    /// With `fuse` and `flash_attention`.
+    fn flash_attention_backward(config: &CompilerConfig) -> Pass<Self> {
+        when(
+            config.fuse && config.flash_attention,
+            FlashAttentionBackward,
+        )
     }
 
-    if config.safe_kernels {
-        p.add(ClampIndices);
+    /// With `fuse` and `fused_linear_cross_entropy`.
+    fn linear_cross_entropy(config: &CompilerConfig) -> Pass<Self> {
+        when(
+            config.fuse && config.fused_linear_cross_entropy,
+            LinearCrossEntropy,
+        )
     }
 
-    // Batched inner products (attention backward's delta, read through transposes) run as elementwise fusions.
-    p.add(Simplify { matched: true }).add(DotStrength);
-
-    if config.neural_engine {
-        p.add(ane::NeuralEngine);
+    /// With `safe_kernels`.
+    fn clamp_indices(config: &CompilerConfig) -> Pass<Self> {
+        when(config.safe_kernels, ClampIndices)
     }
 
-    // A matmul operand's factor along the kept axes (a norm's 1 / rms, a weight's per-channel scale) moves to its output, for its epilogue.
-    if config.linear_reordering {
-        p.add(LinearReordering {
+    /// Always.
+    fn simplify(_: &CompilerConfig) -> Pass<Self> {
+        Box::new(Simplify { matched: true })
+    }
+
+    /// Always: batched inner products (attention backward's delta, read through transposes) run as elementwise
+    /// fusions.
+    fn dot_strength(_: &CompilerConfig) -> Pass<Self> {
+        Box::new(DotStrength)
+    }
+
+    /// With `neural_engine`.
+    fn neural_engine(config: &CompilerConfig) -> Pass<Self> {
+        when(config.neural_engine, ane::NeuralEngine)
+    }
+
+    /// With `linear_reordering`: a matmul operand's factor along the kept axes (a norm's 1 / rms, a weight's
+    /// per-channel scale) moves to its output, for its epilogue.
+    fn linear_reordering(config: &CompilerConfig) -> Pass<Self> {
+        let reordering = LinearReordering {
             tile: crate::codegen::dot_general::mps::ROW_TILE,
-        });
+        };
+
+        when(config.linear_reordering, reordering)
     }
 
-    if config.split_k {
-        p.add(SplitK);
+    /// With `split_k`.
+    fn split_k(config: &CompilerConfig) -> Pass<Self> {
+        when(config.split_k, SplitK)
     }
 
-    // Matmul operands the GEMM kernels can't read as three strides are transposed first.
-    p.add(CanonicalizeDots {
-        readable: reads_contiguous,
-    });
+    /// Always: matmul operands the GEMM kernels can't read as three strides are transposed first.
+    fn canonicalize_dots(_: &CompilerConfig) -> Pass<Self> {
+        Box::new(CanonicalizeDots {
+            readable: reads_contiguous,
+        })
+    }
 
-    if config.fuse {
-        p.add(Updates {
+    /// With `fuse`.
+    fn updates(config: &CompilerConfig) -> Pass<Self> {
+        let updates = Updates {
             least: 2,
             most: MOST_UPDATES,
-        });
+        };
+
+        when(config.fuse, updates)
     }
 
-    if config.fuse {
-        if config.normalization_diamonds {
-            p.add(Diamonds {
-                fusible: fusion::fusible,
-                partials: crate::codegen::row::mps::ROW_PARTIALS,
-            });
-        }
+    /// With `fuse` and `normalization_diamonds`.
+    fn diamonds(config: &CompilerConfig) -> Pass<Self> {
+        let diamonds = Diamonds {
+            fusible: fusion::fusible,
+            partials: crate::codegen::row::mps::ROW_PARTIALS,
+        };
 
-        p.add(PlaceConcats);
-        p.add(fusion::Fusion);
+        when(config.fuse && config.normalization_diamonds, diamonds)
     }
 
-    // Slices a GEMM reads in place become views before the lone layout ops left become elementwise fusions, as on Triton.
-    p.add(PlaceViews {
-        reads: gemm::reads_strided,
-    });
-    p.add(Alone);
-    p.add(Concats);
-    p
+    /// With `fuse`.
+    fn place_concats(config: &CompilerConfig) -> Pass<Self> {
+        when(config.fuse, PlaceConcats)
+    }
+
+    /// With `fuse`; it also fuses horizontally, with `horizontal_fusion`.
+    fn fusion(config: &CompilerConfig) -> Pass<Self> {
+        when(config.fuse, fusion::Fusion)
+    }
+
+    /// Always: slices a GEMM reads in place become views before the lone layout ops left become elementwise
+    /// fusions, as on Triton.
+    fn place_views(_: &CompilerConfig) -> Pass<Self> {
+        Box::new(PlaceViews {
+            reads: gemm::reads_strided,
+        })
+    }
+
+    /// Always.
+    fn alone(_: &CompilerConfig) -> Pass<Self> {
+        Box::new(Alone)
+    }
+
+    /// Always.
+    fn concats(_: &CompilerConfig) -> Pass<Self> {
+        Box::new(Concats)
+    }
 }
 
 /// Rejects graphs with ops MPS has no kernel for: bfloat16 transcendentals and mixed-dtype dots.
@@ -345,7 +408,7 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         scalars: super::positions(&options.scalars),
     };
 
-    pipeline(config).run(&mut module)?;
+    pipeline::<MpsModule>(config).run(&mut module)?;
 
     let MpsModule {
         graph: fused,

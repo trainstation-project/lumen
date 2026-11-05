@@ -16,6 +16,7 @@ pub(crate) mod diamonds;
 pub(crate) mod direct;
 pub(crate) mod dot;
 pub(crate) mod elementwise;
+pub(crate) mod empty;
 pub(crate) mod fusion;
 pub(crate) mod horizontal;
 #[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
@@ -53,4 +54,8 @@ pub(crate) trait CompilerPass<M> {
     fn name(&self) -> &'static str;
     /// Rewrites `module` in place.
     fn apply(&mut self, module: &mut M) -> Result<(), String>;
+    /// Whether the pass does nothing (`empty::Empty`), so a pipeline skips it.
+    fn is_empty(&self) -> bool {
+        false
+    }
 }
