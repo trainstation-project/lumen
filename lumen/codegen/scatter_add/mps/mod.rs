@@ -6,7 +6,7 @@ use crate::graph::{Primitive, TensorType};
 use crate::plan::StepBase;
 use crate::runtime::kernel::Launch as _;
 use crate::runtime::kernel::mps::MpsLaunch;
-use crate::runtime::mps::{Grid, element_arg, elementwise_grid, u32_arg, u64_arg};
+use crate::runtime::kernel::mps::{Grid, element_arg, elementwise_grid, u32_arg, u64_arg};
 use crate::{DType, Scalar, Tensor};
 
 /// Threads of the row kernel's threadgroup, one a column (`SCATTER_THREADS` in `kernel.metal`).

@@ -15,7 +15,7 @@ use crate::codegen::layout::{LayoutCodegen, transpose_tiling};
 use crate::codegen::reduction::ReductionCodegen;
 use crate::codegen::row::RowCodegen;
 use crate::codegen::utils::mps::Mps;
-use crate::graph::{Graph, Primitive};
+use crate::graph::{Graph, Primitive, TensorType};
 use crate::graph_compiler::mps::{Kernel, compile_routed, record_launch};
 use crate::graph_compiler::passes::attention::{self, Strides};
 use crate::graph_compiler::passes::place_views;
@@ -211,4 +211,25 @@ pub(crate) fn fusion_reads_strided(body: &Graph, k: usize, strides: &[usize]) ->
             strides,
             crate::codegen::dot_general::mps::reads_strided,
         )
+}
+
+/// Scratch bytes a step's kernels need beyond its output, for primitives that use any.
+pub(crate) fn scratch_bytes(p: &Primitive, inputs: &[&TensorType], _output: &TensorType) -> usize {
+    match p {
+        Primitive::ReduceSum { axes, .. } | Primitive::ReduceMax { axes } => {
+            let accum = crate::codegen::reduction::mps::accum_dtype(p, inputs[0].dtype);
+            crate::codegen::reduction::mps::scratch_bytes(inputs[0], axes, accum)
+        }
+        Primitive::Cumsum {
+            axis, accum_dtype, ..
+        } => crate::codegen::scan::mps::scratch_bytes(inputs[0], *axis, *accum_dtype),
+        Primitive::Fusion { body, .. } => crate::graph_compiler::mps::fusion_scratch_bytes(body),
+        Primitive::LinearCrossEntropy => {
+            crate::codegen::dot_general::mps::linear_cross_entropy_scratch(inputs[0], inputs[1])
+        }
+        Primitive::ScatterAdd { axis } => {
+            crate::codegen::scatter_add::mps::scratch_bytes(inputs[0], inputs[1], *axis)
+        }
+        _ => 0,
+    }
 }

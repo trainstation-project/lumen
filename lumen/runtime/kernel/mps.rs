@@ -1,5 +1,6 @@
 //! Launching Metal kernels: each dispatched on the MPS stream through its cached pipeline, or recorded inside
-//! `capture` so a plan can replay it against new buffer addresses; and the event markers streams record.
+//! `capture` so a plan can replay it against new buffer addresses; the argument packing and grids kernels launch
+//! with; and the event markers streams record.
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -9,8 +10,10 @@ use std::sync::{Mutex, PoisonError};
 use super::Launch;
 use crate::Tensor;
 use crate::codegen::utils::mps::Mps;
-use crate::runtime::mps::Grid;
 use crate::runtime::stream::mps::{self, Completion};
+use crate::tensor::dtype::dispatch_dtype;
+use crate::tensor::storage::as_bytes;
+use crate::{DType, Element, Scalar};
 
 unsafe extern "C" {
     /// Looks up kernel `name` and dispatches it once; returns nonzero on failure.
@@ -354,3 +357,53 @@ impl Launch for Mps {
         Ok(())
     }
 }
+
+/// Packs a `u32` kernel argument.
+pub(crate) fn u32_arg(v: u32) -> Vec<u8> {
+    v.to_ne_bytes().to_vec()
+}
+
+/// Packs a `usize` as a `u64` kernel argument.
+pub(crate) fn u64_arg(v: usize) -> Vec<u8> {
+    (v as u64).to_ne_bytes().to_vec()
+}
+
+/// Packs dimensions as a `u64` array argument; empty becomes `[0]` so the buffer is never zero-sized.
+pub(crate) fn dims_arg(v: impl IntoIterator<Item = usize>) -> Vec<u8> {
+    let mut v: Vec<u64> = v.into_iter().map(|d| d as u64).collect();
+
+    if v.is_empty() {
+        v.push(0);
+    }
+
+    as_bytes(&v).to_vec()
+}
+
+/// Packs dimensions as a `u32` array argument; empty becomes `[0]` so the buffer is never zero-sized.
+pub(crate) fn dims32_arg(v: impl IntoIterator<Item = usize>) -> Vec<u8> {
+    let mut v: Vec<u32> = v.into_iter().map(|d| d as u32).collect();
+
+    if v.is_empty() {
+        v.push(0);
+    }
+
+    as_bytes(&v).to_vec()
+}
+
+/// Packs `value` converted to `dtype` as a single-element argument.
+pub(crate) fn element_arg(dtype: DType, value: Scalar) -> Vec<u8> {
+    dispatch_dtype!(dtype, T => as_bytes(std::slice::from_ref(&T::from_scalar(value))).to_vec())
+}
+
+/// Bytes each elementwise thread handles; matches `BYTES_PER_THREAD` in `kernels.metal`.
+pub(crate) const BYTES_PER_THREAD: usize = 16;
+/// Thread count above which elementwise grids start giving threads several elements.
+const GRID_THREADS: usize = 32 << 10;
+
+/// One-dimensional grid for an elementwise kernel over `n` elements, giving each thread up to 16 bytes once `n` is large.
+pub(crate) fn elementwise_grid(n: usize, dtype: DType) -> Grid {
+    let most = (BYTES_PER_THREAD / dtype.size_of()).max(1);
+    Grid::Threads([n.div_ceil((n / GRID_THREADS).clamp(1, most)), 1, 1])
+}
+
+pub(crate) use crate::custom_op::mps::Grid;

@@ -6,7 +6,7 @@ use crate::graph::{Primitive, TensorType};
 use crate::plan::StepBase;
 use crate::runtime::kernel::Launch as _;
 use crate::runtime::kernel::mps::MpsLaunch;
-use crate::runtime::mps::{Grid, u32_arg, u64_arg};
+use crate::runtime::kernel::mps::{Grid, u32_arg, u64_arg};
 use crate::{DType, Tensor};
 
 /// Scan length above which a contiguous axis uses the threadgroup row kernel.

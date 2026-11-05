@@ -1,5 +1,5 @@
 //! The CUDA backend, CUDA's default (`config.compiler.use_triton_backend` off): kernels in
-//! NVIDIA's CuTe DSL, generated per step (`codegen::cuda`) and launched by `runtime::cuda`. It runs elementwise fusions (any layout: broadcasts, transposes, slices and strided inputs
+//! NVIDIA's CuTe DSL, generated per step (`codegen::cuda`) and launched by `runtime::kernel::cuda`. It runs elementwise fusions (any layout: broadcasts, transposes, slices and strided inputs
 //! read through index math) and errors on graphs needing any other kernel.
 
 use super::config::CompilerConfig;

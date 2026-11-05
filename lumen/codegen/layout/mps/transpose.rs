@@ -15,9 +15,13 @@ use crate::graph::{Graph, TensorType, Var};
 
 impl TransposeTiling {
     /// Launch grid: one threadgroup per `TILE` x `TILE` tile of each batch.
-    pub(crate) fn grid(&self) -> crate::runtime::mps::Grid {
+    pub(crate) fn grid(&self) -> crate::runtime::kernel::mps::Grid {
         let batches = self.batch.iter().map(|d| d.0).product();
-        crate::runtime::mps::Grid::Groups([self.a.div_ceil(TILE), self.b.div_ceil(TILE), batches])
+        crate::runtime::kernel::mps::Grid::Groups([
+            self.a.div_ceil(TILE),
+            self.b.div_ceil(TILE),
+            batches,
+        ])
     }
 }
 

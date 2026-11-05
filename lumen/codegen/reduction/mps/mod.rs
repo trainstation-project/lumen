@@ -20,7 +20,7 @@ use crate::graph::primitive::free_dims;
 use crate::graph::{Graph, Node};
 use crate::graph_compiler::passes::fusion::mps as fusion;
 use crate::plan::StepBase;
-use crate::runtime::mps::{Grid, dims_arg, dims32_arg, element_arg, u32_arg, u64_arg};
+use crate::runtime::kernel::mps::{Grid, dims_arg, dims32_arg, element_arg, u32_arg, u64_arg};
 use crate::tensor::contiguous_strides;
 use crate::{DType, Scalar, Tensor};
 

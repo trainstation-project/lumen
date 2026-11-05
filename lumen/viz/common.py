@@ -10,7 +10,9 @@ LUMEN = pathlib.Path(lumen.__file__).parent
 
 def prelude():
     """The Metal prelude every generated kernel is compiled with: the shared one, then Philox."""
-    return (LUMEN / "runtime/mps/kernels.metal").read_text() + (LUMEN / "codegen/random/mps/philox.metal").read_text()
+    return (LUMEN / "codegen/utils/mps/prelude.metal").read_text() + (
+        LUMEN / "codegen/random/mps/philox.metal"
+    ).read_text()
 
 
 # Short dtype names used in visualizations, mapped to lumen dtype names.

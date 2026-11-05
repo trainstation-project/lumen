@@ -3,9 +3,10 @@
 //! then a program a block of each position's entries adding its updates in pick order (as MPS's).
 
 use crate::codegen::elementwise::triton::LoopConfig;
+use crate::codegen::elementwise::triton::fill;
 use crate::codegen::scatter_add::triton::{ELEMENTS, SEGMENT, STARTS, rows};
 use crate::codegen::triton::{Kernel, Template};
-use crate::runtime::triton::{Launches, fill, launch};
+use crate::runtime::kernel::triton::{Launches, launch};
 use crate::{DType, Scalar, Tensor, TensorOptions};
 
 /// A Triton scatter-add kernel (lumen.codegen.scatter_add.triton.kernel).
