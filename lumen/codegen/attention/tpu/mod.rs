@@ -17,7 +17,7 @@ use crate::graph_compiler::elementwise;
 #[cfg(lumen_tpu_linked)]
 use crate::plan::Step;
 #[cfg(lumen_tpu_linked)]
-use crate::runtime::tpu::{Launch, launch};
+use crate::runtime::tpu::{Kernel, Rows};
 use crate::tensor::contiguous_strides;
 use config::blocks;
 
@@ -780,35 +780,9 @@ fn written_at(
     Ok((k, mapped))
 }
 
-/// Launches the Python attention kernel `kind` (`forward` or `backward`) with buffer pointers `rows`.
+/// The kernel of an attention fusion step, binding its inputs, then its output, then any extra outputs.
 #[cfg(lumen_tpu_linked)]
-fn run(index: usize, kind: &str, spec: String, rows: &[*const u8]) -> Result<(), String> {
-    let module = match kind {
-        "forward" => "lumen.codegen.attention.tpu.forward_kernel",
-        _ => "lumen.codegen.attention.tpu.backward_kernel",
-    };
-
-    let launched = Launch {
-        module,
-        kernel: format!("flash_attention_{kind}"),
-        spec,
-        rows,
-        scalars: &[],
-        host: &[],
-        sparse: None,
-    };
-
-    launch(index, launched)
-}
-
-/// Encodes an attention fusion step, binding its inputs, then its output, then any extra outputs.
-#[cfg(lumen_tpu_linked)]
-pub(crate) fn encode(
-    index: usize,
-    step: &Step,
-    inputs: &[*const u8],
-    output: *mut u8,
-) -> Result<(), String> {
+pub(crate) fn step_kernel(step: &Step) -> Result<Kernel, String> {
     let Primitive::Fusion { name, body, .. } = &step.primitive else {
         unreachable!("an attention fusion")
     };
@@ -827,15 +801,17 @@ pub(crate) fn encode(
         }
     }
 
-    let n = step.inputs.len();
-
-    let rows: Vec<*const u8> = inputs[..n]
-        .iter()
-        .copied()
-        .chain([output.cast_const()])
-        .chain(inputs[n..].iter().copied())
-        .collect();
-
     let (kind, spec) = kernel(name, body)?;
-    run(index, kind, spec, &rows)
+
+    let module = match kind {
+        "forward" => "lumen.codegen.attention.tpu.forward_kernel",
+        _ => "lumen.codegen.attention.tpu.backward_kernel",
+    };
+
+    Ok(Kernel::new(
+        module,
+        format!("flash_attention_{kind}"),
+        spec,
+        Rows::Split,
+    ))
 }

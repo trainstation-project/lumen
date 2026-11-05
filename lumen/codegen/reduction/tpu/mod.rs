@@ -20,7 +20,7 @@ use crate::graph::{Graph, Node, Primitive, TensorType};
 #[cfg(lumen_tpu_linked)]
 use crate::plan::Step;
 #[cfg(lumen_tpu_linked)]
-use crate::runtime::tpu::{Launch, launch};
+use crate::runtime::tpu::{Kernel, Rows};
 
 /// How a reduction's operand is viewed as `lead` matrices of `m` rows by `n` columns.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -369,14 +369,9 @@ pub(crate) fn blocks(layout: &Layout, ins: &[DType], outs: &[DType]) -> Result<V
     }
 }
 
-/// Launches the reduction fusion `step` on TPU `index`, writing into `output`.
+/// The kernel of the reduction fusion `step`, reading its inputs and writing its output.
 #[cfg(lumen_tpu_linked)]
-pub(crate) fn encode(
-    index: usize,
-    step: &Step,
-    inputs: &[*const u8],
-    output: *mut u8,
-) -> Result<(), String> {
+pub(crate) fn kernel(step: &Step) -> Result<Kernel, String> {
     let Primitive::Fusion { body, .. } = &step.primitive else {
         unreachable!("a reduction fusion")
     };
@@ -389,21 +384,10 @@ pub(crate) fn encode(
 
     let code = Tpu::reduction(body, &[], root).map_err(|e| format!("{}: {e}", step.label))?;
 
-    let rows: Vec<*const u8> = inputs
-        .iter()
-        .copied()
-        .chain([output.cast_const()])
-        .collect();
-
-    let launched = Launch {
-        module: "lumen.codegen.reduction.tpu.kernel",
-        kernel: code.kernel,
-        spec: code.spec,
-        rows: &rows,
-        scalars: &[],
-        host: &[],
-        sparse: None,
-    };
-
-    launch(index, launched)
+    Ok(Kernel::new(
+        "lumen.codegen.reduction.tpu.kernel",
+        code.kernel,
+        code.spec,
+        Rows::Last,
+    ))
 }

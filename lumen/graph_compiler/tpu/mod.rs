@@ -180,6 +180,11 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
     let mut plan = Plan::compile_with(&graph, &plan);
     plan.packed = packed;
     plan.interleaved = interleaved;
+
+    // Each step's kernel is generated now, so running the plan only launches them.
+    #[cfg(lumen_tpu_linked)]
+    crate::runtime::tpu::bake(&plan);
+
     Ok(plan)
 }
 

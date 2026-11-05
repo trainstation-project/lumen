@@ -5,7 +5,9 @@ use crate::codegen::dot_general::tpu::block;
 use crate::device::tpu::layout::Layout;
 use crate::graph::Primitive;
 use crate::plan::Step;
-use crate::runtime::tpu::{Indices, Launch, SPARSE_CORE_MESH, SparseCore, Values, launch};
+use crate::runtime::tpu::{
+    Indices, Kernel, Launch, Rows, SPARSE_CORE_MESH, SparseCore, Values, launch,
+};
 
 /// TPU lane width.
 const LANES: usize = 128;
@@ -22,13 +24,8 @@ const ROWS: usize = 64;
 /// Most bytes one SparseCore chunk of gathered rows may take.
 const SPARSE_CORE_CHUNK: usize = 128 << 10;
 
-/// Encodes a gather of table rows at int32 indices along axis 0, rejecting layouts the kernels don't cover.
-pub(crate) fn encode(
-    index: usize,
-    step: &Step,
-    inputs: &[*const u8],
-    output: *mut u8,
-) -> Result<(), String> {
+/// Rejects gathers the kernels don't cover: only table rows at int32 indices along axis 0.
+fn checked(step: &Step) -> Result<(), String> {
     let (table, ids) = (&step.inputs[0].1, &step.inputs[1].1);
     let failed = |what: &str| Err(format!("{what} does not run on TPU yet: {table} at {ids}"));
 
@@ -44,11 +41,16 @@ pub(crate) fn encode(
         return failed("a table of other than float32, bfloat16 or int32");
     }
 
-    let (vocab, width) = (table.shape[0], table.shape[1]);
+    Ok(())
+}
 
-    if sparse_core(index, step, inputs, output)? {
-        return Ok(());
-    }
+/// The TensorCore kernel gathering table rows at int32 indices along axis 0, rejecting layouts it doesn't cover.
+pub(crate) fn kernel(step: &Step) -> Result<Kernel, String> {
+    checked(step)?;
+
+    let (table, ids) = (&step.inputs[0].1, &step.inputs[1].1);
+    let failed = |what: &str| Err(format!("{what} does not run on TPU yet: {table} at {ids}"));
+    let (vocab, width) = (table.shape[0], table.shape[1]);
 
     let tile = Layout::new(table.dtype, &[1, 1])?.rows;
     // `tile` table rows share one TPU tile; output blocks hold whole tiles of rows.
@@ -96,29 +98,27 @@ pub(crate) fn encode(
         table.dtype.full_name()
     );
 
-    let rows = [inputs[0], inputs[1], output.cast_const()];
-
-    let launched = Launch {
-        module: "lumen.codegen.gather.tpu.kernel",
-        kernel: format!("gather_{}_{bm}x{bn}", table.dtype),
+    let mut kernel = Kernel::new(
+        "lumen.codegen.gather.tpu.kernel",
+        format!("gather_{}_{bm}x{bn}", table.dtype),
         spec,
-        rows: &rows,
-        scalars: &[],
-        host: &[],
-        sparse: None,
-    };
+        Rows::Step,
+    );
 
-    launch(index, launched).map_err(|e| format!("{}: {e}", step.label))
+    kernel.context = Some(step.label.to_string());
+    Ok(kernel)
 }
 
 /// Encodes the gather on the SparseCore when rows are 32-bit, whole lanes and tile-aligned in the shared region;
-/// returns whether it did.
-fn sparse_core(
+/// returns whether it did. Rejects gathers no kernel covers.
+pub(crate) fn sparse_core(
     index: usize,
     step: &Step,
     inputs: &[*const u8],
     output: *mut u8,
 ) -> Result<bool, String> {
+    checked(step)?;
+
     let (table, ids) = (&step.inputs[0].1, &step.inputs[1].1);
     let width = table.shape[1];
 

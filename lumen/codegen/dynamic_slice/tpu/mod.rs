@@ -7,7 +7,7 @@ use crate::codegen::utils::tpu::Tpu;
 use crate::device::tpu::layout::Layout;
 use crate::graph::{Graph, Primitive, TensorType};
 use crate::plan::Step;
-use crate::runtime::tpu::{Launch, launch};
+use crate::runtime::tpu::{Kernel, Rows};
 use crate::tensor::scalar::Scalar;
 
 /// Lane width of a TPU tile.
@@ -257,14 +257,9 @@ impl DynamicSliceCodegen for Tpu {
     }
 }
 
-/// Launches the `dynamic_update_slice` kernel for `step`: one update at runtime int32 starts, or
-/// a fusion of several updates at constant starts (clamped into range here).
-pub(crate) fn encode(
-    index: usize,
-    step: &Step,
-    inputs: &[*const u8],
-    output: *mut u8,
-) -> Result<(), String> {
+/// The `dynamic_update_slice` kernel for `step`: one update at runtime int32 starts, or a fusion of
+/// several updates at constant starts (clamped into range here); `None` when the update is empty.
+pub(crate) fn kernel(step: &Step) -> Result<Option<Kernel>, String> {
     let (operand, update) = (&step.inputs[0].1, &step.inputs[1].1);
     let fixed = matches!(step.primitive, Primitive::Fusion { .. });
 
@@ -279,7 +274,7 @@ pub(crate) fn encode(
     }
 
     if update.numel() == 0 {
-        return Ok(());
+        return Ok(None);
     }
 
     let p = match &step.primitive {
@@ -287,25 +282,16 @@ pub(crate) fn encode(
         _ => Tpu::update(operand, update, &[], &())?,
     };
 
-    let copy = inputs[0] != output.cast_const();
-    let spec = format!("{}, \"copy\": {copy}", p.spec);
-    let n = step.inputs.len();
+    // The kernel copies the operand first unless it is updated in place, in the output's buffer.
+    let mut kernel = Kernel::new(
+        "lumen.codegen.dynamic_slice.tpu.kernel",
+        p.kernel,
+        format!("{}, \"copy\": false", p.spec),
+        Rows::Step,
+    );
 
-    let rows_of: Vec<*const u8> = inputs[..n]
-        .iter()
-        .copied()
-        .chain([output.cast_const()])
-        .collect();
-
-    let launched = Launch {
-        module: "lumen.codegen.dynamic_slice.tpu.kernel",
-        kernel: p.kernel,
-        spec,
-        rows: &rows_of,
-        scalars: &p.scalars,
-        host: &[],
-        sparse: None,
-    };
-
-    launch(index, launched).map_err(|e| format!("{}: {e}", step.label))
+    kernel.copied = Some(format!("{}, \"copy\": true", p.spec));
+    kernel.scalars = p.scalars;
+    kernel.context = Some(step.label.to_string());
+    Ok(Some(kernel))
 }
