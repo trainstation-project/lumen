@@ -3,16 +3,16 @@
 
 use std::collections::HashMap;
 
-use super::{Kernel, MpsModule, fusion, request};
+use super::in_place_concats;
 use crate::codegen::mps::writes_views;
 use crate::graph::{Node, Primitive};
 use crate::graph_compiler::common::alone::wrapped;
 use crate::graph_compiler::common::attention;
-use crate::graph_compiler::common::place_concats::in_place_concats;
+use crate::graph_compiler::mps::{Kernel, MpsModule, fusion, request};
 use crate::graph_compiler::pass::CompilerPass;
 
 /// Compiler pass copying the concatenations fusion left unable to be written in place.
-pub(super) struct Concats;
+pub(crate) struct Concats;
 
 impl<'a> CompilerPass<MpsModule<'a>> for Concats {
     /// Pass name used in profiler ranges and dumps.
@@ -70,7 +70,7 @@ fn pending(producer: &Node) -> Option<Kernel> {
 /// Whether the kernel making operand `k` of `concat` (`producer`, its output `index`) can write it into its slot:
 /// the attention backward kernel (its atomically accumulated dQ aside), a fusion writing views, or, before fusion
 /// (`before_fusion`), a fusible layout or elementwise node.
-pub(super) fn slot_writes(
+pub(crate) fn slot_writes(
     m: &MpsModule<'_>,
     concat: &Node,
     k: usize,
@@ -103,6 +103,6 @@ pub(super) fn slot_writes(
 
 /// Whether an operand `producer` writes into its slot is worth placing its concatenation for: the attention
 /// backward kernel's are (its gradients land side by side), others alone aren't.
-pub(super) fn slot_worth(producer: &Node) -> bool {
+pub(crate) fn slot_worth(producer: &Node) -> bool {
     matches!(pending(producer), Some(Kernel::AttentionBackward))
 }

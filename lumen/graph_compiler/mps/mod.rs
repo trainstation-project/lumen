@@ -1,7 +1,6 @@
 //! MPS graph compiler: the pass pipeline that fuses a graph into Metal kernels, kernel compilation,
 //! and the encoder that launches each fused step with the right grid.
 
-mod concats;
 #[cfg(test)]
 mod tests;
 
@@ -22,6 +21,7 @@ pub(crate) use super::common::fusion::mps as fusion;
 use super::common::linear_cross_entropy::LinearCrossEntropy;
 use super::common::linear_reordering::LinearReordering;
 use super::common::merge_dots::{Blocks, MergeDots, MergeDotsBackward, Packs, Target};
+use super::common::place_concats::mps::{self as concats, Concats};
 use super::common::place_concats::{PlaceConcats, Slots};
 use super::common::place_views::PlaceViews;
 use super::common::simplify::Simplify;
@@ -51,7 +51,6 @@ use crate::runtime::mps::{
 };
 use crate::tensor::contiguous_strides;
 use crate::{DType, Scalar, Tensor};
-use concats::Concats;
 
 // Metal library loader implemented in the Objective-C shim.
 unsafe extern "C" {
@@ -179,7 +178,7 @@ impl Module for MpsModule<'_> {
     }
 }
 
-/// Kind of kernel a fusion requests, generated later by the codegen pass.
+/// Kind of kernel a fusion requests, generated later by codegen.
 pub(crate) enum Kernel {
     /// A fusion's kernel generated from its body.
     Fusion,
