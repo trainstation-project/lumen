@@ -1,7 +1,6 @@
 //! MPS graph compiler: the pass pipeline that fuses a graph into Metal kernels, kernel compilation,
 //! and the encoder that launches each fused step with the right grid.
 
-pub(crate) mod ane;
 pub(crate) mod kernel_codegen;
 #[cfg(test)]
 mod tests;
@@ -12,6 +11,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
 use super::common::alone::{Alone, Lone};
+use super::common::ane::mps as ane;
 use super::common::chunked_cross_entropy::ChunkedCrossEntropy;
 use super::common::clamp_indices::ClampIndices;
 use super::common::diamonds::{Diamonds, Row, RowsModule};
@@ -91,7 +91,7 @@ pub(crate) struct MpsModule<'a> {
     /// Compile options, including the MPS config.
     pub(crate) options: &'a Options,
     /// Packed weight blocks from dot merging: member input indices and the packed axis.
-    packed: Vec<(Vec<usize>, usize)>,
+    pub(crate) packed: Vec<(Vec<usize>, usize)>,
     /// Per packed block, how many members each interleaved group spans (all ones: side by side).
     interleaved: Vec<Vec<usize>>,
     /// Normalization rows found by the diamonds pass, consumed by fusion.
