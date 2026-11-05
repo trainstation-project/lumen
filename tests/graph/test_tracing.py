@@ -1,5 +1,6 @@
 """Tests of tracing: graph text, retracing, primitives, dtypes, broadcasting, meta tensors and what a trace rejects."""
 
+import gc
 import re
 import warnings
 
@@ -68,6 +69,9 @@ def test_deallocate_memory_frees_the_current_plans_workspace():
         """Checks a call with `x` raises, its plan's memory freed."""
         with pytest.raises(RuntimeError, match="allocate_memory"):
             f(x)
+
+    # Earlier tests' garbage is collected now, so no free of a tensor allocated before the profile lands in a phase.
+    gc.collect()
 
     with profile(activities=[ProfilerActivity.CPU], profile_memory=True) as prof:
         phase("before", lambda: None)

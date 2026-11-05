@@ -16,15 +16,15 @@ use crate::graph_compiler::passes::horizontal::segments;
 
 /// The launch shape of an `ElementwiseKernel` (`kernel.py`): threads per block, and the bytes of its
 /// widest tensor each thread moves a step.
-#[cfg_attr(not(lumen_cuda_linked), allow(dead_code))]
+#[cfg_attr(not(all(feature = "python", lumen_cuda_linked)), allow(dead_code))]
 pub(crate) type Shape = (usize, usize);
 
 /// The shape kernels run with untuned (`kernel.py`'s `THREADS` and `STEP_BYTES`).
-#[cfg_attr(not(lumen_cuda_linked), allow(dead_code))]
+#[cfg_attr(not(all(feature = "python", lumen_cuda_linked)), allow(dead_code))]
 pub(crate) const UNTUNED: Shape = (256, 16);
 
 /// The shapes autotuning times: 128 to 1024 threads, 16 to 64 bytes a thread.
-#[cfg_attr(not(lumen_cuda_linked), allow(dead_code))]
+#[cfg_attr(not(all(feature = "python", lumen_cuda_linked)), allow(dead_code))]
 pub(crate) fn shapes() -> Vec<Shape> {
     let threads = (1..=8).map(|k| 128 * k);
     threads.flat_map(|t| [16, 32, 64].map(|b| (t, b))).collect()
@@ -213,7 +213,7 @@ def launch(
 /// Blocks a kernel of launch shape `(threads, step_bytes)` over `n` elements whose widest tensor has
 /// `widest`-byte elements launches: one per tile of its threads' steps, so each block makes one pass
 /// (faster than fewer blocks looping).
-#[cfg_attr(not(lumen_cuda_linked), allow(dead_code))]
+#[cfg_attr(not(all(feature = "python", lumen_cuda_linked)), allow(dead_code))]
 pub(crate) fn blocks(n: usize, widest: usize, (threads, step_bytes): Shape) -> usize {
     let per_thread = (step_bytes / widest).max(1);
     n.div_ceil(threads * per_thread).max(1)

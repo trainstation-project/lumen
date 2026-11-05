@@ -429,7 +429,14 @@ def test_collectives_overlap_the_work_independent_of_them(device):
         """An all-reduce of ``2 x`` plus one, and ``sum(3 exp y)``, which doesn't need it."""
         return prims.device_wait(prims.all_reduce(x * 2.0, "sum", [0, 1])) + 1.0, F.sum(F.exp(y) * 3.0)
 
-    steps = lumen.graph_compiler.Plan(lumen.make_graph(f)(meta(4), meta(4)), device).steps()
+    # CUDA's collectives run on the Triton backend (the CuTe one has no collective kernels).
+    lumen.config.compiler.use_triton_backend = True
+
+    try:
+        steps = lumen.graph_compiler.Plan(lumen.make_graph(f)(meta(4), meta(4)), device).steps()
+    finally:
+        lumen.config.compiler.use_triton_backend = False
+
     labels = [s["label"] for s in steps]
     start, wait = labels.index("all_reduce"), labels.index("device_wait")
     assert start < next(i for i, label in enumerate(labels) if label.startswith("exp")) < wait
