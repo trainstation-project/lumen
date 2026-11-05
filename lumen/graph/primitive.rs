@@ -392,7 +392,7 @@ pub enum Primitive {
         mutated: Vec<usize>,
         overlappable: Vec<(usize, usize)>,
     },
-    /// A `lumen.pallas` TPU kernel producing `outputs`.
+    /// A `lumen.kernels.pallas` TPU kernel producing `outputs`.
     PallasCall {
         label: &'static str,
         kernel: usize,

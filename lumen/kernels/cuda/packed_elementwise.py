@@ -6,8 +6,8 @@ import cuda.bindings.driver as cuda
 import cutlass.cute as cute
 from cutlass import Int32, const_expr
 
-from lumen.cute_dsl_utils.boundary import lane_boundary
-from lumen.cute_dsl_utils.elementwise import _load, _num_blocks, _store
+from lumen.kernels.cuda.boundary import lane_boundary
+from lumen.kernels.cuda.elementwise import _load, _num_blocks, _store
 
 
 class ElementwisePackedCUDAKernel:

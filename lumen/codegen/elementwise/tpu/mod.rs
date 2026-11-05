@@ -1,4 +1,4 @@
-//! TPU elementwise fusions: each generated as `lumen.pallas` source, a `program(device)` the TPU
+//! TPU elementwise fusions: each generated as `lumen.kernels.pallas` source, a `program(device)` the TPU
 //! runtime traces to Mosaic.
 
 pub(crate) mod grid;
@@ -24,7 +24,7 @@ use crate::{DType, Scalar};
 #[cfg(lumen_tpu_linked)]
 use grid::{Dim, Plan, layout, plan};
 
-/// A TPU elementwise kernel: its kernel name, the `lumen.pallas` source of its `program(device)`, and whether it reads its
+/// A TPU elementwise kernel: its kernel name, the `lumen.kernels.pallas` source of its `program(device)`, and whether it reads its
 /// operands through the indexing plan (it then takes its inputs, then its output; a plain one takes its
 /// output right after the step's own inputs).
 #[cfg(lumen_tpu_linked)]
@@ -804,7 +804,7 @@ fn program(specs: &[String], kernel: &[String]) -> String {
 
     formatdoc!(
         "
-        from lumen import pallas as pl
+        from lumen.kernels import pallas as pl
         from lumen.graph import prims
         from lumen.codegen.utils.tpu import pallas
 

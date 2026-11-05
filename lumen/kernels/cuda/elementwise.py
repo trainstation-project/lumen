@@ -8,8 +8,8 @@ import cuda.bindings.driver as cuda
 import cutlass.cute as cute
 from cutlass import Int32
 
-from lumen.cute_dsl_utils.boundary import lane_boundary
-from lumen.cute_dsl_utils.utils import get_fake_cute_tensor
+from lumen.kernels.cuda.boundary import lane_boundary
+from lumen.kernels.cuda.utils import get_fake_cute_tensor
 
 WARP_SIZE = 32
 LOG_WARP_SIZE = 5

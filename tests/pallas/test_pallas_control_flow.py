@@ -1,4 +1,4 @@
-"""Control flow tests for lumen.pallas kernels on TPU, ported from JAX: fori/while loops, scans, conds and switches."""
+"""Control flow tests for lumen.kernels.pallas kernels on TPU, ported from JAX: fori/while loops, scans, conds and switches."""
 
 import functools
 import itertools
@@ -8,7 +8,7 @@ import pytest
 
 import lumen
 import lumen.functional as F
-from lumen import pallas as pl
+from lumen.kernels import pallas as pl
 
 pytestmark = pytest.mark.tpu
 

@@ -8,7 +8,7 @@ import pytest
 
 import lumen
 import lumen.functional as F
-from lumen import pallas as pl
+from lumen.kernels import pallas as pl
 
 pytestmark = pytest.mark.tpu
 

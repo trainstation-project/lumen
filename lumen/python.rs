@@ -20,7 +20,7 @@ const PACKAGES: [(&str, Register); 12] = [
     ("runtime.stream", crate::runtime::stream::python::register),
     ("custom_op", crate::custom_op::python::register),
     ("graph", crate::graph::python::register),
-    ("pallas", crate::pallas::python::register),
+    ("kernels.pallas", crate::kernels::pallas::python::register),
     ("safetensors", crate::safetensors::python::register),
 ];
 

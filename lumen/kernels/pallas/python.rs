@@ -8,7 +8,7 @@ use super::{Kernel, Op, Space, Type, Var};
 use crate::graph::TensorType;
 use crate::tensor::python::{dtype_name, parse_dtype};
 
-/// Python `lumen.pallas._C.Kernel`: the kernel being traced, one builder call per op.
+/// Python `lumen.kernels.pallas._C.Kernel`: the kernel being traced, one builder call per op.
 #[pyclass(name = "Kernel", module = "lumen", unsendable)]
 pub(crate) struct PyKernel {
     inner: Kernel,

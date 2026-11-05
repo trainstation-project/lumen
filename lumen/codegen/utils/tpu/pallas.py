@@ -1,9 +1,9 @@
-"""Lowers lumen.pallas TPU kernels to Mosaic for the Rust TPU runtime, and views into device memory."""
+"""Lowers lumen.kernels.pallas TPU kernels to Mosaic for the Rust TPU runtime, and views into device memory."""
 
 import importlib
 import json
 
-from lumen import pallas as pl
+from lumen.kernels import pallas as pl
 
 
 def lower(module: str, spec: str) -> str:

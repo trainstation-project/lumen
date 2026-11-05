@@ -3,7 +3,7 @@
 import cutlass.cute as cute
 from cutlass.cute.runtime import from_dlpack
 
-from lumen.cute_dsl_utils.constants import get_cute_dtype
+from lumen.kernels.cuda.constants import get_cute_dtype
 
 
 def get_powers_of_2(start: int, end: int) -> list[int]:
