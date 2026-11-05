@@ -38,6 +38,10 @@ pub(crate) struct Elementwise {
 #[cfg(lumen_tpu_linked)]
 const BLOCK_BYTES: usize = 1 << 20;
 
+/// Most elements of a block's rows and columns, before the stream budget halves it.
+#[cfg(lumen_tpu_linked)]
+const BLOCK_ELEMENTS: usize = 1 << 20;
+
 /// Byte budget for all operand blocks streamed together, split evenly across dtypes.
 #[cfg(lumen_tpu_linked)]
 const STREAM_BYTES: usize = 32 << 20;
@@ -56,18 +60,15 @@ pub(crate) fn blocks(shape: &[usize], dtypes: &[DType]) -> Result<Vec<usize>, St
         ]);
     }
 
-    // The row tile is the tallest sublane count among the dtypes, so blocks align for all of them.
-    let rows = dtypes
-        .iter()
-        .map(|&d| Layout::new(d, &[1, 1]).map(|l| l.rows))
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .max()
-        .unwrap_or(8);
+    let rows = tile_rows(dtypes)?;
 
     let (m, n) = (shape[shape.len() - 2], shape[shape.len() - 1]);
-    let mut bm = block(m, rows, 512).ok_or_else(|| failed("its rows"))?;
     let mut bn = block(n, 128, 2048).ok_or_else(|| failed("its columns"))?;
+
+    // Narrow blocks grow taller, up to BLOCK_ELEMENTS: each grid step costs a pipeline step, so small
+    // blocks (a vector's 128-wide view in 512 rows) spend more time stepping than moving bytes.
+    let cap = (BLOCK_ELEMENTS / bn).max(512);
+    let mut bm = block(m, rows, cap).ok_or_else(|| failed("its rows"))?;
     let lead: usize = shape[..shape.len() - 2].iter().product();
     let width = dtypes.iter().map(|d| d.size_of()).max().unwrap_or(4);
     let budget = STREAM_BYTES / dtypes.len();
@@ -96,6 +97,18 @@ pub(crate) fn blocks(shape: &[usize], dtypes: &[DType]) -> Result<Vec<usize>, St
         .unwrap_or(1);
 
     Ok(vec![bl, bm, bn])
+}
+
+/// The rows of a tile every dtype in `dtypes` fills whole: the tallest sublane count among them, so blocks
+/// align for all of them.
+#[cfg(lumen_tpu_linked)]
+fn tile_rows(dtypes: &[DType]) -> Result<usize, String> {
+    let rows = dtypes
+        .iter()
+        .map(|&d| Layout::new(d, &[1, 1]).map(|l| l.rows))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(rows.into_iter().max().unwrap_or(8))
 }
 
 /// Greatest common divisor of `a` and `b`.
@@ -863,6 +876,18 @@ impl ElementwiseCodegen for Tpu {
             .map(|t| t.dtype)
             .chain(body.outputs().iter().map(|&v| body.type_of(v).dtype))
             .collect();
+
+        // A vector is stored as the (n / 128, 128) matrix of whole tiles when n fills whole tile rows, so it
+        // runs as that matrix: 2-d blocks fill every sublane of a vreg, which 1-d ones don't.
+        let matrix;
+
+        let out = match (out.shape.as_slice(), window) {
+            (&[n], None) if n.is_multiple_of(128 * tile_rows(&dtypes)?) => {
+                matrix = TensorType::new(out.dtype, &[n / 128, 128]);
+                &matrix
+            }
+            _ => out,
+        };
 
         let mut blocks = blocks(&out.shape, &dtypes)?;
 
