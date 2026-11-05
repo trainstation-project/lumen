@@ -4,8 +4,8 @@
 use super::Options;
 use crate::Device;
 use crate::graph::{Graph, Primitive, Var};
-use crate::graph_compiler::plan::{ALIGNMENT, lcm};
 use crate::graph_compiler::{Plan, Source, Stage, Staged};
+use crate::plan::{ALIGNMENT, lcm};
 
 /// Where a value must be computed.
 #[derive(Clone, Copy, PartialEq, Debug)]

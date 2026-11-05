@@ -2,12 +2,12 @@
 //! cross-entropy epilogue writing each output tile's per-row max and sum of exponentials (and the label's
 //! logit), then a kernel combining a row's tiles into its loss and `logsumexp`.
 
-use super::gemm::{Epilogue, Gemm};
 use super::{Function, Kernel, Launches, Template};
 use crate::codegen::dot_general::triton::{self as codegen, Config};
 use crate::codegen::elementwise::triton::{LOOP_CONFIGS, UNTUNED_LOOP};
 use crate::graph::Primitive;
-use crate::graph_compiler::plan::Step;
+use crate::graph_compiler::common::dot::triton::{Epilogue, Gemm};
+use crate::plan::Step;
 use crate::tensor::contiguous_strides;
 use crate::{DType, Device, Tensor, TensorOptions};
 
@@ -69,7 +69,7 @@ fn prepare(h: &Tensor, w: &Tensor, target: &Tensor) -> Prepared {
 /// Runs linear cross entropy `step` on `[h, w, target]` into `out` (`[2, b]`: the losses, then the
 /// `logsumexp`s) with GEMM tile `config`: the GEMM writes a partial max and sum a row per tile of
 /// `BLOCK_SIZE_N` classes, then one program a row combines them.
-pub(super) fn run(
+pub(crate) fn run(
     gemm: Gemm,
     step: &Step,
     inputs: &[Tensor],

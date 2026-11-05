@@ -2,7 +2,7 @@
 use super::common::cse::cse;
 use crate::graph::Primitive::*;
 use crate::graph::{Graph, Primitive, TensorType, Var};
-use crate::graph_compiler::plan_tests::data;
+use crate::plan::tests::data;
 use crate::reference;
 use crate::{DType, Scalar};
 

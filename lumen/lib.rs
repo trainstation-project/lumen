@@ -18,6 +18,8 @@ macro_rules! op_name {
 pub const LIBRARY_NAME: &str = library_name!();
 
 pub mod allocator;
+#[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
+pub(crate) mod autotune;
 pub(crate) mod codegen;
 mod config;
 pub mod custom_op;
@@ -26,6 +28,7 @@ pub mod distributed;
 pub mod graph;
 pub mod graph_compiler;
 pub mod pallas;
+pub mod plan;
 pub mod profiler;
 #[cfg(feature = "python")]
 mod python;

@@ -3,7 +3,7 @@
 use super::float_tiles;
 use crate::Tensor;
 use crate::graph::TensorType;
-use crate::graph_compiler::plan::Step;
+use crate::plan::Step;
 use crate::runtime::mps::{Grid, dims_arg, launch};
 use crate::tensor::contiguous_strides;
 

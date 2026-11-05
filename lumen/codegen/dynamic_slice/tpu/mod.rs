@@ -6,7 +6,7 @@ use crate::codegen::dynamic_slice::DynamicSliceCodegen;
 use crate::codegen::utils::tpu::Tpu;
 use crate::device::tpu::layout::Layout;
 use crate::graph::{Graph, Primitive, TensorType};
-use crate::graph_compiler::plan::Step;
+use crate::plan::Step;
 use crate::runtime::tpu::{Launch, launch};
 use crate::tensor::scalar::Scalar;
 

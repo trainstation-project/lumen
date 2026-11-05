@@ -19,10 +19,10 @@ pub(crate) use skinny::*;
 pub(crate) use tiled::*;
 
 use crate::Tensor;
-use crate::graph::Primitive::{self, DotGeneral};
+use crate::graph::Primitive;
 use crate::graph::TensorType;
-use crate::graph::primitive::free_dims;
-use crate::graph_compiler::plan::Step;
+use crate::graph_compiler::common::dot::canonicalize::matmul_order;
+use crate::plan::Step;
 use crate::runtime::mps::{Grid, dims_arg, launch};
 use crate::tensor::contiguous_strides;
 
@@ -38,45 +38,6 @@ const INT_TILE: (usize, usize) = (64, 64);
 const WIDE_TILE: (usize, usize) = (32, 32);
 /// Below this many default tiles the small tile is used, for more parallelism.
 const SMALL_TILES: usize = 32;
-
-/// Operand dimension orders putting each operand in `[batch, M, K]` / `[batch, K, N]` form.
-pub(crate) struct MatmulOrder {
-    /// Lhs dims ordered batch, free (M), contracting (K).
-    pub lhs: Vec<usize>,
-    /// Rhs dims ordered batch, contracting (K), free (N).
-    pub rhs: Vec<usize>,
-    /// Where the batch and M groups end in `lhs`.
-    pub lhs_split: (usize, usize),
-    /// Where the batch and K groups end in `rhs`.
-    pub rhs_split: (usize, usize),
-}
-
-/// The batch/free/contracting dimension orders of a `dot_general`'s operands.
-pub(crate) fn matmul_order(p: &Primitive, lhs_rank: usize, rhs_rank: usize) -> MatmulOrder {
-    let DotGeneral {
-        lhs_contracting,
-        rhs_contracting,
-        lhs_batch,
-        rhs_batch,
-        ..
-    } = p
-    else {
-        unreachable!("a dot_general")
-    };
-
-    let lhs_used = [lhs_batch.as_slice(), lhs_contracting].concat();
-    let rhs_used = [rhs_batch.as_slice(), rhs_contracting].concat();
-    let lhs_free: Vec<usize> = free_dims(lhs_rank, &lhs_used).collect();
-    let rhs_free: Vec<usize> = free_dims(rhs_rank, &rhs_used).collect();
-    let (nb, nk) = (lhs_batch.len(), lhs_contracting.len());
-
-    MatmulOrder {
-        lhs: [lhs_batch.as_slice(), &lhs_free, lhs_contracting].concat(),
-        rhs: [rhs_batch.as_slice(), rhs_contracting, &rhs_free].concat(),
-        lhs_split: (nb, nb + lhs_free.len()),
-        rhs_split: (nb, nb + nk),
-    }
-}
 
 /// Innermost stride of each of the three dim groups of `order` once collapsed, or `None` if a
 /// group's dims are not contiguous with each other.

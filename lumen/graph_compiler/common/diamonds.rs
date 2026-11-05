@@ -1,10 +1,11 @@
 //! Detection of row-normalization patterns ("diamonds"): a value combined with a broadcast of its own
-//! last-axis reduction, which a backend can run as one row kernel; and the rewrite replacing each row
-//! with a `row` fusion.
+//! last-axis reduction, which a backend can run as one row kernel; the rewrite replacing each row
+//! with a `row` fusion; and the pass finding them for a backend's fusion to fuse.
 
 use std::collections::HashMap;
 
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
+use crate::graph_compiler::pass::{CompilerPass, Module};
 use crate::graph_compiler::{constant, elementwise};
 
 /// Whether the backend can put a node in a row kernel.
@@ -1219,6 +1220,57 @@ pub(crate) struct Partials {
     pub columns: usize,
     pub groups: usize,
     pub fewest_groups: usize,
+}
+
+/// A module that keeps the normalization rows the diamonds pass finds, for its fusion to fuse.
+pub(crate) trait RowsModule: Module {
+    /// The rows found so far, which the fusion consumes.
+    fn rows_mut(&mut self) -> &mut Vec<Row>;
+}
+
+/// Compiler pass finding each normalization row the backend's fusion can merge (`fusible`), with column
+/// sums over the same rows riding along as per-group partials within `partials`, and keeping them for its
+/// fusion.
+pub(crate) struct Diamonds {
+    pub fusible: Fusible,
+    pub partials: Partials,
+}
+
+impl<M: RowsModule> CompilerPass<M> for Diamonds {
+    /// Pass name used in profiler ranges and dumps.
+    fn name(&self) -> &'static str {
+        "normalization_diamonds"
+    }
+
+    /// Stores the rows found and the graph rewritten for their partial sums.
+    fn apply(&mut self, m: &mut M) -> Result<(), String> {
+        let found = diamonds(m.graph(), self.fusible);
+        let (graph, rows) = partials(m.graph(), found, self.fusible, self.partials);
+        *m.graph_mut() = graph;
+        *m.rows_mut() = rows;
+        Ok(())
+    }
+}
+
+/// Compiler pass replacing each normalization row the backend's row kernel can take (`fusible` nodes, a
+/// body that `fits`) with a `row` fusion of its own.
+pub(crate) struct FusedDiamonds {
+    pub fusible: Fusible,
+    pub fits: fn(&Graph) -> bool,
+}
+
+impl<M: Module> CompilerPass<M> for FusedDiamonds {
+    /// Pass name used in profiler ranges and dumps.
+    fn name(&self) -> &'static str {
+        "normalization_diamonds"
+    }
+
+    /// Rewrites the graph with each row fused.
+    fn apply(&mut self, m: &mut M) -> Result<(), String> {
+        let rows = diamonds(m.graph(), self.fusible);
+        *m.graph_mut() = fused(m.graph(), &rows, self.fusible, self.fits);
+        Ok(())
+    }
 }
 
 /// Splits column sums that can share a row kernel into a per-group partial sum attached to that row

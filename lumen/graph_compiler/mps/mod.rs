@@ -1,16 +1,7 @@
 //! MPS graph compiler: the pass pipeline that fuses a graph into Metal kernels, kernel compilation,
 //! and the encoder that launches each fused step with the right grid.
 
-pub(crate) mod ane;
-mod autotune;
-mod canonicalize_dots;
-mod diamonds;
-pub(crate) mod fusion;
-mod horizontal;
-mod kernel_codegen;
-mod place_concats;
-mod place_views;
-mod split_k;
+pub(crate) mod kernel_codegen;
 #[cfg(test)]
 mod tests;
 
@@ -20,19 +11,25 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
 use super::common::alone::{Alone, Lone};
+use super::common::ane::mps as ane;
 use super::common::chunked_cross_entropy::ChunkedCrossEntropy;
 use super::common::clamp_indices::ClampIndices;
-use super::common::dot_strength::DotStrength;
+use super::common::diamonds::{Diamonds, Row, RowsModule};
+use super::common::dot::canonicalize::CanonicalizeDots;
+use super::common::dot::split_k::mps::SplitK;
+use super::common::dot::strength::DotStrength;
+pub(crate) use super::common::fusion::mps as fusion;
 use super::common::linear_cross_entropy::LinearCrossEntropy;
 use super::common::linear_reordering::LinearReordering;
-use super::common::merge_dots::{Blocks, MergeDots, Packs, Target};
-use super::common::merge_dots_backward::MergeDotsBackward;
+use super::common::merge_dots::{Blocks, MergeDots, MergeDotsBackward, Packs, Target};
+use super::common::place_concats::{PlaceConcats, Slots};
+use super::common::place_views::PlaceViews;
 use super::common::simplify::Simplify;
 use super::common::take_along_axis::TakeAlongAxis;
 use super::pass::{Module, Pipeline};
 use super::{CompilerConfig, Options};
 use crate::codegen::attention::AttentionCodegen;
-use crate::codegen::attention::mps::{backward_block_with_dq, decodes};
+use crate::codegen::attention::mps::decodes;
 use crate::codegen::dot_general::mps as gemm;
 use crate::codegen::dot_general::mps::GemmConfig;
 use crate::codegen::elementwise::mps::Tuning;
@@ -43,26 +40,18 @@ use crate::codegen::row::mps::row_groups;
 use crate::codegen::store::mps::strided_load;
 use crate::codegen::utils::mps::Mps;
 use crate::graph::{Graph, Node, Primitive, TensorType, Var, View};
-use crate::graph_compiler::common::attention::{self, Backward};
-use crate::graph_compiler::common::flash_attention::{
-    AttentionBackwards, Attentions, FlashAttention, FlashAttentionBackward,
-};
+use crate::graph_compiler::common::attention::{self, FlashAttention, FlashAttentionBackward};
 use crate::graph_compiler::common::horizontal::segments;
 use crate::graph_compiler::common::updates::Updates;
-use crate::graph_compiler::plan::{Buffer, Step};
 use crate::graph_compiler::{Plan, PlanOptions};
+use crate::plan::{Buffer, Step};
 use crate::runtime::mps::{
     Grid, dims_arg, element_arg, elementwise_grid, launch, scratch_bytes, u32_arg,
 };
 use crate::tensor::contiguous_strides;
 use crate::{DType, Scalar, Tensor};
-use canonicalize_dots::CanonicalizeDots;
-#[cfg(test)]
-use canonicalize_dots::canonicalize_dots;
 use kernel_codegen::Codegen;
-use place_concats::PlaceConcats;
-use place_views::PlaceViews;
-pub(crate) use place_views::{
+pub(crate) use kernel_codegen::{
     attention_reads_strided, fusion_reads_strided, loads_strided, loads_views,
 };
 
@@ -97,57 +86,24 @@ const PRELUDE: &str = concat!(
 );
 
 /// Graph and side tables threaded through the MPS passes.
-struct MpsModule<'a> {
-    graph: Graph,
+pub(crate) struct MpsModule<'a> {
+    pub(crate) graph: Graph,
     /// Compile options, including the MPS config.
-    options: &'a Options,
+    pub(crate) options: &'a Options,
     /// Packed weight blocks from dot merging: member input indices and the packed axis.
-    packed: Vec<(Vec<usize>, usize)>,
+    pub(crate) packed: Vec<(Vec<usize>, usize)>,
     /// Per packed block, how many members each interleaved group spans (all ones: side by side).
     interleaved: Vec<Vec<usize>>,
     /// Normalization rows found by the diamonds pass, consumed by fusion.
-    rows: Vec<diamonds::Row>,
+    pub(crate) rows: Vec<Row>,
     /// Graph input indices passed to kernels by value.
-    scalars: Vec<usize>,
+    pub(crate) scalars: Vec<usize>,
     /// Kernels requested so far; fusions name them as `PENDING` plus an index.
-    kernels: Vec<Kernel>,
+    pub(crate) kernels: Vec<Kernel>,
     /// Generated Metal sources by kernel name.
     sources: BTreeMap<String, String>,
     /// Elementwise kernels that the autotuner may regenerate, by kernel name.
-    tunable: BTreeMap<String, autotune::Tunable>,
-}
-
-impl Attentions for MpsModule<'_> {
-    /// Whether attention may absorb elementwise epilogues.
-    fn contraction_epilogues(&self) -> bool {
-        self.options.config.contraction_epilogues
-    }
-
-    /// Graph values of the by-value scalar inputs.
-    fn scalars(&self) -> Vec<Var> {
-        self.scalars
-            .iter()
-            .map(|&i| self.graph.inputs()[i])
-            .collect()
-    }
-
-    /// Requests an attention kernel, returning its pending name.
-    fn kernel(&mut self) -> String {
-        request(&mut self.kernels, Kernel::Attention)
-    }
-}
-
-impl AttentionBackwards for MpsModule<'_> {
-    /// Backwards whose dQ fits the dK/dV kernel, unless deterministic mode forbids its atomic dQ accumulation.
-    fn together(&self) -> impl Fn(&Backward) -> bool + 'static {
-        let deterministic = self.options.config.deterministic;
-        move |b| !deterministic && backward_block_with_dq(b).is_some()
-    }
-
-    /// Requests an attention backward kernel, returning its pending name.
-    fn backward_kernel(&mut self) -> String {
-        request(&mut self.kernels, Kernel::AttentionBackward)
-    }
+    tunable: BTreeMap<String, crate::autotune::mps::Tunable>,
 }
 
 impl Blocks for MpsModule<'_> {
@@ -195,6 +151,24 @@ impl Lone for MpsModule<'_> {
     }
 }
 
+impl Slots for MpsModule<'_> {
+    /// Before fusion: what `kernel_codegen::slot_writes` accepts, fusible nodes counting as kernels.
+    fn writes(&self, concat: &Node, k: usize, producer: &Node, index: usize) -> bool {
+        kernel_codegen::slot_writes(self, concat, k, producer, index, true)
+    }
+
+    /// The attention backward kernel's operands (`kernel_codegen::slot_worth`).
+    fn worth(&self, _: &Node, _: usize, producer: &Node, _: usize) -> bool {
+        kernel_codegen::slot_worth(self, producer)
+    }
+}
+
+impl RowsModule for MpsModule<'_> {
+    fn rows_mut(&mut self) -> &mut Vec<Row> {
+        &mut self.rows
+    }
+}
+
 impl Module for MpsModule<'_> {
     fn graph(&self) -> &Graph {
         &self.graph
@@ -214,7 +188,7 @@ impl Module for MpsModule<'_> {
 }
 
 /// Kind of kernel a fusion requests, generated later by the codegen pass.
-enum Kernel {
+pub(crate) enum Kernel {
     /// A fusion's kernel generated from its body, with a by-value flag per input.
     Fusion(Vec<bool>),
     /// Flash attention forward.
@@ -230,7 +204,7 @@ const MOST_UPDATES: usize = 29;
 const PENDING: &str = "pending#";
 
 /// Records a kernel request and returns the placeholder name a fusion uses until codegen.
-fn request(kernels: &mut Vec<Kernel>, kernel: Kernel) -> String {
+pub(crate) fn request(kernels: &mut Vec<Kernel>, kernel: Kernel) -> String {
     kernels.push(kernel);
     format!("{PENDING}{}", kernels.len() - 1)
 }
@@ -286,10 +260,13 @@ fn pipeline<'a>(config: &CompilerConfig) -> Pipeline<MpsModule<'a>> {
     }
 
     if config.split_k {
-        p.add(split_k::SplitK);
+        p.add(SplitK);
     }
 
-    p.add(CanonicalizeDots);
+    // Matmul operands the GEMM kernels can't read as three strides are transposed first.
+    p.add(CanonicalizeDots {
+        readable: reads_contiguous,
+    });
 
     if config.fuse {
         p.add(Updates {
@@ -300,7 +277,10 @@ fn pipeline<'a>(config: &CompilerConfig) -> Pipeline<MpsModule<'a>> {
 
     if config.fuse {
         if config.normalization_diamonds {
-            p.add(diamonds::Diamonds);
+            p.add(Diamonds {
+                fusible: fusion::fusible,
+                partials: crate::codegen::row::mps::ROW_PARTIALS,
+            });
         }
 
         p.add(PlaceConcats);
@@ -308,7 +288,9 @@ fn pipeline<'a>(config: &CompilerConfig) -> Pipeline<MpsModule<'a>> {
     }
 
     // Slices a GEMM reads in place become views before the lone layout ops left become elementwise fusions, as on Triton.
-    p.add(PlaceViews);
+    p.add(PlaceViews {
+        reads: gemm::reads_strided,
+    });
     p.add(Alone);
     p.add(Codegen);
     p
@@ -360,7 +342,8 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
     };
 
     pipeline(config).run(&mut module)?;
-    compile_kernels(std::mem::take(&mut module.sources))?;
+
+    compile_routed(std::mem::take(&mut module.sources))?;
 
     let MpsModule {
         graph: fused,
@@ -379,18 +362,19 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
     let mut plan = Plan::compile_with(&fused, &plan);
 
     if config.autotune {
-        let tuner = super::common::autotune::Autotuner {
-            timer: autotune::Mps,
+        let tuner = crate::autotune::Autotuner {
+            timer: crate::autotune::mps::Mps,
         };
 
-        let mut elementwise = autotune::Elementwise {
+        let mut elementwise = crate::autotune::mps::Elementwise {
             tunable: &tunable,
             config,
             sources: BTreeMap::new(),
         };
 
         tuner.tune(&mut elementwise, &mut plan)?;
-        tuner.tune(&mut autotune::Gemms::new(config), &mut plan)?;
+        tuner.tune(&mut crate::autotune::mps::Gemms::new(config), &mut plan)?;
+        tuner.tune(&mut crate::autotune::mps::Attentions::default(), &mut plan)?;
     }
 
     // Relabel dots reading packed weight blocks (directly or through same-sized elementwise steps) as `Nx dot_general`.
@@ -490,16 +474,36 @@ fn feeding(primitive: &Primitive, p: usize, inputs: usize) -> Vec<usize> {
     reads
 }
 
-/// Metal Performance Primitives matmul templates, compiled only into MPP kernels.
-const MPP: &str = include_str!("../../codegen/dot_general/mps/mpp/kernel.metal");
+/// Metal Performance Primitives matmul and attention templates, compiled only into MPP kernels.
+const MPP: &str = concat!(
+    include_str!("../../codegen/dot_general/mps/mpp/kernel.metal"),
+    include_str!("../../codegen/attention/mps/forward_mpp_kernel.metal"),
+);
+
+/// Whether the GEMM kernels read operand `k` of `dot` as laid out (contiguously): each of its batch, free and
+/// contracting dimension groups merges into one stride.
+fn reads_contiguous(dot: &Primitive, operands: [&TensorType; 2], k: usize) -> bool {
+    gemm::reads_strided(dot, operands, k, &contiguous_strides(&operands[k].shape))
+}
+
+/// Compiles `sources`, attention kernels on Metal Performance Primitives against their templates and the rest
+/// against the standard prelude.
+pub(crate) fn compile_routed(sources: BTreeMap<String, String>) -> Result<(), String> {
+    let (mpp, sources): (BTreeMap<_, _>, BTreeMap<_, _>) = sources
+        .into_iter()
+        .partition(|(_, source)| source.contains("flash_attention_mpp"));
+
+    compile_kernels(sources)?;
+    compile_mpp_kernels(mpp)
+}
 
 /// Compiles `sources` against the standard prelude.
-fn compile_kernels(sources: BTreeMap<String, String>) -> Result<(), String> {
+pub(crate) fn compile_kernels(sources: BTreeMap<String, String>) -> Result<(), String> {
     compile_with(PRELUDE, sources)
 }
 
 /// Compiles `sources` against the prelude plus the MPP templates.
-fn compile_mpp_kernels(sources: BTreeMap<String, String>) -> Result<(), String> {
+pub(crate) fn compile_mpp_kernels(sources: BTreeMap<String, String>) -> Result<(), String> {
     compile_with(&format!("{PRELUDE}\n{MPP}"), sources)
 }
 
@@ -527,11 +531,11 @@ fn compile_with(prelude: &str, sources: BTreeMap<String, String>) -> Result<(), 
 }
 
 /// Every compiled kernel source by name.
-static SOURCES: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
+pub(crate) static SOURCES: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
 
 /// Whether this Metal toolchain supports Metal Performance Primitives, probed once: a kernel defined only
 /// under `LUMEN_MPP`, compiling (and logging) no error either way.
-fn mpp_available() -> bool {
+pub(crate) fn mpp_available() -> bool {
     static AVAILABLE: OnceLock<bool> = OnceLock::new();
 
     *AVAILABLE.get_or_init(|| {
@@ -545,7 +549,7 @@ fn mpp_available() -> bool {
 
 /// How a fused kernel is launched.
 #[derive(Clone, Copy, PartialEq)]
-enum Launch {
+pub(crate) enum Launch {
     /// Flash attention forward.
     Attention,
     /// Flash attention backward.
@@ -568,7 +572,7 @@ enum Launch {
 static LAUNCHES: Mutex<BTreeMap<String, (Launch, Option<Tuning>)>> = Mutex::new(BTreeMap::new());
 
 /// Classifies a fusion body by the launch its kernel needs.
-fn launch_of(body: &Graph) -> Launch {
+pub(crate) fn launch_of(body: &Graph) -> Launch {
     let update = |n: &crate::graph::Node| {
         matches!(
             n.primitive,
@@ -601,7 +605,7 @@ fn launch_of(body: &Graph) -> Launch {
 }
 
 /// Records how kernel `name` for `body` launches under `tuning`.
-pub(super) fn record_launch(name: &str, body: &Graph, tuning: Option<Tuning>) {
+pub(crate) fn record_launch(name: &str, body: &Graph, tuning: Option<Tuning>) {
     let launch = (launch_of(body), tuning);
     let mut launches = LAUNCHES.lock().unwrap_or_else(PoisonError::into_inner);
     launches.insert(name.to_owned(), launch);
@@ -808,14 +812,8 @@ fn strided_variant(step: &Step, name: &str, body: &Graph) -> Result<Option<Strin
     Ok(Some(variant))
 }
 
-/// Name of attention kernel `name` generated for the step's operand layouts (any strides but a
-/// contiguous last dim), compiling it on first use.
-fn attention_variant(
-    step: &Step,
-    name: &str,
-    body: &Graph,
-    launch: Launch,
-) -> Result<String, String> {
+/// The strides attention step `step` (of fused `body`) reads its operands and writes its outputs at.
+pub(crate) fn attention_strides(step: &Step, body: &Graph) -> attention::Strides {
     let outputs: Vec<(usize, Vec<usize>)> = std::iter::once(&step.output)
         .chain(&step.extra_outputs)
         .zip(&step.output_views)
@@ -825,7 +823,18 @@ fn attention_variant(
         })
         .collect();
 
-    let strides = attention::Strides::of(body, &step.input_strides(), &outputs);
+    attention::Strides::of(body, &step.input_strides(), &outputs)
+}
+
+/// Name of attention kernel `name` generated for the step's operand layouts (any strides but a
+/// contiguous last dim), compiling it on first use.
+fn attention_variant(
+    step: &Step,
+    name: &str,
+    body: &Graph,
+    launch: Launch,
+) -> Result<String, String> {
+    let strides = attention_strides(step, body);
     let mut layout: Vec<_> = strides.inputs.iter().collect();
     layout.sort();
     let mut views: Vec<_> = strides.outputs.iter().collect();
@@ -864,7 +873,7 @@ fn attention_variant(
         .contains_key(&variant);
 
     if !compiled {
-        compile_kernels(BTreeMap::from([(variant.clone(), source)]))?;
+        compile_routed(BTreeMap::from([(variant.clone(), source)]))?;
     }
 
     let launch = launch_kind(name, body);
@@ -894,15 +903,17 @@ pub(crate) fn encode(
         unreachable!("a fusion")
     };
 
-    encode_with(step, name, None, inputs, output, scratch, keep)
+    encode_with(step, name, None, None, inputs, output, scratch, keep)
 }
 
-/// Encodes a fused step, launching the tuned GEMM variant `gemm` when given.
-/// `inputs` holds the body inputs followed by extra output pointers.
-pub(super) fn encode_with(
+/// Encodes a fused step, launching the tuned GEMM variant `gemm` or attention variant `attention_tuned`
+/// (its kernel and tuning) when given. `inputs` holds the body inputs followed by extra output pointers.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_with(
     step: &Step,
     name: &str,
     gemm: Option<(&str, GemmConfig)>,
+    attention_tuned: Option<(&str, crate::codegen::attention::mps::Tuning)>,
     inputs: &[*const u8],
     output: *mut u8,
     scratch: *mut u8,
@@ -975,18 +986,21 @@ pub(super) fn encode_with(
         let a = attention::of_body(body).expect("an attention");
         let (outer, heads) = attention::grid_batch(&a.batch);
 
-        // Decode attention runs one threadgroup per query, otherwise one of `forward_groups`
-        // simdgroups per 8 of them.
-        let groups = crate::codegen::attention::mps::forward_groups(&a);
+        // Decode attention runs one threadgroup per query, otherwise one of its tuning's simdgroups per
+        // its rows of them.
+        let t =
+            attention_tuned.map_or_else(|| crate::codegen::attention::mps::tuning(&a), |(_, t)| t);
+        let (groups, rows) = (t.groups, t.rows());
 
         let grid = match decodes(&a) {
             true => Grid::Groups([a.sq, heads, outer]),
             false => Grid::GroupsOf {
-                groups: [a.sq.div_ceil(8 * groups), heads, outer],
+                groups: [a.sq.div_ceil(rows * groups), heads, outer],
                 threads: 32 * groups,
             },
         };
 
+        let name = attention_tuned.map_or(name, |(kernel, _)| kernel);
         let buffers = attention_buffers(a.dropout.is_some())?;
         return launch(name, &buffers, &scalars, grid, keep, step.label);
     }

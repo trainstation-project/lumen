@@ -5,7 +5,7 @@ use crate::Scalar;
 use crate::graph::Primitive;
 use crate::graph::UnaryOp;
 #[cfg(lumen_tpu_linked)]
-use crate::graph_compiler::plan::Step;
+use crate::plan::Step;
 
 /// The TPU code generator.
 pub(crate) struct Tpu;

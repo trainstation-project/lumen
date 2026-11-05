@@ -56,6 +56,21 @@ def test_a_dot_of_two_vectors_is_a_product_and_a_sum(device, dtype, triton_on_cu
     assert np.abs(floats(out) - expected).max() <= {"float32": 1e-5, "bfloat16": 1e-2}[dtype] * np.abs(expected).max()
 
 
+@pytest.mark.parametrize("device", ["cpu", MPS, TPU, CUDA])
+@pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
+def test_a_dot_batched_over_split_dimensions_agrees_with_numpy(device, dtype, triton_on_cuda):
+    """Attention's scores written out, ``q [B, S, H, D] . k [B, S, H, D]``
+    batched over B and H (a sequence apart) and contracting D: the matmul
+    kernels read each operand in its own layout, transposed first where they
+    can't."""
+    q, k = placed([2, 64, 4, 32], dtype, device), placed([2, 96, 4, 32], dtype, device, seed=1)
+    dims = (((3,), (3,)), ((0, 2), (0, 2)))
+    out = lumen.compile(lambda q, k: prims.dot_general(q, k, dims, "float32").to(dtype=dtype))(q, k)
+    assert out.device == f"{device}:0" and list(out.shape) == [2, 4, 64, 96]
+    expected = np.einsum("bshd,bthd->bhst", floats(q), floats(k))
+    assert np.abs(floats(out) - expected).max() <= {"float32": 1e-5, "bfloat16": 1e-2}[dtype] * np.abs(expected).max()
+
+
 def test_matmul_folds_a_batch_times_a_matrix():
     """A batch times a matrix (``x @ w``, a weight) is one matmul of the
     batch's rows, as torch folds it: the matrix read as it is, never

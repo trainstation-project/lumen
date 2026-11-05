@@ -20,10 +20,8 @@ use super::fusion;
 use crate::graph::Primitive::*;
 use crate::graph::{Graph, Primitive, TensorType, Var};
 use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::plan_tests::mps::{
-    available, check, check_within, exact_values, values,
-};
-use crate::graph_compiler::plan_tests::{data, mlp};
+use crate::plan::tests::mps::{available, check, check_within, exact_values, values};
+use crate::plan::tests::{data, mlp};
 use crate::reference;
 use crate::{DType, Device, Scalar, Tensor};
 
@@ -38,7 +36,7 @@ fn fuse(g: &Graph) -> Graph {
 
     fusion::fuse(
         g,
-        &super::diamonds::diamonds(g),
+        &crate::graph_compiler::common::diamonds::diamonds(g, super::fusion::fusible),
         &[],
         &config,
         |body, by_value| {
@@ -325,7 +323,10 @@ fn dot_operands_are_put_in_matmul_form_by_a_transpose_step() {
 
     let y = apply(&mut g, dot, &[a, b]);
     g.set_outputs(&[y]).unwrap();
-    let canonical = super::canonicalize_dots(&g);
+    let canonical = crate::graph_compiler::common::dot::canonicalize::canonicalize_dots(
+        &g,
+        super::reads_contiguous,
+    );
 
     assert_eq!(
         names(&canonical),
@@ -352,7 +353,15 @@ fn dot_operands_are_put_in_matmul_form_by_a_transpose_step() {
 
     let y = apply(&mut g, mm, &[a, b]);
     g.set_outputs(&[y]).unwrap();
-    assert_eq!(names(&super::canonicalize_dots(&g)), ["dot_general"]);
+    assert_eq!(
+        names(
+            &crate::graph_compiler::common::dot::canonicalize::canonicalize_dots(
+                &g,
+                super::reads_contiguous
+            )
+        ),
+        ["dot_general"]
+    );
 }
 
 /// Large reductions get workspace scratch in the plan, and the generic plan refuses MPS inputs.
@@ -1283,7 +1292,7 @@ fn dots_fuse_their_epilogue() {
 
     let unfused = fusion::fuse(
         &g,
-        &super::diamonds::diamonds(&g),
+        &crate::graph_compiler::common::diamonds::diamonds(&g, super::fusion::fusible),
         &[],
         &config,
         |body, by_value| {
@@ -2093,7 +2102,7 @@ fn vector_dots_are_reduced() {
 
     let d = apply(&mut g, dot, &[a, b]);
     g.set_outputs(&[d]).unwrap();
-    let reduced = crate::graph_compiler::common::dot_strength::reduce_vector_dots(&g);
+    let reduced = crate::graph_compiler::common::dot::strength::reduce_vector_dots(&g);
     let names: Vec<&str> = reduced.nodes().iter().map(|n| n.primitive.name()).collect();
     assert_eq!(names, ["mul", "reduce_sum"], "{reduced}");
     let inputs = [data(&[4, 6, 16], 1), data(&[4, 6, 16], 2)];
@@ -2131,7 +2140,7 @@ fn skinny_dots_split_their_contraction() {
 
     let build = |m: usize, n: usize, k: usize, dtype: DType| build_with(m, n, k, dtype, DType::F32);
     let g = build(8, 256, 4096, DType::F32);
-    let split = super::split_k::split_k(&g);
+    let split = crate::graph_compiler::common::dot::split_k::mps::split_k(&g);
     let names: Vec<&str> = split.nodes().iter().map(|n| n.primitive.name()).collect();
 
     assert_eq!(
@@ -2151,7 +2160,12 @@ fn skinny_dots_split_their_contraction() {
         assert!((w - g).abs() <= 4096.0 * 4.0 * f32::EPSILON, "{w} {g}");
     }
 
-    let split = super::split_k::split_k(&build(8, 256, 4096, DType::BF16));
+    let split = crate::graph_compiler::common::dot::split_k::mps::split_k(&build(
+        8,
+        256,
+        4096,
+        DType::BF16,
+    ));
     let names: Vec<&str> = split.nodes().iter().map(|n| n.primitive.name()).collect();
 
     assert_eq!(
@@ -2160,7 +2174,12 @@ fn skinny_dots_split_their_contraction() {
     );
 
     // Partials outweighing the operands split the same way: a product, then a sum.
-    let split = super::split_k::split_k(&build(352, 352, 2048, DType::BF16));
+    let split = crate::graph_compiler::common::dot::split_k::mps::split_k(&build(
+        352,
+        352,
+        2048,
+        DType::BF16,
+    ));
     let names: Vec<&str> = split.nodes().iter().map(|n| n.primitive.name()).collect();
 
     assert_eq!(
@@ -2170,7 +2189,7 @@ fn skinny_dots_split_their_contraction() {
     );
 
     let g = build_with(352, 352, 2048, DType::BF16, DType::BF16);
-    let split = super::split_k::split_k(&g);
+    let split = crate::graph_compiler::common::dot::split_k::mps::split_k(&g);
     let names: Vec<&str> = split.nodes().iter().map(|n| n.primitive.name()).collect();
 
     assert_eq!(
@@ -2218,7 +2237,7 @@ fn skinny_dots_split_their_contraction() {
         build(4, 256, 2049, DType::F32),
         build(4, 256, 1024, DType::F32),
     ] {
-        let split = super::split_k::split_k(&g);
+        let split = crate::graph_compiler::common::dot::split_k::mps::split_k(&g);
         assert_eq!(split.nodes().len(), 1, "{split}");
     }
 }
@@ -2226,9 +2245,9 @@ fn skinny_dots_split_their_contraction() {
 /// Every tiled, MPP and skinny GEMM config computes plain and bias-fused matmuls like the reference.
 #[test]
 fn every_gemm_candidate_matches_the_reference() {
-    use super::autotune::{Gemms, matmul_of};
+    use crate::autotune::Kernels;
+    use crate::autotune::mps::{Gemms, matmul_of};
     use crate::codegen::dot_general::mps as gemm;
-    use crate::graph_compiler::common::autotune::Kernels;
 
     if !available() {
         return;
@@ -2346,9 +2365,9 @@ fn every_gemm_candidate_matches_the_reference() {
 /// Every tiled GEMM config stores column regions, row halves and concatenated expansions correctly.
 #[test]
 fn every_tiled_gemm_stores_regions_halves_and_expansions_along_rows_and_columns() {
-    use super::autotune::{Gemms, matmul_of};
+    use crate::autotune::Kernels;
+    use crate::autotune::mps::{Gemms, matmul_of};
     use crate::codegen::dot_general::mps as gemm;
-    use crate::graph_compiler::common::autotune::Kernels;
 
     if !available() {
         return;
@@ -2530,9 +2549,9 @@ fn every_tiled_gemm_stores_regions_halves_and_expansions_along_rows_and_columns(
 /// Every MPP config handles gated pairs (halves or interleaved) and an RMS norm wider than one tile.
 #[test]
 fn every_tuned_paired_and_wide_norm_gemm_matches_the_reference() {
-    use super::autotune::{Gemms, matmul_of};
+    use crate::autotune::Kernels;
+    use crate::autotune::mps::{Gemms, matmul_of};
     use crate::codegen::dot_general::mps::Algorithm;
-    use crate::graph_compiler::common::autotune::Kernels;
 
     if !available() || !super::mpp_available() {
         return;
@@ -2737,9 +2756,9 @@ fn every_tuned_paired_and_wide_norm_gemm_matches_the_reference() {
 /// MPP and skinny GEMM candidates pick the expected epilogue layout flags and store every epilogue correctly.
 #[test]
 fn every_tuned_gemm_kernel_stores_every_epilogue() {
-    use super::autotune::{Gemms, matmul_of};
+    use crate::autotune::Kernels;
+    use crate::autotune::mps::{Gemms, matmul_of};
     use crate::codegen::dot_general::mps::{Algorithm, GemmConfig};
-    use crate::graph_compiler::common::autotune::Kernels;
 
     if !available() || !super::mpp_available() {
         return;
@@ -3075,8 +3094,8 @@ fn every_tuned_gemm_kernel_stores_every_epilogue() {
 /// count bfloat16 cannot hold, whichever partial sums a candidate splits it into.
 #[test]
 fn every_gemm_candidate_accumulates_in_the_accum_dtype() {
-    use super::autotune::{Gemms, matmul_of};
-    use crate::graph_compiler::common::autotune::Kernels;
+    use crate::autotune::Kernels;
+    use crate::autotune::mps::{Gemms, matmul_of};
 
     if !available() {
         return;
@@ -3156,8 +3175,8 @@ fn every_gemm_candidate_accumulates_in_the_accum_dtype() {
 /// rounded once (288).
 #[test]
 fn gemv_lanes_sum_in_a_bfloat_accumulator() {
-    use super::autotune::{Gemms, matmul_of};
-    use crate::graph_compiler::common::autotune::Kernels;
+    use crate::autotune::Kernels;
+    use crate::autotune::mps::{Gemms, matmul_of};
 
     if !available() {
         return;
@@ -3240,6 +3259,110 @@ fn gemv_lanes_sum_in_a_bfloat_accumulator() {
             "{config:?}: {:?}",
             &got[..4]
         );
+    }
+}
+
+/// A large GEMM reading a slice of its operand in place (a strided view) tunes the MPP kernels too, and
+/// each of them reads the view through its strides.
+#[test]
+fn strided_gemms_tune_mpp() {
+    use crate::autotune::Kernels;
+    use crate::autotune::mps::{Gemms, matmul_of};
+    use crate::codegen::dot_general::mps::Algorithm;
+
+    if !available() || !super::mpp_available() {
+        return;
+    }
+
+    let (m, k, n) = (512, 256, 512);
+    let mut g = Graph::new();
+    let a = g.input(ty(DType::BF16, &[m, 2 * k]));
+    let w = g.input(ty(DType::BF16, &[k, n]));
+
+    let left = Slice {
+        start_indices: vec![0, 0],
+        limit_indices: vec![m, k],
+        view: false,
+    };
+
+    let dot = DotGeneral {
+        lhs_contracting: vec![1],
+        rhs_contracting: vec![0],
+        lhs_batch: vec![],
+        rhs_batch: vec![],
+        accum_dtype: DType::F32,
+        output_dtype: DType::BF16,
+    };
+
+    let s = apply(&mut g, left, &[a]);
+    let out = apply(&mut g, dot, &[s, w]);
+    g.set_outputs(&[out]).unwrap();
+
+    let inputs: Vec<Tensor> = g
+        .inputs()
+        .iter()
+        .enumerate()
+        .map(|(seed, &v)| {
+            let t = g.type_of(v);
+            values(t.dtype, &t.shape, seed as u64 + 1)
+        })
+        .collect();
+
+    let expected: Vec<f32> = reference::run(&g, &inputs).unwrap()[0]
+        .to_dtype(DType::F32)
+        .unwrap()
+        .to_vec::<f32>();
+
+    let on_mps: Vec<Tensor> = inputs.iter().map(|t| t.to(Device::Mps(0))).collect();
+
+    let mut options = crate::graph_compiler::Options::default();
+    options.config.autotune = false;
+    let mut plan = crate::graph_compiler::compile_with(&g, Device::Mps(0), &options).unwrap();
+
+    let at = plan
+        .steps()
+        .iter()
+        .position(|s| matmul_of(s).is_some())
+        .expect("a matmul step");
+
+    let step = plan.steps()[at].clone();
+    assert!(
+        step.views.iter().any(Option::is_some),
+        "the slice is read in place: {plan}"
+    );
+
+    let mut gemms = Gemms::new(&CompilerConfig::default());
+
+    let configs: Vec<_> = gemms
+        .configs(&step)
+        .into_iter()
+        .filter(|c| c.algorithm == Algorithm::Mpp)
+        .collect();
+
+    assert!(!configs.is_empty(), "no MPP candidate for a strided GEMM");
+
+    let built: Vec<_> = configs
+        .into_iter()
+        .map(|config| (config, gemms.build(&step, config)))
+        .collect();
+
+    gemms.compile().unwrap();
+
+    let scale = expected.iter().fold(0f32, |m, v| m.max(v.abs()));
+
+    for (config, tuned) in built {
+        plan.steps_mut()[at].tuned = Some(tuned);
+        let got = plan.run(&on_mps).unwrap()[0]
+            .to_dtype(DType::F32)
+            .unwrap()
+            .to_vec::<f32>();
+
+        for (e, (w, v)) in expected.iter().zip(&got).enumerate() {
+            assert!(
+                (w - v).abs() <= scale * 1e-2,
+                "{config:?} [{e}]: {v} != {w}"
+            );
+        }
     }
 }
 
@@ -3365,9 +3488,9 @@ fn a_reduction_feeding_a_norm_of_other_rows_is_its_own_kernel() {
 /// Every GEMV config stores plain, row-half and row-region epilogues for either vector side, bit-identical to the default.
 #[test]
 fn every_gemv_candidate_stores_every_epilogue() {
-    use super::autotune::{Gemms, matmul_of};
+    use crate::autotune::Kernels;
+    use crate::autotune::mps::{Gemms, matmul_of};
     use crate::codegen::dot_general::mps::Algorithm;
-    use crate::graph_compiler::common::autotune::Kernels;
 
     if !available() {
         return;

@@ -15,7 +15,7 @@ use crate::graph_compiler::common::attention::{
 };
 use crate::graph_compiler::elementwise;
 #[cfg(lumen_tpu_linked)]
-use crate::graph_compiler::plan::Step;
+use crate::plan::Step;
 #[cfg(lumen_tpu_linked)]
 use crate::runtime::tpu::{Launch, launch};
 use crate::tensor::contiguous_strides;

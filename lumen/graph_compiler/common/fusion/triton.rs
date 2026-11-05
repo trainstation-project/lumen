@@ -1,0 +1,187 @@
+//! Triton fusion: the shared fusion (`common::fusion`, as MPS runs it) with the Triton
+//! kernels' limits and shapes, and which nodes left outside any fusion need one-node kernels.
+
+use super::{Backend, fuse};
+use crate::codegen::dot_general::triton::row::dot_row_fits;
+use crate::codegen::kinds::{gemm_dot, reduction_root, row_reductions};
+use crate::codegen::regions::expansion;
+use crate::codegen::utils::triton::triton_type;
+use crate::graph::{Graph, Node, Primitive, Var};
+use crate::graph_compiler::common::alone::Lone;
+use crate::graph_compiler::pass::CompilerPass;
+use crate::graph_compiler::triton::TritonModule;
+
+/// Whether `node` can be emitted inside a Triton fusion kernel: a supported primitive whose
+/// inputs and output all have Triton dtypes.
+pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
+    use Primitive::*;
+
+    let op = matches!(
+        node.primitive,
+        Add | Sub
+            | Mul
+            | Div
+            | Max
+            | Eq
+            | Lt
+            | Neg
+            | Exp
+            | Log
+            | Sqrt
+            | Tanh
+            | Logistic
+            | Cast { .. }
+            | Select
+            | Unary(_)
+            | Binary(_)
+            | Reshape { .. }
+            | BroadcastInDim { .. }
+            | Transpose { .. }
+            | Slice { .. }
+            | Full { .. }
+            | Iota { .. }
+            | RandomBits { .. }
+            | ReduceSum { .. }
+            | ReduceMax { .. }
+            | DynamicSlice { .. }
+            | Gather { .. }
+            | Concatenate { .. }
+    );
+
+    let typed = |v: &Var| triton_type(graph.type_of(*v).dtype).is_some();
+    op && node.inputs.iter().chain([&node.output]).all(typed)
+}
+
+/// Name of a fusion of a GEMM and the normalization row reading its product.
+const DOT_ROW: &str = "dot_row";
+
+/// Name of a normalization row fusion.
+const ROW: &str = "row";
+
+/// Name of a GEMM fusion with its epilogue.
+const DOT_GENERAL: &str = "dot_general";
+
+/// Name of a reduction fusion with its prologue and epilogue.
+const REDUCTION: &str = "reduction";
+
+/// Name of an elementwise fusion.
+const ELEMENTWISE: &str = "elementwise";
+
+/// The shared fusion's view of Triton: kernels take any number of tensors, a GEMM epilogue
+/// writes at most 4 extra outputs and its two results into a concatenation's slots (as on MPS), and
+/// a GEMM joins the row reading it when one tile holds whole rows (`dot_row_fits`).
+fn backend(m: &TritonModule<'_>) -> Backend {
+    let config = &m.options.config;
+
+    Backend {
+        fusible,
+        max_inputs: usize::MAX,
+        max_aux: 4,
+        multi_output_fusion: config.multi_output_fusion,
+        reduction_epilogues: true,
+        contraction_epilogues: true,
+        expansion: |graph, dot, concat| expansion(graph, dot, concat).is_some(),
+        row_dot: dot_row_fits,
+    }
+}
+
+/// The name of a fused `body`, by its kind as MPS's codegen reads it (`codegen::kinds`): a GEMM and the
+/// row reading it, a normalization row, a GEMM with its epilogue, a reduction with its prologue and
+/// epilogue, or an elementwise fusion.
+fn named(body: &Graph) -> String {
+    let row = !row_reductions(body).is_empty();
+
+    match (gemm_dot(body).is_some(), row) {
+        (true, true) => DOT_ROW,
+        (false, true) => ROW,
+        (true, false) => DOT_GENERAL,
+        _ if reduction_root(body).is_some() => REDUCTION,
+        _ => ELEMENTWISE,
+    }
+    .into()
+}
+
+/// Compiler pass running the shared fusion for Triton.
+pub(crate) struct Fusion;
+
+impl CompilerPass<TritonModule<'_>> for Fusion {
+    /// Pass name used in profiler ranges and dumps.
+    fn name(&self) -> &'static str {
+        "fusion"
+    }
+
+    /// Fuses the graph around the normalization rows the diamonds pass found.
+    fn apply(&mut self, m: &mut TritonModule<'_>) -> Result<(), String> {
+        let scalars: Vec<Var> = crate::graph_compiler::positions(&m.options.scalars)
+            .into_iter()
+            .map(|i| m.graph.inputs()[i])
+            .collect();
+
+        let backend = backend(m);
+        m.graph = fuse(&m.graph, &m.rows, &scalars, &backend, |body, _| named(body));
+        m.rows.clear();
+        Ok(())
+    }
+}
+
+impl Lone for TritonModule<'_> {
+    /// Whether lone `n` is one a Triton loop kernel computes (Triton has no other kernel for it): every
+    /// fusible node but views of their operand (reshapes, slices placed as views) and in-place
+    /// concatenations.
+    fn alone(graph: &Graph, n: &Node) -> bool {
+        fusible(graph, n)
+            && !matches!(
+                n.primitive,
+                Primitive::Reshape { .. }
+                    | Primitive::Slice { view: true, .. }
+                    | Primitive::Concatenate { in_place: true, .. }
+            )
+    }
+
+    /// Triton passes no inputs by value.
+    fn scalars(&mut self) -> Option<&mut Vec<usize>> {
+        None
+    }
+
+    /// Names the kernel by the body's kind.
+    fn kernel(&mut self, body: &Graph, _: &[bool]) -> String {
+        named(body)
+    }
+}
+
+/// Most tensors one horizontally fused Triton kernel may read and write.
+pub(crate) const HORIZONTAL_BUFFERS: usize = 64;
+
+/// Whether horizontal fusion may merge `node`: an `elementwise` fusion without reductions or matmuls, as
+/// MPS's are; a node alone joins only when elementwise (MPS runs a lone fill, iota or the like as its own
+/// step).
+pub(crate) fn horizontal_candidate(_: &Graph, node: &Node) -> bool {
+    let Primitive::Fusion { name, body, .. } = &node.primitive else {
+        return false;
+    };
+
+    let alone = match body.nodes() {
+        [n] => !crate::graph_compiler::elementwise(&n.primitive),
+        _ => false,
+    };
+
+    name == "elementwise" && !alone && reduction_root(body).is_none() && gemm_dot(body).is_none()
+}
+
+/// Whether `producer` ends a kernel of its own writing fresh memory, so it can write a concatenation's operand
+/// straight into its slot through the slot's strides: a matmul, or a fusible elementwise or copying layout op
+/// (a reshape or view slice aliases its operand instead). Fusion leaves such a concatenate unfused, so each
+/// producer is its kernel's root.
+pub(crate) fn slot_writes(graph: &Graph, producer: &Node) -> bool {
+    let copies = matches!(
+        producer.primitive,
+        Primitive::Transpose { .. }
+            | Primitive::BroadcastInDim { .. }
+            | Primitive::Slice { view: false, .. }
+    );
+
+    let kernel = fusible(graph, producer)
+        && (crate::graph_compiler::elementwise(&producer.primitive) || copies);
+
+    kernel || matches!(producer.primitive, Primitive::DotGeneral { .. })
+}

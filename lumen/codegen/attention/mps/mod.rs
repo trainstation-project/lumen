@@ -67,171 +67,9 @@ impl AttentionCodegen for Mps {
     /// The kernel's name and Metal source.
     type Code = (String, String);
 
-    /// Generates the fused attention forward kernel for `body`, with an optional elementwise
-    /// epilogue, raw-score/LSE outputs and dropout; returns its name and source;
-    /// the match already reads the operands' layout.
+    /// Generates the fused attention forward kernel for `body` under its untuned `tuning`.
     fn forward(body: &Graph, a: &Attention, _: &Strides) -> Result<(String, String), String> {
-        // With dropout, the last two body inputs are the seed and offset passed as constants.
-        let n = body.inputs().len() - if a.dropout.is_some() { 2 } else { 0 };
-
-        let input = |base: Var| {
-            let k = body.inputs().iter().position(|&v| v == base);
-            format!("in{}", k.expect("an input of the body"))
-        };
-
-        let index = |name: &str, acc: &Access| ix_method(name, acc, &a.batch);
-
-        let ix = formatdoc!(
-            "
-            struct NAME_ix {{
-                {}
-                {}
-                {}
-                {}
-            }};
-            ",
-            index("q", &a.q)?,
-            index("k", &a.k)?,
-            index("v", &a.v)?,
-            index("o", &a.out)?
-        );
-
-        let (t, o) = (metal_type(a.dtype), metal_type(a.out_dtype));
-        let out = body.outputs()[0];
-        let root = body.nodes()[a.root].output;
-        let w = metal_type(body.type_of(out).dtype);
-
-        // When the body's output isn't the attention node itself, emit a functor computing it from
-        // the attention row value `r`.
-        let (epilogue, epi) = match out == root {
-            true => (String::new(), String::new()),
-            false => {
-                let mut e = Emitter::new(body, &[]);
-                e.invariant[root] = true;
-                e.row_locals.insert(root, "r".into());
-
-                let value = e.value(out, "j".into());
-                let mut fields = String::new();
-
-                for (k, &v) in body.inputs()[..n].iter().enumerate() {
-                    let vt = metal_type(body.type_of(v).dtype);
-                    writeln!(fields, "    device const {vt} *in{k};").unwrap();
-                }
-
-                let members: Vec<String> = (0..n).map(|k| format!("in{k}")).collect();
-                let (hoisted, lines) = (&e.hoisted, &e.lines);
-
-                (
-                    formatdoc!(
-                        "
-                        struct NAME_epi {{
-                            {fields}inline {w} operator()({o} r, ulong i) const {{
-                                uint j = uint(i);
-                                {hoisted}{lines}return {value};
-                            }}
-                        }};
-                        "
-                    ),
-                    format!(", NAME_epi{{{}}}", members.join(", ")),
-                )
-            }
-        };
-
-        let mut params: Vec<String> = body.inputs()[..n]
-            .iter()
-            .enumerate()
-            .map(|(k, &v)| {
-                let vt = metal_type(body.type_of(v).dtype);
-                format!("device const {vt} *in{k} [[buffer({k})]]")
-            })
-            .collect();
-
-        params.push(format!("device {w} *out [[buffer({n})]]"));
-        let mut buffer = n;
-
-        let raw = body.outputs()[1..].contains(&root);
-
-        if raw {
-            buffer += 1;
-            params.push(format!("device {o} *raw [[buffer({buffer})]]"));
-        }
-
-        let lse = a.lse.is_some();
-
-        if lse {
-            buffer += 1;
-            params.push(format!("device float *lse [[buffer({buffer})]]"));
-        }
-
-        let raw_arg = if raw { "raw" } else { "nullptr" };
-        let lse_arg = if lse { "lse" } else { "nullptr" };
-
-        let (drop, epi) = match &a.dropout {
-            Some(d) => {
-                params.extend(random_state(buffer + 1));
-
-                let epi = if epi.is_empty() {
-                    ", Same()".to_owned()
-                } else {
-                    epi
-                };
-
-                let drop = Self::dropout(d, a.dtype, a.sq, a.sk)?;
-                (drop, format!("{epi}, NAME_drop{{seed, start}}"))
-            }
-            None => (String::new(), epi),
-        };
-
-        let (q, k, v) = (input(a.q.base), input(a.k.base), input(a.v.base));
-        let score = Self::score(&a.scores);
-        let (causal, offset) = (a.causal.is_some(), a.causal.unwrap_or(0));
-
-        let offset = match a.offset {
-            Some(v) => format!("{offset} + int({}[0])", input(v)),
-            None => offset.to_string(),
-        };
-
-        let (h, hv, sq, sk) = (a.h, a.hv, a.sq, a.sk);
-        let heads = grid_batch(&a.batch).1;
-
-        // Short query sequences use the decode kernel, which splits keys across threadgroups.
-        let call = match decodes(a) {
-            true => formatdoc!(
-                "
-                threadgroup float maxima[ATTN_GROUPS], sums[ATTN_GROUPS], os[ATTN_GROUPS * {hv}];
-                attention_decode<{t}, {o}, {h}u, {hv}u, {causal}, {raw}, {lse},
-                                 NAME_ix, NAME_score, {w}>(
-                    {q}, {k}, {v}, out, {raw_arg}, {lse_arg},
-                    NAME_ix(), {sq}u, {sk}u, NAME_score(), {offset},
-                    maxima, sums, os,
-                    group.x, group.z, group.y, {heads}u, sg, lane, tid.y * 16 + tid.x{epi});"
-            ),
-            false => {
-                let (bk, groups) = (key_block(a), forward_groups(a));
-
-                formatdoc!(
-                    "
-                    threadgroup {t} ks[{bk} * ({h} + ATTN_PAD({t}))], vs[{bk} * ({hv} + ATTN_PAD({t}))];
-                    flash_attention<{t}, {o}, {h}u, {hv}u, {bk}u, {groups}u, {causal}, {raw}, {lse},
-                                    NAME_ix, NAME_score, {w}>(
-                        {q}, {k}, {v}, out, {raw_arg}, {lse_arg},
-                        NAME_ix(), {sq}u, {sk}u, NAME_score(), {offset},
-                        ks, vs,
-                        group.x, group.z, group.y, {heads}u, sg, lane, tid.y * 16 + tid.x{epi});"
-                )
-            }
-        };
-
-        let params = params.join(",\n");
-
-        Ok(named(formatdoc!(
-            "
-            {ix}{score}{epilogue}{drop}kernel void NAME({params},
-                             {THREAD_ARGS}) {{
-                {call}
-            }}
-            "
-        )))
+        forward_with(body, a, tuning(a))
     }
 
     /// Generates the fused attention backward kernel computing dK/dV, dQ, or both in one pass.
@@ -442,4 +280,191 @@ impl AttentionCodegen for Mps {
             "
         )
     }
+}
+
+/// Generates the fused attention forward kernel for `body` run as `tuned` (decode attention ignores it), with an
+/// optional elementwise epilogue, raw-score/LSE outputs and dropout; returns its name and source; the match
+/// already reads the operands' layout.
+pub(crate) fn forward_with(
+    body: &Graph,
+    a: &Attention,
+    tuned: Tuning,
+) -> Result<(String, String), String> {
+    // With dropout, the last two body inputs are the seed and offset passed as constants.
+    let n = body.inputs().len() - if a.dropout.is_some() { 2 } else { 0 };
+
+    let input = |base: Var| {
+        let k = body.inputs().iter().position(|&v| v == base);
+        format!("in{}", k.expect("an input of the body"))
+    };
+
+    let index = |name: &str, acc: &Access| ix_method(name, acc, &a.batch);
+
+    let ix = formatdoc!(
+        "
+        struct NAME_ix {{
+            {}
+            {}
+            {}
+            {}
+        }};
+        ",
+        index("q", &a.q)?,
+        index("k", &a.k)?,
+        index("v", &a.v)?,
+        index("o", &a.out)?
+    );
+
+    let (t, o) = (metal_type(a.dtype), metal_type(a.out_dtype));
+    let out = body.outputs()[0];
+    let root = body.nodes()[a.root].output;
+    let w = metal_type(body.type_of(out).dtype);
+
+    // When the body's output isn't the attention node itself, emit a functor computing it from
+    // the attention row value `r`.
+    let (epilogue, epi) = match out == root {
+        true => (String::new(), String::new()),
+        false => {
+            let mut e = Emitter::new(body, &[]);
+            e.invariant[root] = true;
+            e.row_locals.insert(root, "r".into());
+
+            let value = e.value(out, "j".into());
+            let mut fields = String::new();
+
+            for (k, &v) in body.inputs()[..n].iter().enumerate() {
+                let vt = metal_type(body.type_of(v).dtype);
+                writeln!(fields, "    device const {vt} *in{k};").unwrap();
+            }
+
+            let members: Vec<String> = (0..n).map(|k| format!("in{k}")).collect();
+            let (hoisted, lines) = (&e.hoisted, &e.lines);
+
+            (
+                formatdoc!(
+                    "
+                    struct NAME_epi {{
+                        {fields}inline {w} operator()({o} r, ulong i) const {{
+                            uint j = uint(i);
+                            {hoisted}{lines}return {value};
+                        }}
+                    }};
+                    "
+                ),
+                format!(", NAME_epi{{{}}}", members.join(", ")),
+            )
+        }
+    };
+
+    let mut params: Vec<String> = body.inputs()[..n]
+        .iter()
+        .enumerate()
+        .map(|(k, &v)| {
+            let vt = metal_type(body.type_of(v).dtype);
+            format!("device const {vt} *in{k} [[buffer({k})]]")
+        })
+        .collect();
+
+    params.push(format!("device {w} *out [[buffer({n})]]"));
+    let mut buffer = n;
+
+    let raw = body.outputs()[1..].contains(&root);
+
+    if raw {
+        buffer += 1;
+        params.push(format!("device {o} *raw [[buffer({buffer})]]"));
+    }
+
+    let lse = a.lse.is_some();
+
+    if lse {
+        buffer += 1;
+        params.push(format!("device float *lse [[buffer({buffer})]]"));
+    }
+
+    let raw_arg = if raw { "raw" } else { "nullptr" };
+    let lse_arg = if lse { "lse" } else { "nullptr" };
+
+    let (drop, epi) = match &a.dropout {
+        Some(d) => {
+            params.extend(random_state(buffer + 1));
+
+            let epi = if epi.is_empty() {
+                ", Same()".to_owned()
+            } else {
+                epi
+            };
+
+            let drop = <Mps as AttentionCodegen>::dropout(d, a.dtype, a.sq, a.sk)?;
+            (drop, format!("{epi}, NAME_drop{{seed, start}}"))
+        }
+        None => (String::new(), epi),
+    };
+
+    let (q, k, v) = (input(a.q.base), input(a.k.base), input(a.v.base));
+    let score = <Mps as AttentionCodegen>::score(&a.scores);
+    let (causal, offset) = (a.causal.is_some(), a.causal.unwrap_or(0));
+
+    let offset = match a.offset {
+        Some(v) => format!("{offset} + int({}[0])", input(v)),
+        None => offset.to_string(),
+    };
+
+    let (h, hv, sq, sk) = (a.h, a.hv, a.sq, a.sk);
+    let heads = grid_batch(&a.batch).1;
+
+    // Short query sequences use the decode kernel, which splits keys across threadgroups.
+    let call = match decodes(a) {
+        true => formatdoc!(
+            "
+            threadgroup float maxima[ATTN_GROUPS], sums[ATTN_GROUPS], os[ATTN_GROUPS * {hv}];
+            attention_decode<{t}, {o}, {h}u, {hv}u, {causal}, {raw}, {lse},
+                             NAME_ix, NAME_score, {w}>(
+                {q}, {k}, {v}, out, {raw_arg}, {lse_arg},
+                NAME_ix(), {sq}u, {sk}u, NAME_score(), {offset},
+                maxima, sums, os,
+                group.x, group.z, group.y, {heads}u, sg, lane, tid.y * 16 + tid.x{epi});"
+        ),
+        // Half and bfloat16 multiply on Metal Performance Primitives where they fit.
+        false if tuned.mpp => {
+            let groups = tuned.groups;
+
+            formatdoc!(
+                "
+                threadgroup float scratch[{groups} * (16 * 32 + 2 * 16)];
+                threadgroup {t} probs[{groups} * 16 * 32];
+                flash_attention_mpp<{t}, {o}, {h}u, {hv}u, {groups}u, {causal}, {raw}, {lse},
+                                    NAME_ix, NAME_score, {w}>(
+                    {q}, {k}, {v}, out, {raw_arg}, {lse_arg},
+                    NAME_ix(), {sq}u, {sk}u, NAME_score(), {offset},
+                    scratch, probs,
+                    group.x, group.z, group.y, {heads}u, sg, lane{epi});"
+            )
+        }
+        false => {
+            let (bk, groups) = (tuned.keys, tuned.groups);
+
+            formatdoc!(
+                "
+                threadgroup {t} ks[{bk} * ({h} + ATTN_PAD({t}))], vs[{bk} * ({hv} + ATTN_PAD({t}))];
+                flash_attention<{t}, {o}, {h}u, {hv}u, {bk}u, {groups}u, {causal}, {raw}, {lse},
+                                NAME_ix, NAME_score, {w}>(
+                    {q}, {k}, {v}, out, {raw_arg}, {lse_arg},
+                    NAME_ix(), {sq}u, {sk}u, NAME_score(), {offset},
+                    ks, vs,
+                    group.x, group.z, group.y, {heads}u, sg, lane, tid.y * 16 + tid.x{epi});"
+            )
+        }
+    };
+
+    let params = params.join(",\n");
+
+    Ok(named(formatdoc!(
+        "
+        {ix}{score}{epilogue}{drop}kernel void NAME({params},
+                         {THREAD_ARGS}) {{
+            {call}
+        }}
+        "
+    )))
 }

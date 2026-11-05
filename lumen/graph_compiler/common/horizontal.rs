@@ -4,9 +4,13 @@ use std::collections::HashMap;
 
 use crate::codegen::layout::{MAX_HEROES, transpose_tiling};
 use crate::graph::{Graph, Node, Primitive, Scope, Var, intern};
+use crate::graph_compiler::pass::{CompilerPass, Module};
 
 /// Most nodes in one horizontal group.
 const MAX_MEMBERS: usize = 32;
+
+/// Largest output, in elements, of a node worth fusing horizontally: larger kernels fill the device alone.
+const MAX_ELEMENTS: usize = 1 << 20;
 
 /// Groups per key still accepting members; the oldest is closed when more open.
 const MAX_OPEN: usize = 4;
@@ -466,4 +470,94 @@ pub(crate) fn heroes_fit(graph: &Graph, members: &[usize]) -> bool {
 /// Whether the merged `body` of `members` keeps their tiling.
 pub(crate) fn keeps_tiling(graph: &Graph, members: &[usize], body: &Graph) -> bool {
     transpose_tiling(body).is_some() == tiled(&graph.nodes()[members[0]])
+}
+
+/// How a backend groups the kernels it merges horizontally.
+#[derive(Clone, Copy)]
+pub(crate) enum Grouping {
+    /// Kernels of any size together (they split the grid), and kernels staging transposes through tiles by
+    /// exact shape (their grid is the shape's tiles), at most `MAX_HEROES` transposes a group.
+    Tiling,
+    /// By output shape: a kernel covers one shape.
+    Shape,
+}
+
+/// A backend's horizontal fusion: merges its `candidate` nodes (non-empty, of at most `MAX_ELEMENTS`) grouped
+/// by `grouping`, each merged kernel binding at most `buffers` buffers and named by `kernel` (from its body
+/// and by-value flags).
+pub(crate) struct Kernels<'a> {
+    pub candidate: fn(&Graph, &Node) -> bool,
+    pub grouping: Grouping,
+    pub buffers: usize,
+    pub kernel: &'a mut dyn FnMut(&Graph, &[bool]) -> String,
+}
+
+impl Target for Kernels<'_> {
+    /// The backend's candidates of a size worth merging.
+    fn candidate(&self, graph: &Graph, node: &Node) -> bool {
+        let elements = graph.type_of(node.output).numel();
+        elements > 0 && elements <= MAX_ELEMENTS && (self.candidate)(graph, node)
+    }
+
+    /// The group key of `grouping`.
+    fn key(&self, graph: &Graph, node: &Node) -> Vec<usize> {
+        match self.grouping {
+            Grouping::Tiling => tiling_key(graph, node),
+            Grouping::Shape => graph.type_of(node.output).shape.clone(),
+        }
+    }
+
+    /// Whether a group binds at most `buffers` buffers and, grouped by tiling, stages few enough transposes.
+    fn fits(&self, graph: &Graph, members: &[usize], buffers: usize) -> bool {
+        let heroes = match self.grouping {
+            Grouping::Tiling => heroes_fit(graph, members),
+            Grouping::Shape => true,
+        };
+
+        heroes && buffers <= self.buffers
+    }
+
+    /// Whether the merged body keeps the members' tiling, when grouped by it.
+    fn accepts(&self, graph: &Graph, members: &[usize], body: &Graph) -> bool {
+        match self.grouping {
+            Grouping::Tiling => keeps_tiling(graph, members, body),
+            Grouping::Shape => true,
+        }
+    }
+
+    /// The merged kernel's name.
+    fn kernel(&mut self, body: &Graph, by_value: &[bool]) -> String {
+        (self.kernel)(body, by_value)
+    }
+}
+
+/// Compiler pass merging a backend's small independent `candidate` kernels as `Kernels` does, each merged
+/// kernel named `name` (its source generated later, per step).
+pub(crate) struct HorizontalFusion {
+    pub candidate: fn(&Graph, &Node) -> bool,
+    pub grouping: Grouping,
+    pub buffers: usize,
+    pub name: &'static str,
+}
+
+impl<M: Module> CompilerPass<M> for HorizontalFusion {
+    /// Pass name used in profiler ranges and dumps.
+    fn name(&self) -> &'static str {
+        "horizontal_fusion"
+    }
+
+    /// Replaces each group of candidates with one multi-output fusion.
+    fn apply(&mut self, m: &mut M) -> Result<(), String> {
+        let name = self.name;
+
+        let mut target = Kernels {
+            candidate: self.candidate,
+            grouping: self.grouping,
+            buffers: self.buffers,
+            kernel: &mut |_, _| name.to_owned(),
+        };
+
+        *m.graph_mut() = fuse(m.graph(), &[], &mut target);
+        Ok(())
+    }
 }

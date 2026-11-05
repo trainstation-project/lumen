@@ -33,7 +33,7 @@ fn kernels(key: DispatchKey) -> Option<WaitKernel> {
 /// Plan step that waits on the first kept tensor's device before continuing.
 #[cfg(lumen_mps_linked)]
 pub(crate) fn encode(
-    _step: &crate::graph_compiler::plan::Step,
+    _step: &crate::plan::Step,
     _inputs: &[*const u8],
     _output: *mut u8,
     keep: Vec<Tensor>,
