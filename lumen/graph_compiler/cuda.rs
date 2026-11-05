@@ -8,7 +8,7 @@ use super::config::CompilerConfig;
 use super::passes::alone::{Alone, Lone};
 use super::passes::fusion::{Backend, fuse};
 use super::passes::{CompilerPass, Module};
-use super::pipeline::Pipeline;
+use super::pipeline::{Pass, Passes, pipeline, when};
 use super::{Options, plan_options};
 use crate::codegen::elementwise::cuda::Layouts;
 use crate::codegen::utils::cuda::cute_type;
@@ -152,6 +152,21 @@ impl CompilerPass<CudaModule<'_>> for Fusion {
     }
 }
 
+/// The CUDA backend's passes: it runs elementwise kernels only.
+impl Passes for CudaModule<'_> {
+    const NAME: &'static str = "cuda";
+
+    /// With `fuse`.
+    fn fusion(config: &CompilerConfig) -> Pass<Self> {
+        when(config.fuse, Fusion)
+    }
+
+    /// Always.
+    fn alone(_: &CompilerConfig) -> Pass<Self> {
+        Box::new(Alone)
+    }
+}
+
 /// Compiles `graph` for the CUDA backend on `device`: fuses its elementwise work and plans it, every
 /// runtime scalar a 0-d device input; errors on an op it has no kernel for.
 pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Result<Plan, String> {
@@ -162,14 +177,7 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
         options,
     };
 
-    let mut pipeline = Pipeline::new("cuda");
-
-    if options.config.fuse {
-        pipeline.add(Fusion);
-    }
-
-    pipeline.add(Alone);
-    pipeline.run(&mut module)?;
+    pipeline::<CudaModule>(&options.config).run(&mut module)?;
 
     let fused = module.graph;
 
