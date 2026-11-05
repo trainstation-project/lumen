@@ -298,7 +298,7 @@ impl Passes for MpsModule<'_> {
     /// per-channel scale) moves to its output, for its epilogue.
     fn linear_reordering(config: &CompilerConfig) -> Pass<Self> {
         let reordering = LinearReordering {
-            tile: crate::codegen::dot_general::mps::ROW_TILE,
+            tile: Some(crate::codegen::dot_general::mps::ROW_TILE),
         };
 
         when(config.linear_reordering, reordering)

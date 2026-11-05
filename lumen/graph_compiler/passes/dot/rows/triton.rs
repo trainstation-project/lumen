@@ -291,165 +291,6 @@ fn finished_body(rows: &Graph, split: &[Var]) -> Graph {
     out
 }
 
-/// Splits each wide row a GEMM feeds into a `dot_partials` fusion, the reduction of its partials, and
-/// the row reading them.
-fn wide_rows(graph: &Graph) -> Graph {
-    let nodes = graph.nodes();
-    let mut producer: Vec<Option<usize>> = vec![None; graph.types.len()];
-
-    for (i, node) in nodes.iter().enumerate() {
-        producer[node.output] = Some(i);
-    }
-
-    let mut wide_of: Vec<Option<Wide>> = (0..nodes.len()).map(|_| None).collect();
-    let mut taken = vec![false; nodes.len()];
-
-    for (r, row) in nodes.iter().enumerate() {
-        if let Some(w) = wide(graph, &producer, (r, row)).filter(|w| !taken[w.producer]) {
-            taken[w.producer] = true;
-            wide_of[r] = Some(w);
-        }
-    }
-
-    if wide_of.iter().all(Option::is_none) {
-        return graph.clone();
-    }
-
-    let mut out = Graph::new();
-    let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
-
-    for &v in graph.inputs() {
-        map[v] = out.input(graph.type_of(v).clone());
-    }
-
-    // A taken GEMM's extra outputs, emitted with its `dot_partials` past the split reductions' partials.
-    let extra = |n: &Node| match n.primitive {
-        Primitive::FusionOutput { .. } => producer[n.inputs[0]].filter(|&g| taken[g]),
-        _ => None,
-    };
-
-    for (i, node) in nodes.iter().enumerate() {
-        if taken[i] || extra(node).is_some() {
-            continue;
-        }
-
-        out.set_origin(node);
-
-        let (
-            Some(w),
-            Primitive::Fusion {
-                body: rows, label, ..
-            },
-        ) = (&wide_of[i], &node.primitive)
-        else {
-            let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
-
-            map[node.output] = out
-                .apply(node.primitive.clone(), &inputs)
-                .expect("a node of the graph");
-
-            out.set_label(map[node.output], node.label);
-            continue;
-        };
-
-        let g = &nodes[w.producer];
-
-        let reads: Vec<Var> = g
-            .inputs
-            .iter()
-            .chain(
-                node.inputs
-                    .iter()
-                    .enumerate()
-                    .filter(|&(k, _)| k != w.at)
-                    .map(|(_, v)| v),
-            )
-            .map(|&v| map[v])
-            .collect();
-
-        let body = partials_body(w, rows);
-
-        let types: Vec<_> = body
-            .outputs()
-            .iter()
-            .map(|&v| body.type_of(v).clone())
-            .collect();
-
-        let parts = [graph.label(g), "partials"].join(FUSION_SEPARATOR);
-
-        let fused = Primitive::Fusion {
-            name: DOT_PARTIALS.into(),
-            label: intern(parts),
-            body,
-        };
-
-        let value = out.apply(fused, &reads).expect("the row's operand");
-        map[g.output] = value;
-
-        for n in nodes.iter().filter(|n| extra(n) == Some(w.producer)) {
-            let Primitive::FusionOutput { index, ty } = &n.primitive else {
-                unreachable!("an extra output")
-            };
-
-            let index = index + w.split.len();
-            let ty = ty.clone();
-
-            map[n.output] = out
-                .apply(Primitive::FusionOutput { index, ty }, &[value])
-                .expect("the GEMM's extra output");
-        }
-
-        // Each split reduction: its partials, reduced, in the reduction's own shape.
-        let mut totals = Vec::new();
-
-        for (k, &v) in w.split.iter().enumerate() {
-            let r = rows
-                .nodes()
-                .iter()
-                .find(|n| n.output == v)
-                .expect("a split reduction");
-
-            let ty = types[k + 1].clone();
-
-            let partials = out
-                .apply(Primitive::FusionOutput { index: k + 1, ty }, &[value])
-                .expect("the partials");
-
-            let total = out
-                .apply(over(r, vec![1]), &[partials])
-                .expect("the partials' total");
-
-            let new_sizes = rows.type_of(v).shape.clone();
-
-            let total = out
-                .apply(Primitive::Reshape { new_sizes }, &[total])
-                .expect("the reduction's shape");
-
-            totals.push(total);
-        }
-
-        let inputs: Vec<Var> = node
-            .inputs
-            .iter()
-            .enumerate()
-            .map(|(k, &v)| if k == w.at { value } else { map[v] })
-            .chain(totals)
-            .collect();
-
-        let row = Primitive::Fusion {
-            name: "row".into(),
-            label,
-            body: finished_body(rows, &w.split),
-        };
-
-        map[node.output] = out.apply(row, &inputs).expect("a fusion typed as its row");
-    }
-
-    let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
-    out.set_outputs(&outputs).expect("values of the graph");
-    out
-}
-
 /// Compiler pass splitting wide GEMM-fed rows into `dot_partials`, their partials' reduction and the row.
 pub(crate) struct WideRows;
 
@@ -459,9 +300,166 @@ impl CompilerPass<TritonModule<'_>> for WideRows {
         "wide_rows"
     }
 
-    /// Splits every wide row a GEMM feeds.
+    /// Splits each wide row a GEMM feeds into a `dot_partials` fusion, the reduction of its partials, and
+    /// the row reading them.
     fn apply(&mut self, m: &mut TritonModule<'_>) -> Result<(), String> {
-        m.graph = wide_rows(&m.graph);
+        let graph = &m.graph;
+
+        let nodes = graph.nodes();
+        let mut producer: Vec<Option<usize>> = vec![None; graph.types.len()];
+
+        for (i, node) in nodes.iter().enumerate() {
+            producer[node.output] = Some(i);
+        }
+
+        let mut wide_of: Vec<Option<Wide>> = (0..nodes.len()).map(|_| None).collect();
+        let mut taken = vec![false; nodes.len()];
+
+        for (r, row) in nodes.iter().enumerate() {
+            if let Some(w) = wide(graph, &producer, (r, row)).filter(|w| !taken[w.producer]) {
+                taken[w.producer] = true;
+                wide_of[r] = Some(w);
+            }
+        }
+
+        if wide_of.iter().all(Option::is_none) {
+            return Ok(());
+        }
+
+        let mut out = Graph::new();
+        let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
+
+        for &v in graph.inputs() {
+            map[v] = out.input(graph.type_of(v).clone());
+        }
+
+        // A taken GEMM's extra outputs, emitted with its `dot_partials` past the split reductions' partials.
+        let extra = |n: &Node| match n.primitive {
+            Primitive::FusionOutput { .. } => producer[n.inputs[0]].filter(|&g| taken[g]),
+            _ => None,
+        };
+
+        for (i, node) in nodes.iter().enumerate() {
+            if taken[i] || extra(node).is_some() {
+                continue;
+            }
+
+            out.set_origin(node);
+
+            let (
+                Some(w),
+                Primitive::Fusion {
+                    body: rows, label, ..
+                },
+            ) = (&wide_of[i], &node.primitive)
+            else {
+                let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
+
+                map[node.output] = out
+                    .apply(node.primitive.clone(), &inputs)
+                    .expect("a node of the graph");
+
+                out.set_label(map[node.output], node.label);
+                continue;
+            };
+
+            let g = &nodes[w.producer];
+
+            let reads: Vec<Var> = g
+                .inputs
+                .iter()
+                .chain(
+                    node.inputs
+                        .iter()
+                        .enumerate()
+                        .filter(|&(k, _)| k != w.at)
+                        .map(|(_, v)| v),
+                )
+                .map(|&v| map[v])
+                .collect();
+
+            let body = partials_body(w, rows);
+
+            let types: Vec<_> = body
+                .outputs()
+                .iter()
+                .map(|&v| body.type_of(v).clone())
+                .collect();
+
+            let parts = [graph.label(g), "partials"].join(FUSION_SEPARATOR);
+
+            let fused = Primitive::Fusion {
+                name: DOT_PARTIALS.into(),
+                label: intern(parts),
+                body,
+            };
+
+            let value = out.apply(fused, &reads).expect("the row's operand");
+            map[g.output] = value;
+
+            for n in nodes.iter().filter(|n| extra(n) == Some(w.producer)) {
+                let Primitive::FusionOutput { index, ty } = &n.primitive else {
+                    unreachable!("an extra output")
+                };
+
+                let index = index + w.split.len();
+                let ty = ty.clone();
+
+                map[n.output] = out
+                    .apply(Primitive::FusionOutput { index, ty }, &[value])
+                    .expect("the GEMM's extra output");
+            }
+
+            // Each split reduction: its partials, reduced, in the reduction's own shape.
+            let mut totals = Vec::new();
+
+            for (k, &v) in w.split.iter().enumerate() {
+                let r = rows
+                    .nodes()
+                    .iter()
+                    .find(|n| n.output == v)
+                    .expect("a split reduction");
+
+                let ty = types[k + 1].clone();
+
+                let partials = out
+                    .apply(Primitive::FusionOutput { index: k + 1, ty }, &[value])
+                    .expect("the partials");
+
+                let total = out
+                    .apply(over(r, vec![1]), &[partials])
+                    .expect("the partials' total");
+
+                let new_sizes = rows.type_of(v).shape.clone();
+
+                let total = out
+                    .apply(Primitive::Reshape { new_sizes }, &[total])
+                    .expect("the reduction's shape");
+
+                totals.push(total);
+            }
+
+            let inputs: Vec<Var> = node
+                .inputs
+                .iter()
+                .enumerate()
+                .map(|(k, &v)| if k == w.at { value } else { map[v] })
+                .chain(totals)
+                .collect();
+
+            let row = Primitive::Fusion {
+                name: "row".into(),
+                label,
+                body: finished_body(rows, &w.split),
+            };
+
+            map[node.output] = out.apply(row, &inputs).expect("a fusion typed as its row");
+        }
+
+        let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
+        out.set_outputs(&outputs).expect("values of the graph");
+
+        m.graph = out;
         Ok(())
     }
 }

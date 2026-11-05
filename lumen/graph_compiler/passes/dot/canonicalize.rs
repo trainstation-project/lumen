@@ -48,82 +48,6 @@ pub(crate) fn matmul_order(p: &Primitive, lhs_rank: usize, rhs_rank: usize) -> M
     }
 }
 
-/// Rebuilds `graph` with explicit transposes in front of dot operands the backend's kernels can't read as laid
-/// out (`readable`), rewriting the dimension numbers to match the transposed layout.
-pub(crate) fn canonicalize_dots(graph: &Graph, readable: Readable) -> Graph {
-    let mut out = Graph::new();
-    let mut map: Vec<Var> = vec![0; graph.types.len()];
-
-    for &v in graph.inputs() {
-        map[v] = out.input(graph.type_of(v).clone());
-    }
-
-    for node in graph.nodes() {
-        out.set_origin(node);
-        let mut inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
-
-        let primitive = match &node.primitive {
-            p @ Primitive::DotGeneral {
-                lhs_contracting,
-                rhs_contracting,
-                lhs_batch,
-                rhs_batch,
-                accum_dtype,
-                output_dtype,
-            } => {
-                let (lhs, rhs) = (graph.type_of(node.inputs[0]), graph.type_of(node.inputs[1]));
-                let order = matmul_order(p, lhs.shape.len(), rhs.shape.len());
-                let (mut lc, mut rc) = (lhs_contracting.clone(), rhs_contracting.clone());
-                let (mut lb, mut rb) = (lhs_batch.clone(), rhs_batch.clone());
-
-                let mut transposed = |input: &mut Var, permutation: &[usize]| {
-                    let t = Primitive::Transpose {
-                        permutation: permutation.to_vec(),
-                    };
-
-                    *input = out
-                        .apply(t, &[*input])
-                        .expect("a permutation of its dimensions");
-                };
-
-                // A transposed lhs is laid out as batch, free, contracting dims in `order.lhs`.
-                if !readable(p, [lhs, rhs], 0) {
-                    transposed(&mut inputs[0], &order.lhs);
-                    let (i, j) = order.lhs_split;
-                    (lb, lc) = ((0..i).collect(), (j..order.lhs.len()).collect());
-                }
-
-                // A transposed rhs is laid out as batch, contracting, free dims in `order.rhs`.
-                if !readable(p, [lhs, rhs], 1) {
-                    transposed(&mut inputs[1], &order.rhs);
-                    let (i, j) = order.rhs_split;
-                    (rb, rc) = ((0..i).collect(), (i..j).collect());
-                }
-
-                Primitive::DotGeneral {
-                    lhs_contracting: lc,
-                    rhs_contracting: rc,
-                    lhs_batch: lb,
-                    rhs_batch: rb,
-                    accum_dtype: *accum_dtype,
-                    output_dtype: *output_dtype,
-                }
-            }
-            p => p.clone(),
-        };
-
-        map[node.output] = out
-            .apply(primitive, &inputs)
-            .expect("a rewrite keeps the node's type");
-
-        out.set_label(map[node.output], node.label);
-    }
-
-    let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
-    out.set_outputs(&outputs).expect("values of the graph");
-    out
-}
-
 /// Compiler pass running `canonicalize_dots` on the module's graph with the backend's `readable`.
 pub(crate) struct CanonicalizeDots {
     pub readable: Readable,
@@ -134,9 +58,84 @@ impl<M: Module> CompilerPass<M> for CanonicalizeDots {
         "canonicalize_dots"
     }
 
-    /// Replaces the module's graph with its canonicalized form.
+    /// Rebuilds `graph` with explicit transposes in front of dot operands the backend's kernels can't read as laid
+    /// out (`readable`), rewriting the dimension numbers to match the transposed layout.
     fn apply(&mut self, m: &mut M) -> Result<(), String> {
-        *m.graph_mut() = canonicalize_dots(m.graph(), self.readable);
+        let graph = m.graph();
+        let readable = self.readable;
+
+        let mut out = Graph::new();
+        let mut map: Vec<Var> = vec![0; graph.types.len()];
+
+        for &v in graph.inputs() {
+            map[v] = out.input(graph.type_of(v).clone());
+        }
+
+        for node in graph.nodes() {
+            out.set_origin(node);
+            let mut inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
+
+            let primitive = match &node.primitive {
+                p @ Primitive::DotGeneral {
+                    lhs_contracting,
+                    rhs_contracting,
+                    lhs_batch,
+                    rhs_batch,
+                    accum_dtype,
+                    output_dtype,
+                } => {
+                    let (lhs, rhs) = (graph.type_of(node.inputs[0]), graph.type_of(node.inputs[1]));
+                    let order = matmul_order(p, lhs.shape.len(), rhs.shape.len());
+                    let (mut lc, mut rc) = (lhs_contracting.clone(), rhs_contracting.clone());
+                    let (mut lb, mut rb) = (lhs_batch.clone(), rhs_batch.clone());
+
+                    let mut transposed = |input: &mut Var, permutation: &[usize]| {
+                        let t = Primitive::Transpose {
+                            permutation: permutation.to_vec(),
+                        };
+
+                        *input = out
+                            .apply(t, &[*input])
+                            .expect("a permutation of its dimensions");
+                    };
+
+                    // A transposed lhs is laid out as batch, free, contracting dims in `order.lhs`.
+                    if !readable(p, [lhs, rhs], 0) {
+                        transposed(&mut inputs[0], &order.lhs);
+                        let (i, j) = order.lhs_split;
+                        (lb, lc) = ((0..i).collect(), (j..order.lhs.len()).collect());
+                    }
+
+                    // A transposed rhs is laid out as batch, contracting, free dims in `order.rhs`.
+                    if !readable(p, [lhs, rhs], 1) {
+                        transposed(&mut inputs[1], &order.rhs);
+                        let (i, j) = order.rhs_split;
+                        (rb, rc) = ((0..i).collect(), (i..j).collect());
+                    }
+
+                    Primitive::DotGeneral {
+                        lhs_contracting: lc,
+                        rhs_contracting: rc,
+                        lhs_batch: lb,
+                        rhs_batch: rb,
+                        accum_dtype: *accum_dtype,
+                        output_dtype: *output_dtype,
+                    }
+                }
+                p => p.clone(),
+            };
+
+            map[node.output] = out
+                .apply(primitive, &inputs)
+                .expect("a rewrite keeps the node's type");
+
+            out.set_label(map[node.output], node.label);
+        }
+
+        let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
+        out.set_outputs(&outputs).expect("values of the graph");
+
+        *m.graph_mut() = out;
         Ok(())
     }
 }

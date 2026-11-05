@@ -100,6 +100,23 @@ impl<M: Module> Pipeline<M> {
     }
 }
 
+/// `graph` as `pass` leaves it, run on a plain module with default options.
+#[cfg(test)]
+pub(crate) fn rewritten<P>(graph: &Graph, mut pass: P) -> Graph
+where
+    P: for<'a> CompilerPass<GraphModule<'a>>,
+{
+    let options = Options::default();
+
+    let mut module = GraphModule {
+        graph: graph.clone(),
+        options: &options,
+    };
+
+    pass.apply(&mut module).expect("a rewritten graph");
+    module.graph
+}
+
 /// A boxed pass for a module of type `M`.
 pub(crate) type Pass<M> = Box<dyn CompilerPass<M>>;
 

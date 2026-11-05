@@ -4,44 +4,6 @@ use crate::Scalar;
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::passes::{CompilerPass, Module};
 
-/// Rebuilds `graph` with the index operand of each gather, scatter-add and linear cross entropy
-/// clamped to `[0, n - 1]`, `n` being the extent it indexes.
-fn clamp_indices(graph: &Graph) -> Graph {
-    let mut out = Graph::new();
-    let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
-
-    for &v in graph.inputs() {
-        map[v] = out.input(graph.type_of(v).clone());
-    }
-
-    for node in graph.nodes() {
-        out.set_origin(node);
-        let mut inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
-
-        let index = match node.primitive {
-            Primitive::Gather { axis } | Primitive::ScatterAdd { axis } => {
-                Some((1, graph.type_of(node.inputs[0]).shape[axis]))
-            }
-            Primitive::LinearCrossEntropy => Some((2, graph.type_of(node.inputs[1]).shape[0])),
-            _ => None,
-        };
-
-        if let Some((k, n)) = index {
-            inputs[k] = clamped(&mut out, inputs[k], n);
-        }
-
-        map[node.output] = out
-            .apply(node.primitive.clone(), &inputs)
-            .expect("well typed");
-
-        out.set_label(map[node.output], node.label);
-    }
-
-    let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
-    out.set_outputs(&outputs).expect("values of the graph");
-    out
-}
-
 /// Appends `min(max(i, 0), n - 1)` on index tensor `i` to `out` and returns it.
 fn clamped(out: &mut Graph, i: Var, n: usize) -> Var {
     let ty = out.type_of(i).clone();
@@ -68,9 +30,45 @@ impl<M: Module> CompilerPass<M> for ClampIndices {
         "clamp_indices"
     }
 
-    /// Replaces the module's graph with its index-clamped version.
+    /// Rebuilds `graph` with the index operand of each gather, scatter-add and linear cross entropy
+    /// clamped to `[0, n - 1]`, `n` being the extent it indexes.
     fn apply(&mut self, m: &mut M) -> Result<(), String> {
-        *m.graph_mut() = clamp_indices(m.graph());
+        let graph = m.graph();
+
+        let mut out = Graph::new();
+        let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
+
+        for &v in graph.inputs() {
+            map[v] = out.input(graph.type_of(v).clone());
+        }
+
+        for node in graph.nodes() {
+            out.set_origin(node);
+            let mut inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
+
+            let index = match node.primitive {
+                Primitive::Gather { axis } | Primitive::ScatterAdd { axis } => {
+                    Some((1, graph.type_of(node.inputs[0]).shape[axis]))
+                }
+                Primitive::LinearCrossEntropy => Some((2, graph.type_of(node.inputs[1]).shape[0])),
+                _ => None,
+            };
+
+            if let Some((k, n)) = index {
+                inputs[k] = clamped(&mut out, inputs[k], n);
+            }
+
+            map[node.output] = out
+                .apply(node.primitive.clone(), &inputs)
+                .expect("well typed");
+
+            out.set_label(map[node.output], node.label);
+        }
+
+        let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
+        out.set_outputs(&outputs).expect("values of the graph");
+
+        *m.graph_mut() = out;
         Ok(())
     }
 }

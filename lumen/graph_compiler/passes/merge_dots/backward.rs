@@ -36,246 +36,6 @@ struct Group {
     weights: Option<(Vec<usize>, Primitive, bool, Option<DType>)>,
 }
 
-/// Finds sums of same-shaped dots against weights used by one forward input and merges each into a
-/// single dot over concatenations.
-fn merge_dots_backward(graph: &Graph) -> Graph {
-    let nodes = graph.nodes();
-    let n = graph.types.len();
-    let mut producer: Vec<Option<usize>> = vec![None; n];
-    let mut users: Vec<Vec<usize>> = vec![Vec::new(); n];
-
-    for (i, node) in nodes.iter().enumerate() {
-        producer[node.output] = Some(i);
-
-        for &v in &node.inputs {
-            users[v].push(i);
-        }
-    }
-
-    let output = |v: Var| graph.outputs().contains(&v);
-
-    let dot = |i: usize| match &nodes[i].primitive {
-        Primitive::DotGeneral {
-            lhs_contracting,
-            rhs_contracting,
-            lhs_batch,
-            ..
-        } => (lhs_batch.is_empty() && lhs_contracting.len() == 1 && rhs_contracting.len() == 1)
-            .then(|| (lhs_contracting[0], rhs_contracting[0])),
-        _ => None,
-    };
-
-    let roundings = roundings(graph);
-    let rounding = |d: usize| roundings[d].map(|c| graph.type_of(nodes[c].output).dtype);
-    let same = |a: usize, b: usize| nodes[a].primitive == nodes[b].primitive;
-
-    // The dot `e` is, or rounds with its cast: a term of a sum.
-    let term = |e: usize| match dot(e) {
-        Some(_) => Some(e),
-        None => producer[*nodes[e].inputs.first()?]
-            .filter(|&d| roundings[d] == Some(e) && dot(d).is_some()),
-    };
-
-    // Whether `v` is a graph input up to single-operand elementwise ops (a weight).
-    let weight = |mut v: Var| loop {
-        match producer[v] {
-            None => break graph.inputs().contains(&v),
-            Some(k) if nodes[k].inputs.len() == 1 && elementwise(&nodes[k].primitive) => {
-                v = nodes[k].inputs[0]
-            }
-            Some(_) => break false,
-        }
-    };
-
-    // Dots reading `a` exactly once, with their other operand.
-    let dots_of = |a: Var| -> Vec<(usize, Var)> {
-        users[a]
-            .iter()
-            .filter(|&&u| dot(u).is_some())
-            .filter_map(|&u| {
-                let ins = &nodes[u].inputs;
-
-                match (ins[0] == a, ins[1] == a) {
-                    (true, false) => Some((u, ins[1])),
-                    (false, true) => Some((u, ins[0])),
-                    _ => None,
-                }
-            })
-            .collect()
-    };
-
-    // Dots reading `g` directly or through a transpose, as primitives on `g` itself.
-    let reads_of = |g: Var| -> Vec<(usize, Var, Primitive, bool)> {
-        let transposes = users[g].iter().filter_map(|&t| match &nodes[t].primitive {
-            Primitive::Transpose { permutation } => Some((nodes[t].output, Some(permutation))),
-            _ => None,
-        });
-        std::iter::once((g, None))
-            .chain(transposes)
-            .flat_map(|(u, permutation)| {
-                dots_of(u).into_iter().filter_map(move |(d, other)| {
-                    let lhs = nodes[d].inputs[0] == u;
-
-                    let dot = match permutation {
-                        None => nodes[d].primitive.clone(),
-                        Some(p) => through(&nodes[d].primitive, lhs, p)?,
-                    };
-
-                    Some((d, other, dot, lhs))
-                })
-            })
-            .collect()
-    };
-
-    let mut groups: Vec<Group> = Vec::new();
-    let mut taken = vec![false; nodes.len()];
-
-    // Walk sums from the last add, collecting single-use dot terms (maybe transposed) under its adds.
-    for s in (0..nodes.len()).rev() {
-        if taken[s] || !matches!(nodes[s].primitive, Primitive::Add) {
-            continue;
-        }
-
-        let alone =
-            |e: usize, by: usize| users[nodes[e].output] == [by] && !output(nodes[e].output);
-
-        let (mut adds, mut terms, mut transposes) = (vec![s], Vec::new(), Vec::new());
-        let mut k = 0;
-        let mut sum = true;
-
-        while sum && k < adds.len() {
-            for &u in &nodes[adds[k]].inputs {
-                match producer[u] {
-                    Some(e) if alone(e, adds[k]) && !taken[e] => match nodes[e].primitive {
-                        Primitive::Add => adds.push(e),
-                        _ if term(e).is_some_and(|d| !taken[d]) => terms.extend(term(e)),
-                        Primitive::Transpose { .. } => match producer[nodes[e].inputs[0]] {
-                            Some(d) if alone(d, e) && term(d).is_some_and(|d| !taken[d]) => {
-                                transposes.push(e);
-                                terms.extend(term(d));
-                            }
-                            _ => sum = false,
-                        },
-                        _ => sum = false,
-                    },
-                    _ => sum = false,
-                }
-            }
-
-            k += 1;
-        }
-
-        let transposed = transposes.is_empty()
-            || (transposes.len() == terms.len()
-                && transposes.iter().all(|&t| same(t, transposes[0])));
-
-        let like_first = |e: usize| same(e, terms[0]) && rounding(e) == rounding(terms[0]);
-
-        if !sum || !transposed || terms.len() < 2 || terms.iter().any(|&e| !like_first(e)) {
-            continue;
-        }
-
-        let Some((lc, rc)) = dot(terms[0]) else {
-            continue;
-        };
-
-        let found = [true, false].into_iter().find_map(|g_first| {
-            let (gi, ai) = if g_first { (0, 1) } else { (1, 0) };
-            let g: Vec<Var> = terms.iter().map(|&e| nodes[e].inputs[gi]).collect();
-            let a: Vec<Var> = terms.iter().map(|&e| nodes[e].inputs[ai]).collect();
-            let ty = |v: Var| graph.type_of(v);
-            let distinct = |vs: &[Var]| (1..vs.len()).all(|j| !vs[..j].contains(&vs[j]));
-            let one_type = |vs: &[Var]| vs.iter().all(|&v| ty(v) == ty(vs[0]));
-            let of_weights = a.iter().all(|&v| weight(v));
-
-            if !distinct(&g) || !distinct(&a) || !one_type(&g) || !one_type(&a) || !of_weights {
-                return None;
-            }
-
-            // The weights' forward dots must all read the same `x`, and be the only such dots of `x`.
-            let (x, forward) = dots_of(a[0]).into_iter().find_map(|(d1, x)| {
-                let forward: Vec<usize> = a
-                    .iter()
-                    .map(|&ai| {
-                        dots_of(ai)
-                            .into_iter()
-                            .find(|&(d, x2)| x2 == x && same(d1, d) && !terms.contains(&d))
-                            .map(|(d, _)| d)
-                    })
-                    .collect::<Option<_>>()?;
-
-                Some((x, forward))
-            })?;
-
-            let alike = dots_of(x)
-                .into_iter()
-                .filter(|&(d, w)| same(d, forward[0]) && ty(w) == ty(a[0]))
-                .count();
-
-            if alike != terms.len() {
-                return None;
-            }
-
-            let mut order: Vec<usize> = (0..terms.len()).collect();
-            order.sort_by_key(|&j| forward[j]);
-            let dots: Vec<usize> = order.iter().map(|&j| terms[j]).collect();
-            let g: Vec<Var> = order.iter().map(|&j| g[j]).collect();
-            let a: Vec<Var> = order.iter().map(|&j| a[j]).collect();
-
-            // Weight-gradient dots: each cotangent against `x` with the same primitive.
-            let weights = reads_of(g[0]).into_iter().find_map(|(f1, x1, dot, lhs)| {
-                let mut fs = vec![f1];
-
-                for &gi in &g[1..] {
-                    let (f, ..) = reads_of(gi).into_iter().find(|&(f, x2, ref dot2, lhs2)| {
-                        x2 == x && *dot2 == dot && lhs2 == lhs && rounding(f) == rounding(f1)
-                    })?;
-
-                    fs.push(f);
-                }
-
-                (x1 == x).then_some((fs, dot, lhs, rounding(f1)))
-            });
-
-            let (g_dim, a_dim) = if g_first { (lc, rc) } else { (rc, lc) };
-
-            Some(Group {
-                sum: s,
-                adds: adds[1..].to_vec(),
-                dots,
-                transposes: transposes.clone(),
-                rounding: rounding(terms[0]),
-                g,
-                a,
-                g_first,
-                g_dim,
-                a_dim,
-                weights,
-            })
-        });
-
-        if let Some(group) = found {
-            for &k in group
-                .adds
-                .iter()
-                .chain(&group.dots)
-                .chain(&group.transposes)
-                .chain(group.weights.iter().flat_map(|w| &w.0))
-            {
-                taken[k] = true;
-            }
-
-            groups.push(group);
-        }
-    }
-
-    if groups.is_empty() {
-        return graph.clone();
-    }
-
-    rewrite(graph, &groups)
-}
-
 /// Rebuilds `graph` with each group's sum as one dot of concatenations and its weight gradients as
 /// slices of one dot, emitting nodes once their operands exist.
 fn rewrite(graph: &Graph, groups: &[Group]) -> Graph {
@@ -550,9 +310,250 @@ impl<M: Module> CompilerPass<M> for MergeDotsBackward {
         "merge_dots_backward"
     }
 
-    /// Replaces the module's graph with its merged version.
+    /// Finds sums of same-shaped dots against weights used by one forward input and merges each into a
+    /// single dot over concatenations.
     fn apply(&mut self, m: &mut M) -> Result<(), String> {
-        *m.graph_mut() = merge_dots_backward(m.graph());
+        let graph = m.graph();
+
+        let nodes = graph.nodes();
+        let n = graph.types.len();
+        let mut producer: Vec<Option<usize>> = vec![None; n];
+        let mut users: Vec<Vec<usize>> = vec![Vec::new(); n];
+
+        for (i, node) in nodes.iter().enumerate() {
+            producer[node.output] = Some(i);
+
+            for &v in &node.inputs {
+                users[v].push(i);
+            }
+        }
+
+        let output = |v: Var| graph.outputs().contains(&v);
+
+        let dot = |i: usize| match &nodes[i].primitive {
+            Primitive::DotGeneral {
+                lhs_contracting,
+                rhs_contracting,
+                lhs_batch,
+                ..
+            } => (lhs_batch.is_empty() && lhs_contracting.len() == 1 && rhs_contracting.len() == 1)
+                .then(|| (lhs_contracting[0], rhs_contracting[0])),
+            _ => None,
+        };
+
+        let roundings = roundings(graph);
+        let rounding = |d: usize| roundings[d].map(|c| graph.type_of(nodes[c].output).dtype);
+        let same = |a: usize, b: usize| nodes[a].primitive == nodes[b].primitive;
+
+        // The dot `e` is, or rounds with its cast: a term of a sum.
+        let term = |e: usize| match dot(e) {
+            Some(_) => Some(e),
+            None => producer[*nodes[e].inputs.first()?]
+                .filter(|&d| roundings[d] == Some(e) && dot(d).is_some()),
+        };
+
+        // Whether `v` is a graph input up to single-operand elementwise ops (a weight).
+        let weight = |mut v: Var| loop {
+            match producer[v] {
+                None => break graph.inputs().contains(&v),
+                Some(k) if nodes[k].inputs.len() == 1 && elementwise(&nodes[k].primitive) => {
+                    v = nodes[k].inputs[0]
+                }
+                Some(_) => break false,
+            }
+        };
+
+        // Dots reading `a` exactly once, with their other operand.
+        let dots_of = |a: Var| -> Vec<(usize, Var)> {
+            users[a]
+                .iter()
+                .filter(|&&u| dot(u).is_some())
+                .filter_map(|&u| {
+                    let ins = &nodes[u].inputs;
+
+                    match (ins[0] == a, ins[1] == a) {
+                        (true, false) => Some((u, ins[1])),
+                        (false, true) => Some((u, ins[0])),
+                        _ => None,
+                    }
+                })
+                .collect()
+        };
+
+        // Dots reading `g` directly or through a transpose, as primitives on `g` itself.
+        let reads_of = |g: Var| -> Vec<(usize, Var, Primitive, bool)> {
+            let transposes = users[g].iter().filter_map(|&t| match &nodes[t].primitive {
+                Primitive::Transpose { permutation } => Some((nodes[t].output, Some(permutation))),
+                _ => None,
+            });
+            std::iter::once((g, None))
+                .chain(transposes)
+                .flat_map(|(u, permutation)| {
+                    dots_of(u).into_iter().filter_map(move |(d, other)| {
+                        let lhs = nodes[d].inputs[0] == u;
+
+                        let dot = match permutation {
+                            None => nodes[d].primitive.clone(),
+                            Some(p) => through(&nodes[d].primitive, lhs, p)?,
+                        };
+
+                        Some((d, other, dot, lhs))
+                    })
+                })
+                .collect()
+        };
+
+        let mut groups: Vec<Group> = Vec::new();
+        let mut taken = vec![false; nodes.len()];
+
+        // Walk sums from the last add, collecting single-use dot terms (maybe transposed) under its adds.
+        for s in (0..nodes.len()).rev() {
+            if taken[s] || !matches!(nodes[s].primitive, Primitive::Add) {
+                continue;
+            }
+
+            let alone =
+                |e: usize, by: usize| users[nodes[e].output] == [by] && !output(nodes[e].output);
+
+            let (mut adds, mut terms, mut transposes) = (vec![s], Vec::new(), Vec::new());
+            let mut k = 0;
+            let mut sum = true;
+
+            while sum && k < adds.len() {
+                for &u in &nodes[adds[k]].inputs {
+                    match producer[u] {
+                        Some(e) if alone(e, adds[k]) && !taken[e] => match nodes[e].primitive {
+                            Primitive::Add => adds.push(e),
+                            _ if term(e).is_some_and(|d| !taken[d]) => terms.extend(term(e)),
+                            Primitive::Transpose { .. } => match producer[nodes[e].inputs[0]] {
+                                Some(d) if alone(d, e) && term(d).is_some_and(|d| !taken[d]) => {
+                                    transposes.push(e);
+                                    terms.extend(term(d));
+                                }
+                                _ => sum = false,
+                            },
+                            _ => sum = false,
+                        },
+                        _ => sum = false,
+                    }
+                }
+
+                k += 1;
+            }
+
+            let transposed = transposes.is_empty()
+                || (transposes.len() == terms.len()
+                    && transposes.iter().all(|&t| same(t, transposes[0])));
+
+            let like_first = |e: usize| same(e, terms[0]) && rounding(e) == rounding(terms[0]);
+
+            if !sum || !transposed || terms.len() < 2 || terms.iter().any(|&e| !like_first(e)) {
+                continue;
+            }
+
+            let Some((lc, rc)) = dot(terms[0]) else {
+                continue;
+            };
+
+            let found = [true, false].into_iter().find_map(|g_first| {
+                let (gi, ai) = if g_first { (0, 1) } else { (1, 0) };
+                let g: Vec<Var> = terms.iter().map(|&e| nodes[e].inputs[gi]).collect();
+                let a: Vec<Var> = terms.iter().map(|&e| nodes[e].inputs[ai]).collect();
+                let ty = |v: Var| graph.type_of(v);
+                let distinct = |vs: &[Var]| (1..vs.len()).all(|j| !vs[..j].contains(&vs[j]));
+                let one_type = |vs: &[Var]| vs.iter().all(|&v| ty(v) == ty(vs[0]));
+                let of_weights = a.iter().all(|&v| weight(v));
+
+                if !distinct(&g) || !distinct(&a) || !one_type(&g) || !one_type(&a) || !of_weights {
+                    return None;
+                }
+
+                // The weights' forward dots must all read the same `x`, and be the only such dots of `x`.
+                let (x, forward) = dots_of(a[0]).into_iter().find_map(|(d1, x)| {
+                    let forward: Vec<usize> = a
+                        .iter()
+                        .map(|&ai| {
+                            dots_of(ai)
+                                .into_iter()
+                                .find(|&(d, x2)| x2 == x && same(d1, d) && !terms.contains(&d))
+                                .map(|(d, _)| d)
+                        })
+                        .collect::<Option<_>>()?;
+
+                    Some((x, forward))
+                })?;
+
+                let alike = dots_of(x)
+                    .into_iter()
+                    .filter(|&(d, w)| same(d, forward[0]) && ty(w) == ty(a[0]))
+                    .count();
+
+                if alike != terms.len() {
+                    return None;
+                }
+
+                let mut order: Vec<usize> = (0..terms.len()).collect();
+                order.sort_by_key(|&j| forward[j]);
+                let dots: Vec<usize> = order.iter().map(|&j| terms[j]).collect();
+                let g: Vec<Var> = order.iter().map(|&j| g[j]).collect();
+                let a: Vec<Var> = order.iter().map(|&j| a[j]).collect();
+
+                // Weight-gradient dots: each cotangent against `x` with the same primitive.
+                let weights = reads_of(g[0]).into_iter().find_map(|(f1, x1, dot, lhs)| {
+                    let mut fs = vec![f1];
+
+                    for &gi in &g[1..] {
+                        let (f, ..) =
+                            reads_of(gi).into_iter().find(|&(f, x2, ref dot2, lhs2)| {
+                                x2 == x
+                                    && *dot2 == dot
+                                    && lhs2 == lhs
+                                    && rounding(f) == rounding(f1)
+                            })?;
+
+                        fs.push(f);
+                    }
+
+                    (x1 == x).then_some((fs, dot, lhs, rounding(f1)))
+                });
+
+                let (g_dim, a_dim) = if g_first { (lc, rc) } else { (rc, lc) };
+
+                Some(Group {
+                    sum: s,
+                    adds: adds[1..].to_vec(),
+                    dots,
+                    transposes: transposes.clone(),
+                    rounding: rounding(terms[0]),
+                    g,
+                    a,
+                    g_first,
+                    g_dim,
+                    a_dim,
+                    weights,
+                })
+            });
+
+            if let Some(group) = found {
+                for &k in group
+                    .adds
+                    .iter()
+                    .chain(&group.dots)
+                    .chain(&group.transposes)
+                    .chain(group.weights.iter().flat_map(|w| &w.0))
+                {
+                    taken[k] = true;
+                }
+
+                groups.push(group);
+            }
+        }
+
+        if groups.is_empty() {
+            return Ok(());
+        }
+
+        *m.graph_mut() = rewrite(graph, &groups);
         Ok(())
     }
 }
