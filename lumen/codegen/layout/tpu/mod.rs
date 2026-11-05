@@ -2,11 +2,11 @@
 
 use crate::codegen::dot_general::tpu::block;
 use crate::codegen::layout::LayoutCodegen;
+use crate::codegen::tpu::{Kernel, Rows};
 use crate::codegen::utils::tpu::Tpu;
 use crate::device::tpu::layout::Layout;
 use crate::graph::{Graph, TensorType};
 use crate::plan::Step;
-use crate::runtime::tpu::{Kernel, Rows};
 
 /// TPU layout: the fixed reshape Pallas program, specialized by a spec of the split or merged last dim;
 /// transposes fuse into the elementwise kernels.

@@ -94,7 +94,7 @@ pub struct Plan {
     /// Set when the program runs as host and device stages instead of `steps`.
     pub(crate) staged: Option<Box<Staged>>,
     /// Per step, the compiled Triton kernel used on CUDA.
-    pub(crate) triton: Option<Vec<Option<crate::graph_compiler::triton::Kernel>>>,
+    pub(crate) triton: Option<Vec<Option<crate::codegen::triton::Kernel>>>,
     /// Whether the CUDA (CuTe DSL) backend runs the steps, each a kernel generated at its launch.
     pub(crate) cuda: bool,
     /// MPS launches captured per step, replayed on later runs.

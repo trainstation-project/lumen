@@ -12,7 +12,6 @@ use crate::codegen::kinds::gemm_dot;
 use crate::device::Device;
 use crate::graph::{Primitive, TensorType, Var, View};
 use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::mps::kernel_codegen;
 use crate::graph_compiler::mps::{
     SOURCES, compile_kernels, compile_mpp_kernels, compile_routed, record_launch,
 };
@@ -58,7 +57,7 @@ impl Kernels for Elementwise<'_> {
         };
 
         match self.tunable.contains_key(name) && TUNED_ELEMENTS.contains(&step.output.1.numel()) {
-            true => kernel_codegen::tunings_of(body),
+            true => crate::codegen::mps::tunings_of(body),
             false => Vec::new(),
         }
     }
@@ -72,7 +71,7 @@ impl Kernels for Elementwise<'_> {
         let t = &self.tunable[name];
 
         let (kernel, source) =
-            kernel_codegen::kernel(body, &t.by_value, self.config, &t.views, Some(tuning));
+            crate::codegen::mps::kernel(body, &t.by_value, self.config, &t.views, Some(tuning));
 
         record_launch(&kernel, body, Some(tuning));
         self.sources.insert(kernel.clone(), source);
@@ -147,7 +146,7 @@ pub(crate) fn matmul_of(
 /// operands (read through their strides).
 fn tiled_gemm(step: &Step) -> bool {
     let float = step.output.1.dtype.is_float();
-    let views = !crate::graph_compiler::mps::loads_views(step);
+    let views = !crate::codegen::mps::loads_views(step);
 
     let tiled = match &step.primitive {
         Primitive::Fusion { name, body, .. } => {

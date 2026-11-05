@@ -1,7 +1,7 @@
 //! MPS graph compiler: the pass pipeline that fuses a graph into Metal kernels, kernel compilation,
 //! and the encoder that launches each fused step with the right grid.
 
-pub(crate) mod kernel_codegen;
+mod concats;
 #[cfg(test)]
 mod tests;
 
@@ -35,6 +35,7 @@ use crate::codegen::dot_general::mps::GemmConfig;
 use crate::codegen::elementwise::mps::Tuning;
 use crate::codegen::kinds::{gemm_dot, reduction_root, row_reductions};
 use crate::codegen::layout::transpose_tiling;
+use crate::codegen::mps::{codegen, loads_strided};
 use crate::codegen::reduction::mps::{has_epilogue, split_launches};
 use crate::codegen::row::mps::row_groups;
 use crate::codegen::store::mps::strided_load;
@@ -50,10 +51,7 @@ use crate::runtime::mps::{
 };
 use crate::tensor::contiguous_strides;
 use crate::{DType, Scalar, Tensor};
-use kernel_codegen::Codegen;
-pub(crate) use kernel_codegen::{
-    attention_reads_strided, fusion_reads_strided, loads_strided, loads_views,
-};
+use concats::Concats;
 
 // Metal library loader implemented in the Objective-C shim.
 unsafe extern "C" {
@@ -100,10 +98,6 @@ pub(crate) struct MpsModule<'a> {
     pub(crate) scalars: Vec<usize>,
     /// Kernels requested so far; fusions name them as `PENDING` plus an index.
     pub(crate) kernels: Vec<Kernel>,
-    /// Generated Metal sources by kernel name.
-    sources: BTreeMap<String, String>,
-    /// Elementwise kernels that the autotuner may regenerate, by kernel name.
-    tunable: BTreeMap<String, crate::autotune::mps::Tunable>,
 }
 
 impl Blocks for MpsModule<'_> {
@@ -152,14 +146,14 @@ impl Lone for MpsModule<'_> {
 }
 
 impl Slots for MpsModule<'_> {
-    /// Before fusion: what `kernel_codegen::slot_writes` accepts, fusible nodes counting as kernels.
+    /// Before fusion: what `concats::slot_writes` accepts, fusible nodes counting as kernels.
     fn writes(&self, concat: &Node, k: usize, producer: &Node, index: usize) -> bool {
-        kernel_codegen::slot_writes(self, concat, k, producer, index, true)
+        concats::slot_writes(self, concat, k, producer, index, true)
     }
 
-    /// The attention backward kernel's operands (`kernel_codegen::slot_worth`).
+    /// The attention backward kernel's operands (`concats::slot_worth`).
     fn worth(&self, _: &Node, _: usize, producer: &Node, _: usize) -> bool {
-        kernel_codegen::slot_worth(self, producer)
+        concats::slot_worth(self, producer)
     }
 }
 
@@ -201,7 +195,7 @@ pub(crate) enum Kernel {
 const MOST_UPDATES: usize = 29;
 
 /// Name prefix of fusions whose kernel is requested but not yet generated.
-const PENDING: &str = "pending#";
+pub(crate) const PENDING: &str = "pending#";
 
 /// Records a kernel request and returns the placeholder name a fusion uses until codegen.
 pub(crate) fn request(kernels: &mut Vec<Kernel>, kernel: Kernel) -> String {
@@ -292,7 +286,7 @@ fn pipeline<'a>(config: &CompilerConfig) -> Pipeline<MpsModule<'a>> {
         reads: gemm::reads_strided,
     });
     p.add(Alone);
-    p.add(Codegen);
+    p.add(Concats);
     p
 }
 
@@ -324,7 +318,8 @@ fn unsupported(graph: &Graph) -> Result<(), String> {
     Ok(())
 }
 
-/// Compiles `graph` for MPS: runs the passes, compiles the kernels, plans buffers and optionally autotunes.
+/// Compiles `graph` for MPS: runs the passes, plans buffers, generates and compiles the kernels, and
+/// optionally autotunes.
 pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> {
     unsupported(graph)?;
     let config = &options.config;
@@ -337,20 +332,16 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         rows: Vec::new(),
         scalars: super::positions(&options.scalars),
         kernels: Vec::new(),
-        sources: BTreeMap::new(),
-        tunable: BTreeMap::new(),
     };
 
     pipeline(config).run(&mut module)?;
-
-    compile_routed(std::mem::take(&mut module.sources))?;
 
     let MpsModule {
         graph: fused,
         packed,
         interleaved,
         scalars,
-        tunable,
+        kernels,
         ..
     } = module;
 
@@ -360,6 +351,8 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
     };
 
     let mut plan = Plan::compile_with(&fused, &plan);
+    let (sources, tunable) = codegen(&mut plan, &kernels, config)?;
+    compile_routed(sources)?;
 
     if config.autotune {
         let tuner = crate::autotune::Autotuner {
@@ -620,7 +613,7 @@ fn launch_kind(name: &str, body: &Graph) -> (Launch, Option<Tuning>) {
     }
 
     let launch = launch_of(body);
-    let tuning = kernel_codegen::tuning_of(body);
+    let tuning = crate::codegen::mps::tuning_of(body);
     launches.insert(name.to_owned(), (launch, tuning));
     (launch, tuning)
 }
@@ -695,7 +688,7 @@ fn run_loop(
     };
 
     let config = super::config::config();
-    let (name, source) = kernel_codegen::kernel(&body, &[by_value], &config, &views, None);
+    let (name, source) = crate::codegen::mps::kernel(&body, &[by_value], &config, &views, None);
 
     let compiled = SOURCES
         .lock()
@@ -704,7 +697,7 @@ fn run_loop(
 
     if !compiled {
         compile_kernels(BTreeMap::from([(name.clone(), source)]))?;
-        record_launch(&name, &body, kernel_codegen::tuning_of(&body));
+        record_launch(&name, &body, crate::codegen::mps::tuning_of(&body));
     }
 
     let strided = !by_value && !src.is_contiguous();

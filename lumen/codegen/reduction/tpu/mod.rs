@@ -11,6 +11,8 @@ use crate::codegen::dot_general::tpu::block;
 #[cfg(lumen_tpu_linked)]
 use crate::codegen::reduction::ReductionCodegen;
 #[cfg(lumen_tpu_linked)]
+use crate::codegen::tpu::{Kernel, Rows};
+#[cfg(lumen_tpu_linked)]
 use crate::codegen::utils::tpu::{Tpu, node};
 #[cfg(lumen_tpu_linked)]
 use crate::device::tpu::layout::Layout as Tiles;
@@ -19,8 +21,6 @@ use crate::graph::Var;
 use crate::graph::{Graph, Node, Primitive, TensorType};
 #[cfg(lumen_tpu_linked)]
 use crate::plan::Step;
-#[cfg(lumen_tpu_linked)]
-use crate::runtime::tpu::{Kernel, Rows};
 
 /// How a reduction's operand is viewed as `lead` matrices of `m` rows by `n` columns.
 #[derive(Clone, Copy, Debug, PartialEq)]

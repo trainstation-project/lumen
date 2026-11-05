@@ -1,10 +1,9 @@
-//! Pass that generates Metal source for every requested kernel and gives each fusion its kernel name, and
-//! the kernel shape (GEMV row, GEMM, row reduction, reduction, transpose or elementwise) each fused body
-//! lowers to.
+//! MPS codegen: once the plan is laid out, generates Metal source for every requested kernel and gives each
+//! fusion step its kernel name; and the kernel shape (GEMV row, GEMM, row reduction, reduction, transpose or
+//! elementwise) each fused body lowers to.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
-use super::{Kernel, MpsModule, PENDING, fusion, request};
 use crate::autotune::mps::Tunable;
 use crate::codegen::attention::AttentionCodegen;
 use crate::codegen::dot_general::mps::{gemm_kernel, gemm_row_kernel, gemv_config, row_dot};
@@ -16,146 +15,96 @@ use crate::codegen::layout::{LayoutCodegen, transpose_tiling};
 use crate::codegen::reduction::ReductionCodegen;
 use crate::codegen::row::RowCodegen;
 use crate::codegen::utils::mps::Mps;
-use crate::graph::{Graph, Node, Primitive, Var};
+use crate::graph::{Graph, Primitive};
 use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::common::alone::wrapped;
 use crate::graph_compiler::common::attention::{self, Strides};
-use crate::graph_compiler::common::place_concats::in_place_concats;
 use crate::graph_compiler::common::place_views;
-use crate::graph_compiler::pass::CompilerPass;
-use crate::plan::Step;
+use crate::graph_compiler::mps::{Kernel, PENDING, record_launch};
+use crate::plan::{Plan, Step};
 
-/// Compiler pass turning pending kernel requests into generated kernels.
-pub(super) struct Codegen;
+/// Generated Metal sources, and the elementwise kernels the autotuner may regenerate, by kernel name.
+pub(crate) type Generated = (
+    BTreeMap<String, String>,
+    BTreeMap<String, crate::autotune::mps::Tunable>,
+);
 
-impl<'a> CompilerPass<MpsModule<'a>> for Codegen {
-    fn name(&self) -> &'static str {
-        "codegen"
-    }
+/// Generates each pending fusion step's kernel in `plan`, writing its outputs through the step's output views,
+/// and names the step after it.
+pub(crate) fn codegen(
+    plan: &mut Plan,
+    kernels: &[Kernel],
+    config: &CompilerConfig,
+) -> Result<Generated, String> {
+    let (mut sources, mut tunable) = (BTreeMap::new(), BTreeMap::new());
 
-    /// Unmarks in-place concatenations that fusion invalidated, then generates each pending fusion's kernel
-    /// with the strided output views it writes into.
-    fn apply(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
-        let config = &m.options.config;
-        // Concatenations no longer valid in place get copied by their own elementwise kernel.
-        let module = &*m;
+    for step in plan.steps_mut() {
+        // Output views, keyed by output index, of a fusion writing straight into a placed buffer.
+        let mut views: HashMap<usize, (usize, Vec<usize>)> = step
+            .output_views
+            .iter()
+            .enumerate()
+            .filter_map(|(k, v)| v.as_ref().map(|v| (k, (v.offset, v.strides.clone()))))
+            .collect();
 
-        let valid = in_place_concats(
-            &m.graph,
-            |c, k, p, index| slot_writes(module, c, k, p, index, false),
-            |_, _, p, _| slot_worth(module, p),
-        );
-        let mut unmarked = false;
+        let Primitive::Fusion { name, body, .. } = &mut step.primitive else {
+            continue;
+        };
 
-        for (i, node) in m.graph.nodes.iter_mut().enumerate() {
-            if let Primitive::Concatenate { in_place, .. } = &mut node.primitive
-                && *in_place
-                && !valid.contains(&i)
-            {
-                *in_place = false;
-                unmarked = true;
-            }
-        }
+        if name == crate::graph::UPDATES {
+            let (kernel, source) =
+                Mps::updates(body, &()).expect("a Metal kernel of every updates body");
 
-        if unmarked {
-            let kernels = &mut m.kernels;
-
-            let concatenate = |n: &crate::graph::Node| {
-                matches!(
-                    n.primitive,
-                    Primitive::Concatenate {
-                        in_place: false,
-                        ..
-                    }
-                )
-            };
-
-            m.graph = wrapped(&m.graph, &[], concatenate, |_, _| {
-                request(kernels, Kernel::Fusion(Vec::new()))
-            });
-        }
-
-        // Output views per fusion, keyed by output index, for fusions writing straight into a placed buffer.
-        let placements = m.graph.placements();
-        let mut views: HashMap<Var, HashMap<usize, (usize, Vec<usize>)>> = HashMap::new();
-
-        for node in &m.graph.nodes {
-            let (fusion, index) = match node.primitive {
-                Primitive::Fusion { .. } => (node.output, 0),
-                Primitive::FusionOutput { index, .. } => (node.inputs[0], index),
-                _ => continue,
-            };
-
-            if let Some((_, at)) = &placements[node.output] {
-                let at = (at.offset, at.strides.clone());
-                views.entry(fusion).or_default().insert(index, at);
-            }
-        }
-
-        for node in m.graph.nodes.iter_mut() {
-            let output = node.output;
-
-            let Primitive::Fusion { name, body, .. } = &mut node.primitive else {
-                continue;
-            };
-
-            if name == crate::graph::UPDATES {
-                let (kernel, source) =
-                    Mps::updates(body, &()).expect("a Metal kernel of every updates body");
-
-                super::record_launch(&kernel, body, None);
-                m.sources.insert(kernel.clone(), source);
-                *name = kernel;
-                continue;
-            }
-
-            let Some(k) = name.strip_prefix(PENDING) else {
-                continue;
-            };
-
-            let k: usize = k.parse().expect("a requested kernel's index");
-
-            let (kernel, source) = match &m.kernels[k] {
-                Kernel::Fusion(by_value) => {
-                    let views = views.remove(&output).unwrap_or_default();
-                    let (kernel, source) = kernel(body, by_value, config, &views, None);
-
-                    let tunable = Tunable {
-                        by_value: by_value.clone(),
-                        views,
-                    };
-
-                    m.tunable.insert(kernel.clone(), tunable);
-                    (kernel, source)
-                }
-                Kernel::Attention => {
-                    let a = attention::of_body(body).expect("an attention");
-                    Mps::forward(body, &a, &Strides::default())?
-                }
-                Kernel::AttentionBackward => {
-                    let strides = Strides {
-                        outputs: views.remove(&output).unwrap_or_default(),
-                        ..Strides::default()
-                    };
-
-                    let b = attention::backward_of_body_strided(body, &strides)
-                        .expect("an attention backward");
-
-                    Mps::backward(body, &b, &strides)?
-                }
-            };
-
-            super::record_launch(&kernel, body, tuning_of(body));
-            m.sources.insert(kernel.clone(), source);
+            record_launch(&kernel, body, None);
+            sources.insert(kernel.clone(), source);
             *name = kernel;
+            continue;
         }
 
-        Ok(())
+        let Some(k) = name.strip_prefix(PENDING) else {
+            continue;
+        };
+
+        let k: usize = k.parse().expect("a requested kernel's index");
+
+        let (kernel, source) = match &kernels[k] {
+            Kernel::Fusion(by_value) => {
+                let (kernel, source) = kernel(body, by_value, config, &views, None);
+
+                let tuned = Tunable {
+                    by_value: by_value.clone(),
+                    views,
+                };
+
+                tunable.insert(kernel.clone(), tuned);
+                (kernel, source)
+            }
+            Kernel::Attention => {
+                let a = attention::of_body(body).expect("an attention");
+                Mps::forward(body, &a, &Strides::default())?
+            }
+            Kernel::AttentionBackward => {
+                let strides = Strides {
+                    outputs: std::mem::take(&mut views),
+                    ..Strides::default()
+                };
+
+                let b = attention::backward_of_body_strided(body, &strides)
+                    .expect("an attention backward");
+
+                Mps::backward(body, &b, &strides)?
+            }
+        };
+
+        record_launch(&kernel, body, tuning_of(body));
+        sources.insert(kernel.clone(), source);
+        *name = kernel;
     }
+
+    Ok((sources, tunable))
 }
 
 /// Default launch tuning when `body` lowers to the elementwise kernel, else `None`.
-pub(super) fn tuning_of(body: &Graph) -> Option<Tuning> {
+pub(crate) fn tuning_of(body: &Graph) -> Option<Tuning> {
     is_elementwise(body).then(|| elementwise_tuning(body))
 }
 
@@ -215,62 +164,8 @@ pub(crate) fn kernel(
 }
 
 /// Whether the kernel chosen for `body` can write its outputs through strided views.
-pub(super) fn writes_views(body: &Graph) -> bool {
+pub(crate) fn writes_views(body: &Graph) -> bool {
     gemm_dot(body).is_none() && row_reductions(body).is_empty() && reduction_root(body).is_none()
-}
-
-/// The kernel request behind `producer` when it is a still-pending fusion.
-fn pending<'k>(kernels: &'k [Kernel], producer: &Node) -> Option<&'k Kernel> {
-    match &producer.primitive {
-        Primitive::Fusion { name, .. } => name
-            .strip_prefix(PENDING)
-            .and_then(|k| k.parse::<usize>().ok())
-            .map(|k| &kernels[k]),
-        _ => None,
-    }
-}
-
-/// Whether the kernel making operand `k` of `concat` (`producer`, its output `index`) can write it into its slot:
-/// the attention backward kernel (its atomically accumulated dQ aside), a fusion writing views, or, before fusion
-/// (`before_fusion`), a fusible layout or elementwise node.
-pub(super) fn slot_writes(
-    m: &MpsModule<'_>,
-    concat: &Node,
-    k: usize,
-    producer: &Node,
-    index: usize,
-    before_fusion: bool,
-) -> bool {
-    match (pending(&m.kernels, producer), &producer.primitive) {
-        (Some(Kernel::AttentionBackward), Primitive::Fusion { body, .. }) => {
-            let atomic = body.outputs().len() == 3 && index == 2;
-            let at = m.graph.slot(concat, k);
-            let views = HashMap::from([(index, (at.offset, at.strides))]);
-            !atomic && attention::backward_of_body_into(body, views).is_some()
-        }
-        (Some(Kernel::Fusion(_)), Primitive::Fusion { body, .. }) => writes_views(body),
-        (None, p) if before_fusion => {
-            let layout = matches!(
-                p,
-                Primitive::Reshape { .. }
-                    | Primitive::Transpose { .. }
-                    | Primitive::BroadcastInDim { .. }
-                    | Primitive::Slice { .. }
-            );
-
-            fusion::fusible(&m.graph, producer) && (layout || fusion::elementwise(p))
-        }
-        _ => false,
-    }
-}
-
-/// Whether an operand `producer` writes into its slot is worth placing its concatenation for: the attention
-/// backward kernel's are (its gradients land side by side), others alone aren't.
-pub(super) fn slot_worth(m: &MpsModule<'_>, producer: &Node) -> bool {
-    matches!(
-        pending(&m.kernels, producer),
-        Some(Kernel::AttentionBackward)
-    )
 }
 
 /// Whether fusion input `k` may be bound as a strided view: it is not attention and no dot reads it.

@@ -3,8 +3,8 @@
 
 use std::collections::HashMap;
 
-use super::kernel_codegen::writes_views;
 use super::{Kernel, MpsModule, PENDING, fusion, request};
+use crate::codegen::mps::writes_views;
 use crate::graph::{Node, Primitive};
 use crate::graph_compiler::common::alone::wrapped;
 use crate::graph_compiler::common::attention;

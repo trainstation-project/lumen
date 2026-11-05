@@ -10,6 +10,8 @@ use crate::codegen::dot_general::tpu::block;
 #[cfg(lumen_tpu_linked)]
 use crate::codegen::row::RowCodegen;
 #[cfg(lumen_tpu_linked)]
+use crate::codegen::tpu::{Kernel, Rows};
+#[cfg(lumen_tpu_linked)]
 use crate::codegen::utils::tpu::Tpu;
 use crate::device::tpu::layout::Layout;
 #[cfg(lumen_tpu_linked)]
@@ -17,8 +19,6 @@ use crate::graph::Var;
 use crate::graph::{Graph, Node, Primitive, TensorType};
 #[cfg(lumen_tpu_linked)]
 use crate::plan::Step;
-#[cfg(lumen_tpu_linked)]
-use crate::runtime::tpu::{Kernel, Rows};
 
 /// Most bytes a minimal float32 block of rows (16 rows of `n`) may take.
 pub(crate) const ROW_BYTES: usize = 1 << 21;

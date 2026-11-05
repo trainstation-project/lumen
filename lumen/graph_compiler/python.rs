@@ -271,7 +271,7 @@ fn triton_code(kernel: &str, functions: &[super::triton::Function]) -> String {
 struct Entry {
     name: String,
     config: [usize; 6],
-    constexprs: Vec<(&'static str, super::triton::Constexpr)>,
+    constexprs: Vec<(&'static str, crate::codegen::triton::Constexpr)>,
     device: usize,
     classes: Vec<super::triton::direct::Class>,
     kernel: std::sync::Arc<super::triton::direct::Compiled>,
@@ -289,7 +289,7 @@ fn direct(
     launches: &super::triton::Launches,
     name: &str,
     config: [usize; 6],
-    constexprs: &[(&'static str, super::triton::Constexpr)],
+    constexprs: &[(&'static str, crate::codegen::triton::Constexpr)],
     identity: impl FnOnce() -> String,
     on: &crate::Tensor,
     values: &[super::triton::direct::Value],
@@ -540,7 +540,7 @@ fn triton_gemm(
 /// Launches a generated Triton elementwise loop kernel over `n` elements in `programs` programs.
 #[allow(clippy::too_many_arguments)]
 fn triton_loop(
-    kernel: &super::triton::Kernel,
+    kernel: &crate::codegen::triton::Kernel,
     config: &crate::codegen::elementwise::triton::LoopConfig,
     functions: &[super::triton::Function],
     launches: &super::triton::Launches,
@@ -598,11 +598,11 @@ fn triton_loop(
 
             for (key, value) in &constexprs {
                 match value {
-                    super::triton::Constexpr::Int(v) => values.set_item(key, v)?,
-                    super::triton::Constexpr::Ints(v) => {
+                    crate::codegen::triton::Constexpr::Int(v) => values.set_item(key, v)?,
+                    crate::codegen::triton::Constexpr::Ints(v) => {
                         values.set_item(key, pyo3::types::PyTuple::new(py, v)?)?
                     }
-                    super::triton::Constexpr::DType(dtype) => {
+                    crate::codegen::triton::Constexpr::DType(dtype) => {
                         let name = crate::codegen::utils::triton::triton_type(*dtype)
                             .expect("a Triton dtype")
                             .trim_start_matches("tl.");

@@ -1,7 +1,6 @@
 //! Tests of the MPS passes: fusion, dot merging and canonicalization, reduction and GEMM codegen,
 //! checked against the reference interpreter and, when a GPU is present, on device.
 
-use super::kernel_codegen;
 use crate::codegen::dot_general::mps as gemm;
 use crate::codegen::kinds::{gemm_dot, row_reductions};
 use crate::codegen::layout::transpose_tiling;
@@ -40,7 +39,7 @@ fn fuse(g: &Graph) -> Graph {
         &[],
         &config,
         |body, by_value| {
-            kernel_codegen::kernel(body, by_value, &config, &Default::default(), None).0
+            crate::codegen::mps::kernel(body, by_value, &config, &Default::default(), None).0
         },
     )
 }
@@ -83,7 +82,7 @@ fn gathers_from_tables_past_u32_index_in_ulong() {
         let index = g.input(ty(DType::I32, &[8]));
         let out = apply(&mut g, Gather { axis: 0 }, &[table, index]);
         g.set_outputs(&[out]).unwrap();
-        kernel_codegen::kernel(
+        crate::codegen::mps::kernel(
             &g,
             &[],
             &CompilerConfig::default(),
@@ -528,7 +527,7 @@ fn transposes_in_fusions_are_tiled() {
 
             assert_eq!(fused.nodes().len(), 1, "{fused}");
 
-            let source = kernel_codegen::kernel(
+            let source = crate::codegen::mps::kernel(
                 body,
                 &[],
                 &CompilerConfig::default(),
@@ -583,7 +582,7 @@ fn reductions_are_normalized() {
             panic!("{fused}")
         };
 
-        let source = kernel_codegen::kernel(
+        let source = crate::codegen::mps::kernel(
             body,
             &[],
             &CompilerConfig::default(),
@@ -649,7 +648,7 @@ fn hierarchical_reductions_keep_their_dtype() {
                     panic!("{fused}")
                 };
 
-                let source = kernel_codegen::kernel(
+                let source = crate::codegen::mps::kernel(
                     body,
                     &[],
                     &CompilerConfig::default(),
@@ -715,7 +714,7 @@ fn hierarchical_reductions_keep_their_dtype() {
 
     for node in fused.nodes() {
         if let Fusion { body, .. } = &node.primitive {
-            let source = kernel_codegen::kernel(
+            let source = crate::codegen::mps::kernel(
                 body,
                 &[],
                 &CompilerConfig::default(),
@@ -1266,7 +1265,7 @@ fn dots_fuse_their_epilogue() {
     };
 
     assert!(label.starts_with("dot_general"), "{label}");
-    let source = kernel_codegen::kernel(
+    let source = crate::codegen::mps::kernel(
         body,
         &[],
         &CompilerConfig::default(),
@@ -1296,7 +1295,7 @@ fn dots_fuse_their_epilogue() {
         &[],
         &config,
         |body, by_value| {
-            kernel_codegen::kernel(body, by_value, &config, &Default::default(), None).0
+            crate::codegen::mps::kernel(body, by_value, &config, &Default::default(), None).0
         },
     );
 
@@ -1506,7 +1505,7 @@ fn reductions_apply_their_epilogue() {
 
             assert!(has_epilogue(body));
 
-            let source = kernel_codegen::kernel(
+            let source = crate::codegen::mps::kernel(
                 body,
                 &[],
                 &CompilerConfig::default(),
@@ -1549,7 +1548,7 @@ fn reductions_apply_an_epilogue_reading_them_twice() {
         };
 
         assert!(has_epilogue(body));
-        let source = kernel_codegen::kernel(
+        let source = crate::codegen::mps::kernel(
             body,
             &[],
             &CompilerConfig::default(),
@@ -1892,7 +1891,7 @@ fn division_by_sqrt_is_as_traced() {
         panic!("{fused}")
     };
 
-    let source = kernel_codegen::kernel(
+    let source = crate::codegen::mps::kernel(
         body,
         &[],
         &CompilerConfig::default(),
@@ -1932,7 +1931,7 @@ fn division_by_sqrt_is_as_traced() {
         panic!("{fused}")
     };
 
-    let source = kernel_codegen::kernel(
+    let source = crate::codegen::mps::kernel(
         body,
         &[],
         &CompilerConfig::default(),

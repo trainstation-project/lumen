@@ -9,10 +9,9 @@ use super::common::fusion::{Backend, fuse};
 use super::config::CompilerConfig;
 use super::pass::{CompilerPass, Module, Pipeline};
 use super::{Options, plan_options};
-use crate::codegen::elementwise::ElementwiseCodegen;
 use crate::codegen::elementwise::cuda::Layouts;
-use crate::codegen::utils::cuda::{Cuda, cute_type};
-use crate::graph::{Graph, Node, Primitive, TensorType, Var};
+use crate::codegen::utils::cuda::cute_type;
+use crate::graph::{Graph, Node, Primitive, Var};
 use crate::plan::{Plan, Step};
 use crate::{Device, Tensor};
 
@@ -190,11 +189,12 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
     let plan = plan_options(&fused, options, config, &Vec::new(), Vec::new());
     let mut plan = Plan::compile_with(&fused, &plan);
     plan.cuda = true;
+    crate::codegen::cuda::codegen(&plan);
     Ok(plan)
 }
 
-/// Runs `step` on its buffers: an elementwise fusion, or an output's copy (a reshape), through a
-/// kernel generated for the tensors' layouts (kept in the step's memo) and launched by Python.
+/// Runs `step` on its buffers: an elementwise fusion, or an output's copy (a reshape), through the kernel
+/// generated for the tensors' layouts (kept in the step's memo) and launched by Python.
 pub(crate) fn run(
     step: &Step,
     inputs: &[Tensor],
@@ -204,17 +204,6 @@ pub(crate) fn run(
     let launch = LAUNCH.get().ok_or(
         "the CUDA backend launches from Python (lumen.codegen.utils.cuda): none is installed",
     )?;
-
-    let body = match &step.primitive {
-        Primitive::Fusion { body, .. } => body.clone(),
-        Primitive::Reshape { new_sizes } => copy_body(&inputs[0], new_sizes),
-        p => {
-            return Err(format!(
-                "{}: the CUDA backend has no kernel for it yet",
-                p.name()
-            ));
-        }
-    };
 
     let outputs: Vec<&Tensor> = std::iter::once(out).chain(outs).collect();
     let n = outputs.iter().map(|t| t.numel()).max().unwrap_or(0);
@@ -235,46 +224,7 @@ pub(crate) fn run(
         spans: tensors.iter().map(Tensor::numel).collect(),
     };
 
-    let key = layouts
-        .inputs
-        .iter()
-        .chain(&layouts.outputs)
-        .chain(std::iter::once(&layouts.spans))
-        .fold(0u64, |h, s| {
-            use std::hash::{Hash, Hasher};
-
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            (h, s).hash(&mut hasher);
-            hasher.finish()
-        });
-
-    let code = step.memo.get(key, || {
-        Cuda::elementwise(
-            &body,
-            &vec![false; inputs.len()],
-            &Default::default(),
-            &layouts,
-        )
-    })?;
-
+    let code = crate::codegen::cuda::generated(step, layouts)?;
     let (name, source) = code.as_ref();
     launch(name, source, &tensors, outputs.len(), n)
-}
-
-/// The body of a copy of `x` reshaped to `shape`: its input, reshaped, its output.
-fn copy_body(x: &Tensor, shape: &[usize]) -> Graph {
-    let mut body = Graph::new();
-    let input = body.input(TensorType::new(x.dtype(), x.shape()));
-
-    let output = body
-        .apply(
-            Primitive::Reshape {
-                new_sizes: shape.to_vec(),
-            },
-            &[input],
-        )
-        .expect("a reshape of the copied value");
-
-    body.set_outputs(&[output]).expect("the copied value");
-    body
 }

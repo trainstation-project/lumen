@@ -2,7 +2,6 @@
 //! templated kernel, generated with its tensors' layouts at launch).
 
 use crate::DType;
-use crate::codegen::dynamic_slice::DynamicSliceCodegen;
 use crate::codegen::kinds::{gemm_dot, reduction_root};
 use crate::codegen::layout::{TILE, transpose_tiling};
 use crate::codegen::reduction::ReductionCodegen;
