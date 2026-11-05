@@ -4,77 +4,6 @@ use crate::DType;
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::passes::{CompilerPass, Module};
 
-/// Rewrites float dots whose operands both have only size-1 free dims (batched inner products)
-/// as `reduce_sum(x * y)`, cast to the output dtype when it differs from the accumulator.
-pub(crate) fn reduce_vector_dots(graph: &Graph) -> Graph {
-    let mut out = Graph::new();
-    let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
-
-    for &v in graph.inputs() {
-        map[v] = out.input(graph.type_of(v).clone());
-    }
-
-    for node in graph.nodes() {
-        out.set_origin(node);
-        let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
-
-        map[node.output] = match &node.primitive {
-            Primitive::DotGeneral {
-                lhs_contracting,
-                rhs_contracting,
-                lhs_batch,
-                rhs_batch,
-                accum_dtype,
-                output_dtype,
-            } if accum_dtype.is_float() => {
-                let operands = [
-                    (inputs[0], lhs_batch, lhs_contracting),
-                    (inputs[1], rhs_batch, rhs_contracting),
-                ];
-
-                let vector = |&(v, b, c): &(Var, &Vec<usize>, &Vec<usize>)| {
-                    let shape = &out.type_of(v).shape;
-                    let free = (0..shape.len()).filter(|d| !b.contains(d) && !c.contains(d));
-                    free.map(|d| shape[d]).product::<usize>() == 1
-                };
-
-                let accum = *accum_dtype;
-
-                (vector(&operands[0]) && vector(&operands[1]))
-                    .then(|| product(&mut out, operands[0], operands[1], accum))
-                    .map(|sum| {
-                        let sum = reshaped(&mut out, sum, &graph.type_of(node.output).shape);
-
-                        match accum == *output_dtype {
-                            true => sum,
-                            false => out
-                                .apply(
-                                    Primitive::Cast {
-                                        new_dtype: *output_dtype,
-                                    },
-                                    &[sum],
-                                )
-                                .expect("a cast"),
-                        }
-                    })
-            }
-            _ => None,
-        }
-        .unwrap_or_else(|| {
-            let v = out
-                .apply(node.primitive.clone(), &inputs)
-                .expect("a node of the graph");
-
-            out.set_label(v, node.label);
-            v
-        });
-    }
-
-    let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
-    out.set_outputs(&outputs).expect("values of the graph");
-    out
-}
-
 /// `reduce_sum(v * m)` over `m`'s contracting dims, with `v` laid out and broadcast onto `m`'s shape;
 /// the result is in dot output order (batch dims, then free dims).
 fn product(
@@ -191,9 +120,78 @@ impl<M: Module> CompilerPass<M> for DotStrength {
         "dot_strength"
     }
 
-    /// Replaces the module's graph with its strength-reduced version.
+    /// Rewrites float dots whose operands both have only size-1 free dims (batched inner products)
+    /// as `reduce_sum(x * y)`, cast to the output dtype when it differs from the accumulator.
     fn apply(&mut self, m: &mut M) -> Result<(), String> {
-        *m.graph_mut() = reduce_vector_dots(m.graph());
+        let graph = m.graph();
+
+        let mut out = Graph::new();
+        let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
+
+        for &v in graph.inputs() {
+            map[v] = out.input(graph.type_of(v).clone());
+        }
+
+        for node in graph.nodes() {
+            out.set_origin(node);
+            let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
+
+            map[node.output] = match &node.primitive {
+                Primitive::DotGeneral {
+                    lhs_contracting,
+                    rhs_contracting,
+                    lhs_batch,
+                    rhs_batch,
+                    accum_dtype,
+                    output_dtype,
+                } if accum_dtype.is_float() => {
+                    let operands = [
+                        (inputs[0], lhs_batch, lhs_contracting),
+                        (inputs[1], rhs_batch, rhs_contracting),
+                    ];
+
+                    let vector = |&(v, b, c): &(Var, &Vec<usize>, &Vec<usize>)| {
+                        let shape = &out.type_of(v).shape;
+                        let free = (0..shape.len()).filter(|d| !b.contains(d) && !c.contains(d));
+                        free.map(|d| shape[d]).product::<usize>() == 1
+                    };
+
+                    let accum = *accum_dtype;
+
+                    (vector(&operands[0]) && vector(&operands[1]))
+                        .then(|| product(&mut out, operands[0], operands[1], accum))
+                        .map(|sum| {
+                            let sum = reshaped(&mut out, sum, &graph.type_of(node.output).shape);
+
+                            match accum == *output_dtype {
+                                true => sum,
+                                false => out
+                                    .apply(
+                                        Primitive::Cast {
+                                            new_dtype: *output_dtype,
+                                        },
+                                        &[sum],
+                                    )
+                                    .expect("a cast"),
+                            }
+                        })
+                }
+                _ => None,
+            }
+            .unwrap_or_else(|| {
+                let v = out
+                    .apply(node.primitive.clone(), &inputs)
+                    .expect("a node of the graph");
+
+                out.set_label(v, node.label);
+                v
+            });
+        }
+
+        let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
+        out.set_outputs(&outputs).expect("values of the graph");
+
+        *m.graph_mut() = out;
         Ok(())
     }
 }

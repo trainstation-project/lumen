@@ -241,7 +241,7 @@ impl Passes for TritonModule<'_> {
     /// With `linear_reordering`, as on MPS: a matmul operand's factor along the kept axes moves to its output.
     fn linear_reordering(config: &CompilerConfig) -> Pass<Self> {
         let reordering = LinearReordering {
-            tile: crate::codegen::dot_general::triton::MOST_GEMM_ROW,
+            tile: Some(crate::codegen::dot_general::triton::MOST_GEMM_ROW),
         };
 
         when(config.linear_reordering, reordering)

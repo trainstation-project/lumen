@@ -287,132 +287,11 @@ fn crosses_tiles(graph: &Graph, uses: &Uses, f: Var, tile: usize) -> bool {
     false
 }
 
-/// Rewrites each matmul whose operand, read only by such matmuls, carries a factor constant along the
-/// contracted axis: the matmul of the operands without their factors, in its accumulation dtype, times
-/// (or divided by) each factor per output row or column, rounded once to its output dtype. With `tile`,
-/// only a factor of a reduction over rows wider than `tile` moves ([`crosses_tiles`]): it is what would
-/// otherwise take a pass over the rows after their GEMM's tiles; every other factor stays as traced.
-pub(crate) fn linear_reordering(graph: &Graph, tile: Option<usize>) -> Graph {
-    let nodes = graph.nodes();
-
-    let mut uses = Uses {
-        producer: vec![None; graph.types.len()],
-        readers: vec![Vec::new(); graph.types.len()],
-    };
-
-    for (i, node) in nodes.iter().enumerate() {
-        uses.producer[node.output] = Some(i);
-
-        for &v in &node.inputs {
-            uses.readers[v].push(i);
-        }
-    }
-
-    // Each reorderable matmul's operands without their factors, by node index.
-    let reordered: Vec<[Option<Stripped>; 2]> = (0..nodes.len())
-        .map(|k| match plain(graph, &nodes[k]) {
-            true => [0, 1].map(|side| {
-                stripped(graph, &uses, k, side).filter(|(_, (f, _, _))| {
-                    tile.is_none_or(|tile| crosses_tiles(graph, &uses, *f, tile))
-                })
-            }),
-            false => [None, None],
-        })
-        .collect();
-
-    if reordered.iter().flatten().all(Option::is_none) {
-        return graph.clone();
-    }
-
-    let mut out = Graph::new();
-    let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
-
-    for &v in graph.inputs() {
-        map[v] = out.input(graph.type_of(v).clone());
-    }
-
-    for (k, node) in nodes.iter().enumerate() {
-        out.set_origin(node);
-
-        if reordered[k].iter().all(Option::is_none) {
-            let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
-
-            map[node.output] = out
-                .apply(node.primitive.clone(), &inputs)
-                .expect("well typed");
-
-            continue;
-        }
-
-        let Primitive::DotGeneral {
-            accum_dtype,
-            output_dtype,
-            ..
-        } = &node.primitive
-        else {
-            unreachable!("a matmul")
-        };
-
-        let mut dot = node.primitive.clone();
-
-        if let Primitive::DotGeneral { output_dtype, .. } = &mut dot {
-            *output_dtype = *accum_dtype;
-        }
-
-        let operands = [0, 1].map(|side| match &reordered[k][side] {
-            Some((e, _)) => emit(&mut out, graph, &map, e),
-            None => map[node.inputs[side]],
-        });
-
-        let shape = graph.type_of(node.output).shape.clone();
-        out.set_origin(node);
-        let mut v = out.apply(dot, &operands).expect("well typed");
-
-        for (side, s) in reordered[k].iter().enumerate() {
-            let Some((_, (f, divide, at))) = s else {
-                continue;
-            };
-
-            // The factor applied after the matmul keeps the origin of the op that applied it before.
-            out.set_origin(&nodes[*at]);
-            let axes = kept(graph, node, side);
-            let f = spread(
-                &mut out,
-                graph,
-                &map,
-                (*f, side, &axes),
-                &shape,
-                *accum_dtype,
-            );
-            let op = if *divide {
-                Primitive::Div
-            } else {
-                Primitive::Mul
-            };
-            v = out.apply(op, &[v, f]).expect("well typed");
-        }
-
-        if output_dtype != accum_dtype {
-            let cast = Primitive::Cast {
-                new_dtype: *output_dtype,
-            };
-
-            out.set_origin(node);
-            v = out.apply(cast, &[v]).expect("well typed");
-        }
-
-        map[node.output] = v;
-    }
-
-    let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
-    out.set_outputs(&outputs).expect("values of the graph");
-    out.prune().0
-}
-
 /// Compiler pass running [`linear_reordering`].
 pub(crate) struct LinearReordering {
-    /// The widest row the backend's GEMM tiles hold whole; only factors of wider rows' reductions move.
-    pub(crate) tile: usize,
+    /// The widest row the backend's GEMM tiles hold whole; only factors of wider rows' reductions move. `None`
+    /// moves factors of every row.
+    pub(crate) tile: Option<usize>,
 }
 
 impl<M: Module> CompilerPass<M> for LinearReordering {
@@ -421,9 +300,130 @@ impl<M: Module> CompilerPass<M> for LinearReordering {
         "linear_reordering"
     }
 
-    /// Replaces the module's graph with its reordered version.
+    /// Rewrites each matmul whose operand, read only by such matmuls, carries a factor constant along the
+    /// contracted axis: the matmul of the operands without their factors, in its accumulation dtype, times
+    /// (or divided by) each factor per output row or column, rounded once to its output dtype. With `tile`,
+    /// only a factor of a reduction over rows wider than `tile` moves ([`crosses_tiles`]): it is what would
+    /// otherwise take a pass over the rows after their GEMM's tiles; every other factor stays as traced.
     fn apply(&mut self, m: &mut M) -> Result<(), String> {
-        *m.graph_mut() = linear_reordering(m.graph(), Some(self.tile));
+        let graph = m.graph();
+        let tile = self.tile;
+
+        let nodes = graph.nodes();
+
+        let mut uses = Uses {
+            producer: vec![None; graph.types.len()],
+            readers: vec![Vec::new(); graph.types.len()],
+        };
+
+        for (i, node) in nodes.iter().enumerate() {
+            uses.producer[node.output] = Some(i);
+
+            for &v in &node.inputs {
+                uses.readers[v].push(i);
+            }
+        }
+
+        // Each reorderable matmul's operands without their factors, by node index.
+        let reordered: Vec<[Option<Stripped>; 2]> = (0..nodes.len())
+            .map(|k| match plain(graph, &nodes[k]) {
+                true => [0, 1].map(|side| {
+                    stripped(graph, &uses, k, side).filter(|(_, (f, _, _))| {
+                        tile.is_none_or(|tile| crosses_tiles(graph, &uses, *f, tile))
+                    })
+                }),
+                false => [None, None],
+            })
+            .collect();
+
+        if reordered.iter().flatten().all(Option::is_none) {
+            return Ok(());
+        }
+
+        let mut out = Graph::new();
+        let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
+
+        for &v in graph.inputs() {
+            map[v] = out.input(graph.type_of(v).clone());
+        }
+
+        for (k, node) in nodes.iter().enumerate() {
+            out.set_origin(node);
+
+            if reordered[k].iter().all(Option::is_none) {
+                let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
+
+                map[node.output] = out
+                    .apply(node.primitive.clone(), &inputs)
+                    .expect("well typed");
+
+                continue;
+            }
+
+            let Primitive::DotGeneral {
+                accum_dtype,
+                output_dtype,
+                ..
+            } = &node.primitive
+            else {
+                unreachable!("a matmul")
+            };
+
+            let mut dot = node.primitive.clone();
+
+            if let Primitive::DotGeneral { output_dtype, .. } = &mut dot {
+                *output_dtype = *accum_dtype;
+            }
+
+            let operands = [0, 1].map(|side| match &reordered[k][side] {
+                Some((e, _)) => emit(&mut out, graph, &map, e),
+                None => map[node.inputs[side]],
+            });
+
+            let shape = graph.type_of(node.output).shape.clone();
+            out.set_origin(node);
+            let mut v = out.apply(dot, &operands).expect("well typed");
+
+            for (side, s) in reordered[k].iter().enumerate() {
+                let Some((_, (f, divide, at))) = s else {
+                    continue;
+                };
+
+                // The factor applied after the matmul keeps the origin of the op that applied it before.
+                out.set_origin(&nodes[*at]);
+                let axes = kept(graph, node, side);
+                let f = spread(
+                    &mut out,
+                    graph,
+                    &map,
+                    (*f, side, &axes),
+                    &shape,
+                    *accum_dtype,
+                );
+                let op = if *divide {
+                    Primitive::Div
+                } else {
+                    Primitive::Mul
+                };
+                v = out.apply(op, &[v, f]).expect("well typed");
+            }
+
+            if output_dtype != accum_dtype {
+                let cast = Primitive::Cast {
+                    new_dtype: *output_dtype,
+                };
+
+                out.set_origin(node);
+                v = out.apply(cast, &[v]).expect("well typed");
+            }
+
+            map[node.output] = v;
+        }
+
+        let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
+        out.set_outputs(&outputs).expect("values of the graph");
+
+        *m.graph_mut() = out.prune().0;
         Ok(())
     }
 }

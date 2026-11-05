@@ -42,52 +42,6 @@ fn round_trips(graph: &Graph) -> Vec<Option<(Var, bool)>> {
     trips
 }
 
-/// `graph` with each round trip through another float dtype dropped where the forward reads it (and
-/// where a gradient reads it, unless the trip is through a narrower dtype, which the gradient keeps).
-pub(crate) fn preserve_precision(graph: &Graph) -> Graph {
-    let trips = round_trips(graph);
-
-    if trips.iter().all(Option::is_none) {
-        return graph.clone();
-    }
-
-    let mut out = Graph::new();
-    let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
-
-    for &v in graph.inputs() {
-        map[v] = out.input(graph.type_of(v).clone());
-    }
-
-    // What a reader reads for `v`: the round-tripped value, unless it computes a gradient and the trip
-    // is through a narrower dtype (the activation saved for it).
-    let read = |v: Var, backward: bool| match trips[v] {
-        Some((_, narrower)) if backward && narrower => v,
-        Some((x, _)) => x,
-        None => v,
-    };
-
-    for node in graph.nodes() {
-        out.set_origin(node);
-        let inputs: Vec<Var> = node
-            .inputs
-            .iter()
-            .map(|&v| map[read(v, node.backward)])
-            .collect();
-        map[node.output] = out
-            .apply(node.primitive.clone(), &inputs)
-            .expect("well typed");
-    }
-
-    // The program's outputs are the forward's.
-    let outputs: Vec<Var> = graph
-        .outputs()
-        .iter()
-        .map(|&v| map[read(v, false)])
-        .collect();
-    out.set_outputs(&outputs).expect("values of the graph");
-    out.prune().0
-}
-
 /// Compiler pass running [`preserve_precision`].
 pub(crate) struct PreservePrecision;
 
@@ -97,9 +51,53 @@ impl<M: Module> CompilerPass<M> for PreservePrecision {
         "preserve_precision"
     }
 
-    /// Replaces the module's graph with its round trips dropped.
+    /// `graph` with each round trip through another float dtype dropped where the forward reads it (and
+    /// where a gradient reads it, unless the trip is through a narrower dtype, which the gradient keeps).
     fn apply(&mut self, m: &mut M) -> Result<(), String> {
-        *m.graph_mut() = preserve_precision(m.graph());
+        let graph = m.graph();
+
+        let trips = round_trips(graph);
+
+        if trips.iter().all(Option::is_none) {
+            return Ok(());
+        }
+
+        let mut out = Graph::new();
+        let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
+
+        for &v in graph.inputs() {
+            map[v] = out.input(graph.type_of(v).clone());
+        }
+
+        // What a reader reads for `v`: the round-tripped value, unless it computes a gradient and the trip
+        // is through a narrower dtype (the activation saved for it).
+        let read = |v: Var, backward: bool| match trips[v] {
+            Some((_, narrower)) if backward && narrower => v,
+            Some((x, _)) => x,
+            None => v,
+        };
+
+        for node in graph.nodes() {
+            out.set_origin(node);
+            let inputs: Vec<Var> = node
+                .inputs
+                .iter()
+                .map(|&v| map[read(v, node.backward)])
+                .collect();
+            map[node.output] = out
+                .apply(node.primitive.clone(), &inputs)
+                .expect("well typed");
+        }
+
+        // The program's outputs are the forward's.
+        let outputs: Vec<Var> = graph
+            .outputs()
+            .iter()
+            .map(|&v| map[read(v, false)])
+            .collect();
+        out.set_outputs(&outputs).expect("values of the graph");
+
+        *m.graph_mut() = out.prune().0;
         Ok(())
     }
 }

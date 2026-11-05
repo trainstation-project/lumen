@@ -103,73 +103,6 @@ fn body(graph: &Graph, chain: &[usize]) -> Graph {
     out
 }
 
-/// Replaces each update chain of `least` to `most` updates with one `updates` fusion emitted at the
-/// chain's last node.
-pub(crate) fn updates(graph: &Graph, least: usize, most: usize) -> Graph {
-    let mut chains = chains(graph, most);
-    chains.retain(|c| c.len() >= least);
-
-    if chains.is_empty() {
-        return graph.clone();
-    }
-
-    let nodes = graph.nodes();
-    let mut last: Vec<Option<usize>> = vec![None; nodes.len()];
-    let mut merged = vec![false; nodes.len()];
-
-    for (c, chain) in chains.iter().enumerate() {
-        chain.iter().for_each(|&d| merged[d] = true);
-        last[*chain.last().expect("a chain")] = Some(c);
-    }
-
-    let mut out = Graph::new();
-    let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
-
-    for &v in graph.inputs() {
-        map[v] = out.input(graph.type_of(v).clone());
-    }
-
-    for (i, node) in nodes.iter().enumerate() {
-        // Earlier chain members are folded into the fusion emitted at the chain's end.
-        if merged[i] && last[i].is_none() {
-            continue;
-        }
-
-        out.set_origin(node);
-
-        if let Some(c) = last[i] {
-            let chain = &chains[c];
-
-            // Reads are the chain's base operand followed by each update.
-            let reads: Vec<Var> = std::iter::once(nodes[chain[0]].inputs[0])
-                .chain(chain.iter().map(|&d| nodes[d].inputs[1]))
-                .map(|v| map[v])
-                .collect();
-
-            let fused = Primitive::Fusion {
-                name: UPDATES.into(),
-                label: intern(format!("{}x dynamic_update_slice", chain.len())),
-                body: body(graph, chain),
-            };
-
-            map[node.output] = out.apply(fused, &reads).expect("the updated operand");
-            continue;
-        }
-
-        let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
-
-        map[node.output] = out
-            .apply(node.primitive.clone(), &inputs)
-            .expect("a node of the graph");
-
-        out.set_label(map[node.output], node.label);
-    }
-
-    let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
-    out.set_outputs(&outputs).expect("values of the graph");
-    out
-}
-
 /// Each update of an `updates` fusion's `body` with its constant start indices, in order.
 pub(crate) fn starts(body: &Graph) -> Vec<(Var, Vec<i64>)> {
     let producer = |v: Var| body.nodes().iter().find(|n| n.output == v);
@@ -207,10 +140,75 @@ impl<M: Module> CompilerPass<M> for Updates {
         "dynamic_update_slices"
     }
 
-    /// Replaces each chain with one `updates` fusion.
+    /// Replaces each update chain of `least` to `most` updates with one `updates` fusion emitted at the
+    /// chain's last node.
     fn apply(&mut self, m: &mut M) -> Result<(), String> {
-        let merged = updates(m.graph(), self.least, self.most);
-        *m.graph_mut() = merged;
+        let graph = m.graph();
+        let (least, most) = (self.least, self.most);
+
+        let mut chains = chains(graph, most);
+        chains.retain(|c| c.len() >= least);
+
+        if chains.is_empty() {
+            return Ok(());
+        }
+
+        let nodes = graph.nodes();
+        let mut last: Vec<Option<usize>> = vec![None; nodes.len()];
+        let mut merged = vec![false; nodes.len()];
+
+        for (c, chain) in chains.iter().enumerate() {
+            chain.iter().for_each(|&d| merged[d] = true);
+            last[*chain.last().expect("a chain")] = Some(c);
+        }
+
+        let mut out = Graph::new();
+        let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
+
+        for &v in graph.inputs() {
+            map[v] = out.input(graph.type_of(v).clone());
+        }
+
+        for (i, node) in nodes.iter().enumerate() {
+            // Earlier chain members are folded into the fusion emitted at the chain's end.
+            if merged[i] && last[i].is_none() {
+                continue;
+            }
+
+            out.set_origin(node);
+
+            if let Some(c) = last[i] {
+                let chain = &chains[c];
+
+                // Reads are the chain's base operand followed by each update.
+                let reads: Vec<Var> = std::iter::once(nodes[chain[0]].inputs[0])
+                    .chain(chain.iter().map(|&d| nodes[d].inputs[1]))
+                    .map(|v| map[v])
+                    .collect();
+
+                let fused = Primitive::Fusion {
+                    name: UPDATES.into(),
+                    label: intern(format!("{}x dynamic_update_slice", chain.len())),
+                    body: body(graph, chain),
+                };
+
+                map[node.output] = out.apply(fused, &reads).expect("the updated operand");
+                continue;
+            }
+
+            let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
+
+            map[node.output] = out
+                .apply(node.primitive.clone(), &inputs)
+                .expect("a node of the graph");
+
+            out.set_label(map[node.output], node.label);
+        }
+
+        let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
+        out.set_outputs(&outputs).expect("values of the graph");
+
+        *m.graph_mut() = out;
         Ok(())
     }
 }

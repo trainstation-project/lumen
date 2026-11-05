@@ -9,92 +9,6 @@ use crate::graph_compiler::passes::{CompilerPass, Module};
 use crate::tensor::dtype::dispatch_dtype;
 use crate::{DType, Element, Scalar};
 
-/// Simplifies `graph` node by node, then prunes and deduplicates it. `matched` says pattern-matching
-/// passes have run, enabling the rewrites that restructure (cast-into-dot, moved casts and layouts,
-/// transposed dots); otherwise only transposes of graph inputs fold into dots.
-pub(crate) fn simplify_with(graph: &Graph, matched: bool) -> Graph {
-    let nodes = graph.nodes();
-    // Distinct readers of each value, counting graph outputs.
-    let mut reads = vec![0usize; graph.types.len()];
-
-    for n in nodes {
-        for (k, &v) in n.inputs.iter().enumerate() {
-            reads[v] += usize::from(!n.inputs[..k].contains(&v));
-        }
-    }
-
-    for &v in graph.outputs() {
-        reads[v] += 1;
-    }
-
-    let mut out = Graph::new();
-    let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
-    // Producer index (in `out`) of each rewritten value, and whether it is a fresh value read once.
-    let mut producer: HashMap<Var, usize> = HashMap::new();
-    let mut once: HashMap<Var, bool> = HashMap::new();
-
-    for &v in graph.inputs() {
-        map[v] = out.input(graph.type_of(v).clone());
-    }
-
-    for node in nodes {
-        out.set_origin(node);
-        let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
-        let first = out.nodes().len();
-
-        let value = match rewrite(&out, &producer, &once, matched, &node.primitive, &inputs) {
-            Some(Rewrite::Value(v)) => v,
-            Some(Rewrite::Node(p, ins)) => {
-                let replaced: Vec<Node> = std::iter::once(node.clone())
-                    .chain(
-                        inputs
-                            .iter()
-                            .filter(|v| !ins.contains(v))
-                            .filter_map(|v| producer.get(v).map(|&k| out.nodes()[k].clone())),
-                    )
-                    .collect();
-
-                out.set_origins(&replaced.iter().collect::<Vec<_>>());
-                let v = out.apply(p, &ins).expect("a rewrite is typed as the node");
-                out.set_label(v, node.label);
-                v
-            }
-            None => match &node.primitive {
-                Primitive::DotGeneral { .. } => {
-                    folded(&mut out, &producer, matched, &node.primitive, &inputs)
-                }
-                _ if matched => moved(&mut out, &producer, &once, &node.primitive, &inputs),
-                _ => None,
-            }
-            .unwrap_or_else(|| {
-                let v = out
-                    .apply(node.primitive.clone(), &inputs)
-                    .expect("a node of the graph");
-
-                out.set_label(v, node.label);
-                v
-            }),
-        };
-
-        // Intermediate nodes a rewrite created have a single reader by construction.
-        for (k, n) in out.nodes().iter().enumerate().skip(first) {
-            producer.insert(n.output, k);
-
-            if n.output != value {
-                once.insert(n.output, true);
-            }
-        }
-
-        let fresh = !once.contains_key(&value);
-        once.insert(value, fresh && reads[node.output] == 1);
-        map[node.output] = value;
-    }
-
-    let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
-    out.set_outputs(&outputs).expect("values of the graph");
-    cse(&out.prune().0)
-}
-
 /// The result of a local rewrite.
 enum Rewrite {
     /// The node is replaced by an existing value.
@@ -681,7 +595,7 @@ fn constant(out: &Graph, producer: &HashMap<Var, usize>, v: Var) -> Option<f64> 
     }
 }
 
-/// Compiler pass running [`simplify_with`].
+/// Compiler pass simplifying the module's graph.
 pub(crate) struct Simplify {
     /// Pattern-matching passes have run, so structural rewrites are allowed.
     pub(crate) matched: bool,
@@ -693,9 +607,91 @@ impl<M: Module> CompilerPass<M> for Simplify {
         "simplify"
     }
 
-    /// Replaces the module's graph with its simplified version.
+    /// Simplifies the module's graph node by node, then prunes and deduplicates it. `matched` says
+    /// pattern-matching passes have run, enabling the rewrites that restructure (cast-into-dot, moved casts
+    /// and layouts, transposed dots); otherwise only transposes of graph inputs fold into dots.
     fn apply(&mut self, m: &mut M) -> Result<(), String> {
-        *m.graph_mut() = simplify_with(m.graph(), self.matched);
+        let graph = m.graph();
+        let matched = self.matched;
+        let nodes = graph.nodes();
+        // Distinct readers of each value, counting graph outputs.
+        let mut reads = vec![0usize; graph.types.len()];
+
+        for n in nodes {
+            for (k, &v) in n.inputs.iter().enumerate() {
+                reads[v] += usize::from(!n.inputs[..k].contains(&v));
+            }
+        }
+
+        for &v in graph.outputs() {
+            reads[v] += 1;
+        }
+
+        let mut out = Graph::new();
+        let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
+        // Producer index (in `out`) of each rewritten value, and whether it is a fresh value read once.
+        let mut producer: HashMap<Var, usize> = HashMap::new();
+        let mut once: HashMap<Var, bool> = HashMap::new();
+
+        for &v in graph.inputs() {
+            map[v] = out.input(graph.type_of(v).clone());
+        }
+
+        for node in nodes {
+            out.set_origin(node);
+            let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
+            let first = out.nodes().len();
+
+            let value =
+                match rewrite(&out, &producer, &once, matched, &node.primitive, &inputs) {
+                    Some(Rewrite::Value(v)) => v,
+                    Some(Rewrite::Node(p, ins)) => {
+                        let replaced: Vec<Node> =
+                            std::iter::once(node.clone())
+                                .chain(inputs.iter().filter(|v| !ins.contains(v)).filter_map(|v| {
+                                    producer.get(v).map(|&k| out.nodes()[k].clone())
+                                }))
+                                .collect();
+
+                        out.set_origins(&replaced.iter().collect::<Vec<_>>());
+                        let v = out.apply(p, &ins).expect("a rewrite is typed as the node");
+                        out.set_label(v, node.label);
+                        v
+                    }
+                    None => match &node.primitive {
+                        Primitive::DotGeneral { .. } => {
+                            folded(&mut out, &producer, matched, &node.primitive, &inputs)
+                        }
+                        _ if matched => moved(&mut out, &producer, &once, &node.primitive, &inputs),
+                        _ => None,
+                    }
+                    .unwrap_or_else(|| {
+                        let v = out
+                            .apply(node.primitive.clone(), &inputs)
+                            .expect("a node of the graph");
+
+                        out.set_label(v, node.label);
+                        v
+                    }),
+                };
+
+            // Intermediate nodes a rewrite created have a single reader by construction.
+            for (k, n) in out.nodes().iter().enumerate().skip(first) {
+                producer.insert(n.output, k);
+
+                if n.output != value {
+                    once.insert(n.output, true);
+                }
+            }
+
+            let fresh = !once.contains_key(&value);
+            once.insert(value, fresh && reads[node.output] == 1);
+            map[node.output] = value;
+        }
+
+        let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
+        out.set_outputs(&outputs).expect("values of the graph");
+        *m.graph_mut() = cse(&out.prune().0);
         Ok(())
     }
 }

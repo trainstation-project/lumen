@@ -29,88 +29,6 @@ pub(super) struct Found {
     pub(super) pick: usize,
 }
 
-/// Replaces every matched cross entropy with a `LinearCrossEntropy` whose `[2, b]` result holds the
-/// loss row and the lse row, and every logsumexp of logits nothing else reads (a gradient's, its loss
-/// unused) with one of class-0 targets, its lse row alone used.
-fn linear_cross_entropy(graph: &Graph) -> Graph {
-    let nodes = graph.nodes();
-    let (producer, readers) = uses(graph);
-
-    let found: Vec<Found> = (0..nodes.len())
-        .filter_map(|i| matched(graph, &producer, &readers, i))
-        .collect();
-
-    let alone: Vec<Logsumexp> = (0..nodes.len())
-        .filter_map(|i| logsumexp(graph, &producer, &readers, i))
-        .filter(|l| l.flat.is_none())
-        .collect();
-
-    if found.is_empty() && alone.is_empty() {
-        return graph.clone();
-    }
-
-    let mut out = Graph::new();
-    let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
-
-    for &v in graph.inputs() {
-        map[v] = out.input(graph.type_of(v).clone());
-    }
-
-    for (i, node) in nodes.iter().enumerate() {
-        if let Some(l) = alone.iter().find(|l| l.members.contains(&i)) {
-            if i != l.lse {
-                continue;
-            }
-
-            let members: Vec<&Node> = l.members.iter().map(|&k| &nodes[k]).collect();
-            out.set_origins(&members);
-
-            let classes = Primitive::Full {
-                shape: vec![l.b],
-                fill_value: Scalar::Int(0),
-                dtype: DType::I32,
-            };
-
-            let target = out.apply(classes, &[]).expect("well typed");
-            let rows = emit(&mut out, map[l.h], map[l.w], l.transposed, target);
-            map[node.output] = row(&mut out, rows, 1, l.b);
-            continue;
-        }
-
-        let Some(f) = found.iter().find(|f| f.members.contains(&i)) else {
-            out.set_origin(node);
-
-            map[node.output] = out
-                .apply(
-                    node.primitive.clone(),
-                    &node.inputs.iter().map(|&v| map[v]).collect::<Vec<_>>(),
-                )
-                .expect("well typed");
-
-            out.set_label(map[node.output], node.label);
-            continue;
-        };
-
-        if i != f.first {
-            continue;
-        }
-
-        let members: Vec<&Node> = f.members.iter().map(|&k| &nodes[k]).collect();
-        out.set_origins(&members);
-
-        let rows = emit(&mut out, map[f.h], map[f.w], f.transposed, map[f.target]);
-        let b = graph.type_of(f.h).shape[0];
-
-        for (k, at) in [(f.loss, 0), (f.lse, 1)] {
-            map[nodes[k].output] = row(&mut out, rows, at, b);
-        }
-    }
-
-    let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
-    out.set_outputs(&outputs).expect("values of the graph");
-    out
-}
-
 /// Emits the `LinearCrossEntropy` of `h`, weight `w` (`[d, v]` when `transposed`) and `target` into `out`.
 fn emit(out: &mut Graph, h: Var, w: Var, transposed: bool, target: Var) -> Var {
     let w = match transposed {
@@ -402,9 +320,89 @@ impl<M: Module> CompilerPass<M> for LinearCrossEntropy {
         "linear_cross_entropy"
     }
 
-    /// Replaces the module's graph with its fused version.
+    /// Replaces every matched cross entropy with a `LinearCrossEntropy` whose `[2, b]` result holds the
+    /// loss row and the lse row, and every logsumexp of logits nothing else reads (a gradient's, its loss
+    /// unused) with one of class-0 targets, its lse row alone used.
     fn apply(&mut self, m: &mut M) -> Result<(), String> {
-        *m.graph_mut() = linear_cross_entropy(m.graph());
+        let graph = m.graph();
+
+        let nodes = graph.nodes();
+        let (producer, readers) = uses(graph);
+
+        let found: Vec<Found> = (0..nodes.len())
+            .filter_map(|i| matched(graph, &producer, &readers, i))
+            .collect();
+
+        let alone: Vec<Logsumexp> = (0..nodes.len())
+            .filter_map(|i| logsumexp(graph, &producer, &readers, i))
+            .filter(|l| l.flat.is_none())
+            .collect();
+
+        if found.is_empty() && alone.is_empty() {
+            return Ok(());
+        }
+
+        let mut out = Graph::new();
+        let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
+
+        for &v in graph.inputs() {
+            map[v] = out.input(graph.type_of(v).clone());
+        }
+
+        for (i, node) in nodes.iter().enumerate() {
+            if let Some(l) = alone.iter().find(|l| l.members.contains(&i)) {
+                if i != l.lse {
+                    continue;
+                }
+
+                let members: Vec<&Node> = l.members.iter().map(|&k| &nodes[k]).collect();
+                out.set_origins(&members);
+
+                let classes = Primitive::Full {
+                    shape: vec![l.b],
+                    fill_value: Scalar::Int(0),
+                    dtype: DType::I32,
+                };
+
+                let target = out.apply(classes, &[]).expect("well typed");
+                let rows = emit(&mut out, map[l.h], map[l.w], l.transposed, target);
+                map[node.output] = row(&mut out, rows, 1, l.b);
+                continue;
+            }
+
+            let Some(f) = found.iter().find(|f| f.members.contains(&i)) else {
+                out.set_origin(node);
+
+                map[node.output] = out
+                    .apply(
+                        node.primitive.clone(),
+                        &node.inputs.iter().map(|&v| map[v]).collect::<Vec<_>>(),
+                    )
+                    .expect("well typed");
+
+                out.set_label(map[node.output], node.label);
+                continue;
+            };
+
+            if i != f.first {
+                continue;
+            }
+
+            let members: Vec<&Node> = f.members.iter().map(|&k| &nodes[k]).collect();
+            out.set_origins(&members);
+
+            let rows = emit(&mut out, map[f.h], map[f.w], f.transposed, map[f.target]);
+            let b = graph.type_of(f.h).shape[0];
+
+            for (k, at) in [(f.loss, 0), (f.lse, 1)] {
+                map[nodes[k].output] = row(&mut out, rows, at, b);
+            }
+        }
+
+        let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
+        out.set_outputs(&outputs).expect("values of the graph");
+
+        *m.graph_mut() = out;
         Ok(())
     }
 }
