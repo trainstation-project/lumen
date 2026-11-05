@@ -4,13 +4,13 @@
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
-use super::Buffers;
+use super::{unsupported, viewed};
 use crate::Device;
 use crate::codegen::tpu::Kernel;
 use crate::codegen::tpu::{Rows, kernel};
 use crate::codegen::utils::tpu::Tpu;
 use crate::graph::Primitive;
-use crate::plan::step::{unsupported, viewed};
+use crate::plan::run::Buffers;
 use crate::plan::{Buffer, Step, StepBase};
 use crate::runtime::kernel::Launch as _;
 use crate::runtime::kernel::tpu::TpuLaunch;

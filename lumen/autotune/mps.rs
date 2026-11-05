@@ -15,7 +15,7 @@ use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::mps::{
     SOURCES, compile_kernels, compile_mpp_kernels, compile_routed, record_launch,
 };
-use crate::plan::run::mps::Encode;
+use crate::plan::step::mps::Encode;
 use crate::plan::{Buffer, MpsStep, Tuned};
 use crate::tensor::contiguous_strides;
 

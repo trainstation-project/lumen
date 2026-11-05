@@ -4,7 +4,7 @@
 use std::ops::{Deref, DerefMut};
 use std::sync::OnceLock;
 
-use super::Buffers;
+use super::unsupported;
 use crate::autotune::mps::Tunable;
 use crate::codegen::dot_general::mps::plan_matmul;
 use crate::codegen::dynamic_slice::mps::{MAX_RANK, copy};
@@ -12,7 +12,7 @@ use crate::codegen::utils::mps::Mps;
 use crate::graph::Primitive;
 use crate::graph::{NEURAL_ENGINE, TensorType, View};
 use crate::plan::StepBase;
-use crate::plan::step::unsupported;
+use crate::plan::run::Buffers;
 use crate::plan::{Buffer, Step};
 use crate::runtime::kernel::Launch as _;
 use crate::runtime::kernel::mps::MpsLaunch;

@@ -1,13 +1,5 @@
-//! Running a plan: its steps on its device, its stages on the host and device, and the custom ops it calls. Each
-//! device's step type, and how it runs on the plan's buffers, is in its own module.
-
-pub(crate) mod cpu;
-pub(crate) mod cuda;
-#[cfg(lumen_mps_linked)]
-pub(crate) mod mps;
-#[cfg(lumen_tpu_linked)]
-pub(crate) mod tpu;
-pub(crate) mod triton;
+//! Running a plan: its steps on its device (each device's step runs itself, `step::<device>`), its stages on the
+//! host and device, and the custom ops it calls.
 
 use super::{Buffer, DevicePlan, Plan, PlanBase, Source, Staged, StagedPlan, Step, StepBase};
 use crate::graph::{Primitive, Scope, TensorType, View};

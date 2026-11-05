@@ -1,6 +1,14 @@
 //! A plan's steps: what every device's step shares (its primitive, the buffers it reads and writes, its memoized
 //! preparations and tuned launch), and the `Step` trait each device's step implements to run.
 
+pub(crate) mod cpu;
+pub(crate) mod cuda;
+#[cfg(lumen_mps_linked)]
+pub(crate) mod mps;
+#[cfg(lumen_tpu_linked)]
+pub(crate) mod tpu;
+pub(crate) mod triton;
+
 use std::any::Any;
 use std::fmt;
 use std::ops::{Deref, DerefMut};

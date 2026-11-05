@@ -1,19 +1,19 @@
 //! Lowers a graph to a plan: an ordered list of kernel steps whose values are placed in
 //! caller inputs, fresh outputs or one shared workspace, and runs it on its device. Each device has its own
-//! step type (`run::<device>`) and plan (`DevicePlan` of its steps); a staged plan runs host and device plans.
+//! step type (`step::<device>`) and plan (`DevicePlan` of its steps); a staged plan runs host and device plans.
 
 mod compile;
 pub(crate) mod run;
-mod step;
+pub(crate) mod step;
 #[cfg(test)]
 pub(crate) mod tests;
 
 #[cfg(lumen_mps_linked)]
-pub(crate) use run::mps::MpsStep;
+pub(crate) use step::mps::MpsStep;
 #[cfg(lumen_tpu_linked)]
-pub(crate) use run::tpu::TpuStep;
-pub(crate) use run::{cpu::CpuStep, cuda::CudaStep, triton::TritonStep};
+pub(crate) use step::tpu::TpuStep;
 pub use step::{Buffer, Memo, Step, StepBase, Tuned};
+pub(crate) use step::{cpu::CpuStep, cuda::CudaStep, triton::TritonStep};
 
 use std::fmt;
 use std::ops::{Deref, DerefMut};

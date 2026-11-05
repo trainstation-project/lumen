@@ -2,10 +2,10 @@
 
 use std::ops::{Deref, DerefMut};
 
-use super::Buffers;
+use super::{unsupported, viewed};
 use crate::Device;
 use crate::graph::TensorType;
-use crate::plan::step::{unsupported, viewed};
+use crate::plan::run::Buffers;
 use crate::plan::{Step, StepBase};
 use crate::reference;
 

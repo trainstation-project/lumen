@@ -3,10 +3,10 @@
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 
-use super::Buffers;
+use super::unsupported;
 use crate::Device;
 use crate::plan::Step;
-use crate::plan::step::unsupported;
+use crate::plan::run::Buffers;
 
 use crate::codegen::attention::triton::launch as attention;
 use crate::codegen::dot_general::triton::launch as gemm;
