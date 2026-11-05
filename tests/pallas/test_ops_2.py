@@ -1,4 +1,4 @@
-"""dot_general, arithmetic, reshape, reduction, bitcast, padding, transpose and gather tests for lumen.pallas on TPU, ported from JAX."""
+"""dot_general, arithmetic, reshape, reduction, bitcast, padding, transpose and gather tests for lumen.kernels.pallas on TPU, ported from JAX."""
 
 import itertools
 import math
@@ -9,7 +9,7 @@ import pytest
 
 import lumen
 import lumen.functional as F
-from lumen import pallas as pl
+from lumen.kernels import pallas as pl
 
 pytestmark = pytest.mark.tpu
 

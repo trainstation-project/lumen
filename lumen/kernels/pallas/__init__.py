@@ -2,7 +2,7 @@
 
 from lumen.graph import prims, tracer
 from lumen.graph.tracer import TracedTensor
-from lumen.pallas._C import Kernel
+from lumen.kernels.pallas._C import Kernel
 
 from .call import ANY, ShapeDtypeStruct, pallas_call, program
 from .pipeline import (
@@ -75,7 +75,7 @@ def _kernel():
     """The kernel being traced."""
     k = tracer.current_graph()
     if not isinstance(k, Kernel):
-        raise RuntimeError("lumen.pallas ops run inside a kernel (lumen.pallas.kernel)")
+        raise RuntimeError("lumen.kernels.pallas ops run inside a kernel (lumen.kernels.pallas.kernel)")
     return k
 
 

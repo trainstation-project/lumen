@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 import lumen
-from lumen import pallas as pl
+from lumen.kernels import pallas as pl
 
 pytestmark = pytest.mark.tpu
 
@@ -64,94 +64,94 @@ def _maybe_ds_to_slice(x):
 
 
 def test_simple_ndindexer():
-    """Skipped: covers JAX's NDIndexer internals, which lumen.pallas doesn't have."""
+    """Skipped: covers JAX's NDIndexer internals, which lumen.kernels.pallas doesn't have."""
     pytest.skip("JAX's NDIndexer internals")
 
 
 def test_invalid_ndindexer():
-    """Skipped: covers JAX's NDIndexer internals, which lumen.pallas doesn't have."""
+    """Skipped: covers JAX's NDIndexer internals, which lumen.kernels.pallas doesn't have."""
     pytest.skip("JAX's NDIndexer internals")
 
 
 @pytest.mark.parametrize("case", ["int_oob", "slice_oob", "Slice_2_2_oob", "Slice_0_4_oob"])
 def test_invalid_ndindexer_oob(case):
-    """Skipped: covers JAX's NDIndexer internals, which lumen.pallas doesn't have."""
+    """Skipped: covers JAX's NDIndexer internals, which lumen.kernels.pallas doesn't have."""
     pytest.skip("JAX's NDIndexer internals")
 
 
 def test_ndindexer_with_padding():
-    """Skipped: covers JAX's NDIndexer internals, which lumen.pallas doesn't have."""
+    """Skipped: covers JAX's NDIndexer internals, which lumen.kernels.pallas doesn't have."""
     pytest.skip("JAX's NDIndexer internals")
 
 
 def test_ndindexer_with_ellipsis():
-    """Skipped: covers JAX's NDIndexer internals, which lumen.pallas doesn't have."""
+    """Skipped: covers JAX's NDIndexer internals, which lumen.kernels.pallas doesn't have."""
     pytest.skip("JAX's NDIndexer internals")
 
 
 def test_ndindexer_with_slices():
-    """Skipped: covers JAX's NDIndexer internals, which lumen.pallas doesn't have."""
+    """Skipped: covers JAX's NDIndexer internals, which lumen.kernels.pallas doesn't have."""
     pytest.skip("JAX's NDIndexer internals")
 
 
 def test_ndindexer_with_arrays():
-    """Skipped: covers JAX's NDIndexer internals, which lumen.pallas doesn't have."""
+    """Skipped: covers JAX's NDIndexer internals, which lumen.kernels.pallas doesn't have."""
     pytest.skip("JAX's NDIndexer internals")
 
 
 def test_ndindexer_with_arrays_and_broadcasting():
-    """Skipped: covers JAX's NDIndexer internals, which lumen.pallas doesn't have."""
+    """Skipped: covers JAX's NDIndexer internals, which lumen.kernels.pallas doesn't have."""
     pytest.skip("JAX's NDIndexer internals")
 
 
 def test_ndindexer_with_arrays_and_invalid_broadcasting():
-    """Skipped: covers JAX's NDIndexer internals, which lumen.pallas doesn't have."""
+    """Skipped: covers JAX's NDIndexer internals, which lumen.kernels.pallas doesn't have."""
     pytest.skip("JAX's NDIndexer internals")
 
 
 def test_ndindexer_with_ref():
-    """Skipped: covers JAX's NDIndexer internals, which lumen.pallas doesn't have."""
+    """Skipped: covers JAX's NDIndexer internals, which lumen.kernels.pallas doesn't have."""
     pytest.skip("JAX's NDIndexer internals")
 
 
 def test_ndindexer_with_transformed_ref():
-    """Skipped: covers JAX's NDIndexer internals, which lumen.pallas doesn't have."""
+    """Skipped: covers JAX's NDIndexer internals, which lumen.kernels.pallas doesn't have."""
     pytest.skip("JAX's NDIndexer internals")
 
 
 def test_ndindexer_with_multiple_refs():
-    """Skipped: covers JAX's NDIndexer internals, which lumen.pallas doesn't have."""
+    """Skipped: covers JAX's NDIndexer internals, which lumen.kernels.pallas doesn't have."""
     pytest.skip("JAX's NDIndexer internals")
 
 
 def test_ndindexer_with_ref_and_int():
-    """Skipped: covers JAX's NDIndexer internals, which lumen.pallas doesn't have."""
+    """Skipped: covers JAX's NDIndexer internals, which lumen.kernels.pallas doesn't have."""
     pytest.skip("JAX's NDIndexer internals")
 
 
 def test_indexer_with_all_types():
-    """Skipped: covers JAX's NDIndexer internals, which lumen.pallas doesn't have."""
+    """Skipped: covers JAX's NDIndexer internals, which lumen.kernels.pallas doesn't have."""
     pytest.skip("JAX's NDIndexer internals")
 
 
 def test_ndindexer_with_symbolic_shape():
-    """Skipped: covers JAX's NDIndexer internals, which lumen.pallas doesn't have."""
+    """Skipped: covers JAX's NDIndexer internals, which lumen.kernels.pallas doesn't have."""
     pytest.skip("JAX's NDIndexer internals")
 
 
 def test_ndindexer_with_symbolic_shape_full_slice():
-    """Skipped: covers JAX's NDIndexer internals, which lumen.pallas doesn't have."""
+    """Skipped: covers JAX's NDIndexer internals, which lumen.kernels.pallas doesn't have."""
     pytest.skip("JAX's NDIndexer internals")
 
 
 @pytest.mark.parametrize("case", ["slice_indexer", "int_indexer"])
 def test_ndindexer_with_symbolic_shape_skips_bounds_check(case):
-    """Skipped: covers JAX's NDIndexer internals, which lumen.pallas doesn't have."""
+    """Skipped: covers JAX's NDIndexer internals, which lumen.kernels.pallas doesn't have."""
     pytest.skip("JAX's NDIndexer internals")
 
 
 def test_ndindexer():
-    """Skipped: covers JAX's NDIndexer internals, which lumen.pallas doesn't have."""
+    """Skipped: covers JAX's NDIndexer internals, which lumen.kernels.pallas doesn't have."""
     pytest.skip("JAX's NDIndexer internals")
 
 

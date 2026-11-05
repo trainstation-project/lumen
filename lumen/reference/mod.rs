@@ -711,7 +711,7 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
         CustomCall { label, .. } => {
             panic!("{label}: a custom op's function runs in a plan (lumen.compile), on tensors")
         }
-        PallasCall { label, .. } => panic!("{label}: a lumen.pallas kernel runs on a TPU"),
+        PallasCall { label, .. } => panic!("{label}: a lumen.kernels.pallas kernel runs on a TPU"),
         AllReduce { .. }
         | AllGather { .. }
         | ReduceScatter { .. }

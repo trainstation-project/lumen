@@ -510,7 +510,9 @@ impl MpsStep {
             Fusion { .. } | LinearCrossEntropy => unreachable!("encoded above"),
             FusionOutput { .. } => unreachable!("a fusion's kernel writes it: no step"),
             CustomCall { .. } => unreachable!("the plan calls a custom op's function itself"),
-            PallasCall { .. } => unreachable!("a plan with a lumen.pallas kernel runs on a TPU"),
+            PallasCall { .. } => {
+                unreachable!("a plan with a lumen.kernels.pallas kernel runs on a TPU")
+            }
             TakeAlongAxis { .. } => {
                 unreachable!("rewritten as a gather (passes/take_along_axis.rs)")
             }

@@ -102,7 +102,7 @@ def _ne(a, b):
 
 def _or(a, b):
     """``a or b`` on Python or traced bools, folding constants."""
-    from lumen import pallas as pl
+    from lumen.kernels import pallas as pl
 
     if isinstance(a, bool) and isinstance(b, bool):
         return a or b
@@ -202,7 +202,7 @@ class _Buffered:
 
     def __init__(self, ref, spec, label, grid):
         """Validates ``spec`` for ``ref`` and allocates two VMEM slots (one when there is a single step) and their DMA semaphores."""
-        from lumen import pallas as pl
+        from lumen.kernels import pallas as pl
 
         self.ref, self.spec, self.label = ref, spec, label
         block = ref.shape if spec.block_shape is None else spec.block_shape
@@ -279,7 +279,7 @@ class _Buffered:
         (``to_hbm``: back): of the rows within the operand alone where it
         reaches past the operand's tiles (the rest of the slot undefined,
         as Pallas leaves it), which takes the block where it is traced."""
-        from lumen import pallas as pl
+        from lumen.kernels import pallas as pl
 
         hbm, part = [], []
         for d, (b, size, element) in enumerate(zip(block, self.sizes, self.elements)):
@@ -302,7 +302,7 @@ class _Buffered:
 
     def slot(self, counter):
         """The VMEM slot and semaphore of buffer ``counter`` (its parity picks one of the two)."""
-        from lumen import pallas as pl
+        from lumen.kernels import pallas as pl
 
         parity = pl.bitwise_and(counter, 1)
         if self.single:
@@ -325,7 +325,7 @@ def emit_pipeline(body, *, grid, in_specs, out_specs, labels=None):
     of its ``BlockSpec``'s block, copied from and to the HBM refs the
     returned function is called with (``pltpu.emit_pipeline``); ``labels``
     name those refs in its errors."""
-    from lumen import pallas as pl
+    from lumen.kernels import pallas as pl
 
     grid = tuple(grid)
     steps = math.prod(grid)

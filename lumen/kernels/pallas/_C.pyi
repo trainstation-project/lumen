@@ -1,8 +1,8 @@
 from typing import Any, Optional, Sequence
 
 class Kernel:
-    """A TPU kernel being traced (``lumen.pallas``): its values are traced
-    tensors of it, its refs ``lumen.pallas.Ref``s (``lumen/pallas/``)."""
+    """A TPU kernel being traced (``lumen.kernels.pallas``): its values are traced
+    tensors of it, its refs ``lumen.kernels.pallas.Ref``s (``lumen/kernels/pallas/``)."""
 
     def __init__(self, scalars: int, rows: int, host_rows: Optional[int] = None) -> None: ...
     def params(self) -> list[int]: ...
