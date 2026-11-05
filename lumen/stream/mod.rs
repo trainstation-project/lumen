@@ -13,7 +13,7 @@ pub(crate) mod python;
 #[cfg(test)]
 mod tests;
 #[cfg(lumen_tpu_linked)]
-mod tpu;
+pub(crate) mod tpu;
 
 pub use cpu::CpuStream;
 #[cfg(lumen_cuda_linked)]

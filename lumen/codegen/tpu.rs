@@ -8,7 +8,10 @@ use crate::codegen::utils::tpu::Tpu;
 use crate::graph::Primitive;
 use crate::graph_compiler::Options;
 use crate::plan::{CpuPlan, Step as _, StepBase, TpuPlan, TpuStep};
-use crate::runtime::tpu::GENERATED;
+
+/// The `module` of a launch whose `spec` is the generated source of its program rather than a spec for a
+/// module's.
+pub(crate) const GENERATED: &str = "generated";
 
 /// How a kernel's buffers are ordered among a step's input and output buffers.
 #[derive(Debug, Clone, Copy)]

@@ -1,6 +1,9 @@
 //! What the TPU code generators share: the backend type, which primitives a plain elementwise kernel runs, the JSON
 //! nodes the Pallas programs rebuild primitives from, and outputs written into windows of wider matrices.
 
+#[cfg(lumen_tpu_linked)]
+pub(crate) mod lowering;
+
 use crate::Scalar;
 use crate::graph::Primitive;
 use crate::graph::UnaryOp;

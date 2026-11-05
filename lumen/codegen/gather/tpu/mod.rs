@@ -9,7 +9,7 @@ use crate::graph::Primitive;
 use crate::plan::StepBase;
 use crate::runtime::kernel::Launch as _;
 use crate::runtime::kernel::tpu::TpuLaunch;
-use crate::runtime::tpu::{Indices, SPARSE_CORE_MESH, SparseCore, Values};
+use crate::runtime::kernel::tpu::{Indices, SPARSE_CORE_MESH, SparseCore, Values};
 
 /// TPU lane width.
 const LANES: usize = 128;

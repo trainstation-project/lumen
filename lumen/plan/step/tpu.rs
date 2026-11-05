@@ -9,12 +9,12 @@ use crate::Device;
 use crate::codegen::tpu::Kernel;
 use crate::codegen::tpu::{Rows, kernel};
 use crate::codegen::utils::tpu::Tpu;
+use crate::codegen::utils::tpu::lowering::lowering;
 use crate::graph::Primitive;
 use crate::plan::run::Buffers;
 use crate::plan::{Buffer, Step, StepBase};
 use crate::runtime::kernel::Launch as _;
 use crate::runtime::kernel::tpu::TpuLaunch;
-use crate::runtime::tpu::lowering;
 
 /// A step of a Pallas kernel on a TPU.
 #[derive(Debug, Clone)]
@@ -159,7 +159,7 @@ impl Step for TpuStep {
             unreachable!("a TPU plan runs on a TPU")
         };
 
-        let batch = crate::runtime::tpu::Batch::new(index);
+        let batch = crate::stream::tpu::Batch::new(index);
         run()?;
         batch.run()
     }
