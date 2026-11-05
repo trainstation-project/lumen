@@ -6,28 +6,28 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 #[cfg(feature = "python")]
-pub(crate) use super::common::attention::triton::{Launch, set_attention};
+pub(crate) use super::passes::attention::triton::{Launch, set_attention};
 #[cfg(feature = "python")]
-pub(crate) use super::common::dot::triton::{Epilogue, set_gemm};
+pub(crate) use super::passes::dot::triton::{Epilogue, set_gemm};
 #[cfg(feature = "python")]
 pub(crate) use crate::codegen::dot_general::triton::Config;
 
-use super::common::alone::Alone;
-use super::common::attention::{self, FlashAttention, FlashAttentionBackward};
-use super::common::chunked_cross_entropy::ChunkedCrossEntropy;
-use super::common::clamp_indices::ClampIndices;
-use super::common::dot::rows::triton::WideRows;
-use super::common::dot::split_k::triton::SplitK;
-use super::common::dot::strength::DotStrength;
-use super::common::dot::triton as gemm;
-use super::common::fusion::triton::{self as fusion, Fusion};
-use super::common::linear_cross_entropy::LinearCrossEntropy;
-use super::common::linear_reordering::LinearReordering;
-use super::common::merge_dots::{Blocks, MergeDots, MergeDotsBackward, Packs, Target};
-use super::common::simplify::Simplify;
-use super::common::take_along_axis::TakeAlongAxis;
-use super::common::updates::Updates;
-use super::pass::{Module, Pipeline};
+use super::passes::alone::Alone;
+use super::passes::attention::{self, FlashAttention, FlashAttentionBackward};
+use super::passes::chunked_cross_entropy::ChunkedCrossEntropy;
+use super::passes::clamp_indices::ClampIndices;
+use super::passes::dot::rows::triton::WideRows;
+use super::passes::dot::split_k::triton::SplitK;
+use super::passes::dot::strength::DotStrength;
+use super::passes::dot::triton as gemm;
+use super::passes::fusion::triton::{self as fusion, Fusion};
+use super::passes::linear_cross_entropy::LinearCrossEntropy;
+use super::passes::linear_reordering::LinearReordering;
+use super::passes::merge_dots::{Blocks, MergeDots, MergeDotsBackward, Packs, Target};
+use super::passes::simplify::Simplify;
+use super::passes::take_along_axis::TakeAlongAxis;
+use super::passes::updates::Updates;
+use super::passes::{Module, Pipeline};
 use super::{CompilerConfig, Options, Plan, plan_options, positions};
 use crate::autotune::Autotuner;
 use crate::autotune::triton::{Events, Gemms, Loops, Tiles};
@@ -41,10 +41,10 @@ use crate::codegen::store::triton::{load, store};
 use crate::codegen::triton::{Kernel, ROW, Template};
 use crate::codegen::utils::triton as codegen;
 use crate::graph::{Graph, Node, Primitive, TensorType, UPDATES};
-use crate::graph_compiler::common::diamonds::{Diamonds, Row, RowsModule};
-use crate::graph_compiler::common::horizontal::{Grouping, HorizontalFusion};
-use crate::graph_compiler::common::place_concats::{PlaceConcats, Slots};
-use crate::graph_compiler::common::place_views::PlaceViews;
+use crate::graph_compiler::passes::diamonds::{Diamonds, Row, RowsModule};
+use crate::graph_compiler::passes::horizontal::{Grouping, HorizontalFusion};
+use crate::graph_compiler::passes::place_concats::{PlaceConcats, Slots};
+use crate::graph_compiler::passes::place_views::PlaceViews;
 use crate::plan::Step;
 use crate::{DType, Device, Scalar, Tensor, TensorOptions};
 
@@ -406,7 +406,7 @@ pub(crate) fn run(
             }
 
             if let Some(Template::ScatterAdd { .. }) = kernel.template {
-                return crate::graph_compiler::common::scatter_add::triton::run(
+                return crate::graph_compiler::passes::scatter_add::triton::run(
                     kernel, launches, inputs, out,
                 );
             }

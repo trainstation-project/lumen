@@ -2,23 +2,23 @@
 #[cfg(test)]
 mod tests;
 
-use super::common::dot::rows::tpu::DotRows;
-use super::common::dot::tpu::FuseDots;
-use super::common::fusion::tpu::{self as fusion, Fusion};
-use super::common::updates::Updates;
-use crate::graph_compiler::common::diamonds::FusedDiamonds;
-use crate::graph_compiler::common::dot::canonicalize::CanonicalizeDots;
-use crate::graph_compiler::common::horizontal::{Grouping, HorizontalFusion};
-use crate::graph_compiler::common::place_concats::{PlaceConcats, Slots};
+use super::passes::dot::rows::tpu::DotRows;
+use super::passes::dot::tpu::FuseDots;
+use super::passes::fusion::tpu::{self as fusion, Fusion};
+use super::passes::updates::Updates;
+use crate::graph_compiler::passes::diamonds::FusedDiamonds;
+use crate::graph_compiler::passes::dot::canonicalize::CanonicalizeDots;
+use crate::graph_compiler::passes::horizontal::{Grouping, HorizontalFusion};
+use crate::graph_compiler::passes::place_concats::{PlaceConcats, Slots};
 
-use super::common::attention::tpu::AttentionLayouts;
-use super::common::attention::{FlashAttention, FlashAttentionBackward};
-use super::common::clamp_indices::ClampIndices;
-use super::common::dot::fold_reshapes::FoldDotReshapes;
-use super::common::dot::strength::DotStrength;
-use super::common::merge_dots::{Blocks, MergeDots, MergeDotsBackward, Packs, Target};
-use super::common::simplify::Simplify;
-use super::pass::{Module, Pipeline};
+use super::passes::attention::tpu::AttentionLayouts;
+use super::passes::attention::{FlashAttention, FlashAttentionBackward};
+use super::passes::clamp_indices::ClampIndices;
+use super::passes::dot::fold_reshapes::FoldDotReshapes;
+use super::passes::dot::strength::DotStrength;
+use super::passes::merge_dots::{Blocks, MergeDots, MergeDotsBackward, Packs, Target};
+use super::passes::simplify::Simplify;
+use super::passes::{Module, Pipeline};
 use super::{CompilerConfig, Options, plan_options, positions};
 use crate::graph::{Graph, Node, Primitive, TensorType};
 use crate::graph_compiler::{Plan, PlanOptions};

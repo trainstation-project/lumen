@@ -12,10 +12,10 @@ use crate::codegen::tpu::{Kernel, Rows};
 use crate::codegen::utils::tpu::Tpu;
 use crate::device::tpu::layout::Layout;
 use crate::graph::{Graph, Node, Primitive, TensorType, Var};
-use crate::graph_compiler::common::attention::{
+use crate::graph_compiler::elementwise;
+use crate::graph_compiler::passes::attention::{
     self, Access, Attention, Backward, Dropout, Score, Strides,
 };
-use crate::graph_compiler::elementwise;
 #[cfg(lumen_tpu_linked)]
 use crate::plan::Step;
 use crate::tensor::contiguous_strides;

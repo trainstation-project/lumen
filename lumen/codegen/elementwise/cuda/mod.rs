@@ -12,7 +12,7 @@ use crate::codegen::emitter::cuda::Emitter;
 use crate::codegen::store::triton::gather_index;
 use crate::codegen::utils::cuda::{Cuda, cute_type, unsigned};
 use crate::graph::Graph;
-use crate::graph_compiler::common::horizontal::segments;
+use crate::graph_compiler::passes::horizontal::segments;
 
 /// The launch shape of an `ElementwiseKernel` (`kernel.py`): threads per block, and the bytes of its
 /// widest tensor each thread moves a step.

@@ -7,7 +7,7 @@ pub(crate) mod triton;
 
 use crate::DType;
 use crate::graph::Graph;
-use crate::graph_compiler::common::attention::{Attention, Backward, Dropout, Score, Strides};
+use crate::graph_compiler::passes::attention::{Attention, Backward, Dropout, Score, Strides};
 
 /// A backend's flash-attention code generator: the code its kernels run for a fused attention body,
 /// given the attention matched in it and how the body's inputs and outputs are laid out.

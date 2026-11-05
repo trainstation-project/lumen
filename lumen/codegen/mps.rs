@@ -17,9 +17,9 @@ use crate::codegen::reduction::ReductionCodegen;
 use crate::codegen::row::RowCodegen;
 use crate::codegen::utils::mps::Mps;
 use crate::graph::{Graph, Primitive};
-use crate::graph_compiler::common::attention::{self, Strides};
-use crate::graph_compiler::common::place_views;
 use crate::graph_compiler::mps::{Kernel, compile_routed, record_launch};
+use crate::graph_compiler::passes::attention::{self, Strides};
+use crate::graph_compiler::passes::place_views;
 use crate::graph_compiler::{CompilerConfig, Options};
 use crate::plan::{Buffer, Plan, Step};
 

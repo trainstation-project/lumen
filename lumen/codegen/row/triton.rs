@@ -17,9 +17,9 @@ use crate::codegen::reduction::triton::{combine, lowest, reduce_along};
 use crate::codegen::utils::triton::*;
 use crate::graph::TensorType;
 use crate::graph::{Graph, Node, Primitive, Var};
-use crate::graph_compiler::common::diamonds::Partials;
-use crate::graph_compiler::common::diamonds::softmax_pair;
 use crate::graph_compiler::elementwise;
+use crate::graph_compiler::passes::diamonds::Partials;
+use crate::graph_compiler::passes::diamonds::softmax_pair;
 
 /// Widest row a normalization row kernel holds whole in registers (XMA's `MAX_TRITON_BLOCK_SIZE`);
 /// wider rows are walked in chunks of `BLOCK_SIZE`, a pass a reduction.

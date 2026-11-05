@@ -18,8 +18,8 @@ use crate::codegen::reduction::mps as reduce;
 use crate::codegen::utils::mps::*;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::common::diamonds::{Partials, depends_on, softmax_pair};
-use crate::graph_compiler::common::fusion::mps as fusion;
+use crate::graph_compiler::passes::diamonds::{Partials, depends_on, softmax_pair};
+use crate::graph_compiler::passes::fusion::mps as fusion;
 
 /// How column sums ride along row kernels: at most 16 `REDUCE_THREADS`-wide column chunks a row,
 /// split into 16 to 64 row groups.

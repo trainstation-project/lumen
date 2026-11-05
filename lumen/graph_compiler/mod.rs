@@ -1,13 +1,12 @@
 //! Graph compiler entry points: runs the frontend passes on a traced graph and lowers it to a
 //! [`Plan`] for the target device, plus helpers shared by the device backends.
 
-pub(crate) mod common;
 pub mod config;
 mod cpu;
 pub(crate) mod cuda;
 #[cfg(lumen_mps_linked)]
 pub(crate) mod mps;
-pub(crate) mod pass;
+pub(crate) mod passes;
 #[cfg(feature = "python")]
 pub(crate) mod python;
 pub(crate) mod remat;
@@ -23,12 +22,12 @@ use crate::graph::{FUSION_SEPARATOR, Graph, Primitive, Var, intern};
 
 pub use crate::plan::{Plan, PlanOptions};
 pub(crate) use crate::plan::{Source, Stage, Staged};
-use common::cse::Cse;
-use common::merge_dots::Packs;
-use common::preserve_precision::PreservePrecision;
-use common::simplify::Simplify;
 pub use config::CompilerConfig;
-use pass::{GraphModule, Pipeline};
+use passes::cse::Cse;
+use passes::merge_dots::Packs;
+use passes::preserve_precision::PreservePrecision;
+use passes::simplify::Simplify;
+use passes::{GraphModule, Pipeline};
 
 /// Per-compilation options: compiler configs and how the graph's inputs may be used.
 #[derive(Debug, Clone)]
