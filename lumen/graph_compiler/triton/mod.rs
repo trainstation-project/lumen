@@ -280,8 +280,8 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
     let mut plan = Plan::compile_with(&fused, &plan);
     plan.packed = packed;
     plan.interleaved = interleaved;
+    crate::codegen::triton::codegen(&mut plan, options)?;
     let deterministic = config.deterministic;
-    crate::codegen::triton::codegen(&mut plan, deterministic);
 
     if options.config.autotune {
         let tuner = Autotuner {

@@ -23,17 +23,22 @@ use crate::tensor::contiguous_strides;
 pub(crate) struct Tunable {
     /// Per fusion input, whether it is passed by value.
     pub by_value: Vec<bool>,
-    /// Strided views of fusion inputs, keyed by input index, as `(offset, strides)`.
+    /// Strided views its outputs are written through, keyed by output index, as `(offset, strides)`.
     pub views: HashMap<usize, (usize, Vec<usize>)>,
+}
+
+/// What a tunable elementwise fusion `step` keeps as its kernel, or `None` for any other step.
+fn tunable(step: &Step) -> Option<&Tunable> {
+    step.kernel
+        .as_deref()
+        .and_then(|k| k.downcast_ref::<Tunable>())
 }
 
 /// Byte alignment of each buffer carved out of the timing scratch.
 const ALIGNMENT: usize = 256;
 
-/// Tuning backend for elementwise fusions.
+/// Tuning backend for elementwise fusions: those whose step keeps a `Tunable` as its kernel.
 pub(crate) struct Elementwise<'a> {
-    /// Fusions that may be retuned, by name.
-    pub tunable: &'a BTreeMap<String, Tunable>,
     pub config: &'a CompilerConfig,
     /// Kernel sources built so far, compiled together by `compile`.
     pub sources: BTreeMap<String, String>,
@@ -52,11 +57,11 @@ impl Kernels for Elementwise<'_> {
 
     /// Tunings to try for a tunable fusion of a mid-sized output, or none.
     fn configs(&self, step: &Step) -> Vec<Tuning> {
-        let Primitive::Fusion { name, body, .. } = &step.primitive else {
+        let Primitive::Fusion { body, .. } = &step.primitive else {
             return Vec::new();
         };
 
-        match self.tunable.contains_key(name) && TUNED_ELEMENTS.contains(&step.output.1.numel()) {
+        match tunable(step).is_some() && TUNED_ELEMENTS.contains(&step.output.1.numel()) {
             true => crate::codegen::mps::tunings_of(body),
             false => Vec::new(),
         }
@@ -64,11 +69,11 @@ impl Kernels for Elementwise<'_> {
 
     /// Generates the fusion's kernel under `tuning` and an encoder that launches it.
     fn build(&mut self, step: &Step, tuning: Tuning) -> Tuned {
-        let Primitive::Fusion { name, body, .. } = &step.primitive else {
+        let Primitive::Fusion { body, .. } = &step.primitive else {
             unreachable!("a fusion")
         };
 
-        let t = &self.tunable[name];
+        let t = tunable(step).expect("a tunable fusion");
 
         let (kernel, source) =
             crate::codegen::mps::kernel(body, &t.by_value, self.config, &t.views, Some(tuning));

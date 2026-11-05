@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::codegen::tpu::{KERNEL, Rows, kernel};
+use crate::codegen::tpu::{Kernel, Rows, kernel};
 use crate::device::tpu::{error, ffi};
 use crate::graph::Primitive;
 use crate::plan::Step;
@@ -835,10 +835,22 @@ pub(crate) fn encode(
         return Ok(());
     }
 
-    let kernel = step.memo.get(KERNEL, || kernel(step))?;
+    // A step without a kept kernel (one with nothing to launch, or one its kernel fails on) generates it now.
+    let generated;
 
-    let Some(kernel) = kernel.as_ref() else {
-        return Ok(());
+    let kernel = match step
+        .kernel
+        .as_deref()
+        .and_then(|k| k.downcast_ref::<Kernel>())
+    {
+        Some(kernel) => kernel,
+        None => match kernel(step)? {
+            Some(kernel) => {
+                generated = kernel;
+                &generated
+            }
+            None => return Ok(()),
+        },
     };
 
     let n = step.inputs.len();

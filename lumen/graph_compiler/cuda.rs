@@ -188,8 +188,7 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
     let config = &options.config;
     let plan = plan_options(&fused, options, config, &Vec::new(), Vec::new());
     let mut plan = Plan::compile_with(&fused, &plan);
-    plan.cuda = true;
-    crate::codegen::cuda::codegen(&plan);
+    crate::codegen::cuda::codegen(&mut plan, options)?;
     Ok(plan)
 }
 

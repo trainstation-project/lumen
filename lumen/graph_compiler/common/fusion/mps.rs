@@ -97,15 +97,10 @@ impl<'a> CompilerPass<MpsModule<'a>> for Fusion {
     /// Fuses the graph, repeating until every by-value scalar is read only by fusions.
     fn apply(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
         let config = &m.options.config;
-        let requested = m.kernels.len();
 
         // Dropping a scalar that some unfused node reads changes kernel signatures, so fuse again from scratch.
         let graph = loop {
-            m.kernels.truncate(requested);
-            let kernels = &mut m.kernels;
-
-            let mut kernel =
-                |_: &Graph, by_value: &[bool]| request(kernels, Kernel::Fusion(by_value.to_vec()));
+            let mut kernel = |_: &Graph, _: &[bool]| request(Kernel::Fusion);
 
             let vars: Vec<Var> = m.scalars.iter().map(|&i| m.graph.inputs()[i]).collect();
             let fused = fuse(&m.graph, &m.rows, &vars, config, &mut kernel);

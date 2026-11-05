@@ -183,7 +183,7 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
 
     // Each step's kernel is generated now, so running the plan only launches them.
     #[cfg(lumen_tpu_linked)]
-    crate::codegen::tpu::codegen(&plan);
+    crate::codegen::tpu::codegen(&mut plan, options)?;
 
     Ok(plan)
 }

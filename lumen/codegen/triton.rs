@@ -1,6 +1,8 @@
 //! Triton codegen: each planned step's loop kernel, generated once when the plan compiles (its `BODY`, for a
 //! templated kernel, generated with its tensors' layouts at launch).
 
+use std::sync::Arc;
+
 use crate::DType;
 use crate::codegen::kinds::{gemm_dot, reduction_root};
 use crate::codegen::layout::{TILE, transpose_tiling};
@@ -10,6 +12,7 @@ use crate::codegen::scan::ScanCodegen;
 use crate::codegen::scan::triton::Scan;
 use crate::codegen::utils::triton as codegen;
 use crate::graph::{Primitive, UPDATES};
+use crate::graph_compiler::Options;
 use crate::graph_compiler::common::horizontal::segments;
 use crate::graph_compiler::triton::scatter_add::Scatter;
 use crate::plan::{Buffer, Plan, Step};
@@ -153,10 +156,19 @@ pub enum Constexpr {
 /// Name of a normalization row fusion.
 pub(crate) const ROW: &str = "row";
 
-/// Generates each step's loop kernel (`None` for a step another kernel runs), kept on `plan`.
-pub(crate) fn codegen(plan: &mut Plan, deterministic: bool) {
-    let kernels = plan.steps().iter().map(|s| loop_kernel(s, deterministic));
-    plan.triton = Some(kernels.collect());
+/// Generates each step's loop kernel, kept on the step (none for a step another kernel runs), and marks `plan`
+/// as Triton's.
+pub(crate) fn codegen(plan: &mut Plan, options: &Options) -> Result<(), String> {
+    let deterministic = options.config.deterministic;
+
+    for step in plan.steps_mut() {
+        if let Some(kernel) = loop_kernel(step, deterministic) {
+            step.kernel = Some(Arc::new(kernel));
+        }
+    }
+
+    plan.triton = true;
+    Ok(())
 }
 
 /// The name of a templated kernel: `kind` plus a hash of `key`, what its `BODY` is generated from (the

@@ -55,6 +55,8 @@ pub struct Step {
     pub sources: Vec<(&'static str, u32)>,
     /// The autotuned kernel choice, if one was made.
     pub tuned: Option<Tuned>,
+    /// The kernel the backend's codegen generated for the step, when it keeps one.
+    pub kernel: Option<Arc<dyn Any + Send + Sync>>,
     /// What a backend prepared to launch the step, per layout of the tensors it ran on.
     pub memo: Memo,
 }

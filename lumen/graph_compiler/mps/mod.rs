@@ -96,8 +96,6 @@ pub(crate) struct MpsModule<'a> {
     pub(crate) rows: Vec<Row>,
     /// Graph input indices passed to kernels by value.
     pub(crate) scalars: Vec<usize>,
-    /// Kernels requested so far; fusions name them as `PENDING` plus an index.
-    pub(crate) kernels: Vec<Kernel>,
 }
 
 impl Blocks for MpsModule<'_> {
@@ -139,9 +137,9 @@ impl Lone for MpsModule<'_> {
         Some(&mut self.scalars)
     }
 
-    /// Requests a fusion kernel with the by-value flags, returning its pending name.
-    fn kernel(&mut self, _: &Graph, by_value: &[bool]) -> String {
-        request(&mut self.kernels, Kernel::Fusion(by_value.to_vec()))
+    /// Requests a fusion kernel, returning its pending name; codegen reads its by-value inputs off the plan.
+    fn kernel(&mut self, _: &Graph, _: &[bool]) -> String {
+        request(Kernel::Fusion)
     }
 }
 
@@ -153,7 +151,7 @@ impl Slots for MpsModule<'_> {
 
     /// The attention backward kernel's operands (`concats::slot_worth`).
     fn worth(&self, _: &Node, _: usize, producer: &Node, _: usize) -> bool {
-        concats::slot_worth(self, producer)
+        concats::slot_worth(producer)
     }
 }
 
@@ -183,24 +181,38 @@ impl Module for MpsModule<'_> {
 
 /// Kind of kernel a fusion requests, generated later by the codegen pass.
 pub(crate) enum Kernel {
-    /// A fusion's kernel generated from its body, with a by-value flag per input.
-    Fusion(Vec<bool>),
+    /// A fusion's kernel generated from its body.
+    Fusion,
     /// Flash attention forward.
     Attention,
     /// Flash attention backward.
     AttentionBackward,
 }
 
+impl Kernel {
+    /// The name a fusion awaiting this kind of kernel goes by until codegen.
+    fn pending(&self) -> &'static str {
+        match self {
+            Kernel::Fusion => "pending#fusion",
+            Kernel::Attention => "pending#attention",
+            Kernel::AttentionBackward => "pending#attention_backward",
+        }
+    }
+
+    /// The kind of kernel a fusion named `name` awaits, or `None` once it has one.
+    pub(crate) fn of(name: &str) -> Option<Kernel> {
+        [Kernel::Fusion, Kernel::Attention, Kernel::AttentionBackward]
+            .into_iter()
+            .find(|k| k.pending() == name)
+    }
+}
+
 /// Most updates one `updates` kernel takes: Metal binds 31 buffers, two of them the operand and output.
 const MOST_UPDATES: usize = 29;
 
-/// Name prefix of fusions whose kernel is requested but not yet generated.
-pub(crate) const PENDING: &str = "pending#";
-
-/// Records a kernel request and returns the placeholder name a fusion uses until codegen.
-pub(crate) fn request(kernels: &mut Vec<Kernel>, kernel: Kernel) -> String {
-    kernels.push(kernel);
-    format!("{PENDING}{}", kernels.len() - 1)
+/// Requests a kernel, returning the placeholder name a fusion uses until codegen generates it.
+pub(crate) fn request(kernel: Kernel) -> String {
+    kernel.pending().to_owned()
 }
 
 /// The MPS pass pipeline, with optional passes enabled by `config`.
@@ -331,7 +343,6 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         interleaved: Vec::new(),
         rows: Vec::new(),
         scalars: super::positions(&options.scalars),
-        kernels: Vec::new(),
     };
 
     pipeline(config).run(&mut module)?;
@@ -341,7 +352,6 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         packed,
         interleaved,
         scalars,
-        kernels,
         ..
     } = module;
 
@@ -351,8 +361,7 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
     };
 
     let mut plan = Plan::compile_with(&fused, &plan);
-    let (sources, tunable) = codegen(&mut plan, &kernels, config)?;
-    compile_routed(sources)?;
+    codegen(&mut plan, options)?;
 
     if config.autotune {
         let tuner = crate::autotune::Autotuner {
@@ -360,7 +369,6 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         };
 
         let mut elementwise = crate::autotune::mps::Elementwise {
-            tunable: &tunable,
             config,
             sources: BTreeMap::new(),
         };
@@ -725,6 +733,7 @@ fn run_loop(
         scope: &[],
         sources: Vec::new(),
         tuned: None,
+        kernel: None,
         memo: Default::default(),
     };
 
