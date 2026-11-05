@@ -4,6 +4,8 @@
 #[cfg(lumen_cuda_linked)]
 use crate::codegen::utils::cuda::Cuda;
 #[cfg(lumen_cuda_linked)]
+use crate::codegen::utils::triton::Triton;
+#[cfg(lumen_cuda_linked)]
 use crate::runtime::kernel::Launch as _;
 #[cfg(lumen_cuda_linked)]
 use crate::runtime::kernel::cuda::CudaLaunch;
@@ -395,7 +397,7 @@ fn direct(
         return Ok(false);
     }
 
-    Cuda::launch(CudaLaunch {
+    Triton::launch(CudaLaunch {
         kernel: &kernel,
         grid,
         values,
