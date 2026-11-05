@@ -6,7 +6,9 @@ use crate::Tensor;
 use crate::codegen::utils::mps::Mps;
 use crate::graph::Primitive;
 use crate::plan::Step;
-use crate::runtime::mps::{elementwise_grid, launch_step, u32_arg, u64_arg};
+use crate::runtime::kernel::Launch as _;
+use crate::runtime::kernel::mps::MpsLaunch;
+use crate::runtime::mps::{elementwise_grid, u32_arg, u64_arg};
 
 /// Metal random bits: a call to the prelude's `philox_bits`.
 impl RandomCodegen for Mps {
@@ -32,5 +34,16 @@ pub(crate) fn encode(
     let args = [u64_arg(offset as usize), u32_arg(n as u32)];
     let grid = elementwise_grid(n, step.output.1.dtype);
 
-    launch_step(step, "random_bits", inputs, output, &args, grid, keep)
+    // The kernel binds the step's inputs, then its output.
+    let mut buffers = inputs.to_vec();
+    buffers.push(output.cast_const());
+
+    Mps::launch(MpsLaunch {
+        kernel: "random_bits",
+        buffers: &buffers,
+        args: &args,
+        grid,
+        keep,
+        name: step.label,
+    })
 }

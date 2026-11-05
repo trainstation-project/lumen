@@ -422,28 +422,6 @@ pub(crate) fn elementwise_grid(n: usize, dtype: DType) -> Grid {
 
 pub(crate) use crate::custom_op::mps::Grid;
 
-/// Launches `kernel` with the step's `inputs` followed by `output` as buffers.
-pub(crate) fn launch_step(
-    step: &Step,
-    kernel: &str,
-    inputs: &[*const u8],
-    output: *mut u8,
-    args: &[Vec<u8>],
-    grid: Grid,
-    keep: Vec<Tensor>,
-) -> Result<(), String> {
-    let mut buffers = inputs.to_vec();
-    buffers.push(output.cast_const());
-    Mps::launch(MpsLaunch {
-        kernel,
-        buffers: &buffers,
-        args,
-        grid,
-        keep,
-        name: step.label,
-    })
-}
-
 /// Dispatches an empty `event_marker` kernel whose completion signals `recorded`, fenced on both sides.
 pub(crate) fn mark_event(
     recorded: std::sync::Arc<crate::stream::event::Recorded>,
