@@ -8,7 +8,8 @@ use crate::codegen::elementwise::triton::{LOOP_CONFIGS, UNTUNED_LOOP};
 use crate::codegen::triton::{Kernel, Template};
 use crate::graph::Primitive;
 use crate::plan::StepBase;
-use crate::runtime::triton::{Function, Launches, launch, layouts};
+use crate::plan::step::triton::layouts;
+use crate::runtime::kernel::triton::{Function, Launches, launch};
 use crate::tensor::contiguous_strides;
 use crate::{DType, Device, Tensor, TensorOptions};
 

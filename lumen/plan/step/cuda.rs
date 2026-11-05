@@ -7,7 +7,7 @@ use super::{unsupported, viewed};
 use crate::codegen::elementwise::cuda::Layouts;
 use crate::plan::run::Buffers;
 use crate::plan::{Step, StepBase};
-use crate::runtime::cuda::LAUNCH;
+use crate::runtime::kernel::cuda::LAUNCH;
 use crate::{Device, Tensor};
 
 /// A step of a CUDA (CuTe DSL) kernel, generated for its tensors' layouts and kept in its memo.

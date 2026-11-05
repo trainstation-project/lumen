@@ -11,7 +11,7 @@ use std::sync::{Mutex, OnceLock, PoisonError};
 use super::collective::{self, Communicator, position};
 use crate::device::cuda::CUDA;
 use crate::graph::{Primitive, Reduction, TensorType};
-use crate::stream::cuda::{EVENT_DISABLE_TIMING, ffi};
+use crate::runtime::stream::cuda::{EVENT_DISABLE_TIMING, ffi};
 use crate::{DType, Device, Tensor};
 
 /// An opaque `ncclComm_t`.
@@ -529,7 +529,7 @@ pub(crate) fn run(primitive: &Primitive, inputs: &[Tensor], out: &Tensor) -> Res
         device,
     };
 
-    crate::stream::cuda::wait(device, group.stream as usize);
+    crate::runtime::stream::cuda::wait(device, group.stream as usize);
 
     let x = inputs.first();
     let x_type = x.map(|x| TensorType::new(x.dtype(), x.shape()));

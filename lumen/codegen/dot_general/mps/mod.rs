@@ -21,7 +21,7 @@ pub(crate) use tiled::*;
 use crate::graph::Primitive;
 use crate::graph::TensorType;
 use crate::graph_compiler::passes::dot::canonicalize::matmul_order;
-use crate::runtime::mps::Grid;
+use crate::runtime::kernel::mps::Grid;
 
 /// Default float tile (rows, columns).
 const FLOAT_TILE: (usize, usize) = (128, 64);

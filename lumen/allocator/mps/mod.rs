@@ -94,7 +94,7 @@ impl Allocator for MpsAllocator {
         // every allocation is also registered as a placed buffer so kernels can bind it; zero-byte requests still need one
         let data = self
             .region
-            .take(nbytes, heap, crate::stream::mps::synchronize);
+            .take(nbytes, heap, crate::runtime::stream::mps::synchronize);
 
         if unsafe { ffi::lumen_mps_place(data.as_ptr(), nbytes.max(1)) } != 0 {
             panic!("Metal could not place a buffer of {nbytes} bytes in its heap");

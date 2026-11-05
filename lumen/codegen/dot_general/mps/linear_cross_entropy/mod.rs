@@ -7,7 +7,7 @@ use crate::graph::TensorType;
 use crate::plan::StepBase;
 use crate::runtime::kernel::Launch as _;
 use crate::runtime::kernel::mps::MpsLaunch;
-use crate::runtime::mps::{Grid, dims_arg};
+use crate::runtime::kernel::mps::{Grid, dims_arg};
 use crate::tensor::contiguous_strides;
 
 /// Bytes of scratch for the per-row, per-column-tile maxima and exp-sums.

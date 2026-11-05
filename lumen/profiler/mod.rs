@@ -301,7 +301,7 @@ pub fn start(config: ProfilerConfig) -> Result<(), String> {
 /// given its launching op's types and accumulation dtypes.
 pub fn stop() -> Result<Profile, String> {
     #[cfg(lumen_mps_linked)]
-    crate::stream::mps::synchronize();
+    crate::runtime::stream::mps::synchronize();
 
     #[cfg(lumen_cupti_linked)]
     cupti::stop();

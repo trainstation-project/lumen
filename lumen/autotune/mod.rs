@@ -10,7 +10,8 @@ use std::sync::{LazyLock, Mutex, PoisonError};
 use crate::device::Device;
 use crate::graph::Primitive;
 use crate::plan::{DevicePlan, Step, StepBase, Tuned};
-use crate::stream::{event_for, hold};
+use crate::runtime::event::event_for;
+use crate::runtime::stream::hold;
 
 /// A backend's source of kernel candidates for plan steps.
 pub(crate) trait Kernels {

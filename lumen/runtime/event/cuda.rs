@@ -6,7 +6,7 @@ use std::sync::Arc;
 use super::{Event, Recorded, timed};
 use crate::device::Device;
 use crate::device::cuda::CUDA;
-use crate::stream::cuda::ffi;
+use crate::runtime::stream::cuda::ffi;
 
 /// `cudaErrorNotReady`, returned by `cudaEventQuery` while work is pending.
 const NOT_READY: i32 = 600;

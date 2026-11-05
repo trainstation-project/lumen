@@ -4,7 +4,6 @@
 mod cpu;
 #[cfg(lumen_cuda_linked)]
 pub mod cuda;
-pub mod event;
 mod meta;
 #[cfg(lumen_mps_linked)]
 pub mod mps;
@@ -13,12 +12,11 @@ pub(crate) mod python;
 #[cfg(test)]
 mod tests;
 #[cfg(lumen_tpu_linked)]
-mod tpu;
+pub(crate) mod tpu;
 
 pub use cpu::CpuStream;
 #[cfg(lumen_cuda_linked)]
 pub use cuda::CudaStream;
-pub use event::{Event, event_for};
 pub use meta::MetaStream;
 #[cfg(lumen_mps_linked)]
 pub use mps::MpsStream;

@@ -224,7 +224,8 @@ fn device_module<'py>(py: Python<'py>, kind: &'static str) -> PyResult<Bound<'py
                     "{kind}.synchronize: {device} is not a {kind} device"
                 )));
             }
-            let stream = core::stream::stream_for(device).map_err(PyRuntimeError::new_err)?;
+            let stream =
+                core::runtime::stream::stream_for(device).map_err(PyRuntimeError::new_err)?;
             let _op = core::profiler::record_op(op_name!("synchronize"), Vec::new);
             args.py().detach(|| stream.synchronize());
             Ok(())

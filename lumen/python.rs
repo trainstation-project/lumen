@@ -17,7 +17,7 @@ const PACKAGES: [(&str, Register); 12] = [
         crate::graph_compiler::config::register,
     ),
     ("profiler", crate::profiler::python::register),
-    ("stream", crate::stream::python::register),
+    ("runtime.stream", crate::runtime::stream::python::register),
     ("custom_op", crate::custom_op::python::register),
     ("graph", crate::graph::python::register),
     ("pallas", crate::pallas::python::register),

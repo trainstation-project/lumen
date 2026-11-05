@@ -13,7 +13,7 @@ use crate::Tensor;
 use crate::codegen::utils::mps::*;
 use crate::graph::{Graph, TensorType, UPDATES};
 use crate::graph_compiler::passes::updates::{overlaps, starts};
-use crate::runtime::mps::{elementwise_grid, u32_arg};
+use crate::runtime::kernel::mps::{elementwise_grid, u32_arg};
 use crate::tensor::contiguous_strides;
 
 /// Copies the `ty`-shaped tensor at `src` to `dst` on the GPU.

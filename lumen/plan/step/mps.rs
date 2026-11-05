@@ -16,8 +16,10 @@ use crate::plan::run::Buffers;
 use crate::plan::{Buffer, Step};
 use crate::runtime::kernel::Launch as _;
 use crate::runtime::kernel::mps::MpsLaunch;
+use crate::runtime::kernel::mps::{
+    Grid, dims_arg, element_arg, elementwise_grid, u32_arg, u64_arg,
+};
 use crate::runtime::kernel::mps::{Pointers, Prepared, Unprepared, capture, prepare, replay};
-use crate::runtime::mps::{Grid, dims_arg, element_arg, elementwise_grid, u32_arg, u64_arg};
 use crate::runtime::wait::wait;
 use crate::tensor::contiguous_strides;
 use crate::{Device, Tensor};

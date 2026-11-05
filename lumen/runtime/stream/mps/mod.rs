@@ -6,7 +6,7 @@ use std::sync::{Arc, Condvar, Mutex};
 use crate::Tensor;
 use crate::device::Device;
 use crate::profiler::GpuContext;
-use crate::stream::event::Recorded;
+use crate::runtime::event::Recorded;
 
 unsafe extern "C" {
     /// Commits the open command buffer and returns the total buffers encoded so far.

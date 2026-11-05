@@ -9,7 +9,7 @@ use crate::device::Device;
 use crate::device::tpu::layout::Layout;
 use crate::runtime::kernel::Launch as _;
 use crate::runtime::kernel::tpu::TpuLaunch;
-use crate::runtime::tpu::flush;
+use crate::runtime::stream::tpu::flush;
 
 /// The TPU tiled layout of `t`'s dtype and shape.
 fn layout(t: &Tensor) -> Layout {

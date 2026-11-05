@@ -9,7 +9,8 @@ use crate::codegen::utils::triton::Triton;
 use crate::graph::{Graph, Node, Primitive};
 use crate::plan::Buffer;
 use crate::plan::StepBase;
-use crate::runtime::triton::{Function, Launches, layouts};
+use crate::plan::step::triton::layouts;
+use crate::runtime::kernel::triton::{Function, Launches};
 use crate::tensor::contiguous_strides;
 use crate::{DType, Tensor};
 

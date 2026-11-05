@@ -1,11 +1,41 @@
-//! Launching a CUDA kernel.
+//! Launching CUDA kernels: a compiled kernel (a Triton or CuTe cubin) enqueued with `cuLaunchKernel` straight from
+//! Rust, through the driver entry points `driver` loads; and the CuTe launcher Python installs.
 
-use super::Launch;
-use crate::codegen::utils::cuda::Cuda;
+#[cfg(all(feature = "python", lumen_cuda_linked))]
+pub(crate) mod driver;
+
+#[cfg(all(feature = "python", lumen_cuda_linked))]
 use std::ffi::{CStr, c_char, c_uint, c_void};
+use std::sync::OnceLock;
 
-use crate::runtime::triton::direct::{Compiled, Value, bytes, driver};
+#[cfg(all(feature = "python", lumen_cuda_linked))]
+use super::Launch;
+use crate::Tensor;
+#[cfg(all(feature = "python", lumen_cuda_linked))]
+use crate::codegen::utils::cuda::Cuda;
+#[cfg(all(feature = "python", lumen_cuda_linked))]
+use driver::{Compiled, Value, bytes, driver};
 
+/// Launches kernel `name` of module `source` (compiling it on its first launch) on `tensors`, its
+/// inputs then its `outputs` outputs, each a flat view of the elements it spans, over `n` elements.
+pub type Launcher = fn(
+    name: &str,
+    source: &str,
+    tensors: &[Tensor],
+    outputs: usize,
+    n: usize,
+) -> Result<(), String>;
+
+/// The launcher installed from Python (`lumen.codegen.utils.cuda`).
+pub(crate) static LAUNCH: OnceLock<Launcher> = OnceLock::new();
+
+/// Installs the launcher; later calls are ignored.
+#[cfg_attr(not(feature = "python"), allow(dead_code))]
+pub(crate) fn set_launch(launch: Launcher) {
+    let _ = LAUNCH.set(launch);
+}
+
+#[cfg(all(feature = "python", lumen_cuda_linked))]
 /// One CUDA launch: a compiled kernel, its grid and its runtime parameters in order.
 pub(crate) struct CudaLaunch<'a> {
     pub(crate) kernel: &'a Compiled,
@@ -13,6 +43,7 @@ pub(crate) struct CudaLaunch<'a> {
     pub(crate) values: &'a [Value],
 }
 
+#[cfg(all(feature = "python", lumen_cuda_linked))]
 /// CUDA enqueues a kernel on lumen's stream with `cuLaunchKernel`, straight from Rust.
 impl Launch for Cuda {
     type Args<'a> = CudaLaunch<'a>;
@@ -64,7 +95,7 @@ impl Launch for Cuda {
                 1,
                 1,
                 kernel.shared,
-                crate::stream::cuda::launch_stream(),
+                crate::runtime::stream::cuda::launch_stream(),
                 params.as_mut_ptr(),
                 std::ptr::null_mut(),
             )

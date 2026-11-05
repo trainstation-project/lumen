@@ -12,6 +12,7 @@ use crate::codegen::attention::triton::launch as attention;
 use crate::codegen::dot_general::triton::launch as gemm;
 use crate::codegen::dynamic_slice::DynamicSliceCodegen;
 use crate::codegen::elementwise::ElementwiseCodegen;
+use crate::codegen::elementwise::triton::copy;
 use crate::codegen::elementwise::triton::{LoopConfig, untuned_loop};
 use crate::codegen::kinds::reduction_root;
 use crate::codegen::layout::{LayoutCodegen, transpose_tiling};
@@ -21,7 +22,7 @@ use crate::codegen::triton::{Kernel, ROW, Template};
 use crate::codegen::utils::triton as codegen;
 use crate::graph::{Primitive, UPDATES};
 use crate::plan::StepBase;
-use crate::runtime::triton::{Function, Launches, copy, launch, layouts};
+use crate::runtime::kernel::triton::{Function, Launches, launch};
 use crate::{DType, Tensor, TensorOptions};
 
 /// A step of Triton kernels on CUDA.
@@ -64,7 +65,7 @@ pub(crate) fn traced(
     run: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
     #[cfg(all(feature = "python", lumen_cuda_linked))]
-    let run = || crate::runtime::triton::direct::counted(label, run);
+    let run = || crate::runtime::kernel::cuda::driver::counted(label, run);
 
     #[cfg(lumen_cupti_linked)]
     let run = || {
@@ -135,7 +136,7 @@ impl TritonStep {
                 }
             }
             (Primitive::HostWait, _) => {
-                crate::stream::stream_for(out.device())?.synchronize();
+                crate::runtime::stream::stream_for(out.device())?.synchronize();
 
                 match out.data_ptr() == inputs[0].data_ptr() {
                     true => Ok(()),
@@ -359,4 +360,16 @@ fn loop_helpers(
         functions,
         launches: Launches::default(),
     }
+}
+
+/// A hash of `tensors`' dtypes, shapes and strides: the key of what a step generated for those layouts.
+pub(crate) fn layouts<'a>(tensors: impl IntoIterator<Item = &'a Tensor>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+
+    for t in tensors {
+        (t.dtype(), t.shape(), t.strides()).hash(&mut hasher);
+    }
+
+    hasher.finish()
 }

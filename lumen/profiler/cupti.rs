@@ -282,7 +282,7 @@ pub(crate) fn stop() {
     };
 
     for device_index in 0..crate::device::cuda::CUDA.device_count() {
-        crate::stream::cuda::synchronize(device_index);
+        crate::runtime::stream::cuda::synchronize(device_index);
     }
 
     unsafe { ffi::cuptiActivityFlushAll(ffi::FLUSH_FORCED) };

@@ -21,7 +21,7 @@ class ShapeDtypeStruct:
 
 def program(spec):
     """The Mosaic of pallas_call kernel ``spec["kernel"]`` for ``spec``
-    (Rust's entry: ``lumen/runtime/tpu.rs``)."""
+    (Rust's entry: ``lumen/codegen/utils/tpu/lowering.rs``)."""
     return _CALLS[spec["kernel"]](spec)
 
 

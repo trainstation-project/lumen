@@ -52,7 +52,7 @@ impl Event for MpsEvent {
             return Ok(());
         };
 
-        crate::stream::mps::flush();
+        crate::runtime::stream::mps::flush();
         marks.wait().map(|_| ())
     }
 }

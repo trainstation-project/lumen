@@ -268,7 +268,7 @@ pub(crate) fn driver() -> Result<&'static Driver, String> {
 
 /// Nodes in the graph lumen's capture stream is capturing, or `None` while none captures.
 fn captured_nodes() -> Option<usize> {
-    let stream = crate::stream::cuda::launch_stream();
+    let stream = crate::runtime::stream::cuda::launch_stream();
 
     if stream.is_null() {
         return None;
@@ -304,7 +304,7 @@ pub(crate) fn counted<R>(label: &'static str, step: impl FnOnce() -> R) -> R {
     let result = step();
     let after = captured_nodes().unwrap_or(before);
 
-    crate::stream::cuda::captured(label, before..after);
+    crate::runtime::stream::cuda::captured(label, before..after);
     result
 }
 

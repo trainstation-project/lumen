@@ -37,6 +37,7 @@ use crate::codegen::dot_general::mps::GemmConfig;
 use crate::codegen::elementwise::mps::Tuning;
 use crate::codegen::kinds::{gemm_dot, reduction_root, row_reductions};
 use crate::codegen::layout::transpose_tiling;
+use crate::codegen::mps::scratch_bytes;
 use crate::codegen::mps::{codegen, loads_strided};
 use crate::codegen::reduction::mps::{has_epilogue, split_launches};
 use crate::codegen::row::mps::row_groups;
@@ -49,7 +50,7 @@ use crate::graph_compiler::passes::horizontal::segments;
 use crate::graph_compiler::passes::updates::Updates;
 use crate::plan::{Buffer, StepBase};
 use crate::plan::{CpuPlan, MpsPlan};
-use crate::runtime::mps::{Grid, dims_arg, element_arg, elementwise_grid, scratch_bytes, u32_arg};
+use crate::runtime::kernel::mps::{Grid, dims_arg, element_arg, elementwise_grid, u32_arg};
 use crate::tensor::contiguous_strides;
 use crate::{DType, Scalar, Tensor};
 
@@ -63,7 +64,7 @@ unsafe extern "C" {
 
 /// Kernel templates and helpers every generated Metal source is compiled against.
 const PRELUDE: &str = concat!(
-    include_str!("../../runtime/mps/kernels.metal"),
+    include_str!("../../codegen/utils/mps/prelude.metal"),
     include_str!("../../codegen/random/mps/philox.metal"),
     indoc::indoc!(
         "

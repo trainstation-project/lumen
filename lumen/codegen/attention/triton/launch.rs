@@ -5,11 +5,13 @@ use std::sync::OnceLock;
 
 use crate::codegen::attention::AttentionCodegen;
 use crate::codegen::attention::triton::{AttentionConfig, untuned_attention};
+use crate::codegen::elementwise::triton::{copy, fill};
 use crate::codegen::utils::triton as codegen;
 use crate::graph::{Primitive, Var};
 use crate::graph_compiler::passes::attention::{self, BACKWARD, FORWARD, Strides};
 use crate::plan::StepBase;
-use crate::runtime::triton::{Function, Launches, copy, fill, layouts};
+use crate::plan::step::triton::layouts;
+use crate::runtime::kernel::triton::{Function, Launches};
 use crate::{Scalar, Tensor, TensorOptions};
 
 /// One launch of a flash-attention kernel.
