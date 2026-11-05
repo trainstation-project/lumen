@@ -30,7 +30,7 @@ use super::common::take_along_axis::TakeAlongAxis;
 use super::pass::{Module, Pipeline};
 use super::{CompilerConfig, Options};
 use crate::codegen::attention::AttentionCodegen;
-use crate::codegen::attention::mps::{backward_block_with_dq, decodes};
+use crate::codegen::attention::mps::decodes;
 use crate::codegen::dot_general::mps as gemm;
 use crate::codegen::dot_general::mps::GemmConfig;
 use crate::codegen::elementwise::mps::Tuning;
@@ -41,10 +41,7 @@ use crate::codegen::row::mps::row_groups;
 use crate::codegen::store::mps::strided_load;
 use crate::codegen::utils::mps::Mps;
 use crate::graph::{Graph, Node, Primitive, TensorType, Var, View};
-use crate::graph_compiler::common::attention::{self, Backward};
-use crate::graph_compiler::common::flash_attention::{
-    AttentionBackwards, Attentions, FlashAttention, FlashAttentionBackward,
-};
+use crate::graph_compiler::common::attention::{self, FlashAttention, FlashAttentionBackward};
 use crate::graph_compiler::common::horizontal::segments;
 use crate::graph_compiler::common::updates::Updates;
 use crate::graph_compiler::{Plan, PlanOptions};
@@ -90,10 +87,10 @@ const PRELUDE: &str = concat!(
 );
 
 /// Graph and side tables threaded through the MPS passes.
-struct MpsModule<'a> {
-    graph: Graph,
+pub(crate) struct MpsModule<'a> {
+    pub(crate) graph: Graph,
     /// Compile options, including the MPS config.
-    options: &'a Options,
+    pub(crate) options: &'a Options,
     /// Packed weight blocks from dot merging: member input indices and the packed axis.
     packed: Vec<(Vec<usize>, usize)>,
     /// Per packed block, how many members each interleaved group spans (all ones: side by side).
@@ -101,46 +98,13 @@ struct MpsModule<'a> {
     /// Normalization rows found by the diamonds pass, consumed by fusion.
     rows: Vec<Row>,
     /// Graph input indices passed to kernels by value.
-    scalars: Vec<usize>,
+    pub(crate) scalars: Vec<usize>,
     /// Kernels requested so far; fusions name them as `PENDING` plus an index.
-    kernels: Vec<Kernel>,
+    pub(crate) kernels: Vec<Kernel>,
     /// Generated Metal sources by kernel name.
     sources: BTreeMap<String, String>,
     /// Elementwise kernels that the autotuner may regenerate, by kernel name.
     tunable: BTreeMap<String, crate::autotune::mps::Tunable>,
-}
-
-impl Attentions for MpsModule<'_> {
-    /// Whether attention may absorb elementwise epilogues.
-    fn contraction_epilogues(&self) -> bool {
-        self.options.config.contraction_epilogues
-    }
-
-    /// Graph values of the by-value scalar inputs.
-    fn scalars(&self) -> Vec<Var> {
-        self.scalars
-            .iter()
-            .map(|&i| self.graph.inputs()[i])
-            .collect()
-    }
-
-    /// Requests an attention kernel, returning its pending name.
-    fn kernel(&mut self) -> String {
-        request(&mut self.kernels, Kernel::Attention)
-    }
-}
-
-impl AttentionBackwards for MpsModule<'_> {
-    /// Backwards whose dQ fits the dK/dV kernel, unless deterministic mode forbids its atomic dQ accumulation.
-    fn together(&self) -> impl Fn(&Backward) -> bool + 'static {
-        let deterministic = self.options.config.deterministic;
-        move |b| !deterministic && backward_block_with_dq(b).is_some()
-    }
-
-    /// Requests an attention backward kernel, returning its pending name.
-    fn backward_kernel(&mut self) -> String {
-        request(&mut self.kernels, Kernel::AttentionBackward)
-    }
 }
 
 impl Blocks for MpsModule<'_> {
@@ -225,7 +189,7 @@ impl Module for MpsModule<'_> {
 }
 
 /// Kind of kernel a fusion requests, generated later by the codegen pass.
-enum Kernel {
+pub(crate) enum Kernel {
     /// A fusion's kernel generated from its body, with a by-value flag per input.
     Fusion(Vec<bool>),
     /// Flash attention forward.
@@ -241,7 +205,7 @@ const MOST_UPDATES: usize = 29;
 const PENDING: &str = "pending#";
 
 /// Records a kernel request and returns the placeholder name a fusion uses until codegen.
-fn request(kernels: &mut Vec<Kernel>, kernel: Kernel) -> String {
+pub(crate) fn request(kernels: &mut Vec<Kernel>, kernel: Kernel) -> String {
     kernels.push(kernel);
     format!("{PENDING}{}", kernels.len() - 1)
 }

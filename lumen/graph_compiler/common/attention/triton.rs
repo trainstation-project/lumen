@@ -3,21 +3,20 @@
 
 use std::sync::OnceLock;
 
-use super::{Function, Launches, TritonModule, copy, fill};
 use crate::codegen::attention::AttentionCodegen;
 use crate::codegen::attention::triton::{AttentionConfig, untuned_attention};
 use crate::codegen::utils::triton as codegen;
 use crate::graph::{Primitive, Var};
-use crate::graph_compiler::common::attention::{self, Backward, Strides};
-use crate::graph_compiler::common::flash_attention::{AttentionBackwards, Attentions};
+use crate::graph_compiler::common::attention::{self, Strides};
+use crate::graph_compiler::triton::{Function, Launches, copy, fill, layouts};
 use crate::plan::Step;
 use crate::{Scalar, Tensor, TensorOptions};
 
 /// Name of a forward flash-attention fusion.
-const FORWARD: &str = "flash_attention";
+pub(super) const FORWARD: &str = "flash_attention";
 
 /// Name of a backward flash-attention fusion.
-const BACKWARD: &str = "flash_attention_backward";
+pub(super) const BACKWARD: &str = "flash_attention_backward";
 
 /// One launch of a flash-attention kernel.
 #[cfg_attr(not(feature = "python"), allow(dead_code))]
@@ -53,43 +52,6 @@ pub(crate) fn set_attention(launch: Attention) {
     let _ = ATTENTION.set(launch);
 }
 
-/// Flash-attention matching for Triton, as on MPS: elementwise epilogues reading any leaf, runtime causal
-/// offsets (decode).
-impl Attentions for TritonModule<'_> {
-    /// Elementwise epilogues are fused into the forward kernel's output store.
-    fn contraction_epilogues(&self) -> bool {
-        true
-    }
-
-    /// Graph values of the by-value scalar inputs.
-    fn scalars(&self) -> Vec<Var> {
-        super::super::positions(&self.options.scalars)
-            .into_iter()
-            .map(|i| self.graph.inputs()[i])
-            .collect()
-    }
-
-    /// Every forward attention runs on the one forward kernel.
-    fn kernel(&mut self) -> String {
-        FORWARD.into()
-    }
-}
-
-/// Each attention backward runs as one kernel adding dQ atomically as it computes dK and dV, or, when
-/// `deterministic`, a dK/dV kernel and a dQ kernel.
-impl AttentionBackwards for TritonModule<'_> {
-    /// Every backward runs as one kernel unless deterministic, so dQ is summed over key blocks in a fixed order.
-    fn together(&self) -> impl Fn(&Backward) -> bool + 'static {
-        let deterministic = self.options.config.deterministic;
-        move |_| !deterministic
-    }
-
-    /// Every backward fusion runs on the backward kernels.
-    fn backward_kernel(&mut self) -> String {
-        BACKWARD.into()
-    }
-}
-
 /// Whether `p` is a flash-attention fusion.
 pub(crate) fn is_attention(p: &Primitive) -> bool {
     matches!(p, Primitive::Fusion { name, .. } if name == FORWARD || name == BACKWARD)
@@ -99,7 +61,7 @@ pub(crate) fn is_attention(p: &Primitive) -> bool {
 type Run = Box<dyn Fn(&Step, &[Tensor], &Tensor, &[Tensor]) -> Result<(), String> + Send + Sync>;
 
 /// Runs flash-attention `step` with its tuned config, or the untuned one for its head size.
-pub(super) fn run(
+pub(crate) fn run(
     step: &Step,
     inputs: &[Tensor],
     out: &Tensor,
@@ -304,7 +266,7 @@ pub(crate) fn attention(
                 .map(|t| (0, t.strides().to_vec()))
                 .collect::<Vec<_>>(),
         );
-        let key = super::layouts(inputs.iter().chain(&written));
+        let key = layouts(inputs.iter().chain(&written));
         let prepared = step.memo.get(key, || prepare(step, &strides))?;
         let zeroed = prepared.zeroed.iter().any(|&k| match prepared.tensors[k] {
             Some(Source::Output(o)) => !written[o].is_contiguous(),

@@ -286,7 +286,8 @@ pub(crate) fn is_gemm(step: &Step) -> bool {
     match &step.primitive {
         Primitive::DotGeneral { .. } | Primitive::LinearCrossEntropy => true,
         p @ Primitive::Fusion { body, .. } => {
-            !super::attention::is_attention(p) && codegen::gemm_dot(body).is_some()
+            !super::super::common::attention::triton::is_attention(p)
+                && codegen::gemm_dot(body).is_some()
         }
         _ => false,
     }
