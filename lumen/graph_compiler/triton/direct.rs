@@ -174,9 +174,7 @@ const RTLD_NOW: c_int = 2;
 #[link(name = "dl")]
 unsafe extern "C" {
     fn dlopen(filename: *const c_char, flags: c_int) -> *mut c_void;
-
     fn dlsym(handle: *mut c_void, symbol: *const c_char) -> *mut c_void;
-
     fn dlerror() -> *const c_char;
 }
 

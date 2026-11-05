@@ -17,6 +17,21 @@ impl AttentionBackwards for TpuModule<'_> {
     }
 }
 
+/// How a backward fusion `body` writes its dQ, dK and dV outputs.
+pub(in crate::graph_compiler::common::attention) fn outputs(
+    body: &Graph,
+) -> Vec<attention::Access> {
+    attention::backward_of_body(body)
+        .map(|b| {
+            [b.dq_out, b.dk_out, b.dv_out]
+                .into_iter()
+                .flatten()
+                .map(|(_, acc)| acc)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Moves the dot computing a backward fusion's `delta` input inside the fusion body.
 ///
 /// The fusion then reads the dot's operands, through any reshape/transpose chains, instead of `delta`.

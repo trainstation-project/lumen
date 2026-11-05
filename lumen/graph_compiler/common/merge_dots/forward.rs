@@ -3,10 +3,10 @@
 
 use std::collections::HashMap;
 
-use super::simplify::roundings;
 use crate::DType;
 use crate::graph::primitive::free_dims;
 use crate::graph::{Graph, Node, Primitive, TensorType, Var};
+use crate::graph_compiler::common::simplify::roundings;
 use crate::graph_compiler::pass::{CompilerPass, Module};
 use crate::graph_compiler::{combined, elementwise};
 

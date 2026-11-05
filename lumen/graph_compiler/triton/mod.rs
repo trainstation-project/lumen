@@ -1,14 +1,10 @@
 //! The Triton backend for CUDA: pass pipeline, plan compilation, autotuning, and running steps
 //! through Triton kernels launched from Python.
 
-mod cross_entropy;
+pub(crate) mod cross_entropy;
 #[cfg(all(feature = "python", lumen_cuda_linked))]
 pub(crate) mod direct;
-mod fusion;
-pub(crate) mod gemm;
 mod scatter_add;
-mod split_k;
-mod wide_rows;
 
 use std::any::Any;
 use std::collections::HashMap;
@@ -17,23 +13,23 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 #[cfg(feature = "python")]
 pub(crate) use super::common::attention::triton::{Launch, set_attention};
 #[cfg(feature = "python")]
-pub(crate) use crate::codegen::dot_general::triton::Config;
-use fusion::Fusion;
+pub(crate) use super::common::dot::triton::{Epilogue, set_gemm};
 #[cfg(feature = "python")]
-pub(crate) use gemm::{Epilogue, set_gemm};
+pub(crate) use crate::codegen::dot_general::triton::Config;
 use scatter_add::Scatter;
-use split_k::SplitK;
-use wide_rows::WideRows;
 
 use super::common::alone::Alone;
 use super::common::attention::{self, FlashAttention, FlashAttentionBackward};
 use super::common::chunked_cross_entropy::ChunkedCrossEntropy;
 use super::common::clamp_indices::ClampIndices;
-use super::common::dot_strength::DotStrength;
+use super::common::dot::rows::triton::WideRows;
+use super::common::dot::split_k::triton::SplitK;
+use super::common::dot::strength::DotStrength;
+use super::common::dot::triton as gemm;
+use super::common::fusion::triton::{self as fusion, Fusion};
 use super::common::linear_cross_entropy::LinearCrossEntropy;
 use super::common::linear_reordering::LinearReordering;
-use super::common::merge_dots::{Blocks, MergeDots, Packs, Target};
-use super::common::merge_dots_backward::MergeDotsBackward;
+use super::common::merge_dots::{Blocks, MergeDots, MergeDotsBackward, Packs, Target};
 use super::common::simplify::Simplify;
 use super::common::take_along_axis::TakeAlongAxis;
 use super::common::updates::Updates;
@@ -275,7 +271,7 @@ pub(crate) struct TritonModule<'a> {
     /// Interleaved region sizes of each packed block.
     interleaved: Vec<Vec<usize>>,
     /// Normalization rows the diamonds pass found, consumed by fusion.
-    rows: Vec<Row>,
+    pub(crate) rows: Vec<Row>,
 }
 
 impl Module for TritonModule<'_> {

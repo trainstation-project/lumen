@@ -3,9 +3,9 @@
 //! those cotangents become one dot sliced per weight. A dot with its rounding cast merges as the rounded
 //! product, the merged dot rounded by one cast.
 
-use super::simplify::roundings;
 use crate::DType;
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
+use crate::graph_compiler::common::simplify::roundings;
 use crate::graph_compiler::elementwise;
 use crate::graph_compiler::pass::{CompilerPass, Module};
 

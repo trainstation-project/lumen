@@ -1,9 +1,9 @@
-//! MPS split-K: the shared pass (`common::split_k`) with MPS's tiles, its GEMV and skinny (few-row)
+//! MPS split-K: the shared pass (`split_k`) with MPS's tiles, its GEMV and skinny (few-row)
 //! products kept whole.
 
+use super::Rules;
 use crate::codegen::dot_general::mps::{float_groups, gemv, skinny_rows};
 use crate::graph::Graph;
-use crate::graph_compiler::common::split_k::Rules;
 use crate::graph_compiler::pass::{CompilerPass, Module};
 
 /// Most rows of a skinny product kept whole: its lanes already split K, while split, each chunk runs on a
@@ -27,7 +27,7 @@ fn chunks(m: usize, n: usize, k: usize) -> Option<usize> {
 }
 
 /// Splits `graph`'s matmuls by MPS's rules.
-pub(super) fn split_k(graph: &Graph) -> Graph {
+pub(crate) fn split_k(graph: &Graph) -> Graph {
     let rules = Rules {
         tiles: &|m, n| float_groups(1, m, n),
         target: 256,
@@ -38,13 +38,14 @@ pub(super) fn split_k(graph: &Graph) -> Graph {
         chunks: Some(&chunks),
     };
 
-    crate::graph_compiler::common::split_k::split_k(graph, &rules)
+    super::split_k(graph, &rules)
 }
 
 /// Compiler pass running `split_k`.
-pub(super) struct SplitK;
+pub(crate) struct SplitK;
 
 impl<M: Module> CompilerPass<M> for SplitK {
+    /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "split_k"
     }

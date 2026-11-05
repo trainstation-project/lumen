@@ -7,9 +7,9 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
-use super::MpsModule;
-use crate::codegen::ane::mil;
+use super::mil;
 use crate::graph::{FUSION_SEPARATOR, Graph, NEURAL_ENGINE, Primitive, TensorType, Var, intern};
+use crate::graph_compiler::mps::MpsModule;
 use crate::graph_compiler::pass::CompilerPass;
 use crate::plan::Step;
 use crate::tensor::contiguous_strides;
@@ -650,7 +650,7 @@ fn contiguous(data: *const u8, ty: &TensorType, strides: &[usize]) -> Vec<u8> {
 
 /// Queues the Neural Engine fusion `step` on the Core ML thread, compiling it with its weights on first use.
 /// The Metal stream signals before the job runs and waits until it finishes; `keep` stays alive until then.
-pub(super) fn encode(
+pub(crate) fn encode(
     step: &Step,
     inputs: &[*const u8],
     output: *mut u8,
@@ -846,7 +846,7 @@ pub(crate) fn invalidate<'a>(steps: impl IntoIterator<Item = &'a Step>) {
 }
 
 /// Compiler pass offloading eligible regions to the Neural Engine.
-pub(super) struct NeuralEngine;
+pub(crate) struct NeuralEngine;
 
 impl<'a> CompilerPass<MpsModule<'a>> for NeuralEngine {
     fn name(&self) -> &'static str {

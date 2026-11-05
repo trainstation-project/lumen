@@ -2,11 +2,11 @@
 
 use std::sync::OnceLock;
 
-use super::{Function, Launches};
 use crate::codegen::dot_general::GemmCodegen;
 use crate::codegen::dot_general::triton::{self as codegen, CONFIGS, Config, UNTUNED};
 use crate::codegen::utils::triton::Triton;
 use crate::graph::{Graph, Node, Primitive};
+use crate::graph_compiler::triton::{Function, Launches, cross_entropy, layouts};
 use crate::plan::Buffer;
 use crate::plan::Step;
 use crate::tensor::contiguous_strides;
@@ -211,10 +211,10 @@ pub(crate) fn gemm(
 
     if let Primitive::LinearCrossEntropy = step.primitive {
         let config = tuned.copied().unwrap_or(CONFIGS[UNTUNED]);
-        return super::cross_entropy::run(*launch, step, inputs, out, &config);
+        return cross_entropy::run(*launch, step, inputs, out, &config);
     }
 
-    let key = super::layouts(inputs.iter().chain([out]).chain(outs));
+    let key = layouts(inputs.iter().chain([out]).chain(outs));
 
     let prepared = step
         .memo
@@ -286,7 +286,7 @@ pub(crate) fn is_gemm(step: &Step) -> bool {
     match &step.primitive {
         Primitive::DotGeneral { .. } | Primitive::LinearCrossEntropy => true,
         p @ Primitive::Fusion { body, .. } => {
-            !super::super::common::attention::triton::is_attention(p)
+            !crate::graph_compiler::common::attention::triton::is_attention(p)
                 && codegen::gemm_dot(body).is_some()
         }
         _ => false,

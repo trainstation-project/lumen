@@ -1,10 +1,7 @@
 //! MPS graph compiler: the pass pipeline that fuses a graph into Metal kernels, kernel compilation,
 //! and the encoder that launches each fused step with the right grid.
 
-pub(crate) mod ane;
-pub(crate) mod fusion;
 pub(crate) mod kernel_codegen;
-mod split_k;
 #[cfg(test)]
 mod tests;
 
@@ -14,15 +11,17 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::{Mutex, OnceLock, PoisonError};
 
 use super::common::alone::{Alone, Lone};
-use super::common::canonicalize_dots::CanonicalizeDots;
+use super::common::ane::mps as ane;
 use super::common::chunked_cross_entropy::ChunkedCrossEntropy;
 use super::common::clamp_indices::ClampIndices;
 use super::common::diamonds::{Diamonds, Row, RowsModule};
-use super::common::dot_strength::DotStrength;
+use super::common::dot::canonicalize::CanonicalizeDots;
+use super::common::dot::split_k::mps::SplitK;
+use super::common::dot::strength::DotStrength;
+pub(crate) use super::common::fusion::mps as fusion;
 use super::common::linear_cross_entropy::LinearCrossEntropy;
 use super::common::linear_reordering::LinearReordering;
-use super::common::merge_dots::{Blocks, MergeDots, Packs, Target};
-use super::common::merge_dots_backward::MergeDotsBackward;
+use super::common::merge_dots::{Blocks, MergeDots, MergeDotsBackward, Packs, Target};
 use super::common::place_concats::{PlaceConcats, Slots};
 use super::common::place_views::PlaceViews;
 use super::common::simplify::Simplify;
@@ -92,11 +91,11 @@ pub(crate) struct MpsModule<'a> {
     /// Compile options, including the MPS config.
     pub(crate) options: &'a Options,
     /// Packed weight blocks from dot merging: member input indices and the packed axis.
-    packed: Vec<(Vec<usize>, usize)>,
+    pub(crate) packed: Vec<(Vec<usize>, usize)>,
     /// Per packed block, how many members each interleaved group spans (all ones: side by side).
     interleaved: Vec<Vec<usize>>,
     /// Normalization rows found by the diamonds pass, consumed by fusion.
-    rows: Vec<Row>,
+    pub(crate) rows: Vec<Row>,
     /// Graph input indices passed to kernels by value.
     pub(crate) scalars: Vec<usize>,
     /// Kernels requested so far; fusions name them as `PENDING` plus an index.
@@ -261,7 +260,7 @@ fn pipeline<'a>(config: &CompilerConfig) -> Pipeline<MpsModule<'a>> {
     }
 
     if config.split_k {
-        p.add(split_k::SplitK);
+        p.add(SplitK);
     }
 
     // Matmul operands the GEMM kernels can't read as three strides are transposed first.

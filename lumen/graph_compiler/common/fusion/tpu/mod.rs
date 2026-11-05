@@ -1,18 +1,14 @@
-//! TPU fusion passes: dot epilogues, row-wise dot fusion, elementwise/reduction fusion and horizontal fusion.
-mod dot_epilogues;
-mod dot_rows;
+//! TPU fusion passes: elementwise/reduction fusion and horizontal fusion (its dot fusions live in
+//! `common::dot`).
 mod emit;
 mod groups;
 
-pub(super) use dot_epilogues::FuseDots;
-pub(super) use dot_rows::DotRows;
-
-use super::TpuModule;
 use crate::graph::{Graph, Node, Primitive};
 use crate::graph_compiler::pass::CompilerPass;
+use crate::graph_compiler::tpu::{LANES, TpuModule};
 
 /// Groups elementwise and reduction nodes into `elementwise` and `reduction` fusions.
-pub(super) struct Fusion;
+pub(crate) struct Fusion;
 
 impl CompilerPass<TpuModule<'_>> for Fusion {
     fn name(&self) -> &'static str {
@@ -26,11 +22,11 @@ impl CompilerPass<TpuModule<'_>> for Fusion {
 }
 
 /// Most buffers one horizontally fused TPU kernel may read and write.
-pub(super) const HORIZONTAL_BUFFERS: usize = 32;
+pub(crate) const HORIZONTAL_BUFFERS: usize = 32;
 
 /// Whether horizontal fusion may merge `node`: a non-scalar `elementwise` fusion of fully fusible nodes not
 /// written in place into a concat.
-pub(super) fn horizontal_candidate(graph: &Graph, node: &Node) -> bool {
+pub(crate) fn horizontal_candidate(graph: &Graph, node: &Node) -> bool {
     let Primitive::Fusion { name, body, .. } = &node.primitive else {
         return false;
     };
@@ -53,7 +49,7 @@ pub(super) fn horizontal_candidate(graph: &Graph, node: &Node) -> bool {
 /// straight into its slot: the concat joins its last axis, the operand's width fills whole lanes, and its
 /// producer's kernel writes a strided slice of the shared buffer (a dot, an elementwise fusion, a fill, a
 /// scalar broadcast or an elementwise op).
-pub(super) fn slot_writes(graph: &Graph, concat: &Node, k: usize, producer: &Node) -> bool {
+pub(crate) fn slot_writes(graph: &Graph, concat: &Node, k: usize, producer: &Node) -> bool {
     let Primitive::Concatenate { dimension, .. } = concat.primitive else {
         return false;
     };
@@ -69,6 +65,6 @@ pub(super) fn slot_writes(graph: &Graph, concat: &Node, k: usize, producer: &Nod
     };
 
     dimension + 1 == graph.type_of(concat.output).shape.len()
-        && graph.type_of(concat.inputs[k]).shape[dimension].is_multiple_of(super::LANES)
+        && graph.type_of(concat.inputs[k]).shape[dimension].is_multiple_of(LANES)
         && writes
 }

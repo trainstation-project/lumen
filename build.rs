@@ -128,7 +128,7 @@ fn build_mps_shim() {
     println!("cargo:rerun-if-changed=lumen/stream/mps/mps.mm");
     println!("cargo:rerun-if-changed=lumen/stream/mps/mps.h");
     println!("cargo:rerun-if-changed=lumen/runtime/mps/shim.mm");
-    println!("cargo:rerun-if-changed=lumen/graph_compiler/mps/ane/coreml.mm");
+    println!("cargo:rerun-if-changed=lumen/graph_compiler/common/ane/coreml.mm");
 
     for source in PRIMITIVE_KERNELS {
         println!("cargo:rerun-if-changed={source}");
@@ -144,7 +144,7 @@ fn build_mps_shim() {
         .file("lumen/allocator/mps/mps_shim.mm")
         .file("lumen/stream/mps/mps.mm")
         .file("lumen/runtime/mps/shim.mm")
-        .file("lumen/graph_compiler/mps/ane/coreml.mm")
+        .file("lumen/graph_compiler/common/ane/coreml.mm")
         .include(PathBuf::from(
             env::var_os("OUT_DIR").expect("OUT_DIR not set"),
         ))

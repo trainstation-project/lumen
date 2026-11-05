@@ -1,22 +1,22 @@
 //! TPU graph compiler: the pass pipeline that rewrites a traced graph into TPU kernels and plans its buffers.
-mod fusion;
 #[cfg(test)]
 mod tests;
 
+use super::common::dot::rows::tpu::DotRows;
+use super::common::dot::tpu::FuseDots;
+use super::common::fusion::tpu::{self as fusion, Fusion};
 use super::common::updates::Updates;
-use crate::graph_compiler::common::canonicalize_dots::CanonicalizeDots;
 use crate::graph_compiler::common::diamonds::FusedDiamonds;
+use crate::graph_compiler::common::dot::canonicalize::CanonicalizeDots;
 use crate::graph_compiler::common::horizontal::{Grouping, HorizontalFusion};
 use crate::graph_compiler::common::place_concats::{PlaceConcats, Slots};
-use fusion::{DotRows, FuseDots, Fusion};
 
 use super::common::attention::tpu::AttentionLayouts;
 use super::common::attention::{FlashAttention, FlashAttentionBackward};
 use super::common::clamp_indices::ClampIndices;
-use super::common::dot_strength::DotStrength;
-use super::common::fold_dot_reshapes::FoldDotReshapes;
-use super::common::merge_dots::{Blocks, MergeDots, Packs, Target};
-use super::common::merge_dots_backward::MergeDotsBackward;
+use super::common::dot::fold_reshapes::FoldDotReshapes;
+use super::common::dot::strength::DotStrength;
+use super::common::merge_dots::{Blocks, MergeDots, MergeDotsBackward, Packs, Target};
 use super::common::simplify::Simplify;
 use super::pass::{Module, Pipeline};
 use super::{CompilerConfig, Options, plan_options, positions};
@@ -25,7 +25,7 @@ use crate::graph_compiler::{Plan, PlanOptions};
 use crate::plan::DeviceLayout;
 
 /// Vector lane width of a TPU register; concatenated and merged dot widths are aligned to it.
-const LANES: usize = 128;
+pub(crate) const LANES: usize = 128;
 
 /// Buffer layout of TPU tensors, which are stored TPU-tiled in the shared region.
 const LAYOUT: DeviceLayout = DeviceLayout {

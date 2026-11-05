@@ -3,7 +3,7 @@
 
 #[cfg(lumen_mps_linked)]
 mod mps;
-mod tpu;
+pub(super) mod tpu;
 mod triton;
 
 use super::{Access, Dropout, Matcher, Score, Strides, body_of, fits32};

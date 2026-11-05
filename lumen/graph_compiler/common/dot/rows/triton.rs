@@ -3,13 +3,13 @@
 //! reductions' partials over each `tile`-column block of a row as well (`dot_partials`); those are
 //! reduced and the row reads them instead of reducing its rows again, so the product is read once less.
 
-use super::TritonModule;
 use crate::codegen::dot_general::triton::partial_tile;
 use crate::codegen::kinds::gemm_dot;
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
 use crate::graph_compiler::common::diamonds::tile_reductions;
 use crate::graph_compiler::elementwise;
 use crate::graph_compiler::pass::CompilerPass;
+use crate::graph_compiler::triton::TritonModule;
 
 /// Name of a GEMM writing a row's operand and its first reductions' partials.
 const DOT_PARTIALS: &str = "dot_partials";
@@ -451,7 +451,7 @@ fn wide_rows(graph: &Graph) -> Graph {
 }
 
 /// Compiler pass splitting wide GEMM-fed rows into `dot_partials`, their partials' reduction and the row.
-pub(super) struct WideRows;
+pub(crate) struct WideRows;
 
 impl CompilerPass<TritonModule<'_>> for WideRows {
     /// Pass name used in profiler ranges and dumps.

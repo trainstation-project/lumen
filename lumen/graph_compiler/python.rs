@@ -134,7 +134,7 @@ impl PyPlan {
     /// Drops the cached Neural Engine models of this plan's steps (MPS builds only).
     fn _invalidate_neural_engine(&self) {
         #[cfg(lumen_mps_linked)]
-        crate::graph_compiler::mps::ane::invalidate(self.inner.steps());
+        crate::graph_compiler::common::ane::mps::invalidate(self.inner.steps());
     }
 
     /// Bytes of device workspace the plan needs.
