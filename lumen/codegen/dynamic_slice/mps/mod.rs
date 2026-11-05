@@ -11,11 +11,9 @@ use indoc::formatdoc;
 use super::DynamicSliceCodegen;
 use crate::Tensor;
 use crate::codegen::utils::mps::*;
-use crate::graph::Primitive;
 use crate::graph::{Graph, TensorType, UPDATES};
 use crate::graph_compiler::passes::updates::{overlaps, starts};
-use crate::plan::Step;
-use crate::runtime::mps::{Grid, dims_arg, elementwise_grid, u32_arg, u64_arg};
+use crate::runtime::mps::{elementwise_grid, u32_arg};
 use crate::tensor::contiguous_strides;
 
 /// Copies the `ty`-shaped tensor at `src` to `dst` on the GPU.
@@ -41,78 +39,7 @@ pub(crate) fn copy(
 }
 
 /// Highest operand rank the Metal kernels take.
-const MAX_RANK: usize = 8;
-
-/// Encodes a `DynamicSlice` or `DynamicUpdateSlice` step; an out-of-place update first copies
-/// the operand into the output.
-pub(crate) fn encode(
-    step: &Step,
-    inputs: &[*const u8],
-    output: *mut u8,
-    keep: Vec<Tensor>,
-) -> Result<(), String> {
-    let x = &step.inputs[0].1;
-    let rank = x.shape.len();
-
-    if rank > MAX_RANK {
-        return Err(format!(
-            "{}: {rank} dimensions are more than its MPS kernels take ({MAX_RANK})",
-            step.label
-        ));
-    }
-
-    let bytes = x.dtype.size_of();
-
-    let (source, block, first) = match &step.primitive {
-        Primitive::DynamicSlice { slice_sizes } => (inputs[0], slice_sizes.clone(), 1),
-        Primitive::DynamicUpdateSlice => (inputs[1], step.inputs[1].1.shape.clone(), 2),
-        _ => unreachable!("a dynamic slice"),
-    };
-
-    let update = matches!(step.primitive, Primitive::DynamicUpdateSlice);
-
-    if update && output.cast_const() != inputs[0] {
-        copy(inputs[0], output, x, keep.clone(), step.label)?;
-    }
-
-    let index_dtype = step
-        .inputs
-        .get(first)
-        .map_or("i32".into(), |(_, t)| t.dtype.to_string());
-
-    // Unused index slots point at the source buffer; the kernel only reads the first `rank`.
-    let mut buffers = vec![source, output.cast_const()];
-    buffers.extend((0..MAX_RANK).map(|d| *inputs.get(first + d).unwrap_or(&source)));
-    let count: usize = block.iter().product();
-
-    let args = [
-        dims_arg(x.shape.clone()),
-        dims_arg(block.clone()),
-        u32_arg(rank as u32),
-        u64_arg(count),
-    ];
-
-    // Use 32-bit offsets when the operand fits, 64-bit otherwise.
-    let width = match x.numel() <= u32::MAX as usize {
-        true => 32,
-        false => 64,
-    };
-
-    let kernel = match update {
-        true => format!("dynamic_update_slice_{bytes}_{index_dtype}_{width}"),
-        false => format!("dynamic_slice_{bytes}_{index_dtype}_{width}"),
-    };
-
-    let grid = Grid::Threads([count.div_ceil(16 / bytes), 1, 1]);
-    Mps::launch(MpsLaunch {
-        kernel: &kernel,
-        buffers: &buffers,
-        args: &args,
-        grid,
-        keep,
-        name: step.label,
-    })
-}
+pub(crate) const MAX_RANK: usize = 8;
 
 /// Metal dynamic slices: a generated kernel for a chain of updates; one update runs Metal's fixed kernel.
 impl DynamicSliceCodegen for Mps {

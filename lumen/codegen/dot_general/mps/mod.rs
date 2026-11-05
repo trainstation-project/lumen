@@ -18,16 +18,10 @@ pub(crate) use row::*;
 pub(crate) use skinny::*;
 pub(crate) use tiled::*;
 
-use crate::Tensor;
-use crate::codegen::utils::mps::Mps;
 use crate::graph::Primitive;
 use crate::graph::TensorType;
 use crate::graph_compiler::passes::dot::canonicalize::matmul_order;
-use crate::plan::Step;
-use crate::runtime::kernel::Launch as _;
-use crate::runtime::kernel::mps::MpsLaunch;
-use crate::runtime::mps::{Grid, dims_arg};
-use crate::tensor::contiguous_strides;
+use crate::runtime::mps::Grid;
 
 /// Default float tile (rows, columns).
 const FLOAT_TILE: (usize, usize) = (128, 64);
@@ -172,49 +166,6 @@ pub(crate) fn plan_matmul(
         mid,
         grid: Grid::Groups([n.div_ceil(tn), m.div_ceil(tm), b]),
         p: [m, n, k, lsb, lsm, lsk, rsb, rsk, rsn],
-    })
-}
-
-/// Launches the precompiled matmul kernel for a plan step's `dot_general`.
-pub(crate) fn encode(
-    step: &Step,
-    inputs: &[*const u8],
-    output: *mut u8,
-    keep: Vec<Tensor>,
-) -> Result<(), String> {
-    let (lhs, rhs, out) = (&step.inputs[0].1, &step.inputs[1].1, &step.output.1);
-    let name = step.label;
-
-    let strides = |k: usize| {
-        let ty = &step.inputs[k].1;
-
-        step.views[k]
-            .as_ref()
-            .map_or_else(|| contiguous_strides(&ty.shape), |v| v.strides.clone())
-    };
-
-    let launch_ = plan_matmul(
-        &step.primitive,
-        lhs,
-        rhs,
-        out,
-        &strides(0),
-        &strides(1),
-        name,
-        None,
-    )?;
-
-    let Primitive::DotGeneral { accum_dtype, .. } = &step.primitive else {
-        unreachable!("a dot_general")
-    };
-
-    Mps::launch(MpsLaunch {
-        kernel: &format!("matmul_{}_{accum_dtype}_{}", lhs.dtype, out.dtype),
-        buffers: &[inputs[0], inputs[1], output.cast_const()],
-        args: &[dims_arg(launch_.p)],
-        grid: launch_.grid,
-        keep,
-        name,
     })
 }
 
