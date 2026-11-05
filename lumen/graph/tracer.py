@@ -935,7 +935,7 @@ class Compiled:
             self._warm.add(id(plan))
             return plan.run_in(workspace, inputs)
         from lumen.codegen.utils import triton
-        from lumen.stream._C import CudaGraph
+        from lumen.runtime.stream._C import CudaGraph
 
         self._graphs.pop(id(plan), None)
         buffers = [Tensor.empty(list(inputs[i].shape), inputs[i].dtype, key[1]) for i in args]

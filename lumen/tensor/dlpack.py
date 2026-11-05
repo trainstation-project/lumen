@@ -4,7 +4,7 @@ import enum
 
 from lumen._native import LIBRARY_NAME
 from lumen.device import device
-from lumen.stream._C import Stream
+from lumen.runtime.stream._C import Stream
 from lumen.tensor import _C
 
 __all__ = ["DLDeviceType", "from_dlpack"]

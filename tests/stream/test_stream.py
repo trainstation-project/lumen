@@ -26,7 +26,7 @@ def test_every_device_has_a_stream():
 def test_the_stream_is_the_only_api():
     """``lumen.Stream`` and ``lumen.Event`` are the stream API (no
     per-device stream functions)."""
-    assert lumen.stream.__all__ == ["Event", "Stream"]
+    assert lumen.runtime.stream.__all__ == ["Event", "Stream"]
     cpu = lumen.Stream("cpu")
     assert cpu == lumen.Stream("cpu:0") and hash(cpu) == hash(lumen.Stream()) and cpu != lumen.Stream("meta")
     cpu.wait_stream(lumen.Stream("cpu"))
