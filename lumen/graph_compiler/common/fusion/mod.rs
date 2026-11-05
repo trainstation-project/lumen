@@ -1,12 +1,17 @@
 //! Fusion shared by the GPU backends: groups elementwise chains, reductions, normalization rows
-//! and GEMM epilogues into `Fusion` nodes, each compiled by the backend to one kernel.
+//! and GEMM epilogues into `Fusion` nodes, each compiled by the backend to one kernel. `mps` and `triton`
+//! run it with their kernels' limits; `tpu` groups nodes into the TPU's elementwise and reduction kernels.
 
 mod analysis;
 mod dot_epilogues;
 mod emit;
 mod hosts;
+#[cfg(lumen_mps_linked)]
+pub(crate) mod mps;
 mod reduction_epilogues;
 mod rows;
+pub(crate) mod tpu;
+pub(crate) mod triton;
 
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::common::diamonds::Row;

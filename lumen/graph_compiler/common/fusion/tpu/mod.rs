@@ -3,12 +3,12 @@
 mod emit;
 mod groups;
 
-use super::TpuModule;
 use crate::graph::{Graph, Node, Primitive};
 use crate::graph_compiler::pass::CompilerPass;
+use crate::graph_compiler::tpu::{LANES, TpuModule};
 
 /// Groups elementwise and reduction nodes into `elementwise` and `reduction` fusions.
-pub(super) struct Fusion;
+pub(crate) struct Fusion;
 
 impl CompilerPass<TpuModule<'_>> for Fusion {
     fn name(&self) -> &'static str {
@@ -22,11 +22,11 @@ impl CompilerPass<TpuModule<'_>> for Fusion {
 }
 
 /// Most buffers one horizontally fused TPU kernel may read and write.
-pub(super) const HORIZONTAL_BUFFERS: usize = 32;
+pub(crate) const HORIZONTAL_BUFFERS: usize = 32;
 
 /// Whether horizontal fusion may merge `node`: a non-scalar `elementwise` fusion of fully fusible nodes not
 /// written in place into a concat.
-pub(super) fn horizontal_candidate(graph: &Graph, node: &Node) -> bool {
+pub(crate) fn horizontal_candidate(graph: &Graph, node: &Node) -> bool {
     let Primitive::Fusion { name, body, .. } = &node.primitive else {
         return false;
     };
@@ -65,6 +65,6 @@ pub(crate) fn slot_writes(graph: &Graph, concat: &Node, k: usize, producer: &Nod
     };
 
     dimension + 1 == graph.type_of(concat.output).shape.len()
-        && graph.type_of(concat.inputs[k]).shape[dimension].is_multiple_of(super::LANES)
+        && graph.type_of(concat.inputs[k]).shape[dimension].is_multiple_of(LANES)
         && writes
 }

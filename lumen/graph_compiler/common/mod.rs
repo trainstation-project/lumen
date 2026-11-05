@@ -1,6 +1,8 @@
 //! Device-independent graph passes shared by the backend compilers.
 
 pub(crate) mod alone;
+#[cfg(lumen_mps_linked)]
+pub(crate) mod ane;
 pub(crate) mod cse;
 pub(crate) mod diamonds;
 pub(crate) mod dot;

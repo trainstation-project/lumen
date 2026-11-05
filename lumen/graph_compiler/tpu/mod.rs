@@ -1,16 +1,15 @@
 //! TPU graph compiler: the pass pipeline that rewrites a traced graph into TPU kernels and plans its buffers.
-pub(crate) mod fusion;
 #[cfg(test)]
 mod tests;
 
 use super::common::dot::rows::tpu::DotRows;
 use super::common::dot::tpu::FuseDots;
+use super::common::fusion::tpu::{self as fusion, Fusion};
 use super::common::updates::Updates;
 use crate::graph_compiler::common::diamonds::FusedDiamonds;
 use crate::graph_compiler::common::dot::canonicalize::CanonicalizeDots;
 use crate::graph_compiler::common::horizontal::{Grouping, HorizontalFusion};
 use crate::graph_compiler::common::place_concats::{PlaceConcats, Slots};
-use fusion::Fusion;
 
 use super::common::attention::tpu::AttentionLayouts;
 use super::common::attention::{FlashAttention, FlashAttentionBackward};

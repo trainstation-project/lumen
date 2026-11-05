@@ -2,10 +2,10 @@
 use std::collections::HashMap;
 
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
+use crate::graph_compiler::common::fusion::tpu::slot_writes;
 use crate::graph_compiler::common::place_concats::in_place_concats;
 use crate::graph_compiler::elementwise;
 use crate::graph_compiler::pass::CompilerPass;
-use crate::graph_compiler::tpu::fusion::slot_writes;
 use crate::graph_compiler::tpu::{LANES, TpuModule};
 
 /// Most equal-width slices of one dot an epilogue may combine.

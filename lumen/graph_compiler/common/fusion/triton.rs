@@ -1,15 +1,15 @@
 //! Triton fusion: the shared fusion (`common::fusion`, as MPS runs it) with the Triton
 //! kernels' limits and shapes, and which nodes left outside any fusion need one-node kernels.
 
-use super::TritonModule;
+use super::{Backend, fuse};
 use crate::codegen::dot_general::triton::row::dot_row_fits;
 use crate::codegen::kinds::{gemm_dot, reduction_root, row_reductions};
 use crate::codegen::regions::expansion;
 use crate::codegen::utils::triton::triton_type;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::common::alone::Lone;
-use crate::graph_compiler::common::fusion::{Backend, fuse};
 use crate::graph_compiler::pass::CompilerPass;
+use crate::graph_compiler::triton::TritonModule;
 
 /// Whether `node` can be emitted inside a Triton fusion kernel: a supported primitive whose
 /// inputs and output all have Triton dtypes.
@@ -102,7 +102,7 @@ fn named(body: &Graph) -> String {
 }
 
 /// Compiler pass running the shared fusion for Triton.
-pub(super) struct Fusion;
+pub(crate) struct Fusion;
 
 impl CompilerPass<TritonModule<'_>> for Fusion {
     /// Pass name used in profiler ranges and dumps.
@@ -112,7 +112,7 @@ impl CompilerPass<TritonModule<'_>> for Fusion {
 
     /// Fuses the graph around the normalization rows the diamonds pass found.
     fn apply(&mut self, m: &mut TritonModule<'_>) -> Result<(), String> {
-        let scalars: Vec<Var> = super::super::positions(&m.options.scalars)
+        let scalars: Vec<Var> = crate::graph_compiler::positions(&m.options.scalars)
             .into_iter()
             .map(|i| m.graph.inputs()[i])
             .collect();
@@ -150,12 +150,12 @@ impl Lone for TritonModule<'_> {
 }
 
 /// Most tensors one horizontally fused Triton kernel may read and write.
-pub(super) const HORIZONTAL_BUFFERS: usize = 64;
+pub(crate) const HORIZONTAL_BUFFERS: usize = 64;
 
 /// Whether horizontal fusion may merge `node`: an `elementwise` fusion without reductions or matmuls, as
 /// MPS's are; a node alone joins only when elementwise (MPS runs a lone fill, iota or the like as its own
 /// step).
-pub(super) fn horizontal_candidate(_: &Graph, node: &Node) -> bool {
+pub(crate) fn horizontal_candidate(_: &Graph, node: &Node) -> bool {
     let Primitive::Fusion { name, body, .. } = &node.primitive else {
         return false;
     };
@@ -172,7 +172,7 @@ pub(super) fn horizontal_candidate(_: &Graph, node: &Node) -> bool {
 /// straight into its slot through the slot's strides: a matmul, or a fusible elementwise or copying layout op
 /// (a reshape or view slice aliases its operand instead). Fusion leaves such a concatenate unfused, so each
 /// producer is its kernel's root.
-pub(super) fn slot_writes(graph: &Graph, producer: &Node) -> bool {
+pub(crate) fn slot_writes(graph: &Graph, producer: &Node) -> bool {
     let copies = matches!(
         producer.primitive,
         Primitive::Transpose { .. }
