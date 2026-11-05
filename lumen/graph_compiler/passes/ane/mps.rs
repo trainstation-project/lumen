@@ -674,7 +674,7 @@ pub(crate) fn encode(
 
     if entry.program.is_none() {
         // Constants are read from device memory, so the stream must finish producing them first.
-        crate::stream::mps::synchronize();
+        crate::runtime::stream::mps::synchronize();
         let _compile = crate::profiler::record_host_kernel("coreml (compile)");
 
         let data: Vec<Option<Vec<u8>>> = (0..inputs.len())
@@ -713,13 +713,15 @@ pub(crate) fn encode(
     let mut last = LAST.lock().unwrap_or_else(PoisonError::into_inner);
 
     let ready = match *last {
-        Some((encoded, done)) if encoded == crate::stream::mps::encoded() => done,
+        Some((encoded, done)) if encoded == crate::runtime::stream::mps::encoded() => done,
         _ => {
             let ready = EVENT.fetch_add(1, Ordering::Relaxed) + 1;
 
-            unsafe { lumen_coreml_encode_signal(crate::stream::mps::command_buffer(), ready) };
+            unsafe {
+                lumen_coreml_encode_signal(crate::runtime::stream::mps::command_buffer(), ready)
+            };
 
-            crate::stream::mps::flush();
+            crate::runtime::stream::mps::flush();
             ready
         }
     };
@@ -741,10 +743,10 @@ pub(crate) fn encode(
         .send(job)
         .map_err(|_| format!("{}: the Core ML thread has stopped", step.label))?;
 
-    unsafe { lumen_coreml_encode_wait(crate::stream::mps::command_buffer(), done) };
+    unsafe { lumen_coreml_encode_wait(crate::runtime::stream::mps::command_buffer(), done) };
 
-    crate::stream::mps::mark();
-    *last = Some((crate::stream::mps::encoded(), done));
+    crate::runtime::stream::mps::mark();
+    *last = Some((crate::runtime::stream::mps::encoded(), done));
     Ok(())
 }
 

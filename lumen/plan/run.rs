@@ -487,7 +487,7 @@ fn call_custom_op(
 
     #[cfg(lumen_mps_linked)]
     if buffers.device == Device::Mps(0) {
-        crate::stream::mps::mark();
+        crate::runtime::stream::mps::mark();
     }
 
     called.map_err(|e| format!("{}: {e}", step.label))

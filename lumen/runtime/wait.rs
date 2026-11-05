@@ -24,7 +24,7 @@ fn kernels(key: DispatchKey) -> Option<WaitKernel> {
         #[cfg(not(lumen_tpu_linked))]
         DispatchKey::Tpu => Some(|_| {}),
         DispatchKey::Mps | DispatchKey::Cuda => Some(|t| {
-            let stream = crate::stream::stream_for(t.device());
+            let stream = crate::runtime::stream::stream_for(t.device());
             stream.expect("a tensor's device is present").synchronize()
         }),
     }

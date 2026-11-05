@@ -10,7 +10,7 @@ use super::Launch;
 use crate::Tensor;
 use crate::codegen::utils::mps::Mps;
 use crate::runtime::mps::Grid;
-use crate::stream::mps::{self, Completion};
+use crate::runtime::stream::mps::{self, Completion};
 
 unsafe extern "C" {
     /// Looks up kernel `name` and dispatches it once; returns nonzero on failure.
@@ -225,7 +225,7 @@ pub(crate) fn pipeline(kernel: &str) -> Result<*mut c_void, String> {
 
 /// Dispatches an empty `event_marker` kernel whose completion signals `recorded`, fenced on both sides.
 pub(crate) fn mark_event(
-    recorded: std::sync::Arc<crate::stream::event::Recorded>,
+    recorded: std::sync::Arc<crate::runtime::event::Recorded>,
 ) -> Result<(), String> {
     let c_name = CString::new("event_marker").expect("kernel names have no NUL");
     let (context, done) = mps::submit_event(recorded);

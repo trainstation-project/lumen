@@ -12,7 +12,7 @@ pub(crate) struct PyStream {
     device: core::Device,
     /// 0 for lumen's stream; otherwise an external `cudaStream_t` as an integer.
     stream_id: usize,
-    inner: std::sync::Arc<dyn core::stream::Stream>,
+    inner: std::sync::Arc<dyn core::runtime::stream::Stream>,
 }
 
 impl PyStream {
@@ -21,7 +21,7 @@ impl PyStream {
     fn wait_host(&self) {
         #[cfg(lumen_cuda_linked)]
         if let (core::Device::Cuda(index), id @ 1..) = (self.device, self.stream_id) {
-            return core::stream::cuda::synchronize_external(index, id);
+            return core::runtime::stream::cuda::synchronize_external(index, id);
         }
 
         self.inner.synchronize();
@@ -49,7 +49,7 @@ impl PyStream {
     #[pyo3(signature = (device = None, *, stream_id = 0))]
     fn new(device: Option<&Bound<'_, PyAny>>, stream_id: usize) -> PyResult<Self> {
         let device = crate::device::python::resolve_device(device)?;
-        let inner = core::stream::stream_for(device).map_err(PyRuntimeError::new_err)?;
+        let inner = core::runtime::stream::stream_for(device).map_err(PyRuntimeError::new_err)?;
 
         if stream_id != 0 && !matches!(device, core::Device::Cuda(_)) {
             return Err(PyValueError::new_err(format!(
@@ -94,7 +94,7 @@ impl PyStream {
         if let (core::Device::Cuda(index), 0) = (other.device, other.stream_id)
             && self.device == other.device
         {
-            return core::stream::CudaStream { index }.wait(self.stream_id);
+            return core::runtime::stream::CudaStream { index }.wait(self.stream_id);
         }
 
         let other: &PyStream = &other;
@@ -158,7 +158,7 @@ unsafe extern "C" {
 /// The current `MTLCommandBuffer` as an integer pointer.
 #[cfg(lumen_mps_linked)]
 fn command_buffer() -> usize {
-    core::stream::mps::command_buffer() as usize
+    core::runtime::stream::mps::command_buffer() as usize
 }
 
 /// Without MPS there is no command buffer; never reached since `mps` errors first.
@@ -189,7 +189,7 @@ fn buffer_of(_t: &core::Tensor) -> PyResult<(usize, usize)> {
 /// Python `lumen.Event`: a marker recorded into a device's stream, optionally timed.
 #[pyclass(name = "Event", module = "lumen")]
 pub(crate) struct PyEvent {
-    inner: Box<dyn core::stream::Event>,
+    inner: Box<dyn core::runtime::event::Event>,
 }
 
 #[pymethods]
@@ -200,8 +200,8 @@ impl PyEvent {
     fn new(device: Option<&Bound<'_, PyAny>>, enable_timing: bool) -> PyResult<Self> {
         let device = crate::device::python::resolve_device(device)?;
 
-        let inner =
-            core::stream::event_for(device, enable_timing).map_err(PyRuntimeError::new_err)?;
+        let inner = core::runtime::event::event_for(device, enable_timing)
+            .map_err(PyRuntimeError::new_err)?;
 
         Ok(PyEvent { inner })
     }
@@ -259,7 +259,7 @@ impl PyEvent {
 #[cfg(lumen_cuda_linked)]
 #[pyclass(name = "CudaGraph", module = "lumen")]
 pub(crate) struct PyCudaGraph {
-    inner: core::stream::cuda::CudaGraph,
+    inner: core::runtime::stream::cuda::CudaGraph,
 }
 
 #[cfg(lumen_cuda_linked)]
@@ -275,7 +275,8 @@ impl PyCudaGraph {
             ));
         };
 
-        let inner = core::stream::cuda::CudaGraph::begin(index).map_err(PyRuntimeError::new_err)?;
+        let inner = core::runtime::stream::cuda::CudaGraph::begin(index)
+            .map_err(PyRuntimeError::new_err)?;
 
         Ok(PyCudaGraph { inner })
     }

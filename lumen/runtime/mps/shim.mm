@@ -1,4 +1,4 @@
-#include "../../stream/mps/mps.h"
+#include "../stream/mps/mps.h"
 #include "primitive_kernels.h"
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>

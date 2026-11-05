@@ -135,7 +135,7 @@ impl TritonStep {
                 }
             }
             (Primitive::HostWait, _) => {
-                crate::stream::stream_for(out.device())?.synchronize();
+                crate::runtime::stream::stream_for(out.device())?.synchronize();
 
                 match out.data_ptr() == inputs[0].data_ptr() {
                     true => Ok(()),

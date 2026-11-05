@@ -159,7 +159,7 @@ impl Step for TpuStep {
             unreachable!("a TPU plan runs on a TPU")
         };
 
-        let batch = crate::stream::tpu::Batch::new(index);
+        let batch = crate::runtime::stream::tpu::Batch::new(index);
         run()?;
         batch.run()
     }

@@ -978,8 +978,8 @@ fn tuned(
         let mut best = f64::INFINITY;
 
         for _ in 0..2 {
-            let mut start = crate::stream::event_for(device, true)?;
-            let mut end = crate::stream::event_for(device, true)?;
+            let mut start = crate::runtime::event::event_for(device, true)?;
+            let mut end = crate::runtime::event::event_for(device, true)?;
             start.record()?;
 
             for _ in 0..REPS {

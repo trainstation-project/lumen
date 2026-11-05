@@ -64,7 +64,7 @@ impl Launch for Cuda {
                 1,
                 1,
                 kernel.shared,
-                crate::stream::cuda::launch_stream(),
+                crate::runtime::stream::cuda::launch_stream(),
                 params.as_mut_ptr(),
                 std::ptr::null_mut(),
             )

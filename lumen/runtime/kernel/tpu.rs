@@ -10,7 +10,7 @@ use crate::codegen::tpu::GENERATED;
 use crate::codegen::utils::tpu::Tpu;
 use crate::codegen::utils::tpu::lowering::lowering;
 use crate::device::tpu::{error, ffi};
-use crate::stream::tpu::BATCHES;
+use crate::runtime::stream::tpu::BATCHES;
 
 /// One TPU launch: the device it runs on, the kernel's lowering module (or generated program) and spec, its
 /// buffers, extra scalars and host data.

@@ -24,6 +24,7 @@ pub trait Event: Send + Sync {
     /// Completion times of the last record, for events that report them on the host.
     fn marks(&self) -> Option<&Arc<Recorded>>;
     /// The event as `Any`, for downcasting to its backend type.
+    #[cfg_attr(not(lumen_cuda_linked), allow(dead_code))]
     fn as_any(&self) -> &dyn Any;
 
     /// Whether the event has been recorded.
@@ -32,6 +33,7 @@ pub trait Event: Send + Sync {
     }
 
     /// Whether the work before the event has finished; true for an unrecorded event.
+    #[cfg_attr(not(feature = "python"), allow(dead_code))]
     fn query(&self) -> bool {
         self.marks().is_none_or(|r| r.done())
     }
@@ -125,6 +127,7 @@ impl Recorded {
     }
 
     /// Whether completion has been recorded.
+    #[cfg_attr(not(feature = "python"), allow(dead_code))]
     fn done(&self) -> bool {
         self.times
             .lock()
