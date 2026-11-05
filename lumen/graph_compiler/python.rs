@@ -334,10 +334,10 @@ fn direct(
     let kernel = match found {
         Some(kernel) => kernel,
         None => {
-            let key = direct::key(&identity(), device, values);
+            let key = driver::key(&identity(), device, values);
             let mut nothing = false;
 
-            let kernel = direct::compiled(&key, || {
+            let kernel = driver::compiled(&key, || {
                 Python::attach(|py| {
                     let kwargs = PyDict::new(py);
                     kwargs.set_item("compile", true)?;
@@ -346,7 +346,7 @@ fn direct(
                     if info.is_none() {
                         nothing = true;
 
-                        return Ok(direct::Compiled {
+                        return Ok(driver::Compiled {
                             function: 0,
                             warps: 0,
                             shared: 0,
@@ -363,7 +363,7 @@ fn direct(
                         Vec<String>,
                     ) = info.extract()?;
 
-                    Ok(direct::Compiled {
+                    Ok(driver::Compiled {
                         function,
                         warps,
                         shared,
@@ -849,7 +849,7 @@ fn cuda_launch(
         };
 
         let values: Vec<Value> = tensors.iter().map(Value::of).collect();
-        let key = direct::key(name, device, &values);
+        let key = driver::key(name, device, &values);
         let widest = tensors
             .iter()
             .map(|t| t.dtype().size_of())
@@ -858,7 +858,7 @@ fn cuda_launch(
 
         // The kernel compiled for launch shape `(threads, step_bytes)`.
         let compiled = |(threads, step_bytes): Shape| {
-            direct::compiled(&format!("{key}|{threads}x{step_bytes}"), || {
+            driver::compiled(&format!("{key}|{threads}x{step_bytes}"), || {
                 let dtypes = tensors
                     .iter()
                     .map(|t| crate::codegen::utils::cuda::cute_type(t.dtype()))
@@ -876,7 +876,7 @@ fn cuda_launch(
                         .call1((name, source, dtypes, aligned, threads, step_bytes))?
                         .extract()?;
 
-                    Ok(direct::Compiled {
+                    Ok(driver::Compiled {
                         function,
                         warps,
                         shared,
@@ -969,7 +969,7 @@ fn tuned(
         .collect();
 
     // Seconds per launch of `kernel` on `blocks` blocks: the best of two timed batches after a warm-up.
-    let time = |kernel: &direct::Compiled, blocks: usize| -> Result<f64, String> {
+    let time = |kernel: &driver::Compiled, blocks: usize| -> Result<f64, String> {
         const REPS: usize = 10;
 
         Cuda::launch(CudaLaunch {
