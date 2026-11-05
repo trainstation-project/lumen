@@ -10,7 +10,7 @@ from cutlass import Boolean, Float32, Int32, Int64, const_expr
 from cutlass.base_dsl.enums import Arch
 from cutlass.experimental import primitives as prims
 
-import lumen.codegen.dot_general.cuda.utils as utils
+import lumen.kernels.cuda.utils as utils
 
 _operator_max = getattr(operator, "max", None)
 _operator_min = getattr(operator, "min", None)

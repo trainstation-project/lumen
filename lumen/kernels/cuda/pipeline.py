@@ -390,7 +390,7 @@ class PipelineStasAsync(PipelineAsyncOg):
     Differences from the stock split-agent pipelines:
 
     - The full barrier is a transaction barrier armed and credited inside the
-      data path (lumen.codegen.dot_general.cuda.reduce.cluster_reduce issues arrive_and_expect_tx and
+      data path (lumen.kernels.cuda.reduce.cluster_reduce issues arrive_and_expect_tx and
       the STAS stores, and waits on it with ``state.phase``), so
       producer_commit is a no-op and producer_get_barrier hands the raw
       barrier to the STAS issuer.

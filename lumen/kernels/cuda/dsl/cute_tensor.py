@@ -18,7 +18,7 @@ opaque no-op SSA boundary on packed f16/bf16 lanes.  This is useful when downstr
 would otherwise rematerialize a vector truncation for multiple consumers.
 
 ``tensor.clone()`` materializes into ``cute.make_rmem_tensor_like(src)``.
-``tensor.contiguous()`` mirrors ``lumen.codegen.dot_general.cuda.copy_utils.contiguous``.
+``tensor.contiguous()`` mirrors ``lumen.kernels.cuda.copy_utils.contiguous``.
 """
 
 from __future__ import annotations
@@ -134,7 +134,7 @@ def patch_cute_tensor() -> None:
     The patch is idempotent. CuTe's immutable ``TensorSSA.to`` already handles
     value conversion; this installs the analogous materializing conversion on
     mutable register-backed ``_Tensor`` fragments, plus a ``contiguous`` method
-    equivalent to :func:`lumen.codegen.dot_general.cuda.copy_utils.contiguous`, and a ``clone`` method
+    equivalent to :func:`lumen.kernels.cuda.copy_utils.contiguous`, and a ``clone`` method
     that copies into a matching compact rmem tensor.
     """
     tensor_cls = _cute_tensor._Tensor

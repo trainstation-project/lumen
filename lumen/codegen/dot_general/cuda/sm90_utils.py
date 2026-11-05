@@ -10,7 +10,7 @@ from cutlass.cute.nvgpu import warpgroup
 from cutlass.cutlass_dsl import Numeric, dsl_user_op
 from cutlass.utils import LayoutEnum
 
-from lumen.codegen.dot_general.cuda import copy_utils
+from lumen.kernels.cuda import copy_utils
 
 
 @dsl_user_op

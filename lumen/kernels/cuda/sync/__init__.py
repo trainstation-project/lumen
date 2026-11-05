@@ -2,7 +2,7 @@
 
 """Synchronization helpers for CuTe DSL kernels."""
 
-from lumen.codegen.dot_general.cuda.sync.barrier import (
+from lumen.kernels.cuda.sync.barrier import (
     GlobalSemaphore,
     Semaphore,
     release_add,

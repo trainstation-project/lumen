@@ -1,4 +1,5 @@
-"""CuTe DSL helpers for lumen's CUDA kernels: activations, dtype mapping, and grid-strided elementwise kernels."""
+"""CuTe DSL helpers for lumen's CUDA kernels: activations, dtype mapping, and grid-strided elementwise kernels; and
+QuACK's CuTe DSL helpers its GEMMs use (copies, layouts, pipelines, reductions, rounding, `sync`, `dsl`)."""
 
 from .activations import sigmoid, tanh
 from .constants import get_cute_dtype

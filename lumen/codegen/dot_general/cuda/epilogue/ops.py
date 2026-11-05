@@ -30,21 +30,21 @@ from cutlass.cute.nvgpu import warp
 from cutlass.cutlass_dsl import T, dsl_user_op
 from cutlass.experimental import primitives as prims
 
-import lumen.codegen.dot_general.cuda.copy_utils as copy_utils
-import lumen.codegen.dot_general.cuda.layout_utils as layout_utils
 import lumen.codegen.dot_general.cuda.sm90_utils as sm90_utils
-import lumen.codegen.dot_general.cuda.utils as utils
-from lumen.codegen.dot_general.cuda.compile_utils import div_for_dtype, fake_batched, make_fake_tensor
-from lumen.codegen.dot_general.cuda.cute_dsl_utils import torch2cute_dtype_map
-from lumen.codegen.dot_general.cuda.reduce import swap_shuffle_reduce
-from lumen.codegen.dot_general.cuda.rounding import (
+import lumen.kernels.cuda.copy_utils as copy_utils
+import lumen.kernels.cuda.layout_utils as layout_utils
+import lumen.kernels.cuda.utils as utils
+from lumen.codegen.dot_general.cuda.sm90_utils import partition_for_epilogue
+from lumen.kernels.cuda.compile_utils import div_for_dtype, fake_batched, make_fake_tensor
+from lumen.kernels.cuda.cute_dsl_utils import torch2cute_dtype_map
+from lumen.kernels.cuda.reduce import swap_shuffle_reduce
+from lumen.kernels.cuda.rounding import (
     SR_STORE_DTYPES,
     RoundingMode,
     convert_f32_frag_sr,
     epilogue_aux_out_sr_seed,
     epilogue_sr_seed,
 )
-from lumen.codegen.dot_general.cuda.sm90_utils import partition_for_epilogue
 
 
 def assume_stride_divisibility(tensor):
@@ -387,7 +387,7 @@ class EpiOp:
         """Type annotation for this op's EpilogueArguments field. ``const``
         reflects host_arg_form: a Constexpr[...] annotation makes the TVM-FFI
         converter emit NO runtime argument (value baked at trace, None at
-        call — see the converter patch in lumen.codegen.dot_general.cuda.cute_dsl_utils)."""
+        call — see the converter patch in lumen.kernels.cuda.cute_dsl_utils)."""
         return Optional[cute.Tensor]
 
     def host_arg_form(self, value):

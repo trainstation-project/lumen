@@ -12,15 +12,11 @@ from cutlass import Boolean, Int32, const_expr
 from cutlass.cute.nvgpu import cpasync
 from cutlass.utils import LayoutEnum
 
-import lumen.codegen.dot_general.cuda.copy_utils as copy_utils
-import lumen.codegen.dot_general.cuda.layout_utils as layout_utils
-import lumen.codegen.dot_general.cuda.utils as utils
-from lumen.codegen.dot_general.cuda import pipeline_checks
-from lumen.codegen.dot_general.cuda.cute_dsl_utils import ParamsBase
+import lumen.kernels.cuda.copy_utils as copy_utils
+import lumen.kernels.cuda.layout_utils as layout_utils
+import lumen.kernels.cuda.utils as utils
 from lumen.codegen.dot_general.cuda.epilogue.ops import DStore, EpiSmemBytes, TileLoad, TileStore, VecReduce
 from lumen.codegen.dot_general.cuda.gemm_config import SplitKMode
-from lumen.codegen.dot_general.cuda.pipeline import PipelineTmaAsync, PipelineTmaCpAsync
-from lumen.codegen.dot_general.cuda.sync import Semaphore
 from lumen.codegen.dot_general.cuda.tile_scheduler import (
     PersistenceMode,
     TileScheduler,
@@ -29,6 +25,10 @@ from lumen.codegen.dot_general.cuda.tile_scheduler import (
     VarlenMTileSchedulerArguments,
 )
 from lumen.codegen.dot_general.cuda.varlen_utils import VarlenManager
+from lumen.kernels.cuda import pipeline_checks
+from lumen.kernels.cuda.cute_dsl_utils import ParamsBase
+from lumen.kernels.cuda.pipeline import PipelineTmaAsync, PipelineTmaCpAsync
+from lumen.kernels.cuda.sync import Semaphore
 
 
 class NamedBarrierGemm(enum.IntEnum):
@@ -711,7 +711,7 @@ class GemmBase:
             finalizer_load_acc = load_acc_and_fold
         else:
             split_k_sem, ws_ptr = None, None
-        # Mixed static/dynamic test (lumen.codegen.dot_general.cuda.dsl.mixed_constexpr_if): the const_expr
+        # Mixed static/dynamic test (lumen.kernels.cuda.dsl.mixed_constexpr_if): the const_expr
         # prefix folds at trace time, so split_k == 1 / SEPARATE codegen is a bare
         # epilogue call with no dynamic if, while SERIAL/PARALLEL non-finalizing
         # splits commit raw partials and only the last split runs the epilogue.

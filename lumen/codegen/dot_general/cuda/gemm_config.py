@@ -276,7 +276,7 @@ def get_all_configs(
 
 def default_config(device) -> GemmConfig:
     """Per-arch default config (canonical home; gemm_interface re-exports)."""
-    from lumen.codegen.dot_general.cuda.cute_dsl_utils import get_device_capacity
+    from lumen.kernels.cuda.cute_dsl_utils import get_device_capacity
 
     return _default_config_for_cap(get_device_capacity(device)[0])
 

@@ -18,9 +18,9 @@ from cutlass.cutlass_dsl import dsl_user_op
 from cutlass.experimental import primitives as prims
 from cutlass.utils import LayoutEnum, block_copy
 
-from lumen.codegen.dot_general.cuda import layout_utils
-from lumen.codegen.dot_general.cuda.cute_dsl_utils import append_s2t_broadcast_mode
-from lumen.codegen.dot_general.cuda.utils import make_vector
+from lumen.kernels.cuda import layout_utils
+from lumen.kernels.cuda.cute_dsl_utils import append_s2t_broadcast_mode
+from lumen.kernels.cuda.utils import make_vector
 
 Sm100MmaPeerBitMask = 0xFEFFFFFF
 _TCGEN05_TMEM_OPS = (
@@ -227,7 +227,7 @@ def sr_cvt_copy(
     assert isinstance(src.iterator, cute.Pointer) and src.memspace == cute.AddressSpace.rmem
     from cutlass.cute.tensor import TensorSSA
 
-    from lumen.codegen.dot_general.cuda.rounding import convert_f32_to_bf16_sr, convert_f32_to_f16_sr
+    from lumen.kernels.cuda.rounding import convert_f32_to_bf16_sr, convert_f32_to_f16_sr
 
     assert const_expr(
         dst.element_type in (cutlass.BFloat16, cutlass.Float16)

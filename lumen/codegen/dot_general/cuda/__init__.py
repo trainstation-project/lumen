@@ -1,15 +1,15 @@
-"""QuACK's SM80 GEMM (https://github.com/Dao-AILab/quack, commit bb0e6b2, Apache-2.0) and the quack modules it
-imports, their `quack` imports rewritten to this package; this `__init__` drops quack's rmsnorm, softmax and
-cross_entropy re-exports."""
+"""QuACK's SM80 GEMM (https://github.com/Dao-AILab/quack, commit bb0e6b2, Apache-2.0) and the quack GEMM modules it
+imports, their `quack` imports rewritten to this package and, for QuACK's CuTe DSL helpers, to `lumen.kernels.cuda`;
+this `__init__` drops quack's rmsnorm, softmax and cross_entropy re-exports."""
 
 __version__ = "0.6.5"
 
 import os
 
-import lumen.codegen.dot_general.cuda.dsl as _quack_dsl  # noqa: F401
+import lumen.kernels.cuda.dsl as _quack_dsl  # noqa: F401
 
 if os.environ.get("CUTE_DSL_PTXAS_PATH", None) is not None:
-    from lumen.codegen.dot_general.cuda.dsl import cute_dsl_ptxas as _cute_dsl_ptxas
+    from lumen.kernels.cuda.dsl import cute_dsl_ptxas as _cute_dsl_ptxas
 
     # Patch before importing any modules that instantiate CuTeDSL. The patch
     # forces PTX dumping so the CUDA library loader can replace CUTLASS DSL's
@@ -19,7 +19,7 @@ if os.environ.get("CUTE_DSL_PTXAS_PATH", None) is not None:
 # Pythonic CuTe tensor indexing (`:` / `...` sugar) is installed as a side effect
 # of importing `quack.dsl`, which imports `quack.dsl.cute_tensor_indexing` and
 # monkey-patches CuTe's tensor classes process-wide.
-from lumen.codegen.dot_general.cuda.rounding import RoundingMode  # noqa: E402
+from lumen.kernels.cuda.rounding import RoundingMode  # noqa: E402
 
 __all__ = [
     "RoundingMode",

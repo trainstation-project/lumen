@@ -53,7 +53,7 @@ Rules:
 
 Like flash-attention's block-sparse loop patch, this intentionally
 monkey-patches the installed CuTe DSL at import time rather than editing
-site-packages; ``lumen.codegen.dot_general.cuda.dsl.__init__`` installs it before any quack kernel is
+site-packages; ``lumen.kernels.cuda.dsl.__init__`` installs it before any quack kernel is
 preprocessed.
 """
 

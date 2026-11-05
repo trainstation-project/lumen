@@ -7,8 +7,8 @@ import cutlass
 import cutlass.cute as cute
 from cutlass import Boolean, Int32, const_expr
 
-from lumen.codegen.dot_general.cuda import copy_utils
-from lumen.codegen.dot_general.cuda.cute_dsl_utils import mlir_namedtuple
+from lumen.kernels.cuda import copy_utils
+from lumen.kernels.cuda.cute_dsl_utils import mlir_namedtuple
 
 
 # Grouping arguments together that should be passed to __call__

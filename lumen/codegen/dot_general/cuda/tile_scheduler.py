@@ -10,10 +10,10 @@ from cutlass import Boolean, Float32, Int32, Uint32, const_expr
 from cutlass.cute.experimental import iket
 from cutlass.experimental import primitives as prims
 
-import lumen.codegen.dot_general.cuda.utils as utils
-from lumen.codegen.dot_general.cuda.cute_dsl_utils import mlir_namedtuple
-from lumen.codegen.dot_general.cuda.fast_math import FastDivmod
-from lumen.codegen.dot_general.cuda.pipeline import PipelineStateWAdvance
+import lumen.kernels.cuda.utils as utils
+from lumen.kernels.cuda.cute_dsl_utils import mlir_namedtuple
+from lumen.kernels.cuda.fast_math import FastDivmod
+from lumen.kernels.cuda.pipeline import PipelineStateWAdvance
 
 
 class RasterOrderOption(IntEnum):
