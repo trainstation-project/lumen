@@ -9,7 +9,6 @@ pub(crate) mod attention;
 #[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
 pub(crate) mod chunked_cross_entropy;
 #[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
-pub(crate) mod clamp_indices;
 pub(crate) mod cse;
 pub(crate) mod diamonds;
 pub(crate) mod dot;

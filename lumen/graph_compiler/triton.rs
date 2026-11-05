@@ -5,7 +5,6 @@ use super::passes::Module;
 use super::passes::alone::Alone;
 use super::passes::attention::{FlashAttention, FlashAttentionBackward};
 use super::passes::chunked_cross_entropy::ChunkedCrossEntropy;
-use super::passes::clamp_indices::ClampIndices;
 use super::passes::dot::rows::triton::WideRows;
 use super::passes::dot::split_k::triton::SplitK;
 use super::passes::dot::strength::DotStrength;
@@ -150,11 +149,6 @@ impl Passes for TritonModule<'_> {
             config.fuse && config.fused_linear_cross_entropy,
             LinearCrossEntropy,
         )
-    }
-
-    /// With `safe_kernels`.
-    fn clamp_indices(config: &CompilerConfig) -> Pass<Self> {
-        when(config.safe_kernels, ClampIndices)
     }
 
     /// Always.

@@ -89,8 +89,6 @@ compiler_config! {
     fuse, set_fuse: bool = true;
     /// Time candidate kernel configurations and keep the fastest.
     autotune, set_autotune: bool = true;
-    /// Clamp indices kernels read (off: indices are read as given).
-    safe_kernels, set_safe_kernels: bool = false;
     /// Merge independent small kernels into one launch.
     horizontal_fusion, set_horizontal_fusion: bool = true;
     /// Write a fusion's values read elsewhere as extra outputs.

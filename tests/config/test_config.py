@@ -44,7 +44,7 @@ def test_compiler_flags_defaults(compiler):
     assert compiler.contraction_epilogues is True and compiler.horizontal_fusion is True
     assert compiler.online_softmax is True and compiler.row_cache == 8
     assert compiler.split_k is True and compiler.deterministic is False
-    assert compiler.fused_linear_cross_entropy is True and compiler.safe_kernels is False
+    assert compiler.fused_linear_cross_entropy is True
     assert compiler.autotune is True and compiler.neural_engine is False
     assert (compiler.use_triton_backend, compiler.cuda_graphs) == (False, True)
     assert compiler.linear_reordering is False and compiler.preserve_precision is False
@@ -109,13 +109,6 @@ def test_compiler_flags_change_what_compiles(compiler):
     assert "maxima" in online()["fusion"]["source"]
     compiler.online_softmax = False
     assert "maxima" not in online()["fusion"]["source"]
-    compiler.reset()
-
-    take = lambda x, i: x[i] * 2.0  # noqa: E731
-    table, ids = lumen.empty([16, 8], device="meta"), lumen.empty([4], dtype="int64", device="meta")
-    assert "select" not in " ".join(_labels(take, table, ids))
-    compiler.safe_kernels = True
-    assert "select" in " ".join(_labels(take, table, ids))
     compiler.reset()
 
     loss = lambda h, w, t: F.cross_entropy(F.matmul(h, w.t(), "float32", "float32"), t)  # noqa: E731
