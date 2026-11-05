@@ -319,7 +319,7 @@ impl Plan {
     /// Whether every step reading input `i` accepts it with `strides`, so it needn't be made
     /// contiguous first.
     fn reads_strided(&self, i: usize, strides: &[usize]) -> bool {
-        if self.triton.is_some() {
+        if self.triton {
             let at = Buffer::Input(i);
 
             return !self.outputs_at.contains(&at)
@@ -401,7 +401,7 @@ impl Plan {
         let executor = if cfg!(lumen_mps_linked) && device == Device::Mps(0) {
             Device::Mps(0)
         } else if cfg!(lumen_tpu_linked) && matches!(device, Device::Tpu(_))
-            || (self.triton.is_some() || self.cuda) && matches!(device, Device::Cuda(_))
+            || (self.triton || self.cuda) && matches!(device, Device::Cuda(_))
         {
             device
         } else {
@@ -482,7 +482,7 @@ impl Plan {
         };
 
         if executor != Device::Mps(0)
-            && self.triton.is_none()
+            && !self.triton
             && self
                 .steps
                 .iter()
@@ -663,8 +663,6 @@ impl Plan {
                         _ => tensor(buffer).view_bytes(0, ty.dtype, &ty.shape),
                     };
 
-                    let kernels = self.triton.as_deref().unwrap_or_default();
-
                     // A value placed in a larger buffer (a slice read in place, an in-place
                     // concatenate's slot) is read or written through its offset and strides there.
                     let strided = |(value, at): (&(Buffer, TensorType), &Option<View>)| match at {
@@ -696,7 +694,10 @@ impl Plan {
 
                     let out = outputs.next().expect("a step's output");
                     let outs: Vec<Tensor> = outputs.collect();
-                    let kernel = kernels.get(at).and_then(Option::as_ref);
+                    let kernel = step
+                        .kernel
+                        .as_deref()
+                        .and_then(|k| k.downcast_ref::<crate::codegen::triton::Kernel>());
                     let run = || match self.cuda {
                         true => crate::graph_compiler::cuda::run(step, &inputs, &out, &outs),
                         false => {

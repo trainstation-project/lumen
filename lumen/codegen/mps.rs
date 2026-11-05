@@ -3,6 +3,7 @@
 //! elementwise) each fused body lowers to.
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use crate::autotune::mps::Tunable;
 use crate::codegen::attention::AttentionCodegen;
@@ -16,26 +17,18 @@ use crate::codegen::reduction::ReductionCodegen;
 use crate::codegen::row::RowCodegen;
 use crate::codegen::utils::mps::Mps;
 use crate::graph::{Graph, Primitive};
-use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::common::attention::{self, Strides};
 use crate::graph_compiler::common::place_views;
-use crate::graph_compiler::mps::{Kernel, PENDING, record_launch};
-use crate::plan::{Plan, Step};
+use crate::graph_compiler::mps::{Kernel, compile_routed, record_launch};
+use crate::graph_compiler::{CompilerConfig, Options};
+use crate::plan::{Buffer, Plan, Step};
 
-/// Generated Metal sources, and the elementwise kernels the autotuner may regenerate, by kernel name.
-pub(crate) type Generated = (
-    BTreeMap<String, String>,
-    BTreeMap<String, crate::autotune::mps::Tunable>,
-);
-
-/// Generates each pending fusion step's kernel in `plan`, writing its outputs through the step's output views,
-/// and names the step after it.
-pub(crate) fn codegen(
-    plan: &mut Plan,
-    kernels: &[Kernel],
-    config: &CompilerConfig,
-) -> Result<Generated, String> {
-    let (mut sources, mut tunable) = (BTreeMap::new(), BTreeMap::new());
+/// Generates and compiles each pending fusion step's kernel in `plan`, writing its outputs through the step's
+/// output views and reading its by-value inputs as scalars, and names the step after it. An elementwise
+/// fusion keeps what the autotuner needs to regenerate it as its step's kernel.
+pub(crate) fn codegen(plan: &mut Plan, options: &Options) -> Result<(), String> {
+    let config = &options.config;
+    let mut sources = BTreeMap::new();
 
     for step in plan.steps_mut() {
         // Output views, keyed by output index, of a fusion writing straight into a placed buffer.
@@ -44,6 +37,12 @@ pub(crate) fn codegen(
             .iter()
             .enumerate()
             .filter_map(|(k, v)| v.as_ref().map(|v| (k, (v.offset, v.strides.clone()))))
+            .collect();
+
+        let by_value: Vec<bool> = step
+            .inputs
+            .iter()
+            .map(|(b, _)| matches!(b, Buffer::Scalar(_)))
             .collect();
 
         let Primitive::Fusion { name, body, .. } = &mut step.primitive else {
@@ -60,22 +59,14 @@ pub(crate) fn codegen(
             continue;
         }
 
-        let Some(k) = name.strip_prefix(PENDING) else {
+        let Some(requested) = Kernel::of(name) else {
             continue;
         };
 
-        let k: usize = k.parse().expect("a requested kernel's index");
-
-        let (kernel, source) = match &kernels[k] {
-            Kernel::Fusion(by_value) => {
-                let (kernel, source) = kernel(body, by_value, config, &views, None);
-
-                let tuned = Tunable {
-                    by_value: by_value.clone(),
-                    views,
-                };
-
-                tunable.insert(kernel.clone(), tuned);
+        let (kernel, source) = match requested {
+            Kernel::Fusion => {
+                let (kernel, source) = kernel(body, &by_value, config, &views, None);
+                step.kernel = Some(Arc::new(Tunable { by_value, views }));
                 (kernel, source)
             }
             Kernel::Attention => {
@@ -100,7 +91,7 @@ pub(crate) fn codegen(
         *name = kernel;
     }
 
-    Ok((sources, tunable))
+    compile_routed(sources)
 }
 
 /// Default launch tuning when `body` lowers to the elementwise kernel, else `None`.

@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use super::{Kernel, MpsModule, PENDING, fusion, request};
+use super::{Kernel, MpsModule, fusion, request};
 use crate::codegen::mps::writes_views;
 use crate::graph::{Node, Primitive};
 use crate::graph_compiler::common::alone::wrapped;
@@ -27,7 +27,7 @@ impl<'a> CompilerPass<MpsModule<'a>> for Concats {
         let valid = in_place_concats(
             &m.graph,
             |c, k, p, index| slot_writes(module, c, k, p, index, false),
-            |_, _, p, _| slot_worth(module, p),
+            |_, _, p, _| slot_worth(p),
         );
         let mut unmarked = false;
 
@@ -42,8 +42,6 @@ impl<'a> CompilerPass<MpsModule<'a>> for Concats {
         }
 
         if unmarked {
-            let kernels = &mut m.kernels;
-
             let concatenate = |n: &crate::graph::Node| {
                 matches!(
                     n.primitive,
@@ -54,22 +52,17 @@ impl<'a> CompilerPass<MpsModule<'a>> for Concats {
                 )
             };
 
-            m.graph = wrapped(&m.graph, &[], concatenate, |_, _| {
-                request(kernels, Kernel::Fusion(Vec::new()))
-            });
+            m.graph = wrapped(&m.graph, &[], concatenate, |_, _| request(Kernel::Fusion));
         }
 
         Ok(())
     }
 }
 
-/// The kernel request behind `producer` when it is a still-pending fusion.
-fn pending<'k>(kernels: &'k [Kernel], producer: &Node) -> Option<&'k Kernel> {
+/// The kind of kernel `producer` awaits when it is a still-pending fusion.
+fn pending(producer: &Node) -> Option<Kernel> {
     match &producer.primitive {
-        Primitive::Fusion { name, .. } => name
-            .strip_prefix(PENDING)
-            .and_then(|k| k.parse::<usize>().ok())
-            .map(|k| &kernels[k]),
+        Primitive::Fusion { name, .. } => Kernel::of(name),
         _ => None,
     }
 }
@@ -85,14 +78,14 @@ pub(super) fn slot_writes(
     index: usize,
     before_fusion: bool,
 ) -> bool {
-    match (pending(&m.kernels, producer), &producer.primitive) {
+    match (pending(producer), &producer.primitive) {
         (Some(Kernel::AttentionBackward), Primitive::Fusion { body, .. }) => {
             let atomic = body.outputs().len() == 3 && index == 2;
             let at = m.graph.slot(concat, k);
             let views = HashMap::from([(index, (at.offset, at.strides))]);
             !atomic && attention::backward_of_body_into(body, views).is_some()
         }
-        (Some(Kernel::Fusion(_)), Primitive::Fusion { body, .. }) => writes_views(body),
+        (Some(Kernel::Fusion), Primitive::Fusion { body, .. }) => writes_views(body),
         (None, p) if before_fusion => {
             let layout = matches!(
                 p,
@@ -110,9 +103,6 @@ pub(super) fn slot_writes(
 
 /// Whether an operand `producer` writes into its slot is worth placing its concatenation for: the attention
 /// backward kernel's are (its gradients land side by side), others alone aren't.
-pub(super) fn slot_worth(m: &MpsModule<'_>, producer: &Node) -> bool {
-    matches!(
-        pending(&m.kernels, producer),
-        Some(Kernel::AttentionBackward)
-    )
+pub(super) fn slot_worth(producer: &Node) -> bool {
+    matches!(pending(producer), Some(Kernel::AttentionBackward))
 }

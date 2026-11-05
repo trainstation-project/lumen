@@ -2,15 +2,14 @@
 //! memo; the runtime lowers it once per device and launches it.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::codegen::elementwise::ElementwiseCodegen;
 use crate::codegen::utils::tpu::Tpu;
 use crate::graph::Primitive;
+use crate::graph_compiler::Options;
 use crate::plan::{Plan, Step};
 use crate::runtime::tpu::GENERATED;
-
-/// Memo key of a step's TPU kernel.
-pub(crate) const KERNEL: u64 = u64::MAX;
 
 /// How a kernel's buffers are ordered among a step's input and output buffers.
 #[derive(Clone, Copy)]
@@ -126,10 +125,14 @@ pub(crate) fn kernel(step: &Step) -> Result<Option<Kernel>, String> {
     }
 }
 
-/// Generates the kernel of each step of `plan`, so runs only launch them.
-pub(crate) fn codegen(plan: &Plan) {
-    for step in plan.steps() {
-        // A step its kernel fails on keeps failing, with the same error, when it runs.
-        let _ = step.memo.get(KERNEL, || kernel(step));
+/// Generates the kernel of each step of `plan`, kept on the step, so runs only launch them. A step its kernel
+/// fails on keeps none and fails, with the same error, when it runs.
+pub(crate) fn codegen(plan: &mut Plan, _: &Options) -> Result<(), String> {
+    for step in plan.steps_mut() {
+        if let Ok(Some(kernel)) = kernel(step) {
+            step.kernel = Some(Arc::new(kernel));
+        }
     }
+
+    Ok(())
 }

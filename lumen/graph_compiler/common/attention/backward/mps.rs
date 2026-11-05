@@ -13,6 +13,6 @@ impl AttentionBackwards for MpsModule<'_> {
 
     /// Requests an attention backward kernel, returning its pending name.
     fn backward_kernel(&mut self) -> String {
-        request(&mut self.kernels, Kernel::AttentionBackward)
+        request(Kernel::AttentionBackward)
     }
 }

@@ -511,6 +511,7 @@ impl Plan {
                     sources
                 },
                 tuned: None,
+                kernel: None,
                 memo: Memo::default(),
             })
             .collect();
@@ -531,6 +532,7 @@ impl Plan {
                 scope: &[],
                 sources: Vec::new(),
                 tuned: None,
+                kernel: None,
                 memo: Memo::default(),
             });
         }
@@ -548,7 +550,7 @@ impl Plan {
             packed: Vec::new(),
             interleaved: Vec::new(),
             staged: None,
-            triton: None,
+            triton: false,
             cuda: false,
             #[cfg(lumen_mps_linked)]
             launches: OnceLock::new(),
@@ -578,7 +580,7 @@ impl Plan {
             packed,
             interleaved,
             staged: Some(Box::new(staged)),
-            triton: None,
+            triton: false,
             cuda: false,
             #[cfg(lumen_mps_linked)]
             launches: OnceLock::new(),

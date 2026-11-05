@@ -7,6 +7,7 @@ use crate::codegen::elementwise::ElementwiseCodegen;
 use crate::codegen::elementwise::cuda::Layouts;
 use crate::codegen::utils::cuda::Cuda;
 use crate::graph::{Graph, Primitive, TensorType};
+use crate::graph_compiler::Options;
 use crate::plan::{Plan, Step};
 
 /// The kernel `step` runs as for tensors laid out as `layouts`, generated once per layout and kept in the
@@ -57,10 +58,12 @@ fn extent(shape: &[usize], strides: &[usize]) -> usize {
     }
 }
 
-/// Generates each step's kernel for the layouts `plan` gives its tensors, so its launches find it in the
-/// step's memo; tensors laid out otherwise when it runs get theirs then. A step its kernel fails on fails,
-/// with the same error, when it runs.
-pub(crate) fn codegen(plan: &Plan) {
+/// Marks `plan` as the CUDA backend's and generates each step's kernel for the layouts the plan gives its
+/// tensors, kept in the step's memo by layout so its launches find it; tensors laid out otherwise when it runs
+/// get theirs then. A step its kernel fails on fails, with the same error, when it runs.
+pub(crate) fn codegen(plan: &mut Plan, _: &Options) -> Result<(), String> {
+    plan.cuda = true;
+
     for step in plan.steps() {
         let outputs = std::iter::once(&step.output).chain(&step.extra_outputs);
 
@@ -84,6 +87,8 @@ pub(crate) fn codegen(plan: &Plan) {
 
         let _ = generated(step, layouts);
     }
+
+    Ok(())
 }
 
 /// The body of a copy of `x` reshaped to `shape`: its input, reshaped, its output.

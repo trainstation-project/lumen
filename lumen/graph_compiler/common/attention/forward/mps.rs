@@ -20,6 +20,6 @@ impl Attentions for MpsModule<'_> {
 
     /// Requests an attention kernel, returning its pending name.
     fn kernel(&mut self) -> String {
-        request(&mut self.kernels, Kernel::Attention)
+        request(Kernel::Attention)
     }
 }
