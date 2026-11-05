@@ -304,7 +304,7 @@ impl PyGraph {
     /// second dot and output values (the output its rounding cast's when it narrows the dot), the softmax
     /// max/sum, the score chain, causal mask, dropout and member nodes.
     fn attentions<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
-        use crate::graph_compiler::common::attention::{Score, traced};
+        use crate::graph_compiler::passes::attention::{Score, traced};
         let nodes = self.inner.nodes();
 
         traced(&self.inner)
@@ -358,7 +358,7 @@ impl PyGraph {
     /// alone reads), `weight` (or None), output `out`, each row's `rms` (its `1 / rms` where `inverse`), and
     /// the `members` computed between them.
     fn rms_norms<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyDict>>> {
-        crate::graph_compiler::common::rms_norm::rms_norms(&self.inner)
+        crate::graph_compiler::passes::rms_norm::rms_norms(&self.inner)
             .into_iter()
             .map(|r| {
                 let d = PyDict::new(py);

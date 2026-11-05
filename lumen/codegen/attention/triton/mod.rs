@@ -16,7 +16,7 @@ use crate::codegen::emitter::triton::Emitter;
 use crate::codegen::store::triton::load;
 use crate::codegen::utils::triton::{Triton, constant, indented, named, triton_type};
 use crate::graph::Graph;
-use crate::graph_compiler::common::attention::{
+use crate::graph_compiler::passes::attention::{
     Access, Attention, Backward, Dropout, Score, Strides, Term,
 };
 use crate::tensor::contiguous_strides;

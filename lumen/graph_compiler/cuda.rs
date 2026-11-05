@@ -4,10 +4,11 @@
 
 use std::sync::OnceLock;
 
-use super::common::alone::{Alone, Lone};
-use super::common::fusion::{Backend, fuse};
 use super::config::CompilerConfig;
-use super::pass::{CompilerPass, Module, Pipeline};
+use super::passes::alone::{Alone, Lone};
+use super::passes::fusion::{Backend, fuse};
+use super::passes::{CompilerPass, Module};
+use super::pipeline::Pipeline;
 use super::{Options, plan_options};
 use crate::codegen::elementwise::cuda::Layouts;
 use crate::codegen::utils::cuda::cute_type;

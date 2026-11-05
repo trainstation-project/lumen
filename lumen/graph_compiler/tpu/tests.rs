@@ -109,8 +109,8 @@ fn rows_fuse_where_what_others_read_of_them_is_written() {
         crate::codegen::row::tpu::fits,
     );
 
-    let rows = crate::graph_compiler::common::diamonds::diamonds(&g, fusible);
-    let fused = crate::graph_compiler::common::diamonds::fused(&g, &rows, fusible, fits);
+    let rows = crate::graph_compiler::passes::diamonds::diamonds(&g, fusible);
+    let fused = crate::graph_compiler::passes::diamonds::fused(&g, &rows, fusible, fits);
 
     let inputs: Vec<Tensor> = (0..2)
         .map(|k| {

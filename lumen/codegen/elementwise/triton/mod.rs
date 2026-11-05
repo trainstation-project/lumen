@@ -13,7 +13,7 @@ use crate::codegen::emitter::Emit;
 use crate::codegen::emitter::triton::Emitter;
 use crate::codegen::utils::triton::*;
 use crate::graph::Graph;
-use crate::graph_compiler::common::horizontal::segments;
+use crate::graph_compiler::passes::horizontal::segments;
 
 /// Triton elementwise fusions: the fixed `elementwise_kernel` (lumen.codegen.elementwise.triton.kernel) runs
 /// a generated `BODY` over blocks of each grid segment; the body loads and stores through helpers for its

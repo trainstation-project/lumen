@@ -16,7 +16,7 @@ use crate::codegen::emitter::mps::Emitter;
 use crate::codegen::store::mps::written;
 use crate::codegen::utils::mps::*;
 use crate::graph::Graph;
-use crate::graph_compiler::common::horizontal::segments;
+use crate::graph_compiler::passes::horizontal::segments;
 
 /// Metal elementwise fusions: one kernel a fusion running the fixed `elementwise` loop (`kernel.metal`) over a
 /// generated body functor a grid segment, its outputs stored through their views and its elements split

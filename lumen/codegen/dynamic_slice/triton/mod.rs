@@ -20,7 +20,7 @@ impl DynamicSliceCodegen for Triton {
     /// stays in bounds; element `BLOCK` of every update is written, except where a later update
     /// overlapping it writes over it.
     fn updates(body: &Graph, layouts: &Tensors) -> Result<(String, String), String> {
-        let starts: Vec<Vec<i64>> = crate::graph_compiler::common::updates::starts(body)
+        let starts: Vec<Vec<i64>> = crate::graph_compiler::passes::updates::starts(body)
             .into_iter()
             .map(|(_, s)| s)
             .collect();
@@ -59,7 +59,7 @@ impl DynamicSliceCodegen for Triton {
         writeln!(code, "    at = {at}").unwrap();
 
         let chain =
-            crate::graph_compiler::common::updates::overlaps(&x.shape, &update.shape, &starts);
+            crate::graph_compiler::passes::updates::overlaps(&x.shape, &update.shape, &starts);
 
         for (k, (start, later)) in chain.iter().enumerate() {
             let offset: usize = (0..rank).map(|d| start[d] * strides[d]).sum();

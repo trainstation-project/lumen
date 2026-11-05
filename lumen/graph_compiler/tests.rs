@@ -1,5 +1,5 @@
 //! Tests for the shared graph compiler passes: CSE, simplification, host stages and the pass pipeline.
-use super::common::cse::cse;
+use super::passes::cse::cse;
 use crate::graph::Primitive::*;
 use crate::graph::{Graph, Primitive, TensorType, Var};
 use crate::plan::tests::data;
@@ -195,7 +195,7 @@ fn algebraic_simplification() {
 
     let b = apply(&mut g, outer, &[b]);
     g.set_outputs(&[r, t, b]).unwrap();
-    let simplified = super::common::simplify::simplify_with(&g, false);
+    let simplified = super::passes::simplify::simplify_with(&g, false);
 
     assert_eq!(
         names(&simplified),
@@ -230,16 +230,16 @@ fn transposes_of_dots_swap_their_operands() {
 
     let inputs = [data(&[4, 6], 1), data(&[6, 5], 2)];
     let g = build(false);
-    let swapped = super::common::simplify::simplify_with(&g, true);
+    let swapped = super::passes::simplify::simplify_with(&g, true);
     assert_eq!(names(&swapped), ["dot_general"], "{swapped}");
     same_values(&g, &swapped, &inputs);
 
     assert_eq!(
-        names(&super::common::simplify::simplify_with(&g, false)),
+        names(&super::passes::simplify::simplify_with(&g, false)),
         ["dot_general", "transpose"]
     );
 
-    let twice = super::common::simplify::simplify_with(&build(true), true);
+    let twice = super::passes::simplify::simplify_with(&build(true), true);
     assert_eq!(names(&twice), ["dot_general", "transpose"], "{twice}");
 }
 
@@ -277,16 +277,16 @@ fn rounding_casts_fold_into_their_dots() {
 
     for reshaped in [false, true] {
         let g = build(reshaped, false);
-        let folded = super::common::simplify::simplify_with(&g, true);
+        let folded = super::passes::simplify::simplify_with(&g, true);
         let dot = &folded.nodes()[0];
         assert_eq!(folded.type_of(dot.output).dtype, DType::BF16, "{folded}");
         assert_eq!(names(&folded).len(), 1 + usize::from(reshaped), "{folded}");
 
-        let unfolded = super::common::simplify::simplify_with(&g, false);
+        let unfolded = super::passes::simplify::simplify_with(&g, false);
         assert!(names(&unfolded).contains(&"cast"), "{unfolded}");
     }
 
-    let twice = super::common::simplify::simplify_with(&build(false, true), true);
+    let twice = super::passes::simplify::simplify_with(&build(false, true), true);
     assert_eq!(names(&twice), ["dot_general", "cast"], "{twice}");
 }
 
@@ -308,7 +308,7 @@ fn rearranges_move_past_elementwise_primitives() {
     let a = apply(&mut g, Mul, &[a, two]);
     let a = apply(&mut g, Exp, &[a]);
     g.set_outputs(&[a]).unwrap();
-    let moved = super::common::simplify::simplify_with(&g, true);
+    let moved = super::passes::simplify::simplify_with(&g, true);
 
     assert_eq!(
         names(&moved),
@@ -319,7 +319,7 @@ fn rearranges_move_past_elementwise_primitives() {
     same_values(&g, &moved, &[data(&[2, 3], 1), data(&[2, 3], 2)]);
 
     assert_eq!(
-        names(&super::common::simplify::simplify_with(&g, false)),
+        names(&super::passes::simplify::simplify_with(&g, false)),
         ["full", "transpose", "transpose", "add", "mul", "exp"]
     );
 }
@@ -341,7 +341,7 @@ fn casts_move_past_layout_primitives() {
     let w = widened(&mut g);
     let r = apply(&mut g, Reshape { new_sizes: vec![6] }, &[w]);
     g.set_outputs(&[r]).unwrap();
-    let moved = super::common::simplify::simplify_with(&g, true);
+    let moved = super::passes::simplify::simplify_with(&g, true);
     assert_eq!(names(&moved), ["cast", "reshape", "cast"], "{moved}");
     same_values(&g, &moved, &inputs);
     let mut g = Graph::new();
@@ -363,7 +363,7 @@ fn casts_move_past_layout_primitives() {
     let n = apply(&mut g, cast(DType::BF16), &[s]);
     let o = apply(&mut g, cast(DType::F32), &[n]);
     g.set_outputs(&[o]).unwrap();
-    let moved = super::common::simplify::simplify_with(&g, true);
+    let moved = super::passes::simplify::simplify_with(&g, true);
 
     assert_eq!(
         names(&moved),
@@ -392,7 +392,7 @@ fn casts_move_past_layout_primitives() {
         );
 
         g.set_outputs(&[cat]).unwrap();
-        let moved = super::common::simplify::simplify_with(&g, true);
+        let moved = super::passes::simplify::simplify_with(&g, true);
         assert_eq!(names(&moved), want, "{moved}");
         same_values(&g, &moved, &inputs);
     }
@@ -506,8 +506,9 @@ fn ops_on_host_and_device_values_raise() {
 #[test]
 #[cfg_attr(miri, ignore = "file I/O, which Miri isolates")]
 fn a_pipeline_runs_its_passes_in_order_and_dumps_each() {
-    use super::common::cse::Cse;
-    use super::pass::{CompilerPass, GraphModule, Pipeline};
+    use super::passes::CompilerPass;
+    use super::passes::cse::Cse;
+    use super::pipeline::{GraphModule, Pipeline};
     use super::{CompilerConfig, Options};
 
     /// Test pass that negates the graph's first output.
@@ -576,7 +577,7 @@ fn a_pipeline_runs_its_passes_in_order_and_dumps_each() {
 /// `Strides::of` keeps only the operands not laid out contiguously in their own buffers.
 #[test]
 fn attention_strides_record_only_strided_operands() {
-    use super::common::attention::Strides;
+    use super::passes::attention::Strides;
     let mut g = Graph::new();
     let a = g.input(ty(&[2, 3]));
     let b = g.input(ty(&[2, 3]));
@@ -653,7 +654,7 @@ fn row_scaled_matmul(extra_output: bool) -> Graph {
 /// program's to bfloat16 rounding.
 #[test]
 fn row_scale_moves_past_its_matmul() {
-    use super::common::linear_reordering::linear_reordering;
+    use super::passes::linear_reordering::linear_reordering;
 
     let g = row_scaled_matmul(false);
     let out = linear_reordering(&g, None);
@@ -696,7 +697,7 @@ fn row_scale_moves_past_its_matmul() {
 /// division; the values the traced program's to float32 rounding.
 #[test]
 fn row_division_moves_past_its_matmul() {
-    use super::common::linear_reordering::linear_reordering;
+    use super::passes::linear_reordering::linear_reordering;
 
     let mut g = Graph::new();
     let x = g.input(ty(&[8, 32]));
@@ -734,7 +735,7 @@ fn row_division_moves_past_its_matmul() {
 /// and stays.
 #[test]
 fn shared_lhs_and_column_scales_stay() {
-    use super::common::linear_reordering::linear_reordering;
+    use super::passes::linear_reordering::linear_reordering;
 
     let g = row_scaled_matmul(true);
     assert_eq!(names(&linear_reordering(&g, None)), names(&g));
@@ -762,7 +763,7 @@ fn shared_lhs_and_column_scales_stay() {
 /// rounding.
 #[test]
 fn column_scale_of_the_weight_moves_past_its_matmul() {
-    use super::common::linear_reordering::linear_reordering;
+    use super::passes::linear_reordering::linear_reordering;
 
     let mut g = Graph::new();
     let x = g.input(ty(&[8, 32]));
@@ -909,7 +910,7 @@ fn assert_reordered(g: &Graph, out: &Graph, shapes: &[Vec<usize>], moved: usize,
 /// size or kept with its operand's rank; the values the traced program's to float32 rounding.
 #[test]
 fn factors_move_past_their_matmul_in_every_layout() {
-    use super::common::linear_reordering::linear_reordering;
+    use super::passes::linear_reordering::linear_reordering;
 
     for (xt, wt) in [(false, false), (false, true), (true, false), (true, true)] {
         for keepdim in [false, true] {
@@ -928,7 +929,7 @@ fn factors_move_past_their_matmul_in_every_layout() {
 /// `W · t` of `x W`) does not commute with the matmul and stays, on either side in every layout.
 #[test]
 fn contracted_axis_factors_stay_in_every_layout() {
-    use super::common::linear_reordering::linear_reordering;
+    use super::passes::linear_reordering::linear_reordering;
 
     for (xt, wt) in [(false, false), (false, true), (true, false), (true, true)] {
         for side in 0..2 {
@@ -966,7 +967,7 @@ fn contracted_axis_factors_stay_in_every_layout() {
 /// program's to float32 rounding.
 #[test]
 fn batched_rows_move_past_their_matmul() {
-    use super::common::linear_reordering::linear_reordering;
+    use super::passes::linear_reordering::linear_reordering;
 
     for wt in [false, true] {
         for keepdim in [false, true] {
@@ -1037,7 +1038,7 @@ fn norm_scaled_matmul() -> Graph {
 /// input (a per-row scale, a weight's dequantization scale); without one, any factor moves.
 #[test]
 fn reordering_moves_only_factors_of_cross_tile_reductions() {
-    use super::common::linear_reordering::linear_reordering;
+    use super::passes::linear_reordering::linear_reordering;
 
     let g = norm_scaled_matmul();
     let moved = |out: &Graph| names(out).ends_with(&["dot_general", "broadcast_in_dim", "mul"]);
@@ -1056,7 +1057,7 @@ fn reordering_moves_only_factors_of_cross_tile_reductions() {
 /// through a wider dtype (`bf16(f32(y))`) is dropped for both.
 #[test]
 fn preserve_precision_drops_forward_round_trips() {
-    use super::common::preserve_precision::preserve_precision;
+    use super::passes::preserve_precision::preserve_precision;
 
     let mut g = Graph::new();
     let x = g.input(ty(&[4]));

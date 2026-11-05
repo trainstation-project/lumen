@@ -75,7 +75,7 @@ pub(crate) fn row_dot(body: &Graph) -> Option<&Node> {
 /// earlier one's result), or `None` if a softmax pair or a non-SIMD-reducible dtype prevents it.
 pub(crate) fn tile_reductions(body: &Graph) -> Option<Vec<usize>> {
     let reductions = row_reductions(body);
-    let first = crate::graph_compiler::common::diamonds::tile_reductions(body, &reductions)?;
+    let first = crate::graph_compiler::passes::diamonds::tile_reductions(body, &reductions)?;
 
     let simd = |&k: &usize| {
         matches!(
@@ -101,7 +101,7 @@ pub(crate) fn early_outputs(body: &Graph) -> Vec<usize> {
 
             body.type_of(v).numel() != rows
                 && !summed.contains(&v)
-                && !crate::graph_compiler::common::diamonds::depends_on(body, v, &reduced)
+                && !crate::graph_compiler::passes::diamonds::depends_on(body, v, &reduced)
         })
         .collect()
 }
@@ -210,8 +210,8 @@ pub(crate) fn cut(body: &Graph, dot: Var) -> Cut {
         .map(|node| node.output)
         .filter(|&v| {
             rows_of(v)
-                && crate::graph_compiler::common::diamonds::depends_on(body, v, &[dot])
-                && !crate::graph_compiler::common::diamonds::depends_on(body, v, &reduced)
+                && crate::graph_compiler::passes::diamonds::depends_on(body, v, &[dot])
+                && !crate::graph_compiler::passes::diamonds::depends_on(body, v, &reduced)
         })
         .chain([dot]);
 
