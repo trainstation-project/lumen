@@ -2,7 +2,7 @@
 //! caller inputs, fresh outputs or one shared workspace, and runs it on a device.
 
 mod compile;
-mod run;
+pub(crate) mod run;
 mod step;
 #[cfg(test)]
 pub(crate) mod tests;

@@ -15,8 +15,8 @@ use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::mps::{
     SOURCES, compile_kernels, compile_mpp_kernels, compile_routed, record_launch,
 };
+use crate::plan::run::mps::Encode;
 use crate::plan::{Buffer, Step, Tuned};
-use crate::runtime::mps::Encode;
 use crate::tensor::contiguous_strides;
 
 /// What a tunable elementwise fusion needs to regenerate its kernel under another tuning.
@@ -446,7 +446,7 @@ impl Timer for Mps {
     /// Encodes one launch, rotating through input copies so repeats read cold memory.
     fn run(&self, buffers: &Buffers, step: &Step, rep: usize) -> Result<(), String> {
         let inputs = &buffers.copies[rep % buffers.copies.len()];
-        crate::runtime::mps::encode(step, inputs, buffers.output, buffers.scratch, Vec::new())
+        crate::plan::run::mps::encode(step, inputs, buffers.output, buffers.scratch, Vec::new())
     }
 }
 

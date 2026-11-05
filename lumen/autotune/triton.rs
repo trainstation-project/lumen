@@ -8,8 +8,8 @@ use crate::codegen::dot_general::triton::{self as codegen, CONFIGS, Config};
 use crate::codegen::elementwise::triton::{LoopConfig, loop_configs};
 use crate::codegen::triton::{Kernel, Template};
 use crate::graph::{Primitive, TensorType};
+use crate::plan::run::triton::run;
 use crate::plan::{Buffer, Step, Tuned};
-use crate::runtime::triton::run;
 use crate::{Device, Tensor, TensorOptions};
 
 /// Autotuning candidates for flash-attention steps.

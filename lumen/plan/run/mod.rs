@@ -1,5 +1,12 @@
 //! Running a plan: its steps on a device, its stages on the host and device, and the custom ops it calls.
 
+pub(crate) mod cuda;
+#[cfg(lumen_mps_linked)]
+pub(crate) mod mps;
+#[cfg(lumen_tpu_linked)]
+pub(crate) mod tpu;
+pub(crate) mod triton;
+
 #[cfg(lumen_mps_linked)]
 use std::sync::OnceLock;
 
@@ -325,9 +332,7 @@ impl Plan {
             return !self.outputs_at.contains(&at)
                 && self.steps.iter().all(|s| {
                     s.inputs.iter().all(|&(b, ref ty)| {
-                        b != at
-                            || ty.shape == self.inputs[i].shape
-                                && crate::runtime::triton::reads_strided(s)
+                        b != at || ty.shape == self.inputs[i].shape && triton::reads_strided(s)
                     })
                 });
         }
@@ -594,7 +599,7 @@ impl Plan {
                     use crate::runtime::kernel::mps::{
                         Pointers, Unprepared, capture, prepare, replay,
                     };
-                    use crate::runtime::mps::encode;
+                    use mps::encode;
 
                     // Capture each step's launch once and replay it with new pointers on later runs.
                     let replayed = !viewed && !crate::profiler::is_enabled() && replayable(step);
@@ -652,7 +657,7 @@ impl Plan {
                 #[cfg(lumen_tpu_linked)]
                 Device::Tpu(index) => {
                     let _ = scratch;
-                    crate::runtime::tpu::encode(index, step, &args, out)?;
+                    tpu::encode(index, step, &args, out)?;
                 }
                 Device::Cuda(_) => {
                     let _ = scratch;
@@ -700,8 +705,8 @@ impl Plan {
                         .as_deref()
                         .and_then(|k| k.downcast_ref::<crate::codegen::triton::Kernel>());
                     let run = || match self.cuda {
-                        true => crate::runtime::cuda::run(step, &inputs, &out, &outs),
-                        false => crate::runtime::triton::run(kernel, step, &inputs, &out, &outs),
+                        true => cuda::run(step, &inputs, &out, &outs),
+                        false => triton::run(kernel, step, &inputs, &out, &outs),
                     };
 
                     // Captured into a CUDA graph, the nodes it adds are the step's, by name.
