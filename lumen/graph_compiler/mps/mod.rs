@@ -2,7 +2,6 @@
 //! and the encoder that launches each fused step with the right grid.
 
 pub(crate) mod ane;
-pub(crate) mod fusion;
 pub(crate) mod kernel_codegen;
 #[cfg(test)]
 mod tests;
@@ -19,6 +18,7 @@ use super::common::diamonds::{Diamonds, Row, RowsModule};
 use super::common::dot::canonicalize::CanonicalizeDots;
 use super::common::dot::split_k::mps::SplitK;
 use super::common::dot::strength::DotStrength;
+pub(crate) use super::common::fusion::mps as fusion;
 use super::common::linear_cross_entropy::LinearCrossEntropy;
 use super::common::linear_reordering::LinearReordering;
 use super::common::merge_dots::{Blocks, MergeDots, MergeDotsBackward, Packs, Target};
@@ -95,7 +95,7 @@ pub(crate) struct MpsModule<'a> {
     /// Per packed block, how many members each interleaved group spans (all ones: side by side).
     interleaved: Vec<Vec<usize>>,
     /// Normalization rows found by the diamonds pass, consumed by fusion.
-    rows: Vec<Row>,
+    pub(crate) rows: Vec<Row>,
     /// Graph input indices passed to kernels by value.
     pub(crate) scalars: Vec<usize>,
     /// Kernels requested so far; fusions name them as `PENDING` plus an index.

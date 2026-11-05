@@ -1,12 +1,12 @@
 //! MPS fusion: the shared fusion (`common::fusion`) with Metal's kernels' limits and shapes,
 //! each fusion compiled to one Metal kernel.
 
-use super::{Kernel, MpsModule, request};
+use super::{self as common, Backend};
 use crate::DType;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::common::diamonds::Row;
-use crate::graph_compiler::common::fusion::{self as common, Backend};
+use crate::graph_compiler::mps::{Kernel, MpsModule, request};
 use crate::graph_compiler::pass::CompilerPass;
 pub(crate) use crate::graph_compiler::{elementwise, label};
 
@@ -76,7 +76,7 @@ fn backend(config: &CompilerConfig) -> Backend {
 
 /// Fuses `graph` for Metal under `config`, given its normalization `rows` and by-value `scalars`;
 /// `kernel` names each fusion body's kernel.
-pub(super) fn fuse(
+pub(crate) fn fuse(
     graph: &Graph,
     rows: &[Row],
     scalars: &[Var],
@@ -87,7 +87,7 @@ pub(super) fn fuse(
 }
 
 /// Compiler pass running fusion, then optional horizontal fusion.
-pub(super) struct Fusion;
+pub(crate) struct Fusion;
 
 impl<'a> CompilerPass<MpsModule<'a>> for Fusion {
     fn name(&self) -> &'static str {

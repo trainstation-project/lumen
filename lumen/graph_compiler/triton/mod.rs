@@ -4,7 +4,6 @@
 pub(crate) mod cross_entropy;
 #[cfg(all(feature = "python", lumen_cuda_linked))]
 pub(crate) mod direct;
-mod fusion;
 mod scatter_add;
 
 use std::any::Any;
@@ -17,7 +16,6 @@ pub(crate) use super::common::attention::triton::{Launch, set_attention};
 pub(crate) use super::common::dot::triton::{Epilogue, set_gemm};
 #[cfg(feature = "python")]
 pub(crate) use crate::codegen::dot_general::triton::Config;
-use fusion::Fusion;
 use scatter_add::Scatter;
 
 use super::common::alone::Alone;
@@ -28,6 +26,7 @@ use super::common::dot::rows::triton::WideRows;
 use super::common::dot::split_k::triton::SplitK;
 use super::common::dot::strength::DotStrength;
 use super::common::dot::triton as gemm;
+use super::common::fusion::triton::{self as fusion, Fusion};
 use super::common::linear_cross_entropy::LinearCrossEntropy;
 use super::common::linear_reordering::LinearReordering;
 use super::common::merge_dots::{Blocks, MergeDots, MergeDotsBackward, Packs, Target};
@@ -272,7 +271,7 @@ pub(crate) struct TritonModule<'a> {
     /// Interleaved region sizes of each packed block.
     interleaved: Vec<Vec<usize>>,
     /// Normalization rows the diamonds pass found, consumed by fusion.
-    rows: Vec<Row>,
+    pub(crate) rows: Vec<Row>,
 }
 
 impl Module for TritonModule<'_> {
