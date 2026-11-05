@@ -1,6 +1,9 @@
 //! Metal dynamic slices: the dynamic-slice and dynamic-update-slice kernels and their launches, the copy
 //! an out-of-place update starts from, and the source of a fused chain of dynamic-update-slices.
 
+use crate::codegen::utils::mps::Mps;
+use crate::runtime::kernel::Launch as _;
+use crate::runtime::kernel::mps::MpsLaunch;
 use std::fmt::Write;
 
 use indoc::formatdoc;
@@ -12,7 +15,7 @@ use crate::graph::Primitive;
 use crate::graph::{Graph, TensorType, UPDATES};
 use crate::graph_compiler::passes::updates::{overlaps, starts};
 use crate::plan::Step;
-use crate::runtime::mps::{Grid, dims_arg, elementwise_grid, launch, u32_arg, u64_arg};
+use crate::runtime::mps::{Grid, dims_arg, elementwise_grid, u32_arg, u64_arg};
 use crate::tensor::contiguous_strides;
 
 /// Copies the `ty`-shaped tensor at `src` to `dst` on the GPU.
@@ -27,14 +30,14 @@ pub(crate) fn copy(
     let kernel = format!("dynamic_slice_copy_{}", ty.dtype.size_of());
     let grid = elementwise_grid(n, ty.dtype);
 
-    launch(
-        &kernel,
-        &[src, dst.cast_const()],
-        &[u32_arg(n as u32)],
+    Mps::launch(MpsLaunch {
+        kernel: &kernel,
+        buffers: &[src, dst.cast_const()],
+        args: &[u32_arg(n as u32)],
         grid,
         keep,
         name,
-    )
+    })
 }
 
 /// Highest operand rank the Metal kernels take.
@@ -101,7 +104,14 @@ pub(crate) fn encode(
     };
 
     let grid = Grid::Threads([count.div_ceil(16 / bytes), 1, 1]);
-    launch(&kernel, &buffers, &args, grid, keep, step.label)
+    Mps::launch(MpsLaunch {
+        kernel: &kernel,
+        buffers: &buffers,
+        args: &args,
+        grid,
+        keep,
+        name: step.label,
+    })
 }
 
 /// Metal dynamic slices: a generated kernel for a chain of updates; one update runs Metal's fixed kernel.

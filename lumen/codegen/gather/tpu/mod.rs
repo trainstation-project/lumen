@@ -3,10 +3,13 @@
 use crate::DType;
 use crate::codegen::dot_general::tpu::block;
 use crate::codegen::tpu::{Kernel, Rows};
+use crate::codegen::utils::tpu::Tpu;
 use crate::device::tpu::layout::Layout;
 use crate::graph::Primitive;
 use crate::plan::Step;
-use crate::runtime::tpu::{Indices, Launch, SPARSE_CORE_MESH, SparseCore, Values, launch};
+use crate::runtime::kernel::Launch as _;
+use crate::runtime::kernel::tpu::TpuLaunch;
+use crate::runtime::tpu::{Indices, SPARSE_CORE_MESH, SparseCore, Values};
 
 /// TPU lane width.
 const LANES: usize = 128;
@@ -183,7 +186,8 @@ pub(crate) fn sparse_core(
 
     let operands = [inputs[1], inputs[0], output.cast_const()];
 
-    let launched = Launch {
+    let launched = TpuLaunch {
+        device: index,
         module: "lumen.codegen.gather.tpu.kernel",
         kernel: format!("gather_sparse_core_{}_{k}x{words}", table.dtype),
         spec,
@@ -193,6 +197,6 @@ pub(crate) fn sparse_core(
         sparse: Some(sparse),
     };
 
-    launch(index, launched).map_err(|e| format!("{}: {e}", step.label))?;
+    Tpu::launch(launched).map_err(|e| format!("{}: {e}", step.label))?;
     Ok(true)
 }

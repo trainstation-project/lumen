@@ -4,7 +4,9 @@ use crate::codegen::scan::ScanCodegen;
 use crate::codegen::utils::mps::Mps;
 use crate::graph::{Primitive, TensorType};
 use crate::plan::Step;
-use crate::runtime::mps::{Grid, launch, u32_arg, u64_arg};
+use crate::runtime::kernel::Launch as _;
+use crate::runtime::kernel::mps::MpsLaunch;
+use crate::runtime::mps::{Grid, u32_arg, u64_arg};
 use crate::{DType, Tensor};
 
 /// Scan length above which a contiguous axis uses the threadgroup row kernel.
@@ -157,7 +159,14 @@ pub(crate) fn encode(
             args.extend([u32_arg(b as u32), u32_arg((a * b) as u32)]);
         }
 
-        launch(&kernel, &buffers, &args, grid, keep, step.label)
+        Mps::launch(MpsLaunch {
+            kernel: &kernel,
+            buffers: &buffers,
+            args: &args,
+            grid,
+            keep,
+            name: step.label,
+        })
     };
 
     if chunks > 1 {
@@ -178,14 +187,14 @@ pub(crate) fn encode(
         let kernel = format!("cumsum_lines_{accum_dtype}");
         let grid = Grid::Threads([lines, 1, 1]);
 
-        launch(
-            &kernel,
-            &[partials, partials, partials],
-            &args,
+        Mps::launch(MpsLaunch {
+            kernel: &kernel,
+            buffers: &[partials, partials, partials],
+            args: &args,
             grid,
-            keep.clone(),
-            step.label,
-        )?;
+            keep: keep.clone(),
+            name: step.label,
+        })?;
     }
 
     pass(false, keep)

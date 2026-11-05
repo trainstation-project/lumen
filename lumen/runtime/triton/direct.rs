@@ -218,7 +218,7 @@ struct Driver {
 }
 
 /// Loads `libcuda.so.1` once and resolves the driver entry points.
-fn driver() -> Result<&'static Driver, String> {
+pub(crate) fn driver() -> Result<&'static Driver, String> {
     static DRIVER: OnceLock<Result<Driver, String>> = OnceLock::new();
 
     DRIVER
@@ -309,7 +309,7 @@ pub(crate) fn counted<R>(label: &'static str, step: impl FnOnce() -> R) -> R {
 }
 
 /// The bytes Triton type `ty` passes `value` as, or `None` for a parameter specialized away.
-fn bytes(ty: &str, value: Value) -> Result<Option<[u8; 8]>, String> {
+pub(crate) fn bytes(ty: &str, value: Value) -> Result<Option<[u8; 8]>, String> {
     let mut out = [0u8; 8];
 
     let int = |v: Value| match v {
@@ -344,67 +344,4 @@ fn bytes(ty: &str, value: Value) -> Result<Option<[u8; 8]>, String> {
     }
 
     Ok(Some(out))
-}
-
-/// Launches `kernel` on `grid` with `values` (its runtime parameters in order) on lumen's stream (a
-/// CUDA graph's capture stream while it captures), then the two scratch pointers Triton appends,
-/// null since the kernel needs no scratch.
-pub(crate) fn launch(kernel: &Compiled, grid: [usize; 3], values: &[Value]) -> Result<(), String> {
-    if kernel.types.len() != values.len() {
-        return Err(format!(
-            "a Triton kernel of {} runtime parameters launched with {} values",
-            kernel.types.len(),
-            values.len()
-        ));
-    }
-
-    let mut storage: Vec<[u8; 8]> = Vec::with_capacity(values.len() + 2);
-
-    for (ty, &value) in kernel.types.iter().zip(values) {
-        if let Some(b) = bytes(ty, value)? {
-            storage.push(b);
-        }
-    }
-
-    storage.extend([[0u8; 8]; 2]);
-    let mut params: Vec<*mut c_void> = storage.iter_mut().map(|b| b.as_mut_ptr().cast()).collect();
-
-    if grid.contains(&0) {
-        return Ok(());
-    }
-
-    let driver = driver()?;
-    let [x, y, z] = grid.map(|g| g as c_uint);
-
-    let result = unsafe {
-        (driver.launch)(
-            kernel.function as *mut c_void,
-            x,
-            y,
-            z,
-            32 * kernel.warps,
-            1,
-            1,
-            kernel.shared,
-            crate::stream::cuda::launch_stream(),
-            params.as_mut_ptr(),
-            std::ptr::null_mut(),
-        )
-    };
-
-    match result {
-        0 => Ok(()),
-        e => {
-            let mut message: *const c_char = std::ptr::null();
-
-            unsafe { (driver.error)(e, &mut message) };
-
-            let message = match message.is_null() {
-                true => "unknown".into(),
-                false => unsafe { CStr::from_ptr(message) }.to_string_lossy(),
-            };
-
-            Err(format!("cuLaunchKernel failed: {message} (error {e})"))
-        }
-    }
 }

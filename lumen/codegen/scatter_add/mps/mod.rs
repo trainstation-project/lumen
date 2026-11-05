@@ -1,9 +1,12 @@
 //! Metal scatter-adds: the fixed `scatter_add` kernels (`kernel.metal`) and their launch, which copies the
 //! operand into the output, then adds the updates in.
 
+use crate::codegen::utils::mps::Mps;
 use crate::graph::{Primitive, TensorType};
 use crate::plan::Step;
-use crate::runtime::mps::{Grid, element_arg, elementwise_grid, launch, u32_arg, u64_arg};
+use crate::runtime::kernel::Launch as _;
+use crate::runtime::kernel::mps::MpsLaunch;
+use crate::runtime::mps::{Grid, element_arg, elementwise_grid, u32_arg, u64_arg};
 use crate::{DType, Scalar, Tensor};
 
 /// Threads of the row kernel's threadgroup, one a column (`SCATTER_THREADS` in `kernel.metal`).
@@ -87,14 +90,14 @@ pub(crate) fn encode(
             threads: ATOMIC_THREADS,
         };
 
-        return launch(
-            &name,
-            &[updates, index_buffer, out],
-            &args,
+        return Mps::launch(MpsLaunch {
+            kernel: &name,
+            buffers: &[updates, index_buffer, out],
+            args: &args,
             grid,
             keep,
-            label,
-        );
+            name: label,
+        });
     }
 
     // Each position's update count (then the place kernel's cursor) and start, and the updates' order.
@@ -106,42 +109,49 @@ pub(crate) fn encode(
         u32_arg(n as u32),
     ];
     let grid = elementwise_grid(n, DType::F32);
-    launch("fill_4", &[counts], &zero, grid, Vec::new(), label)?;
+    Mps::launch(MpsLaunch {
+        kernel: "fill_4",
+        buffers: &[counts],
+        args: &zero,
+        grid,
+        keep: Vec::new(),
+        name: label,
+    })?;
 
     let count = format!("scatter_add_count_{index}");
     let grid = Grid::Threads([m, 1, 1]);
-    launch(
-        &count,
-        &[index_buffer, counts],
-        &[u64_arg(m)],
+    Mps::launch(MpsLaunch {
+        kernel: &count,
+        buffers: &[index_buffer, counts],
+        args: &[u64_arg(m)],
         grid,
-        Vec::new(),
-        label,
-    )?;
+        keep: Vec::new(),
+        name: label,
+    })?;
 
     let grid = Grid::GroupsOf {
         groups: [1, 1, 1],
         threads: 1024,
     };
-    launch(
-        "scatter_add_starts",
-        &[counts, starts],
-        &[u64_arg(n)],
+    Mps::launch(MpsLaunch {
+        kernel: "scatter_add_starts",
+        buffers: &[counts, starts],
+        args: &[u64_arg(n)],
         grid,
-        Vec::new(),
-        label,
-    )?;
+        keep: Vec::new(),
+        name: label,
+    })?;
 
     let place = format!("scatter_add_place_{index}");
     let buffers = [index_buffer, starts, counts, order];
-    launch(
-        &place,
-        &buffers,
-        &[u64_arg(m)],
-        Grid::Threads([m, 1, 1]),
-        Vec::new(),
-        label,
-    )?;
+    Mps::launch(MpsLaunch {
+        kernel: &place,
+        buffers: &buffers,
+        args: &[u64_arg(m)],
+        grid: Grid::Threads([m, 1, 1]),
+        keep: Vec::new(),
+        name: label,
+    })?;
 
     let rows = format!("scatter_add_rows_{}_{index}", x.dtype.name());
     let buffers = [updates, index_buffer, out, starts, order];
@@ -152,5 +162,12 @@ pub(crate) fn encode(
         threads: THREADS,
     };
 
-    launch(&rows, &buffers, &args, grid, keep, label)
+    Mps::launch(MpsLaunch {
+        kernel: &rows,
+        buffers: &buffers,
+        args: &args,
+        grid,
+        keep,
+        name: label,
+    })
 }

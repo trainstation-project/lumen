@@ -2,6 +2,9 @@
 //! reductions split into a partials pass plus a final pass), and the source of a reduction fused with an
 //! elementwise prologue and epilogue.
 
+use crate::codegen::utils::mps::Mps;
+use crate::runtime::kernel::Launch as _;
+use crate::runtime::kernel::mps::MpsLaunch;
 use std::fmt::Write;
 
 use indoc::{formatdoc, indoc};
@@ -17,7 +20,7 @@ use crate::graph::primitive::free_dims;
 use crate::graph::{Graph, Node};
 use crate::graph_compiler::passes::fusion::mps as fusion;
 use crate::plan::Step;
-use crate::runtime::mps::{Grid, dims_arg, dims32_arg, element_arg, launch, u32_arg, u64_arg};
+use crate::runtime::mps::{Grid, dims_arg, dims32_arg, element_arg, u32_arg, u64_arg};
 use crate::tensor::contiguous_strides;
 use crate::{DType, Scalar, Tensor};
 
@@ -210,7 +213,14 @@ pub(crate) fn encode_reduction(
     };
 
     let args: Vec<Vec<u8>> = scalars.iter().cloned().chain(args).collect();
-    launch(&kernel, &buffers, &args, grid, keep, name)
+    Mps::launch(MpsLaunch {
+        kernel: &kernel,
+        buffers: &buffers,
+        args: &args,
+        grid,
+        keep,
+        name,
+    })
 }
 
 /// Threads per threadgroup; must match REDUCE_THREADS in kernel.metal.
@@ -370,14 +380,14 @@ fn consecutive(
         if rows {
             let args = args(&[u64_arg(count), u64_arg(chunk)]);
 
-            launch(
-                &kernel,
-                &buffers,
-                &args,
-                Grid::Groups([chunks, a, 1]),
+            Mps::launch(MpsLaunch {
+                kernel: &kernel,
+                buffers: &buffers,
+                args: &args,
+                grid: Grid::Groups([chunks, a, 1]),
                 keep,
                 name,
-            )
+            })
         } else {
             let args = args(&[
                 u32_arg(b as u32),
@@ -387,7 +397,14 @@ fn consecutive(
             ]);
 
             let grid = Grid::Threads([a * chunks * b, 1, 1]);
-            launch(&kernel, &buffers, &args, grid, keep, name)
+            Mps::launch(MpsLaunch {
+                kernel: &kernel,
+                buffers: &buffers,
+                args: &args,
+                grid,
+                keep,
+                name,
+            })
         }
     };
 

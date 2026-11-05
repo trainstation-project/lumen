@@ -19,11 +19,14 @@ pub(crate) use skinny::*;
 pub(crate) use tiled::*;
 
 use crate::Tensor;
+use crate::codegen::utils::mps::Mps;
 use crate::graph::Primitive;
 use crate::graph::TensorType;
 use crate::graph_compiler::passes::dot::canonicalize::matmul_order;
 use crate::plan::Step;
-use crate::runtime::mps::{Grid, dims_arg, launch};
+use crate::runtime::kernel::Launch as _;
+use crate::runtime::kernel::mps::MpsLaunch;
+use crate::runtime::mps::{Grid, dims_arg};
 use crate::tensor::contiguous_strides;
 
 /// Default float tile (rows, columns).
@@ -205,14 +208,14 @@ pub(crate) fn encode(
         unreachable!("a dot_general")
     };
 
-    launch(
-        &format!("matmul_{}_{accum_dtype}_{}", lhs.dtype, out.dtype),
-        &[inputs[0], inputs[1], output.cast_const()],
-        &[dims_arg(launch_.p)],
-        launch_.grid,
+    Mps::launch(MpsLaunch {
+        kernel: &format!("matmul_{}_{accum_dtype}_{}", lhs.dtype, out.dtype),
+        buffers: &[inputs[0], inputs[1], output.cast_const()],
+        args: &[dims_arg(launch_.p)],
+        grid: launch_.grid,
         keep,
         name,
-    )
+    })
 }
 
 /// Merges dims `(size, stride)` (size-1 dims dropped) into one, if each stride equals the next's

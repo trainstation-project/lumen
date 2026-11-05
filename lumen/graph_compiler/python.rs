@@ -1,6 +1,12 @@
 //! Python bindings of the graph compiler: the `Plan` class, kernel launch capture for code
 //! dumps, and the hooks that launch Triton kernels through Python.
 
+#[cfg(lumen_cuda_linked)]
+use crate::codegen::utils::cuda::Cuda;
+#[cfg(lumen_cuda_linked)]
+use crate::runtime::kernel::Launch as _;
+#[cfg(lumen_cuda_linked)]
+use crate::runtime::kernel::cuda::CudaLaunch;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -387,7 +393,11 @@ fn direct(
         return Ok(false);
     }
 
-    direct::launch(&kernel, grid, values)?;
+    Cuda::launch(CudaLaunch {
+        kernel: &kernel,
+        grid,
+        values,
+    })?;
     Ok(true)
 }
 
@@ -881,7 +891,11 @@ fn cuda_launch(
         };
 
         let kernel = compiled(shape)?;
-        direct::launch(&kernel, [blocks(n, widest, shape), 1, 1], &values)
+        Cuda::launch(CudaLaunch {
+            kernel: &kernel,
+            grid: [blocks(n, widest, shape), 1, 1],
+            values: &values,
+        })
     }
 
     #[cfg(not(lumen_cuda_linked))]
@@ -952,7 +966,11 @@ fn tuned(
     let time = |kernel: &direct::Compiled, blocks: usize| -> Result<f64, String> {
         const REPS: usize = 10;
 
-        direct::launch(kernel, [blocks, 1, 1], &values)?;
+        Cuda::launch(CudaLaunch {
+            kernel: kernel,
+            grid: [blocks, 1, 1],
+            values: &values,
+        })?;
         let mut best = f64::INFINITY;
 
         for _ in 0..2 {
@@ -961,7 +979,11 @@ fn tuned(
             start.record()?;
 
             for _ in 0..REPS {
-                direct::launch(kernel, [blocks, 1, 1], &values)?;
+                Cuda::launch(CudaLaunch {
+                    kernel: kernel,
+                    grid: [blocks, 1, 1],
+                    values: &values,
+                })?;
             }
 
             end.record()?;

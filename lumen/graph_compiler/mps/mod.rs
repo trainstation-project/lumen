@@ -4,6 +4,8 @@
 #[cfg(test)]
 mod tests;
 
+use crate::runtime::kernel::Launch as _;
+use crate::runtime::kernel::mps::MpsLaunch;
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::{CString, c_char, c_void};
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -47,9 +49,7 @@ use crate::graph_compiler::passes::horizontal::segments;
 use crate::graph_compiler::passes::updates::Updates;
 use crate::graph_compiler::{Plan, PlanOptions};
 use crate::plan::{Buffer, Step};
-use crate::runtime::mps::{
-    Grid, dims_arg, element_arg, elementwise_grid, launch, scratch_bytes, u32_arg,
-};
+use crate::runtime::mps::{Grid, dims_arg, element_arg, elementwise_grid, scratch_bytes, u32_arg};
 use crate::tensor::contiguous_strides;
 use crate::{DType, Scalar, Tensor};
 
@@ -1044,7 +1044,14 @@ pub(crate) fn encode_with(
         let mut buffers = inputs.to_vec();
         buffers.push(output.cast_const());
         let grid = Grid::Threads([step.inputs[1].1.numel(), 1, 1]);
-        return launch(name, &buffers, &scalars, grid, keep, step.label);
+        return Mps::launch(MpsLaunch {
+            kernel: name,
+            buffers: &buffers,
+            args: &scalars,
+            grid,
+            keep,
+            name: step.label,
+        });
     }
 
     if kind == Launch::Attention {
@@ -1067,7 +1074,14 @@ pub(crate) fn encode_with(
 
         let name = attention_tuned.map_or(name, |(kernel, _)| kernel);
         let buffers = attention_buffers(a.dropout.is_some())?;
-        return launch(name, &buffers, &scalars, grid, keep, step.label);
+        return Mps::launch(MpsLaunch {
+            kernel: name,
+            buffers: &buffers,
+            args: &scalars,
+            grid,
+            keep,
+            name: step.label,
+        });
     }
 
     if kind == Launch::AttentionBackward {
@@ -1086,11 +1100,25 @@ pub(crate) fn encode_with(
             ];
 
             let grid = elementwise_grid(n, DType::F32);
-            launch("fill_4", &[extra[1]], &args, grid, Vec::new(), "full (dQ)")?;
+            Mps::launch(MpsLaunch {
+                kernel: "fill_4",
+                buffers: &[extra[1]],
+                args: &args,
+                grid,
+                keep: Vec::new(),
+                name: "full (dQ)",
+            })?;
         }
 
         let grid = Grid::Groups([rows.div_ceil(64), heads, outer]);
-        return launch(name, &buffers, &scalars, grid, keep, step.label);
+        return Mps::launch(MpsLaunch {
+            kernel: name,
+            buffers: &buffers,
+            args: &scalars,
+            grid,
+            keep,
+            name: step.label,
+        });
     }
 
     if kind == Launch::Gemm {
@@ -1217,14 +1245,14 @@ pub(crate) fn encode_with(
                 },
             );
 
-            launch(
-                &format!("{name}_partials"),
-                &first,
-                &args,
+            Mps::launch(MpsLaunch {
+                kernel: &format!("{name}_partials"),
+                buffers: &first,
+                args: &args,
                 grid,
-                keep.clone(),
-                step.label,
-            )?;
+                keep: keep.clone(),
+                name: step.label,
+            })?;
 
             crate::profiler::next_launch(
                 crate::graph::intern(format!("{} (combine)", step.label)),
@@ -1256,7 +1284,14 @@ pub(crate) fn encode_with(
             rows.extend(&tiles);
             let grid = Grid::Groups([row_groups(body), 1, 1]);
             let combine = format!("{name}_combine");
-            return launch(&combine, &rows, &scalars, grid, keep, step.label);
+            return Mps::launch(MpsLaunch {
+                kernel: &combine,
+                buffers: &rows,
+                args: &scalars,
+                grid,
+                keep,
+                name: step.label,
+            });
         }
 
         let (kernel, grid) = match gemm::row_dot(body) {
@@ -1276,7 +1311,14 @@ pub(crate) fn encode_with(
             },
         };
 
-        return launch(&kernel, &buffers, &args, grid, keep, step.label);
+        return Mps::launch(MpsLaunch {
+            kernel: &kernel,
+            buffers: &buffers,
+            args: &args,
+            grid,
+            keep,
+            name: step.label,
+        });
     }
 
     if kind == Launch::Rows {
@@ -1284,14 +1326,14 @@ pub(crate) fn encode_with(
         buffers.push(output.cast_const());
         buffers.extend(extra);
 
-        return launch(
-            name,
-            &buffers,
-            &scalars,
-            Grid::Groups([row_groups(body), 1, 1]),
+        return Mps::launch(MpsLaunch {
+            kernel: name,
+            buffers: &buffers,
+            args: &scalars,
+            grid: Grid::Groups([row_groups(body), 1, 1]),
             keep,
-            step.label,
-        );
+            name: step.label,
+        });
     }
 
     if kind == Launch::Reduction {
@@ -1322,7 +1364,14 @@ pub(crate) fn encode_with(
         let mut buffers = inputs.to_vec();
         buffers.push(output.cast_const());
         buffers.extend(extra);
-        return launch(name, &buffers, &scalars, tiling.grid(), keep, step.label);
+        return Mps::launch(MpsLaunch {
+            kernel: name,
+            buffers: &buffers,
+            args: &scalars,
+            grid: tiling.grid(),
+            keep,
+            name: step.label,
+        });
     }
 
     let out = &step.output.1;
@@ -1351,7 +1400,14 @@ pub(crate) fn encode_with(
         .collect();
 
     let args: Vec<Vec<u8>> = scalars.into_iter().chain([u32_arg(n as u32)]).collect();
-    launch(name, &buffers, &args, grid, keep, step.label)
+    Mps::launch(MpsLaunch {
+        kernel: name,
+        buffers: &buffers,
+        args: &args,
+        grid,
+        keep,
+        name: step.label,
+    })
 }
 
 /// Scratch bytes a fusion kernel needs: tile buffers for row-tile GEMMs or partials for reductions.

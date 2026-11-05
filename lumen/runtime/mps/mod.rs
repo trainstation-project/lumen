@@ -1,5 +1,8 @@
 //! Metal kernel launching: per-primitive encode dispatch, pipeline caching, argument packing,
 //! and capturing launches so a plan can replay them against new buffer addresses.
+use crate::codegen::utils::mps::Mps;
+use crate::runtime::kernel::Launch as _;
+use crate::runtime::kernel::mps::MpsLaunch;
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ffi::{CString, c_char, c_void};
@@ -50,14 +53,14 @@ unsafe extern "C" {
 
 /// A kernel launch recorded by `capture` instead of dispatched, with its raw buffer addresses.
 pub(crate) struct Captured {
-    pipeline: *mut c_void,
-    buffers: Vec<*const u8>,
-    args: Vec<Vec<u8>>,
-    sizes: [usize; 3],
-    groups: bool,
-    group: usize,
-    kernel: String,
-    label: &'static str,
+    pub(crate) pipeline: *mut c_void,
+    pub(crate) buffers: Vec<*const u8>,
+    pub(crate) args: Vec<Vec<u8>>,
+    pub(crate) sizes: [usize; 3],
+    pub(crate) groups: bool,
+    pub(crate) group: usize,
+    pub(crate) kernel: String,
+    pub(crate) label: &'static str,
 }
 
 /// Where a captured buffer pointer lives, as a byte offset into one of the plan's allocations.
@@ -197,7 +200,7 @@ pub(crate) fn replay(prepared: &Prepared, at: &Pointers, keep: Vec<Tensor>) -> R
 }
 
 thread_local! {
-    static CAPTURED: RefCell<Option<Vec<Captured>>> = const { RefCell::new(None) };
+    pub(crate) static CAPTURED: RefCell<Option<Vec<Captured>>> = const { RefCell::new(None) };
 }
 
 /// Runs `encode` with launches recorded rather than dispatched, returning what it launched.
@@ -211,10 +214,10 @@ pub(crate) fn capture(
 }
 
 /// Most argument buffers a kernel launch can carry.
-const MAX_ARGS: usize = 31;
+pub(crate) const MAX_ARGS: usize = 31;
 
 /// Returns the cached compute pipeline for `kernel`, building it on first use.
-fn pipeline(kernel: &str) -> Result<*mut c_void, String> {
+pub(crate) fn pipeline(kernel: &str) -> Result<*mut c_void, String> {
     static PIPELINES: Mutex<BTreeMap<String, usize>> = Mutex::new(BTreeMap::new());
     let mut pipelines = PIPELINES.lock().unwrap_or_else(PoisonError::into_inner);
 
@@ -443,7 +446,14 @@ pub(crate) fn launch_step(
 ) -> Result<(), String> {
     let mut buffers = inputs.to_vec();
     buffers.push(output.cast_const());
-    launch(kernel, &buffers, args, grid, keep, step.label)
+    Mps::launch(MpsLaunch {
+        kernel,
+        buffers: &buffers,
+        args,
+        grid,
+        keep,
+        name: step.label,
+    })
 }
 
 /// Dispatches an empty `event_marker` kernel whose completion signals `recorded`, fenced on both sides.
@@ -480,67 +490,8 @@ pub(crate) fn mark_event(
     Ok(())
 }
 
-/// Launches `kernel`, or records it when inside `capture`; a grid with a zero dimension is skipped.
-pub(crate) fn launch(
-    kernel: &str,
-    buffers: &[*const u8],
-    args: &[Vec<u8>],
-    grid: Grid,
-    keep: Vec<Tensor>,
-    name: &'static str,
-) -> Result<(), String> {
-    let (sizes, groups, group) = match grid {
-        Grid::Threads(sizes) => (sizes, false, 0),
-        Grid::Groups(sizes) => (sizes, true, 0),
-        Grid::GroupsOf { groups, threads } => (groups, true, threads),
-        Grid::Elementwise { threads, group } => ([threads, 1, 1], false, group),
-    };
-
-    if sizes.contains(&0) {
-        crate::profiler::clear_next_launch();
-        return Ok(());
-    }
-
-    let pipeline = pipeline(kernel)?;
-
-    if args.len() > MAX_ARGS {
-        return Err(format!(
-            "the MPS kernel {kernel} takes at most {MAX_ARGS} arguments"
-        ));
-    }
-
-    let captured = CAPTURED.with_borrow_mut(|c| {
-        c.as_mut().map(|c| {
-            c.push(Captured {
-                pipeline,
-                buffers: buffers.to_vec(),
-                args: args.to_vec(),
-                sizes,
-                groups,
-                group,
-                kernel: kernel.to_owned(),
-                label: name,
-            })
-        })
-    });
-
-    if captured.is_some() {
-        return Ok(());
-    }
-
-    dispatch(
-        pipeline,
-        buffers,
-        args,
-        (sizes, groups, group),
-        keep,
-        name,
-        kernel,
-    )
-}
-
 /// Submits one pipeline dispatch to the MPS stream, with `keep` held until it completes.
-fn dispatch(
+pub(crate) fn dispatch(
     pipeline: *mut c_void,
     buffers: &[*const u8],
     args: &[Vec<u8>],

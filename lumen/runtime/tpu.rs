@@ -561,7 +561,7 @@ fn cached(key: String, lower: impl FnOnce() -> Result<String, String>) -> Result
 }
 
 /// A kernel lowered and ready to chain into a program.
-struct Lowered {
+pub(crate) struct Lowered {
     module: &'static str,
     /// The kernel's full JSON spec, or a generated program's source.
     spec: Arc<str>,
@@ -698,28 +698,9 @@ impl Drop for Batch {
     }
 }
 
-/// One kernel launch request.
-pub(crate) struct Launch<'a> {
-    /// Python module whose `program(spec)` lowers the kernel, or `GENERATED` for a generated program.
-    pub(crate) module: &'static str,
-    /// Name shown in profiles.
-    pub(crate) kernel: String,
-    /// JSON object fields describing the kernel (without braces), to which the device fields are added; a
-    /// generated program's source.
-    pub(crate) spec: String,
-    /// Buffers the kernel reads and writes, passed as their row offsets.
-    pub(crate) rows: &'a [*const u8],
-    /// Extra `i32` scalars after the row offsets.
-    pub(crate) scalars: &'a [i32],
-    /// Host bytes passed as whole extra rows.
-    pub(crate) host: &'a [u8],
-    /// Runs on the SparseCore when set.
-    pub(crate) sparse: Option<SparseCore>,
-}
-
 /// Mosaic of a kernel of `module` with spec `fields` on device `index`, `scalars` scalars and `host` host rows,
 /// and the full spec it was lowered from.
-fn lowering(
+pub(crate) fn lowering(
     index: usize,
     module: &str,
     fields: &str,
@@ -750,33 +731,14 @@ fn lowering(
     Ok((mosaic, spec.into()))
 }
 
-/// Lowers `launch` and adds it to the open batch on device `index`, or runs it now. A launch with host
-/// data runs on its own after flushing the batch.
-pub(crate) fn launch(index: usize, launch: Launch) -> Result<(), String> {
-    let scalars = launch.rows.len() + launch.scalars.len();
-    let host = (!launch.host.is_empty()).then_some(launch.host.len() / crate::allocator::tpu::ROW);
-
-    let (mosaic, spec) = lowering(index, launch.module, &launch.spec, scalars, host)
-        .map_err(|e| format!("{}: {e}", launch.kernel))?;
-
-    let lowered = Lowered {
-        mosaic,
-        module: launch.module,
-        spec,
-        scalars: [
-            crate::allocator::tpu::rows_of(index, launch.rows)?.as_slice(),
-            launch.scalars,
-        ]
-        .concat(),
-        sparse: launch.sparse.map(Box::new),
-    };
-
-    enqueue(index, &launch.kernel, lowered, launch.host)
-}
-
 /// Adds `lowered`, named `kernel` in profiles, to the open batch on device `index`, or runs it now. A launch
 /// with `host` data runs on its own after flushing the batch.
-fn enqueue(index: usize, kernel: &str, lowered: Lowered, host: &[u8]) -> Result<(), String> {
+pub(crate) fn enqueue(
+    index: usize,
+    kernel: &str,
+    lowered: Lowered,
+    host: &[u8],
+) -> Result<(), String> {
     crate::profiler::tpu::launched(index, kernel);
 
     crate::profiler::launched::templated(kernel, || {
