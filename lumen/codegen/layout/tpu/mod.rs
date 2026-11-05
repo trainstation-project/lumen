@@ -6,7 +6,7 @@ use crate::codegen::tpu::{Kernel, Rows};
 use crate::codegen::utils::tpu::Tpu;
 use crate::device::tpu::layout::Layout;
 use crate::graph::{Graph, TensorType};
-use crate::plan::Step;
+use crate::plan::StepBase;
 
 /// TPU layout: the fixed reshape Pallas program, specialized by a spec of the split or merged last dim;
 /// transposes fuse into the elementwise kernels.
@@ -69,7 +69,7 @@ impl LayoutCodegen for Tpu {
 }
 
 /// The kernel of the reshape `step` of TPU-tiled tensors.
-pub(crate) fn kernel(step: &Step) -> Result<Kernel, String> {
+pub(crate) fn kernel(step: &StepBase) -> Result<Kernel, String> {
     let (kernel, spec) = Tpu::reshape(&step.inputs[0].1, &step.output.1)?;
 
     Ok(Kernel::new(

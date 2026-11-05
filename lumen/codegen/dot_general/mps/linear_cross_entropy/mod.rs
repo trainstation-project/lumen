@@ -4,7 +4,7 @@ use super::float_tiles;
 use crate::Tensor;
 use crate::codegen::utils::mps::Mps;
 use crate::graph::TensorType;
-use crate::plan::Step;
+use crate::plan::StepBase;
 use crate::runtime::kernel::Launch as _;
 use crate::runtime::kernel::mps::MpsLaunch;
 use crate::runtime::mps::{Grid, dims_arg};
@@ -19,7 +19,7 @@ pub(crate) fn linear_cross_entropy_scratch(h: &TensorType, w: &TensorType) -> us
 /// Launches the fused matmul writing per-tile softmax partials and target logits, then the
 /// combine that turns them into each row's loss (`out[..b]`) and log-sum-exp (`out[b..]`).
 pub(crate) fn encode_linear_cross_entropy(
-    step: &Step,
+    step: &StepBase,
     inputs: &[*const u8],
     output: *mut u8,
     scratch: *mut u8,

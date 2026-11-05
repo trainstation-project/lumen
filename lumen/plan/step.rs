@@ -1,9 +1,13 @@
-//! A plan's steps: the buffers they read and write, their memoized kernels and tuned launches.
+//! A plan's steps: what every device's step shares (its primitive, the buffers it reads and writes, its memoized
+//! preparations and tuned launch), and the `Step` trait each device's step implements to run.
 
 use std::any::Any;
 use std::fmt;
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
+use super::run::Buffers;
+use crate::Device;
 use crate::graph::{Primitive, Scope, TensorType, View};
 use crate::tensor::contiguous_strides;
 
@@ -31,9 +35,9 @@ impl fmt::Display for Buffer {
     }
 }
 
-/// One kernel launch: a primitive with the buffers it reads and writes.
+/// What every device's step shares: a primitive with the buffers it reads and writes.
 #[derive(Debug, Clone)]
-pub struct Step {
+pub struct StepBase {
     pub primitive: Primitive,
     /// Name shown in profiles and error messages.
     pub label: &'static str,
@@ -55,8 +59,6 @@ pub struct Step {
     pub sources: Vec<(&'static str, u32)>,
     /// The autotuned kernel choice, if one was made.
     pub tuned: Option<Tuned>,
-    /// The kernel the backend's codegen generated for the step, when it keeps one.
-    pub kernel: Option<Arc<dyn Any + Send + Sync>>,
     /// What a backend prepared to launch the step, per layout of the tensors it ran on.
     pub memo: Memo,
 }
@@ -107,7 +109,7 @@ impl fmt::Debug for Memo {
 pub struct Tuned {
     /// Name of the chosen kernel.
     pub kernel: String,
-    /// Backend launch configuration, recovered with `Step::launch`.
+    /// Backend launch configuration, recovered with `StepBase::launch`.
     launch: Arc<dyn Any + Send + Sync>,
 }
 
@@ -127,7 +129,7 @@ impl fmt::Debug for Tuned {
     }
 }
 
-impl Step {
+impl StepBase {
     /// The tuned launch configuration, if one of type `L` was stored.
     pub(crate) fn launch<L: 'static>(&self) -> Option<&L> {
         self.tuned.as_ref()?.launch.downcast_ref::<L>()
@@ -158,4 +160,74 @@ impl Step {
             })
             .collect()
     }
+}
+
+/// One kernel launch of a plan on its device: the shared `StepBase` it derefs to, plus what its device's codegen
+/// generated for it.
+pub trait Step: Deref<Target = StepBase> + DerefMut + fmt::Debug + Send + Sync {
+    /// Runs the step on the plan's buffers.
+    fn run(&self, buffers: &Buffers) -> Result<(), String>;
+
+    /// Whether the step reads operand `k`, a caller input of `shape`, laid out at `strides` as given.
+    fn reads_strided(&self, k: usize, shape: &[usize], strides: &[usize]) -> bool {
+        let _ = (k, shape, strides);
+        false
+    }
+
+    /// Errors unless a plan of `steps` runs on `device`.
+    fn check(steps: &[Self], device: Device) -> Result<(), String>
+    where
+        Self: Sized;
+
+    /// Runs `run`, which launches every step of a plan on `device`; a device that batches launches runs the
+    /// batch after it.
+    fn batched(device: Device, run: &mut dyn FnMut() -> Result<(), String>) -> Result<(), String>
+    where
+        Self: Sized,
+    {
+        let _ = device;
+        run()
+    }
+
+    /// The shared part of the step, without what its device generated.
+    fn into_base(self) -> StepBase
+    where
+        Self: Sized;
+}
+
+/// The error of running a plan of `steps`, compiled for `name` (the devices `runs` accepts), on `device`; `None`
+/// when it may run there.
+pub(crate) fn unsupported<S: Step>(
+    steps: &[S],
+    device: Device,
+    runs: impl Fn(Device) -> bool,
+    name: &str,
+) -> Option<String> {
+    if !runs(device) {
+        return Some(format!(
+            "the plan was compiled for {name}, so it runs there, not on {device}"
+        ));
+    }
+
+    // Only a TPU runs a lumen.pallas kernel.
+    steps
+        .iter()
+        .find(|s| {
+            matches!(s.primitive, Primitive::PallasCall { .. }) && !matches!(device, Device::Tpu(_))
+        })
+        .map(|s| {
+            format!(
+                "{}: a lumen.pallas kernel runs on a TPU, not {device}",
+                s.label
+            )
+        })
+}
+
+/// The error of a plan of `steps` on a device whose kernels read no operand through a view, if a step reads one.
+pub(crate) fn viewed<S: Step>(steps: &[S]) -> Option<String> {
+    steps
+        .iter()
+        .flat_map(|s| &s.views)
+        .any(Option::is_some)
+        .then(|| "operands read as views run on MPS only".to_string())
 }

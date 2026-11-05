@@ -11,7 +11,7 @@ use super::{Options, plan_options};
 use crate::Device;
 use crate::codegen::utils::cuda::cute_type;
 use crate::graph::{Graph, Node, Primitive, Var};
-use crate::plan::Plan;
+use crate::plan::{CpuPlan, CudaPlan};
 
 /// Name of an elementwise fusion.
 const ELEMENTWISE: &str = "elementwise";
@@ -147,7 +147,11 @@ impl Passes for CudaModule<'_> {
 
 /// Compiles `graph` for the CUDA backend on `device`: fuses its elementwise work and plans it, every
 /// runtime scalar a 0-d device input; errors on an op it has no kernel for.
-pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Result<Plan, String> {
+pub(crate) fn compile(
+    graph: &Graph,
+    device: Device,
+    options: &Options,
+) -> Result<CudaPlan, String> {
     let _ = device;
 
     let mut module = CudaModule {
@@ -174,7 +178,5 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
 
     let config = &options.config;
     let plan = plan_options(&fused, options, config, &Vec::new(), Vec::new());
-    let mut plan = Plan::compile_with(&fused, &plan);
-    crate::codegen::cuda::codegen(&mut plan, options)?;
-    Ok(plan)
+    crate::codegen::cuda::codegen(CpuPlan::compile_with(&fused, &plan), options)
 }

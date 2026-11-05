@@ -1,7 +1,7 @@
 //! Tests for plan compilation (buffer reuse, donation, scheduling, scratch, views) and,
 //! when MPS is linked, for running plans on MPS against the reference evaluator.
 use super::Buffer;
-use super::Plan;
+use super::{CpuPlan, Plan};
 use crate::graph::Primitive::*;
 use crate::graph::{Graph, Primitive, TensorType};
 use crate::reference;
@@ -31,8 +31,8 @@ pub(crate) fn data(shape: &[usize], seed: u64) -> Tensor {
 }
 
 /// Compiles `g`, checks it matches the reference evaluator bitwise and returns the plan.
-fn check_against_reference(g: &Graph, inputs: &[Tensor]) -> Plan {
-    let plan = Plan::compile(g);
+fn check_against_reference(g: &Graph, inputs: &[Tensor]) -> CpuPlan {
+    let plan = CpuPlan::compile(g);
     let expected = reference::run(g, inputs).unwrap();
     let actual = plan.run(inputs).unwrap();
     assert_eq!(expected.len(), actual.len());
@@ -199,7 +199,7 @@ fn plan_rematerializes_under_a_memory_limit() {
             ..Default::default()
         };
 
-        let plan = Plan::compile_with(&g, &options);
+        let plan = CpuPlan::compile_with(&g, &options);
         let actual = plan.run(&inputs).unwrap();
 
         assert_eq!(
@@ -310,7 +310,7 @@ fn owned_plans_place_outputs_in_the_workspace_and_read_inputs_in_place() {
         ..Default::default()
     };
 
-    let plan = Plan::compile_with(&g, &options);
+    let plan = CpuPlan::compile_with(&g, &options);
     assert_eq!(plan.steps()[0].inputs[0].0, Buffer::Input(0));
     assert_eq!(plan.steps()[0].inputs[1].0, Buffer::Input(1));
     let workspace = Tensor::zeros(&[plan.workspace_bytes()], DType::U8);
@@ -351,7 +351,7 @@ fn owned_plans_copy_arguments_sharing_a_donated_parameter() {
         ..Default::default()
     };
 
-    let plan = Plan::compile_with(&g, &options);
+    let plan = CpuPlan::compile_with(&g, &options);
     let workspace = Tensor::zeros(&[plan.workspace_bytes()], DType::U8);
     let w = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0], DType::F32);
     let out = plan.run_in(&workspace, &[w.clone(), w.clone()]).unwrap();
@@ -364,7 +364,7 @@ fn owned_plans_copy_arguments_sharing_a_donated_parameter() {
 fn steps_write_over_operands_that_die_there() {
     let ty = |shape: &[usize]| TensorType::new(DType::F32, shape);
 
-    let at = |plan: &Plan, name: &str| {
+    let at = |plan: &CpuPlan, name: &str| {
         let step = plan
             .steps()
             .iter()
@@ -423,7 +423,7 @@ fn steps_write_over_operands_that_die_there() {
         .unwrap();
 
     g.set_outputs(&[c]).unwrap();
-    let plan = Plan::compile(&g);
+    let plan = CpuPlan::compile(&g);
     let (out, ins) = at(&plan, "cast");
     assert_ne!(ins, [out], "{plan}");
     let (out, ins) = at(&plan, "exp");
@@ -436,7 +436,7 @@ fn steps_write_over_operands_that_die_there() {
 }
 
 /// Compiles `g` donating input 0 and returns the plan with the first non-workspace output buffer.
-fn donating(g: &Graph) -> (Plan, Buffer) {
+fn donating(g: &Graph) -> (CpuPlan, Buffer) {
     let options = super::PlanOptions {
         scratch: None,
         donate: vec![0],
@@ -448,7 +448,7 @@ fn donating(g: &Graph) -> (Plan, Buffer) {
         layout: None,
     };
 
-    let plan = Plan::compile_with(g, &options);
+    let plan = CpuPlan::compile_with(g, &options);
 
     let out = plan
         .steps()
@@ -509,7 +509,7 @@ fn donated_inputs_hold_outputs_written_in_place() {
     let d = g.apply(Mul, &[x, two]).unwrap();
     g.set_outputs(&[e, d]).unwrap();
 
-    let plan = Plan::compile_with(
+    let plan = CpuPlan::compile_with(
         &g,
         &super::PlanOptions {
             scratch: None,
@@ -544,7 +544,7 @@ fn inputs_donated_into_an_output_hold_it_alone() {
     g.set_outputs(&[later, new]).unwrap();
 
     let at = |options: &super::PlanOptions| {
-        let plan = Plan::compile_with(&g, options);
+        let plan = CpuPlan::compile_with(&g, options);
         let written: Vec<Buffer> = plan.steps().iter().map(|s| s.output.0).collect();
         (plan, written)
     };
@@ -583,7 +583,7 @@ fn donated_inputs_in_a_block_wait_for_its_readers() {
     g.set_outputs(&[later, new]).unwrap();
 
     let plan = |blocks: Vec<(usize, Vec<usize>)>| {
-        Plan::compile_with(
+        CpuPlan::compile_with(
             &g,
             &super::PlanOptions {
                 donate_into: vec![(0, 1)],
@@ -653,10 +653,10 @@ fn custom_calls_mutate_in_place_where_they_can() {
         }
 
         g.set_outputs(&outputs).unwrap();
-        Plan::compile(&g)
+        CpuPlan::compile(&g)
     };
 
-    let step = |plan: &Plan| {
+    let step = |plan: &CpuPlan| {
         let step = plan
             .steps()
             .iter()
@@ -699,7 +699,7 @@ fn in_place_concatenates_are_written_by_their_operands_steps() {
 
     let y = g.apply(Mul, &[c, c]).unwrap();
     g.set_outputs(&[y]).unwrap();
-    let plan = Plan::compile(&g);
+    let plan = CpuPlan::compile(&g);
     let names: Vec<&str> = plan.steps().iter().map(|s| s.primitive.name()).collect();
     assert_eq!(names, ["exp", "neg", "mul"], "{plan}");
 
@@ -769,7 +769,7 @@ fn kernel_scratch_is_placed_in_the_workspace() {
         layout: None,
     };
 
-    let plan = Plan::compile_with(&g, &options);
+    let plan = CpuPlan::compile_with(&g, &options);
     let reduce = &plan.steps()[1];
     let (offset, bytes) = reduce.scratch.expect("the reduction's scratch");
     assert_eq!(bytes, 100);
@@ -800,7 +800,7 @@ fn plans_run_on_meta_tensors_compute_nothing() {
         meta(data(&[16, 3], 3)),
     ];
 
-    let outputs = Plan::compile(&g)
+    let outputs = CpuPlan::compile(&g)
         .run_on(&inputs, crate::Device::Meta(0))
         .unwrap();
 
@@ -812,7 +812,7 @@ fn plans_run_on_meta_tensors_compute_nothing() {
     );
 
     assert!(
-        Plan::compile(&g)
+        CpuPlan::compile(&g)
             .run_on(&inputs, crate::Device::Cpu(0))
             .is_err()
     );
@@ -824,7 +824,6 @@ pub(crate) mod mps {
     use super::Primitive::*;
     use super::{data, mlp};
     use crate::graph::{Graph, Primitive, TensorType};
-    use crate::graph_compiler::Plan;
     use crate::reference;
     use crate::tensor::dtype::dispatch_dtype;
     use crate::{DType, Device, Element, Scalar, Tensor, TensorOptions};
@@ -1585,7 +1584,10 @@ pub(crate) mod mps {
                 .device(Device::Mps(0)),
         );
 
-        let err = Plan::compile(&g).run(&[x]).unwrap_err();
+        let err = crate::graph_compiler::compile(&g, Device::Mps(0))
+            .and_then(|plan| plan.run(&[x]))
+            .unwrap_err();
+
         assert!(err.contains("float64"), "{err}");
 
         let mut g = Graph::new();
@@ -1599,6 +1601,7 @@ pub(crate) mod mps {
             Tensor::zeros(&[2], DType::F32),
         );
 
-        assert!(Plan::compile(&g).run(&[a, b]).is_err());
+        let plan = crate::graph_compiler::compile(&g, Device::Mps(0)).unwrap();
+        assert!(plan.run(&[a, b]).is_err());
     }
 }

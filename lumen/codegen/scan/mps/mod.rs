@@ -3,7 +3,7 @@ use crate::codegen::reduction::mps::kernel_dtype;
 use crate::codegen::scan::ScanCodegen;
 use crate::codegen::utils::mps::Mps;
 use crate::graph::{Primitive, TensorType};
-use crate::plan::Step;
+use crate::plan::StepBase;
 use crate::runtime::kernel::Launch as _;
 use crate::runtime::kernel::mps::MpsLaunch;
 use crate::runtime::mps::{Grid, u32_arg, u64_arg};
@@ -88,7 +88,7 @@ pub(crate) fn scratch_bytes(x: &TensorType, axis: usize, accum: DType) -> usize 
 /// Encodes a cumsum step. A split scan runs three passes: per-chunk totals into scratch,
 /// an in-place scan of those totals, then the chunked scan carrying each chunk's prefix.
 pub(crate) fn encode(
-    step: &Step,
+    step: &StepBase,
     inputs: &[*const u8],
     output: *mut u8,
     scratch: *mut u8,

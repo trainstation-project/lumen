@@ -6,7 +6,7 @@ use crate::codegen::tpu::{Kernel, Rows};
 use crate::codegen::utils::tpu::Tpu;
 use crate::device::tpu::layout::Layout;
 use crate::graph::Primitive;
-use crate::plan::Step;
+use crate::plan::StepBase;
 use crate::runtime::kernel::Launch as _;
 use crate::runtime::kernel::tpu::TpuLaunch;
 use crate::runtime::tpu::{Indices, SPARSE_CORE_MESH, SparseCore, Values};
@@ -27,7 +27,7 @@ const ROWS: usize = 64;
 const SPARSE_CORE_CHUNK: usize = 128 << 10;
 
 /// Rejects gathers the kernels don't cover: only table rows at int32 indices along axis 0.
-fn checked(step: &Step) -> Result<(), String> {
+fn checked(step: &StepBase) -> Result<(), String> {
     let (table, ids) = (&step.inputs[0].1, &step.inputs[1].1);
     let failed = |what: &str| Err(format!("{what} does not run on TPU yet: {table} at {ids}"));
 
@@ -47,7 +47,7 @@ fn checked(step: &Step) -> Result<(), String> {
 }
 
 /// The TensorCore kernel gathering table rows at int32 indices along axis 0, rejecting layouts it doesn't cover.
-pub(crate) fn kernel(step: &Step) -> Result<Kernel, String> {
+pub(crate) fn kernel(step: &StepBase) -> Result<Kernel, String> {
     checked(step)?;
 
     let (table, ids) = (&step.inputs[0].1, &step.inputs[1].1);
@@ -115,7 +115,7 @@ pub(crate) fn kernel(step: &Step) -> Result<Kernel, String> {
 /// returns whether it did. Rejects gathers no kernel covers.
 pub(crate) fn sparse_core(
     index: usize,
-    step: &Step,
+    step: &StepBase,
     inputs: &[*const u8],
     output: *mut u8,
 ) -> Result<bool, String> {

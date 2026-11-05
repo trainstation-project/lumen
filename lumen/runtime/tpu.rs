@@ -6,13 +6,7 @@ use std::collections::HashMap;
 use std::ffi::c_void;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::codegen::tpu::{Kernel, Rows, kernel};
-use crate::codegen::utils::tpu::Tpu;
 use crate::device::tpu::{error, ffi};
-use crate::graph::Primitive;
-use crate::plan::Step;
-use crate::runtime::kernel::Launch as _;
-use crate::runtime::kernel::tpu::TpuLaunch;
 
 /// Mosaic source of `module`'s kernel for JSON `spec`, lowered by `lumen.codegen.utils.tpu.pallas`.
 #[cfg(feature = "python")]

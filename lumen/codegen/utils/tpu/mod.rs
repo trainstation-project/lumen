@@ -5,7 +5,7 @@ use crate::Scalar;
 use crate::graph::Primitive;
 use crate::graph::UnaryOp;
 #[cfg(lumen_tpu_linked)]
-use crate::plan::Step;
+use crate::plan::StepBase;
 
 /// The TPU code generator.
 pub(crate) struct Tpu;
@@ -82,7 +82,7 @@ pub(crate) fn node(p: &Primitive, args: &[usize]) -> String {
 
 /// The `(row stride, column offset)` of output `k` when it is written into a window of a wider matrix.
 #[cfg(lumen_tpu_linked)]
-pub(crate) fn window(step: &Step, k: usize) -> Option<(usize, usize)> {
+pub(crate) fn window(step: &StepBase, k: usize) -> Option<(usize, usize)> {
     let view = step.output_views.get(k)?.as_ref()?;
     window_at(view.offset, &view.strides)
 }

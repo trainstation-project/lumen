@@ -44,11 +44,12 @@ use crate::codegen::row::mps::row_groups;
 use crate::codegen::store::mps::strided_load;
 use crate::codegen::utils::mps::Mps;
 use crate::graph::{Graph, Node, Primitive, TensorType, Var, View};
+use crate::graph_compiler::PlanOptions;
 use crate::graph_compiler::passes::attention::{self, FlashAttention, FlashAttentionBackward};
 use crate::graph_compiler::passes::horizontal::segments;
 use crate::graph_compiler::passes::updates::Updates;
-use crate::graph_compiler::{Plan, PlanOptions};
-use crate::plan::{Buffer, Step};
+use crate::plan::{Buffer, StepBase};
+use crate::plan::{CpuPlan, MpsPlan};
 use crate::runtime::mps::{Grid, dims_arg, element_arg, elementwise_grid, scratch_bytes, u32_arg};
 use crate::tensor::contiguous_strides;
 use crate::{DType, Scalar, Tensor};
@@ -369,8 +370,30 @@ impl Passes for MpsModule<'_> {
 fn unsupported(graph: &Graph) -> Result<(), String> {
     use Primitive::*;
 
+    // Metal has no float64 or float8 type for a kernel to compute or copy them in.
+    let metal = |ty: &TensorType| {
+        !matches!(
+            ty.dtype,
+            DType::F64 | DType::F8E4M3FN | DType::F8E5M2 | DType::F8E4M3B11FNUZ
+        )
+    };
+
     for node in graph.nodes() {
         let x = graph.type_of(node.inputs.first().copied().unwrap_or(node.output));
+
+        let typed = node
+            .inputs
+            .iter()
+            .chain([&node.output])
+            .map(|&v| graph.type_of(v));
+
+        if let Some(ty) = typed.into_iter().find(|ty| !metal(ty)) {
+            return Err(format!(
+                "{}: {} is not supported on MPS",
+                node.primitive.name(),
+                ty.dtype.full_name()
+            ));
+        }
 
         if node.primitive.is_transcendental() && x.dtype == DType::BF16 {
             return Err(format!(
@@ -395,7 +418,7 @@ fn unsupported(graph: &Graph) -> Result<(), String> {
 
 /// Compiles `graph` for MPS: runs the passes, plans buffers, generates and compiles the kernels, and
 /// optionally autotunes.
-pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> {
+pub(super) fn compile(graph: &Graph, options: &Options) -> Result<MpsPlan, String> {
     unsupported(graph)?;
     let config = &options.config;
 
@@ -423,8 +446,7 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         ..super::plan_options(&fused, options, config, &packed, scalars)
     };
 
-    let mut plan = Plan::compile_with(&fused, &plan);
-    codegen(&mut plan, options)?;
+    let mut plan = codegen(CpuPlan::compile_with(&fused, &plan), options)?;
 
     if config.autotune {
         let tuner = crate::autotune::Autotuner {
@@ -775,7 +797,7 @@ fn run_loop(
     let input = body.type_of(body.inputs()[0]).clone();
     let output = body.type_of(body.outputs()[0]).clone();
 
-    let step = Step {
+    let step = StepBase {
         primitive: Primitive::Fusion { name, label, body },
         label,
         inputs: vec![(
@@ -796,7 +818,6 @@ fn run_loop(
         scope: &[],
         sources: Vec::new(),
         tuned: None,
-        kernel: None,
         memo: Default::default(),
     };
 
@@ -807,7 +828,7 @@ fn run_loop(
 
 /// Name of a kernel variant of `name` that loads the step's strided input views directly, compiling it on
 /// first use; `None` when no view needs it.
-fn strided_variant(step: &Step, name: &str, body: &Graph) -> Result<Option<String>, String> {
+fn strided_variant(step: &StepBase, name: &str, body: &Graph) -> Result<Option<String>, String> {
     if step.views.iter().all(Option::is_none) {
         return Ok(None);
     }
@@ -878,7 +899,7 @@ fn strided_variant(step: &Step, name: &str, body: &Graph) -> Result<Option<Strin
 }
 
 /// The strides attention step `step` (of fused `body`) reads its operands and writes its outputs at.
-pub(crate) fn attention_strides(step: &Step, body: &Graph) -> attention::Strides {
+pub(crate) fn attention_strides(step: &StepBase, body: &Graph) -> attention::Strides {
     let outputs: Vec<(usize, Vec<usize>)> = std::iter::once(&step.output)
         .chain(&step.extra_outputs)
         .zip(&step.output_views)
@@ -894,7 +915,7 @@ pub(crate) fn attention_strides(step: &Step, body: &Graph) -> attention::Strides
 /// Name of attention kernel `name` generated for the step's operand layouts (any strides but a
 /// contiguous last dim), compiling it on first use.
 fn attention_variant(
-    step: &Step,
+    step: &StepBase,
     name: &str,
     body: &Graph,
     launch: Launch,
@@ -958,7 +979,7 @@ fn attention_variant(
 
 /// Encodes fused step `step` reading `inputs` into `output`, using `scratch` and keeping `keep` alive.
 pub(crate) fn encode(
-    step: &Step,
+    step: &StepBase,
     inputs: &[*const u8],
     output: *mut u8,
     scratch: *mut u8,
@@ -975,7 +996,7 @@ pub(crate) fn encode(
 /// (its kernel and tuning) when given. `inputs` holds the body inputs followed by extra output pointers.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn encode_with(
-    step: &Step,
+    step: &StepBase,
     name: &str,
     gemm: Option<(&str, GemmConfig)>,
     attention_tuned: Option<(&str, crate::codegen::attention::mps::Tuning)>,

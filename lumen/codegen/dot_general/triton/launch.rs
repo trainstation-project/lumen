@@ -8,7 +8,7 @@ use crate::codegen::dot_general::triton::{self as codegen, CONFIGS, Config, UNTU
 use crate::codegen::utils::triton::Triton;
 use crate::graph::{Graph, Node, Primitive};
 use crate::plan::Buffer;
-use crate::plan::Step;
+use crate::plan::StepBase;
 use crate::runtime::triton::{Function, Launches, layouts};
 use crate::tensor::contiguous_strides;
 use crate::{DType, Tensor};
@@ -71,7 +71,7 @@ struct Prepared {
 }
 
 /// Generates a GEMM step's prologues and epilogue for the layouts of `inputs`, `out` and `outs`.
-fn prepare(step: &Step, inputs: &[Tensor], out: &Tensor, outs: &[Tensor]) -> Prepared {
+fn prepare(step: &StepBase, inputs: &[Tensor], out: &Tensor, outs: &[Tensor]) -> Prepared {
     let Primitive::Fusion { name, body, .. } = &step.primitive else {
         let code = codegen::gemm(
             &step.primitive,
@@ -200,7 +200,7 @@ fn operands<'a>(body: &Graph, dot: &Node, inputs: &'a [Tensor]) -> (&'a Tensor, 
 /// when `None`), its strided prologues and epilogue generated once per layout of its tensors; secondary
 /// fusion outputs go in `outs`.
 pub(crate) fn gemm(
-    step: &Step,
+    step: &StepBase,
     inputs: &[Tensor],
     out: &Tensor,
     outs: &[Tensor],
@@ -283,7 +283,7 @@ fn accum_dtype(dot: &Primitive) -> DType {
 }
 
 /// Whether `step` runs on the GEMM kernel: a dot, a fusion around one, or a linear cross entropy.
-pub(crate) fn is_gemm(step: &Step) -> bool {
+pub(crate) fn is_gemm(step: &StepBase) -> bool {
     match &step.primitive {
         Primitive::DotGeneral { .. } | Primitive::LinearCrossEntropy => true,
         p @ Primitive::Fusion { body, .. } => {
@@ -296,11 +296,11 @@ pub(crate) fn is_gemm(step: &Step) -> bool {
 
 /// A tuned GEMM launch with its config baked in.
 pub(crate) type Run =
-    Box<dyn Fn(&Step, &[Tensor], &Tensor, &[Tensor]) -> Result<(), String> + Send + Sync>;
+    Box<dyn Fn(&StepBase, &[Tensor], &Tensor, &[Tensor]) -> Result<(), String> + Send + Sync>;
 
 /// Runs GEMM `step` with its tuned config, or the untuned default.
 pub(crate) fn run(
-    step: &Step,
+    step: &StepBase,
     inputs: &[Tensor],
     out: &Tensor,
     outs: &[Tensor],

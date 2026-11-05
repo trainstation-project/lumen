@@ -23,7 +23,7 @@ use crate::tensor::python::{PyTensor, dtype_name};
 /// A compiled plan of a traced graph, runnable on tensors from Python.
 #[pyclass(name = "Plan", module = "lumen", frozen)]
 struct PyPlan {
-    inner: Plan,
+    inner: Box<dyn Plan>,
 }
 
 #[pymethods]
@@ -120,7 +120,7 @@ impl PyPlan {
     /// calls out to a custom op or a Pallas kernel, or runs a collective.
     #[getter]
     fn capturable(&self) -> bool {
-        self.inner.staged.is_none()
+        self.inner.staged().is_none()
             && !self.inner.steps().iter().any(|s| {
                 matches!(
                     s.primitive,
@@ -140,7 +140,9 @@ impl PyPlan {
     /// Drops the cached Neural Engine models of this plan's steps (MPS builds only).
     fn _invalidate_neural_engine(&self) {
         #[cfg(lumen_mps_linked)]
-        crate::graph_compiler::passes::ane::mps::invalidate(self.inner.steps());
+        crate::graph_compiler::passes::ane::mps::invalidate(
+            self.inner.steps().into_iter().map(|s| &**s),
+        );
     }
 
     /// Bytes of device workspace the plan needs.

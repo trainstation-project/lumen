@@ -8,7 +8,7 @@ use crate::codegen::attention::triton::{AttentionConfig, untuned_attention};
 use crate::codegen::utils::triton as codegen;
 use crate::graph::{Primitive, Var};
 use crate::graph_compiler::passes::attention::{self, BACKWARD, FORWARD, Strides};
-use crate::plan::Step;
+use crate::plan::StepBase;
 use crate::runtime::triton::{Function, Launches, copy, fill, layouts};
 use crate::{Scalar, Tensor, TensorOptions};
 
@@ -52,11 +52,12 @@ pub(crate) fn is_attention(p: &Primitive) -> bool {
 }
 
 /// A tuned flash-attention launch with its config baked in.
-type Run = Box<dyn Fn(&Step, &[Tensor], &Tensor, &[Tensor]) -> Result<(), String> + Send + Sync>;
+type Run =
+    Box<dyn Fn(&StepBase, &[Tensor], &Tensor, &[Tensor]) -> Result<(), String> + Send + Sync>;
 
 /// Runs flash-attention `step` with its tuned config, or the untuned one for its head size.
 pub(crate) fn run(
-    step: &Step,
+    step: &StepBase,
     inputs: &[Tensor],
     out: &Tensor,
     outs: &[Tensor],
@@ -119,7 +120,7 @@ fn sizes(batch: &[usize], [sq, sk, h, hv]: [usize; 4]) -> [usize; 6] {
 
 /// Analyzes flash-attention `step`'s body, its operands laid out as `strides` gives them, into its
 /// kernel's tensors, helpers and parameters.
-fn prepare(step: &Step, strides: &Strides) -> Result<Prepared, String> {
+fn prepare(step: &StepBase, strides: &Strides) -> Result<Prepared, String> {
     let Primitive::Fusion { name, body, .. } = &step.primitive else {
         unreachable!("an attention fusion")
     };
@@ -223,7 +224,7 @@ fn prepare(step: &Step, strides: &Strides) -> Result<Prepared, String> {
 /// Runs the forward or backward flash-attention fusion `step` with tile `config`, or the untuned
 /// config for its head size; its kernel and helpers are prepared on its first run.
 pub(crate) fn attention(
-    step: &Step,
+    step: &StepBase,
     inputs: &[Tensor],
     out: &Tensor,
     outs: &[Tensor],

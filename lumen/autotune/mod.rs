@@ -9,19 +9,20 @@ use std::sync::{LazyLock, Mutex, PoisonError};
 
 use crate::device::Device;
 use crate::graph::Primitive;
-use crate::graph_compiler::Plan;
-use crate::plan::{Step, Tuned};
+use crate::plan::{DevicePlan, Step, StepBase, Tuned};
 use crate::stream::{event_for, hold};
 
 /// A backend's source of kernel candidates for plan steps.
 pub(crate) trait Kernels {
+    /// The backend's plan steps.
+    type Step;
     /// Backend-specific tuning parameters of one candidate.
     type Config;
 
     /// Candidate configs for `step`; empty when the step isn't tuned.
-    fn configs(&self, step: &Step) -> Vec<Self::Config>;
+    fn configs(&self, step: &Self::Step) -> Vec<Self::Config>;
     /// Builds the kernel for `step` under `config`.
-    fn build(&mut self, step: &Step, config: Self::Config) -> Tuned;
+    fn build(&mut self, step: &Self::Step, config: Self::Config) -> Tuned;
     /// Compiles every candidate built so far, before any is timed.
     fn compile(&mut self) -> Result<(), String> {
         Ok(())
@@ -30,22 +31,24 @@ pub(crate) trait Kernels {
 
 /// Runs plan steps on a device so they can be timed.
 pub(crate) trait Timer {
+    /// The backend's plan steps.
+    type Step: Step + Clone;
     /// Scratch inputs and outputs a step runs on.
     type Buffers;
 
     /// Device the steps run on.
     fn device(&self) -> Device;
     /// Allocates buffers to run `step` on, or `None` when it can't be timed.
-    fn buffers(&self, step: &Step) -> Result<Option<Self::Buffers>, String>;
+    fn buffers(&self, step: &Self::Step) -> Result<Option<Self::Buffers>, String>;
     /// Enqueues one run of `step`; `rep` numbers the repetition.
-    fn run(&self, buffers: &Self::Buffers, step: &Step, rep: usize) -> Result<(), String>;
+    fn run(&self, buffers: &Self::Buffers, step: &Self::Step, rep: usize) -> Result<(), String>;
 }
 
 /// Average seconds per run of `step` over `reps` runs after one warm-up run.
 fn time<T: Timer>(
     timer: &T,
     buffers: &T::Buffers,
-    step: &Step,
+    step: &T::Step,
     reps: usize,
 ) -> Result<f64, String> {
     timer.run(buffers, step, 0)?;
@@ -79,7 +82,7 @@ const BUDGET_SECONDS: f64 = 1e-3;
 const REPS: std::ops::RangeInclusive<usize> = 2..=256;
 
 /// Steps with the same kernel, operand types and views share one tuning result.
-fn key(step: &Step) -> String {
+fn key(step: &StepBase) -> String {
     let name = match &step.primitive {
         Primitive::Fusion { name, .. } => name.clone(),
         p => p.to_string(),
@@ -96,7 +99,7 @@ fn key(step: &Step) -> String {
 
 static PICKS: LazyLock<Mutex<HashMap<String, usize>>> = LazyLock::new(Default::default);
 
-fn pick<K>(device: Device, step: &Step) -> String {
+fn pick<K>(device: Device, step: &StepBase) -> String {
     let types: Vec<String> = step.inputs.iter().map(|(_, ty)| ty.to_string()).collect();
 
     format!(
@@ -111,12 +114,20 @@ fn pick<K>(device: Device, step: &Step) -> String {
 
 impl<T: Timer> Autotuner<T> {
     /// Sets the `tuned` kernel of each tunable step in `plan` to its fastest candidate, outside the profiler.
-    pub(crate) fn tune<K: Kernels>(&self, kernels: &mut K, plan: &mut Plan) -> Result<(), String> {
+    pub(crate) fn tune<K: Kernels<Step = T::Step>>(
+        &self,
+        kernels: &mut K,
+        plan: &mut DevicePlan<T::Step>,
+    ) -> Result<(), String> {
         crate::profiler::untraced(|| self.tune_untraced(kernels, plan))
     }
 
     /// Body of [`Self::tune`].
-    fn tune_untraced<K: Kernels>(&self, kernels: &mut K, plan: &mut Plan) -> Result<(), String> {
+    fn tune_untraced<K: Kernels<Step = T::Step>>(
+        &self,
+        kernels: &mut K,
+        plan: &mut DevicePlan<T::Step>,
+    ) -> Result<(), String> {
         let mut same: HashMap<String, usize> = HashMap::new();
         let mut jobs: Vec<(Vec<usize>, Vec<Tuned>)> = Vec::new();
 

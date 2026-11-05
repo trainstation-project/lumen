@@ -8,18 +8,18 @@ use crate::codegen::dot_general::triton::{self as codegen, CONFIGS, Config};
 use crate::codegen::elementwise::triton::{LoopConfig, loop_configs};
 use crate::codegen::triton::{Kernel, Template};
 use crate::graph::{Primitive, TensorType};
-use crate::plan::run::triton::run;
-use crate::plan::{Buffer, Step, Tuned};
+use crate::plan::{Buffer, TritonStep, Tuned};
 use crate::{Device, Tensor, TensorOptions};
 
 /// Autotuning candidates for flash-attention steps.
 pub(crate) struct Tiles;
 
 impl Kernels for Tiles {
+    type Step = TritonStep;
     type Config = AttentionConfig;
 
     /// Every attention config for an attention step, none otherwise.
-    fn configs(&self, step: &Step) -> Vec<AttentionConfig> {
+    fn configs(&self, step: &TritonStep) -> Vec<AttentionConfig> {
         match is_attention(&step.primitive) {
             true => ATTENTION_CONFIGS.to_vec(),
             false => Vec::new(),
@@ -27,7 +27,7 @@ impl Kernels for Tiles {
     }
 
     /// A launch of `step` with `config`.
-    fn build(&mut self, _: &Step, config: AttentionConfig) -> Tuned {
+    fn build(&mut self, _: &TritonStep, config: AttentionConfig) -> Tuned {
         let run: Run = Box::new(move |step, inputs, out, outs| {
             attention(step, inputs, out, outs, Some(&config))
         });
@@ -40,10 +40,11 @@ impl Kernels for Tiles {
 pub(crate) struct Gemms;
 
 impl Kernels for Gemms {
+    type Step = TritonStep;
     type Config = Config;
 
     /// Every GEMM config for a GEMM step (whole-row tiles for a row epilogue), none otherwise.
-    fn configs(&self, step: &Step) -> Vec<Config> {
+    fn configs(&self, step: &TritonStep) -> Vec<Config> {
         match &step.primitive {
             Primitive::Fusion { name, .. } if name == DOT_ROW => {
                 codegen::row_gemm_configs(step.output.1.shape.last().copied().unwrap_or(1))
@@ -54,7 +55,7 @@ impl Kernels for Gemms {
     }
 
     /// A launch of `step` with `config`.
-    fn build(&mut self, _: &Step, config: Config) -> Tuned {
+    fn build(&mut self, _: &TritonStep, config: Config) -> Tuned {
         let run: Run =
             Box::new(move |step, inputs, out, outs| gemm(step, inputs, out, outs, Some(&config)));
 
@@ -66,17 +67,16 @@ impl Kernels for Gemms {
 pub(crate) struct Loops;
 
 /// The loop kernel codegen kept on `step`, if it has one.
-fn loop_kernel(step: &Step) -> Option<&Kernel> {
-    step.kernel
-        .as_deref()
-        .and_then(|k| k.downcast_ref::<Kernel>())
+fn loop_kernel(step: &TritonStep) -> Option<&Kernel> {
+    step.kernel.as_ref()
 }
 
 impl Kernels for Loops {
+    type Step = TritonStep;
     type Config = LoopConfig;
 
     /// Loop configs whose block covers the kernel's lanes and splits; none for a scatter-add.
-    fn configs(&self, step: &Step) -> Vec<LoopConfig> {
+    fn configs(&self, step: &TritonStep) -> Vec<LoopConfig> {
         let Some(kernel) = loop_kernel(step) else {
             return Vec::new();
         };
@@ -91,18 +91,19 @@ impl Kernels for Loops {
     }
 
     /// The step launched with `config`.
-    fn build(&mut self, _: &Step, config: LoopConfig) -> Tuned {
+    fn build(&mut self, _: &TritonStep, config: LoopConfig) -> Tuned {
         Tuned::new(format!("{config:?}"), config)
     }
 }
 
-/// Times steps on `device` with CUDA events, with the loop kernels codegen kept on them.
+/// Times steps on `device` with CUDA events.
 pub(crate) struct Events {
     pub(crate) device: Device,
 }
 
 impl Timer for Events {
-    type Buffers = (Option<Kernel>, Vec<Tensor>, Tensor, Vec<Tensor>);
+    type Step = TritonStep;
+    type Buffers = (Vec<Tensor>, Tensor, Vec<Tensor>);
 
     /// The device steps run on.
     fn device(&self) -> Device {
@@ -110,7 +111,7 @@ impl Timer for Events {
     }
 
     /// Zeroed inputs and outputs for `step`; scalars live on the CPU, and in-place ops write their operand.
-    fn buffers(&self, step: &Step) -> Result<Option<Self::Buffers>, String> {
+    fn buffers(&self, step: &TritonStep) -> Result<Option<Self::Buffers>, String> {
         let zeros = |ty: &TensorType, device| {
             Tensor::zeros(
                 &ty.shape,
@@ -138,16 +139,16 @@ impl Timer for Events {
             .map(|(_, ty)| zeros(ty, self.device))
             .collect();
 
-        Ok(Some((loop_kernel(step).cloned(), inputs, out, outs)))
+        Ok(Some((inputs, out, outs)))
     }
 
     /// One run of the step.
     fn run(
         &self,
-        (kernel, inputs, out, outs): &Self::Buffers,
-        step: &Step,
+        (inputs, out, outs): &Self::Buffers,
+        step: &TritonStep,
         _: usize,
     ) -> Result<(), String> {
-        run(kernel.as_ref(), step, inputs, out, outs)
+        step.run_raw(inputs, out, outs)
     }
 }

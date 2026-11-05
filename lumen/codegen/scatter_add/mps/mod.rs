@@ -3,7 +3,7 @@
 
 use crate::codegen::utils::mps::Mps;
 use crate::graph::{Primitive, TensorType};
-use crate::plan::Step;
+use crate::plan::StepBase;
 use crate::runtime::kernel::Launch as _;
 use crate::runtime::kernel::mps::MpsLaunch;
 use crate::runtime::mps::{Grid, element_arg, elementwise_grid, u32_arg, u64_arg};
@@ -27,7 +27,7 @@ pub(crate) fn scratch_bytes(x: &TensorType, indices: &TensorType, axis: usize) -
 /// sorted by position (a count, its prefix sum and a placement, in `scratch`), then a threadgroup per
 /// position with updates adds them in update order, a thread a column.
 pub(crate) fn encode(
-    step: &Step,
+    step: &StepBase,
     inputs: &[*const u8],
     output: *mut u8,
     scratch: *mut u8,

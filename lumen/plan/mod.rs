@@ -1,5 +1,6 @@
-//! Lowers a graph to a `Plan`: an ordered list of kernel steps whose values are placed in
-//! caller inputs, fresh outputs or one shared workspace, and runs it on a device.
+//! Lowers a graph to a plan: an ordered list of kernel steps whose values are placed in
+//! caller inputs, fresh outputs or one shared workspace, and runs it on its device. Each device has its own
+//! step type (`run::<device>`) and plan (`DevicePlan` of its steps); a staged plan runs host and device plans.
 
 mod compile;
 pub(crate) mod run;
@@ -7,14 +8,19 @@ mod step;
 #[cfg(test)]
 pub(crate) mod tests;
 
-pub use step::{Buffer, Memo, Step, Tuned};
+#[cfg(lumen_mps_linked)]
+pub(crate) use run::mps::MpsStep;
+#[cfg(lumen_tpu_linked)]
+pub(crate) use run::tpu::TpuStep;
+pub(crate) use run::{cpu::CpuStep, cuda::CudaStep, triton::TritonStep};
+pub use step::{Buffer, Memo, Step, StepBase, Tuned};
 
 use std::fmt;
-#[cfg(lumen_mps_linked)]
-use std::sync::OnceLock;
+use std::ops::{Deref, DerefMut};
 
 pub use crate::graph::View;
 use crate::graph::{Primitive, TensorType};
+use crate::{Device, Tensor};
 
 /// Byte alignment of every value and scratch region in the workspace.
 pub const ALIGNMENT: usize = 256;
@@ -22,7 +28,7 @@ pub const ALIGNMENT: usize = 256;
 /// Bytes of kernel scratch a primitive needs for the given operand and output types.
 pub type ScratchFn = fn(&Primitive, &[&TensorType], &TensorType) -> usize;
 
-/// Options controlling how `Plan::compile_with` places values.
+/// Options controlling how `CpuPlan::compile_with` places values.
 #[derive(Debug, Clone, Default)]
 pub struct PlanOptions {
     /// Sizes the scratch each step needs; it is reserved in the workspace.
@@ -67,9 +73,9 @@ pub(crate) fn lcm(a: usize, b: usize) -> usize {
     a / x * b
 }
 
-/// A compiled program: its steps, where each value lives and the workspace size it needs.
+/// What every plan shares: where each value lives and the workspace size it needs.
 #[derive(Debug, Clone)]
-pub struct Plan {
+pub struct PlanBase {
     /// Types of the inputs, including packed blocks after the program's own.
     inputs: Vec<TensorType>,
     outputs: Vec<TensorType>,
@@ -82,7 +88,6 @@ pub struct Plan {
     arguments: Vec<bool>,
     /// Where each output is written; `Output(k)` unless the plan is owned.
     outputs_at: Vec<Buffer>,
-    steps: Vec<Step>,
     workspace_bytes: usize,
     /// Alignment the workspace's base address needs.
     workspace_alignment: usize,
@@ -91,36 +96,134 @@ pub struct Plan {
     pub(crate) packed: Vec<(Vec<usize>, usize)>,
     /// Per packed block, the region sizes `Tensor::pack` interleaves its members with.
     pub(crate) interleaved: Vec<Vec<usize>>,
-    /// Set when the program runs as host and device stages instead of `steps`.
-    pub(crate) staged: Option<Box<Staged>>,
-    /// Whether the Triton backend runs the steps, each with the loop kernel its step keeps, if any.
-    pub(crate) triton: bool,
-    /// Whether the CUDA (CuTe DSL) backend runs the steps, each a kernel generated at its launch.
-    pub(crate) cuda: bool,
-    /// MPS launches captured per step, replayed on later runs.
-    #[cfg(lumen_mps_linked)]
-    launches: Launches,
 }
 
-/// Per step, the prepared MPS launch once captured (`None` when it can't be replayed).
+/// A compiled program on its device: the `PlanBase` it derefs to, its steps, and how it runs.
+pub trait Plan:
+    Deref<Target = PlanBase> + DerefMut + fmt::Display + fmt::Debug + Send + Sync
+{
+    /// The steps in execution order (a staged plan's, every stage's in turn).
+    fn steps(&self) -> Vec<&dyn Step>;
+
+    /// The host and device stages, when the program runs as stages instead of steps.
+    fn staged(&self) -> Option<&Staged> {
+        None
+    }
+
+    /// Runs on `device`, allocating the workspace and outputs; all inputs must already be there.
+    /// On the meta device it only returns empty outputs.
+    fn run_on(&self, inputs: &[Tensor], device: Device) -> Result<Vec<Tensor>, String>;
+
+    /// Runs an owned plan in a caller-provided workspace; outputs placed in the workspace are
+    /// returned as views of it, so the next run overwrites them.
+    fn run_in(&self, workspace: &Tensor, inputs: &[Tensor]) -> Result<Vec<Tensor>, String>;
+
+    /// Runs on the device of the first input (the CPU when there are none).
+    fn run(&self, inputs: &[Tensor]) -> Result<Vec<Tensor>, String> {
+        self.run_on(
+            inputs,
+            inputs.first().map_or(Device::Cpu(0), Tensor::device),
+        )
+    }
+}
+
+/// A plan of one device's steps.
+#[derive(Debug, Clone)]
+pub struct DevicePlan<S> {
+    base: PlanBase,
+    steps: Vec<S>,
+}
+
+/// A plan the CPU runs with the reference kernels; a device's codegen lowers it to its own plan.
+pub type CpuPlan = DevicePlan<CpuStep>;
+/// A plan of Metal kernels.
 #[cfg(lumen_mps_linked)]
-type Launches = OnceLock<Vec<OnceLock<Option<crate::runtime::kernel::mps::Prepared>>>>;
+pub type MpsPlan = DevicePlan<MpsStep>;
+/// A plan of Pallas kernels on a TPU.
+#[cfg(lumen_tpu_linked)]
+pub type TpuPlan = DevicePlan<TpuStep>;
+/// A plan of Triton kernels on CUDA.
+pub type TritonPlan = DevicePlan<TritonStep>;
+/// A plan of CUDA (CuTe DSL) kernels.
+pub type CudaPlan = DevicePlan<CudaStep>;
+
+impl<S> Deref for DevicePlan<S> {
+    type Target = PlanBase;
+
+    /// The plan's buffers.
+    fn deref(&self) -> &PlanBase {
+        &self.base
+    }
+}
+
+impl<S> DerefMut for DevicePlan<S> {
+    /// The plan's buffers.
+    fn deref_mut(&mut self) -> &mut PlanBase {
+        &mut self.base
+    }
+}
+
+impl<S: Step> DevicePlan<S> {
+    /// The steps in execution order.
+    pub fn steps(&self) -> &[S] {
+        &self.steps
+    }
+
+    /// Mutable steps.
+    pub(crate) fn steps_mut(&mut self) -> &mut [S] {
+        &mut self.steps
+    }
+
+    /// The plan with each step made into another device's by `f`, in order.
+    pub(crate) fn map<T>(
+        self,
+        f: impl FnMut(S) -> Result<T, String>,
+    ) -> Result<DevicePlan<T>, String> {
+        Ok(DevicePlan {
+            base: self.base,
+            steps: self.steps.into_iter().map(f).collect::<Result<_, _>>()?,
+        })
+    }
+}
 
 /// A program split into host and device stages, each with its own plan.
-#[derive(Debug, Clone)]
-pub(crate) struct Staged {
+#[derive(Debug)]
+pub struct Staged {
     /// The stages, in execution order.
     pub(crate) stages: Vec<Stage>,
     /// Where each program output comes from.
     pub(crate) outputs: Vec<Source>,
 }
 
+/// A plan of host and device stages.
+#[derive(Debug)]
+pub struct StagedPlan {
+    base: PlanBase,
+    staged: Staged,
+}
+
+impl Deref for StagedPlan {
+    type Target = PlanBase;
+
+    /// The program's inputs, outputs and shared workspace.
+    fn deref(&self) -> &PlanBase {
+        &self.base
+    }
+}
+
+impl DerefMut for StagedPlan {
+    /// The program's inputs, outputs and shared workspace.
+    fn deref_mut(&mut self) -> &mut PlanBase {
+        &mut self.base
+    }
+}
+
 /// One host or device part of a staged program.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct Stage {
     /// Runs on the CPU rather than the device.
     pub(crate) host: bool,
-    pub(crate) plan: Plan,
+    pub(crate) plan: Box<dyn Plan>,
     /// Where each of the stage's inputs comes from.
     pub(crate) inputs: Vec<Source>,
     /// Indices of the parent plan's packed blocks this stage reads, after `inputs`.
@@ -142,26 +245,10 @@ pub(crate) enum Source {
     ToDevice(usize, usize),
 }
 
-impl Plan {
+impl PlanBase {
     /// Types of all inputs, packed blocks included.
     pub(crate) fn input_types(&self) -> &[TensorType] {
         &self.inputs
-    }
-
-    /// The steps in execution order.
-    pub fn steps(&self) -> &[Step] {
-        &self.steps
-    }
-
-    /// Mutable steps; drops any captured MPS launches since they may no longer match.
-    #[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
-    pub(crate) fn steps_mut(&mut self) -> &mut [Step] {
-        #[cfg(lumen_mps_linked)]
-        {
-            self.launches = OnceLock::new();
-        }
-
-        &mut self.steps
     }
 
     /// Workspace bytes a run needs.
@@ -185,24 +272,9 @@ impl Plan {
     }
 }
 
-impl fmt::Display for Plan {
+impl<S: Step> fmt::Display for DevicePlan<S> {
+    /// The plan's listing: its workspace, then each step's outputs, primitive, operands and scratch.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let Some(staged) = &self.staged {
-            write!(f, "staged plan (workspace {} bytes)", self.workspace_bytes)?;
-
-            for (s, stage) in staged.stages.iter().enumerate() {
-                let side = if stage.host { "host" } else { "device" };
-
-                write!(
-                    f,
-                    "\nstage {s} ({side}, inputs {:?}): {}",
-                    stage.inputs, stage.plan
-                )?;
-            }
-
-            return write!(f, "\noutputs {:?}", staged.outputs);
-        }
-
         write!(f, "plan (workspace {} bytes)", self.workspace_bytes)?;
 
         for step in &self.steps {
@@ -229,5 +301,24 @@ impl fmt::Display for Plan {
         }
 
         Ok(())
+    }
+}
+
+impl fmt::Display for StagedPlan {
+    /// The plan's listing: its workspace, each stage's plan, and where the outputs come from.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "staged plan (workspace {} bytes)", self.workspace_bytes)?;
+
+        for (s, stage) in self.staged.stages.iter().enumerate() {
+            let side = if stage.host { "host" } else { "device" };
+
+            write!(
+                f,
+                "\nstage {s} ({side}, inputs {:?}): {}",
+                stage.inputs, stage.plan
+            )?;
+        }
+
+        write!(f, "\noutputs {:?}", self.staged.outputs)
     }
 }
