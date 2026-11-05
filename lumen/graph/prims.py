@@ -370,8 +370,7 @@ def gather(x, indices, axis):
     """``x``'s entries along ``axis`` that ``indices`` (int32 or int64, any
     shape) pick: ``x``'s shape with ``axis`` replaced by the indices'
     (``jnp.take``; MLX's ``take``, ``weight[ids]``), each index in the axis
-    (one out of it the program's error; clamped into it with
-    ``lumen.config.compiler.<device>.safe_kernels``)."""
+    (one out of it the program's error)."""
     return bind("gather", x, indices, axis=axis)
 
 

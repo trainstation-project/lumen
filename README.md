@@ -102,8 +102,7 @@ themselves where the device is missing, so one `make test` covers any machine.
 - **Own kernels, own plan.** Graphs run through lumen's `Plan` and its
   hand-written/generated kernels, not a vendor graph runtime (e.g. not
   MPSGraph).
-- **No safety checks in kernels.** Kernels read indices as given; clamping
-  happens only behind `lumen.config.compiler.safe_kernels` (off by default).
+- **No safety checks in kernels.** Kernels read indices as given.
 - **Rust tests are in-crate** (`tests.rs` beside each `mod.rs`) and never
   enable the `python` feature; bindings are tested from `tests/`.
 - **Tests are self-contained:** they copy example code rather than importing
