@@ -33,7 +33,7 @@ pub mod profiler;
 #[cfg(feature = "python")]
 mod python;
 pub mod reference;
-pub(crate) mod runtime;
+pub mod runtime;
 pub mod safetensors;
 pub mod tensor;
 
