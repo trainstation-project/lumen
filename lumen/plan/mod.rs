@@ -104,7 +104,7 @@ pub struct Plan {
 
 /// Per step, the prepared MPS launch once captured (`None` when it can't be replayed).
 #[cfg(lumen_mps_linked)]
-type Launches = OnceLock<Vec<OnceLock<Option<crate::runtime::mps::Prepared>>>>;
+type Launches = OnceLock<Vec<OnceLock<Option<crate::runtime::kernel::mps::Prepared>>>>;
 
 /// A program split into host and device stages, each with its own plan.
 #[derive(Debug, Clone)]

@@ -591,9 +591,10 @@ impl Plan {
                         keep.push(workspace.holding());
                     }
 
-                    use crate::runtime::mps::{
-                        Pointers, Unprepared, capture, encode, prepare, replay,
+                    use crate::runtime::kernel::mps::{
+                        Pointers, Unprepared, capture, prepare, replay,
                     };
+                    use crate::runtime::mps::encode;
 
                     // Capture each step's launch once and replay it with new pointers on later runs.
                     let replayed = !viewed && !crate::profiler::is_enabled() && replayable(step);
