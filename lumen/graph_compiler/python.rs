@@ -1,6 +1,14 @@
 //! Python bindings of the graph compiler: the `Plan` class, kernel launch capture for code
 //! dumps, and the hooks that launch Triton kernels through Python.
 
+#[cfg(lumen_cuda_linked)]
+use crate::codegen::utils::cuda::Cuda;
+#[cfg(lumen_cuda_linked)]
+use crate::codegen::utils::triton::Triton;
+#[cfg(lumen_cuda_linked)]
+use crate::runtime::kernel::Launch as _;
+#[cfg(lumen_cuda_linked)]
+use crate::runtime::kernel::cuda::CudaLaunch;
 use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
@@ -17,7 +25,7 @@ use crate::tensor::python::{PyTensor, dtype_name};
 /// A compiled plan of a traced graph, runnable on tensors from Python.
 #[pyclass(name = "Plan", module = "lumen", frozen)]
 struct PyPlan {
-    inner: Plan,
+    inner: Box<dyn Plan>,
 }
 
 #[pymethods]
@@ -114,7 +122,7 @@ impl PyPlan {
     /// calls out to a custom op or a Pallas kernel, or runs a collective.
     #[getter]
     fn capturable(&self) -> bool {
-        self.inner.staged.is_none()
+        self.inner.staged().is_none()
             && !self.inner.steps().iter().any(|s| {
                 matches!(
                     s.primitive,
@@ -134,7 +142,9 @@ impl PyPlan {
     /// Drops the cached Neural Engine models of this plan's steps (MPS builds only).
     fn _invalidate_neural_engine(&self) {
         #[cfg(lumen_mps_linked)]
-        crate::graph_compiler::passes::ane::mps::invalidate(self.inner.steps());
+        crate::graph_compiler::passes::ane::mps::invalidate(
+            self.inner.steps().into_iter().map(|s| &**s),
+        );
     }
 
     /// Bytes of device workspace the plan needs.
@@ -387,7 +397,11 @@ fn direct(
         return Ok(false);
     }
 
-    direct::launch(&kernel, grid, values)?;
+    Triton::launch(CudaLaunch {
+        kernel: &kernel,
+        grid,
+        values,
+    })?;
     Ok(true)
 }
 
@@ -881,7 +895,11 @@ fn cuda_launch(
         };
 
         let kernel = compiled(shape)?;
-        direct::launch(&kernel, [blocks(n, widest, shape), 1, 1], &values)
+        Cuda::launch(CudaLaunch {
+            kernel: &kernel,
+            grid: [blocks(n, widest, shape), 1, 1],
+            values: &values,
+        })
     }
 
     #[cfg(not(lumen_cuda_linked))]
@@ -952,7 +970,11 @@ fn tuned(
     let time = |kernel: &direct::Compiled, blocks: usize| -> Result<f64, String> {
         const REPS: usize = 10;
 
-        direct::launch(kernel, [blocks, 1, 1], &values)?;
+        Cuda::launch(CudaLaunch {
+            kernel: kernel,
+            grid: [blocks, 1, 1],
+            values: &values,
+        })?;
         let mut best = f64::INFINITY;
 
         for _ in 0..2 {
@@ -961,7 +983,11 @@ fn tuned(
             start.record()?;
 
             for _ in 0..REPS {
-                direct::launch(kernel, [blocks, 1, 1], &values)?;
+                Cuda::launch(CudaLaunch {
+                    kernel: kernel,
+                    grid: [blocks, 1, 1],
+                    values: &values,
+                })?;
             }
 
             end.record()?;

@@ -8,11 +8,14 @@ use crate::codegen::elementwise::cuda::Layouts;
 use crate::codegen::utils::cuda::Cuda;
 use crate::graph::{Graph, Primitive, TensorType};
 use crate::graph_compiler::Options;
-use crate::plan::{Plan, Step};
+use crate::plan::{CpuPlan, CudaPlan, CudaStep, Step as _, StepBase};
 
 /// The kernel `step` runs as for tensors laid out as `layouts`, generated once per layout and kept in the
 /// step's memo.
-pub(crate) fn generated(step: &Step, layouts: Layouts) -> Result<Arc<(String, String)>, String> {
+pub(crate) fn generated(
+    step: &StepBase,
+    layouts: Layouts,
+) -> Result<Arc<(String, String)>, String> {
     let key = layouts
         .inputs
         .iter()
@@ -58,12 +61,10 @@ fn extent(shape: &[usize], strides: &[usize]) -> usize {
     }
 }
 
-/// Marks `plan` as the CUDA backend's and generates each step's kernel for the layouts the plan gives its
-/// tensors, kept in the step's memo by layout so its launches find it; tensors laid out otherwise when it runs
-/// get theirs then. Fails on a step no CUDA kernel takes.
-pub(crate) fn codegen(plan: &mut Plan, _: &Options) -> Result<(), String> {
-    plan.cuda = true;
-
+/// The CUDA backend's plan of `plan`: each step's kernel generated for the layouts the plan gives its tensors,
+/// kept in the step's memo by layout so its launches find it; tensors laid out otherwise when it runs get theirs
+/// then. Fails on a step no CUDA kernel takes.
+pub(crate) fn codegen(plan: CpuPlan, _: &Options) -> Result<CudaPlan, String> {
     for step in plan.steps() {
         let outputs = std::iter::once(&step.output).chain(&step.extra_outputs);
 
@@ -88,7 +89,7 @@ pub(crate) fn codegen(plan: &mut Plan, _: &Options) -> Result<(), String> {
         generated(step, layouts)?;
     }
 
-    Ok(())
+    plan.map(|step| Ok(CudaStep(step.into_base())))
 }
 
 /// The body of a copy of `x` reshaped to `shape`: its input, reshaped, its output.

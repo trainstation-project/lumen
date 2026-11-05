@@ -2,9 +2,12 @@
 
 use super::float_tiles;
 use crate::Tensor;
+use crate::codegen::utils::mps::Mps;
 use crate::graph::TensorType;
-use crate::plan::Step;
-use crate::runtime::mps::{Grid, dims_arg, launch};
+use crate::plan::StepBase;
+use crate::runtime::kernel::Launch as _;
+use crate::runtime::kernel::mps::MpsLaunch;
+use crate::runtime::mps::{Grid, dims_arg};
 use crate::tensor::contiguous_strides;
 
 /// Bytes of scratch for the per-row, per-column-tile maxima and exp-sums.
@@ -16,7 +19,7 @@ pub(crate) fn linear_cross_entropy_scratch(h: &TensorType, w: &TensorType) -> us
 /// Launches the fused matmul writing per-tile softmax partials and target logits, then the
 /// combine that turns them into each row's loss (`out[..b]`) and log-sum-exp (`out[b..]`).
 pub(crate) fn encode_linear_cross_entropy(
-    step: &Step,
+    step: &StepBase,
     inputs: &[*const u8],
     output: *mut u8,
     scratch: *mut u8,
@@ -65,9 +68,9 @@ pub(crate) fn encode_linear_cross_entropy(
         }
     });
 
-    launch(
-        &format!("lce_partials_{kind}{}_{}", h.dtype, target.dtype),
-        &[
+    Mps::launch(MpsLaunch {
+        kernel: &format!("lce_partials_{kind}{}_{}", h.dtype, target.dtype),
+        buffers: &[
             inputs[0],
             inputs[1],
             inputs[2],
@@ -75,11 +78,11 @@ pub(crate) fn encode_linear_cross_entropy(
             maxima,
             sums,
         ],
-        &[p],
-        Grid::Groups([tiles, b.div_ceil(tm), 1]),
-        keep.clone(),
-        step.label,
-    )?;
+        args: &[p],
+        grid: Grid::Groups([tiles, b.div_ceil(tm), 1]),
+        keep: keep.clone(),
+        name: step.label,
+    })?;
 
     crate::profiler::next_launch("linear_cross_entropy (combine)", || {
         crate::profiler::IoTypes {
@@ -90,12 +93,12 @@ pub(crate) fn encode_linear_cross_entropy(
         }
     });
 
-    launch(
-        "lce_combine",
-        &[maxima, sums, output.cast_const()],
-        &[dims_arg([b, tiles])],
-        Grid::Groups([b.div_ceil(8), 1, 1]),
+    Mps::launch(MpsLaunch {
+        kernel: "lce_combine",
+        buffers: &[maxima, sums, output.cast_const()],
+        args: &[dims_arg([b, tiles])],
+        grid: Grid::Groups([b.div_ceil(8), 1, 1]),
         keep,
-        step.label,
-    )
+        name: step.label,
+    })
 }

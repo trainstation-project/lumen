@@ -1,5 +1,11 @@
 //! User-written Metal kernels compiled at runtime and launched on lumen's MPS stream.
 
+#[cfg(lumen_mps_linked)]
+use crate::codegen::utils::mps::Mps;
+#[cfg(lumen_mps_linked)]
+use crate::runtime::kernel::Launch as _;
+#[cfg(lumen_mps_linked)]
+use crate::runtime::kernel::mps::MpsLaunch;
 use crate::{Device, Tensor};
 
 /// Dispatch size of a Metal kernel launch.
@@ -61,7 +67,14 @@ impl MetalKernel {
                 tensors.iter().map(|t| t.data_ptr().cast_const()).collect();
 
             let label = crate::graph::intern(self.name.clone());
-            crate::runtime::mps::launch(&self.key, &buffers, args, grid, tensors.to_vec(), label)
+            Mps::launch(MpsLaunch {
+                kernel: &self.key,
+                buffers: &buffers,
+                args,
+                grid,
+                keep: tensors.to_vec(),
+                name: label,
+            })
         }
 
         #[cfg(not(lumen_mps_linked))]

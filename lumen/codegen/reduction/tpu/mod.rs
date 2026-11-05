@@ -20,7 +20,7 @@ use crate::device::tpu::layout::Layout as Tiles;
 use crate::graph::Var;
 use crate::graph::{Graph, Node, Primitive, TensorType};
 #[cfg(lumen_tpu_linked)]
-use crate::plan::Step;
+use crate::plan::StepBase;
 
 /// How a reduction's operand is viewed as `lead` matrices of `m` rows by `n` columns.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -371,7 +371,7 @@ pub(crate) fn blocks(layout: &Layout, ins: &[DType], outs: &[DType]) -> Result<V
 
 /// The kernel of the reduction fusion `step`, reading its inputs and writing its output.
 #[cfg(lumen_tpu_linked)]
-pub(crate) fn kernel(step: &Step) -> Result<Kernel, String> {
+pub(crate) fn kernel(step: &StepBase) -> Result<Kernel, String> {
     let Primitive::Fusion { body, .. } = &step.primitive else {
         unreachable!("a reduction fusion")
     };

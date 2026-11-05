@@ -13,7 +13,6 @@ class CompilerConfig:
     use_triton_backend: bool = False
     fuse: bool = True
     autotune: bool = True
-    safe_kernels: bool = False
     horizontal_fusion: bool = True
     multi_output_fusion: bool = True
     split_k: bool = True

@@ -4,6 +4,7 @@
 pub(crate) mod cuda;
 pub(crate) mod device_transfer;
 pub(crate) mod dispatch;
+pub(crate) mod kernel;
 #[cfg(lumen_mps_linked)]
 pub(crate) mod mps;
 #[cfg(lumen_tpu_linked)]

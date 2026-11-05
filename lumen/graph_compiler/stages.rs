@@ -1,11 +1,12 @@
 //! Splits a graph that moves values between host and device into alternating device and host
-//! stages, compiles each, and joins them into one staged [`Plan`].
+//! stages, compiles each, and joins them into one [`StagedPlan`].
 
 use super::Options;
 use crate::Device;
 use crate::graph::{Graph, Primitive, Var};
-use crate::graph_compiler::{Plan, Source, Stage, Staged};
+use crate::graph_compiler::{Source, Stage, Staged};
 use crate::plan::{ALIGNMENT, lcm};
+use crate::plan::{Plan, StagedPlan};
 
 /// Where a value must be computed.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -80,7 +81,7 @@ pub(crate) fn compile(
     graph: &Graph,
     device: Device,
     options: &Options,
-) -> Result<Option<Plan>, String> {
+) -> Result<Option<StagedPlan>, String> {
     let Some(p) = place(graph, device, &options.scalars)? else {
         return Ok(None);
     };
@@ -150,8 +151,7 @@ pub(crate) fn compile(
         }
     }
 
-    let (mut stages, mut steps, mut packed, mut block_types) =
-        (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut stages, mut packed, mut block_types) = (Vec::new(), Vec::new(), Vec::new());
 
     let mut interleaved = Vec::new();
     let mut workspace_bytes: usize = 0;
@@ -189,8 +189,8 @@ pub(crate) fn compile(
             ..Options::default()
         };
 
-        let plan = if b.host {
-            super::cpu::compile(&b.graph, &stage_options)?
+        let plan: Box<dyn Plan> = if b.host {
+            Box::new(super::cpu::compile(&b.graph, &stage_options)?)
         } else {
             stage_options.parameters = options.parameters.as_ref().map(|p| mask(p));
             stage_options.packable = mask(&options.packable);
@@ -230,7 +230,6 @@ pub(crate) fn compile(
             block_types.push(plan.input_types()[inputs.len() + j].clone());
         }
 
-        steps.extend(plan.steps().iter().cloned());
         // Device stages share one workspace, each at its own aligned offset; host stages use none.
         let offset = workspace_bytes.next_multiple_of(plan.workspace_alignment());
 
@@ -263,11 +262,10 @@ pub(crate) fn compile(
 
     let staged = Staged { stages, outputs };
 
-    Ok(Some(Plan::staged(
+    Ok(Some(StagedPlan::new(
         input_types,
         output_types,
         staged,
-        steps,
         (workspace_bytes, workspace_alignment),
         packed,
         interleaved,

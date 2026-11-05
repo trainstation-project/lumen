@@ -5,7 +5,6 @@ use super::passes::Module;
 use super::passes::alone::Alone;
 use super::passes::attention::{FlashAttention, FlashAttentionBackward};
 use super::passes::chunked_cross_entropy::ChunkedCrossEntropy;
-use super::passes::clamp_indices::ClampIndices;
 use super::passes::dot::rows::triton::WideRows;
 use super::passes::dot::split_k::triton::SplitK;
 use super::passes::dot::strength::DotStrength;
@@ -17,7 +16,7 @@ use super::passes::simplify::Simplify;
 use super::passes::take_along_axis::TakeAlongAxis;
 use super::passes::updates::Updates;
 use super::pipeline::{Pass, Passes, pipeline, when};
-use super::{CompilerConfig, Options, Plan, plan_options, positions};
+use super::{CompilerConfig, Options, plan_options, positions};
 use crate::autotune::Autotuner;
 use crate::autotune::triton::{Events, Gemms, Loops, Tiles};
 use crate::graph::{Graph, Node};
@@ -25,6 +24,7 @@ use crate::graph_compiler::passes::diamonds::{Diamonds, Row, RowsModule};
 use crate::graph_compiler::passes::horizontal::{Grouping, HorizontalFusion};
 use crate::graph_compiler::passes::place_concats::{PlaceConcats, Slots};
 use crate::graph_compiler::passes::place_views::PlaceViews;
+use crate::plan::{CpuPlan, TritonPlan};
 use crate::{DType, Device};
 
 /// Rejects graphs with half-precision transcendentals, which Triton's libdevice lacks.
@@ -151,11 +151,6 @@ impl Passes for TritonModule<'_> {
         )
     }
 
-    /// With `safe_kernels`.
-    fn clamp_indices(config: &CompilerConfig) -> Pass<Self> {
-        when(config.safe_kernels, ClampIndices)
-    }
-
     /// Always.
     fn simplify(_: &CompilerConfig) -> Pass<Self> {
         Box::new(Simplify { matched: true })
@@ -244,7 +239,11 @@ impl Passes for TritonModule<'_> {
 
 /// Compiles `graph` for `device` with the Triton backend: runs the passes, plans the steps, generates
 /// loop kernels and autotunes GEMM and loop configs when enabled.
-pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Result<Plan, String> {
+pub(crate) fn compile(
+    graph: &Graph,
+    device: Device,
+    options: &Options,
+) -> Result<TritonPlan, String> {
     unsupported(graph)?;
     let config = &options.config;
 
@@ -267,10 +266,10 @@ pub(crate) fn compile(graph: &Graph, device: Device, options: &Options) -> Resul
 
     let scalars = positions(&options.scalars);
     let plan = plan_options(&fused, options, config, &packed, scalars);
-    let mut plan = Plan::compile_with(&fused, &plan);
+    let mut plan = CpuPlan::compile_with(&fused, &plan);
     plan.packed = packed;
     plan.interleaved = interleaved;
-    crate::codegen::triton::codegen(&mut plan, options)?;
+    let mut plan = crate::codegen::triton::codegen(plan, options)?;
 
     if options.config.autotune {
         let tuner = Autotuner {

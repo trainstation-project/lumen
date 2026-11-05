@@ -1,8 +1,8 @@
 //! Rematerialization: lowers a plan's peak workspace under a memory limit by recomputing large
 //! values just before their later readers instead of keeping them live.
 
-use super::Plan;
 use crate::graph::{Graph, Node, Primitive, Var};
+use crate::plan::CpuPlan;
 
 /// Whether `node` can be cloned: not a custom call, reshape alias or part of a multi-output fusion.
 fn recomputable(graph: &Graph, node: &Node) -> bool {
@@ -160,7 +160,11 @@ fn usage(graph: &Graph) -> Vec<usize> {
 
 /// Greedily recomputes values across the live-bytes peak until `plan`'s workspace fits in `limit`,
 /// returning the smallest plan found.
-pub(crate) fn rematerialize(graph: &Graph, limit: usize, plan: impl Fn(&Graph) -> Plan) -> Plan {
+pub(crate) fn rematerialize(
+    graph: &Graph,
+    limit: usize,
+    plan: impl Fn(&Graph) -> CpuPlan,
+) -> CpuPlan {
     const MIN_REMAT_BYTES: usize = 64 << 10;
     const MAX_DEPTH: usize = 2;
     const ROUNDS: usize = 4;

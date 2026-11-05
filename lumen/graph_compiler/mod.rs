@@ -60,13 +60,31 @@ impl Default for Options {
 }
 
 /// Compiles `graph` for `device` with default options.
-pub fn compile(graph: &Graph, device: Device) -> Result<Plan, String> {
+pub fn compile(graph: &Graph, device: Device) -> Result<Box<dyn Plan>, String> {
     compile_with(graph, device, &Options::default())
 }
 
 /// Runs the frontend passes (CSE, simplify) and compiles `graph` for `device`, splitting it into
 /// per-device stages when it moves values between devices.
-pub fn compile_with(graph: &Graph, device: Device, options: &Options) -> Result<Plan, String> {
+pub fn compile_with(
+    graph: &Graph,
+    device: Device,
+    options: &Options,
+) -> Result<Box<dyn Plan>, String> {
+    // Graphs with transfers or host-only parts are compiled as stages; otherwise one device plan.
+    let graph = &frontend(graph, options)?;
+
+    if device != Device::Cpu(0)
+        && let Some(plan) = stages::compile(graph, device, options)?
+    {
+        return Ok(Box::new(plan));
+    }
+
+    device_compile(&stages::without_transfers(graph), device, options)
+}
+
+/// `graph` after the frontend passes every device runs first: CSE and simplification.
+pub(crate) fn frontend(graph: &Graph, options: &Options) -> Result<Graph, String> {
     let mut module = GraphModule {
         graph: graph.clone(),
         options,
@@ -84,31 +102,26 @@ pub fn compile_with(graph: &Graph, device: Device, options: &Options) -> Result<
         .add(Simplify { matched: false })
         .run(&mut module)?;
 
-    // Graphs with transfers or host-only parts are compiled as stages; otherwise one device plan.
-    let graph = &module.graph;
-
-    if device != Device::Cpu(0)
-        && let Some(plan) = stages::compile(graph, device, options)?
-    {
-        return Ok(plan);
-    }
-
-    device_compile(&stages::without_transfers(graph), device, options)
+    Ok(module.graph)
 }
 
 /// Dispatches a single-device graph to its backend; anything without one runs on the CPU backend.
-fn device_compile(graph: &Graph, device: Device, options: &Options) -> Result<Plan, String> {
-    match device {
+fn device_compile(
+    graph: &Graph,
+    device: Device,
+    options: &Options,
+) -> Result<Box<dyn Plan>, String> {
+    Ok(match device {
         // CUDA runs on the Triton backend when asked, else on the CUDA (CuTe DSL) one.
         Device::Cuda(_) if options.config.use_triton_backend => {
-            triton::compile(graph, device, options)
+            Box::new(triton::compile(graph, device, options)?)
         }
-        Device::Cuda(_) => cuda::compile(graph, device, options),
+        Device::Cuda(_) => Box::new(cuda::compile(graph, device, options)?),
         #[cfg(lumen_mps_linked)]
-        Device::Mps(_) => mps::compile(graph, options),
-        Device::Tpu(_) => tpu::compile(graph, options),
-        _ => cpu::compile(graph, options),
-    }
+        Device::Mps(_) => Box::new(mps::compile(graph, options)?),
+        Device::Tpu(_) => tpu::compile(graph, options)?,
+        _ => Box::new(cpu::compile(graph, options)?),
+    })
 }
 
 /// Indices of the `true` entries of `mask`.

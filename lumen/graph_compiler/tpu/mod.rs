@@ -14,7 +14,6 @@ use crate::graph_compiler::passes::place_concats::{PlaceConcats, Slots};
 use super::passes::Module;
 use super::passes::attention::tpu::AttentionLayouts;
 use super::passes::attention::{FlashAttention, FlashAttentionBackward};
-use super::passes::clamp_indices::ClampIndices;
 use super::passes::dot::fold_reshapes::FoldDotReshapes;
 use super::passes::dot::strength::DotStrength;
 use super::passes::merge_dots::{Blocks, MergeDots, MergeDotsBackward, Packs, Target};
@@ -22,8 +21,9 @@ use super::passes::simplify::Simplify;
 use super::pipeline::{Pass, Passes, pipeline, when};
 use super::{CompilerConfig, Options, plan_options, positions};
 use crate::graph::{Graph, Node, Primitive, TensorType};
-use crate::graph_compiler::{Plan, PlanOptions};
+use crate::graph_compiler::PlanOptions;
 use crate::plan::DeviceLayout;
+use crate::plan::{CpuPlan, Plan};
 
 /// Vector lane width of a TPU register; concatenated and merged dot widths are aligned to it.
 pub(crate) const LANES: usize = 128;
@@ -104,11 +104,6 @@ impl Passes for TpuModule<'_> {
     /// With `flash_attention`.
     fn attention_layouts(config: &CompilerConfig) -> Pass<Self> {
         when(config.flash_attention, AttentionLayouts)
-    }
-
-    /// With `safe_kernels`.
-    fn clamp_indices(config: &CompilerConfig) -> Pass<Self> {
-        when(config.safe_kernels, ClampIndices)
     }
 
     /// Always.
@@ -199,7 +194,8 @@ impl Passes for TpuModule<'_> {
 }
 
 /// Runs the TPU pass pipeline over `graph` and plans its buffers with the TPU tiled layout.
-pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> {
+/// Without a TPU linked, the plan stays the CPU's.
+pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Box<dyn Plan>, String> {
     let mut module = TpuModule {
         graph: graph.clone(),
         options,
@@ -229,15 +225,16 @@ pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<Plan, String> 
         )
     };
 
-    let mut plan = Plan::compile_with(&graph, &plan);
+    let mut plan = CpuPlan::compile_with(&graph, &plan);
     plan.packed = packed;
     plan.interleaved = interleaved;
 
     // Each step's kernel is generated now, so running the plan only launches them.
     #[cfg(lumen_tpu_linked)]
-    crate::codegen::tpu::codegen(&mut plan, options)?;
+    return Ok(Box::new(crate::codegen::tpu::codegen(plan, options)?));
 
-    Ok(plan)
+    #[cfg(not(lumen_tpu_linked))]
+    Ok(Box::new(plan))
 }
 
 /// Whether the TPU matmul kernel reads operand `k` of `dot` over `operands` as laid out: its batch dimensions

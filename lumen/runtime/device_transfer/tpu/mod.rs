@@ -4,9 +4,12 @@ use std::ptr::NonNull;
 
 use crate::Tensor;
 use crate::allocator::tpu::ROW;
+use crate::codegen::utils::tpu::Tpu;
 use crate::device::Device;
 use crate::device::tpu::layout::Layout;
-use crate::runtime::tpu::{Launch, flush, launch};
+use crate::runtime::kernel::Launch as _;
+use crate::runtime::kernel::tpu::TpuLaunch;
+use crate::runtime::tpu::flush;
 
 /// The TPU tiled layout of `t`'s dtype and shape.
 fn layout(t: &Tensor) -> Layout {
@@ -24,17 +27,19 @@ pub(super) fn copy_h2d(dst: &Tensor, src: &Tensor) {
     let host = layout(dst).tile(bytes);
     debug_assert!(host.len().is_multiple_of(ROW));
 
-    let launched = Launch {
+    let launched = TpuLaunch {
+        device: index,
         module: "lumen.runtime.device_transfer.tpu",
-        kernel: "copy_h2d".to_owned(),
+        kernel: "copy_h2d",
         spec: String::new(),
         rows: &[dst.data_ptr().cast_const()],
         scalars: &[],
         host: &host,
         sparse: None,
+        lowered: None,
     };
 
-    launch(index, launched)
+    Tpu::launch(launched)
         .unwrap_or_else(|e| panic!("copying {nbytes} bytes to tpu:{index} failed: {e}"));
 }
 

@@ -174,11 +174,6 @@ pub(crate) trait Passes: Module + Sized {
         Box::new(Empty)
     }
 
-    /// Clamps gather, scatter-add and linear-cross-entropy indices into range.
-    fn clamp_indices(_: &CompilerConfig) -> Pass<Self> {
-        Box::new(Empty)
-    }
-
     /// Folds a reshape flattening leading dims into a 2-D dot's lhs.
     fn fold_dot_reshapes(_: &CompilerConfig) -> Pass<Self> {
         Box::new(Empty)
@@ -293,7 +288,6 @@ pub(crate) fn pipeline<M: Passes>(config: &CompilerConfig) -> Pipeline<M> {
         .push(M::flash_attention_backward(config))
         .push(M::attention_layouts(config))
         .push(M::linear_cross_entropy(config))
-        .push(M::clamp_indices(config))
         .push(M::fold_dot_reshapes(config))
         .push(M::simplify(config))
         .push(M::dot_strength(config))
