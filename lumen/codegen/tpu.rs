@@ -126,16 +126,10 @@ pub(crate) fn kernel(step: &Step) -> Result<Option<Kernel>, String> {
     }
 }
 
-/// Generates the kernel of each step of `plan` (and of its device stages), so runs only launch them.
+/// Generates the kernel of each step of `plan`, so runs only launch them.
 pub(crate) fn codegen(plan: &Plan) {
-    let staged = plan.staged.iter().flat_map(|s| &s.stages);
-
     for step in plan.steps() {
         // A step its kernel fails on keeps failing, with the same error, when it runs.
         let _ = step.memo.get(KERNEL, || kernel(step));
-    }
-
-    for stage in staged.filter(|s| !s.host) {
-        codegen(&stage.plan);
     }
 }
