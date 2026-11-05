@@ -121,16 +121,22 @@ pub(crate) fn kernel(step: &Step) -> Result<Option<Kernel>, String> {
             pallas.context = Some(step.label.to_string());
             Ok(Some(pallas))
         }
+        // Custom calls run their registered kernels, not a TPU program.
+        Primitive::CustomCall { .. } => Ok(None),
         _ => Err(format!("{} does not run on TPU yet", step.primitive.name())),
     }
 }
 
-/// Generates the kernel of each step of `plan`, kept on the step, so runs only launch them. A step its kernel
-/// fails on keeps none and fails, with the same error, when it runs.
+/// Generates the kernel of each step of `plan`, kept on the step, so runs only launch them; fails on a step no
+/// TPU kernel takes (a gather, only once its launch finds the SparseCore can't run it either).
 pub(crate) fn codegen(plan: &mut Plan, _: &Options) -> Result<(), String> {
     for step in plan.steps_mut() {
-        if let Ok(Some(kernel)) = kernel(step) {
-            step.kernel = Some(Arc::new(kernel));
+        match kernel(step) {
+            Ok(Some(kernel)) => step.kernel = Some(Arc::new(kernel)),
+            Ok(None) => {}
+            // A gather its TensorCore kernel can't take may still run on the SparseCore, which its launch decides.
+            Err(_) if matches!(step.primitive, Primitive::Gather { .. }) => {}
+            Err(e) => return Err(e),
         }
     }
 

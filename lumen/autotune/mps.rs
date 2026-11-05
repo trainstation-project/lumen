@@ -75,8 +75,10 @@ impl Kernels for Elementwise<'_> {
 
         let t = tunable(step).expect("a tunable fusion");
 
+        // Codegen generated this body's kernel under another tuning, so it generates under this one too.
         let (kernel, source) =
-            crate::codegen::mps::kernel(body, &t.by_value, self.config, &t.views, Some(tuning));
+            crate::codegen::mps::kernel(body, &t.by_value, self.config, &t.views, Some(tuning))
+                .expect("a kernel of a tunable fusion under any tuning");
 
         record_launch(&kernel, body, Some(tuning));
         self.sources.insert(kernel.clone(), source);

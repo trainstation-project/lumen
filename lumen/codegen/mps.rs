@@ -51,7 +51,7 @@ pub(crate) fn codegen(plan: &mut Plan, options: &Options) -> Result<(), String> 
 
         if name == crate::graph::UPDATES {
             let (kernel, source) =
-                Mps::updates(body, &()).expect("a Metal kernel of every updates body");
+                Mps::updates(body, &()).map_err(|e| format!("{}: {e}", step.label))?;
 
             record_launch(&kernel, body, None);
             sources.insert(kernel.clone(), source);
@@ -65,7 +65,8 @@ pub(crate) fn codegen(plan: &mut Plan, options: &Options) -> Result<(), String> 
 
         let (kernel, source) = match requested {
             Kernel::Fusion => {
-                let (kernel, source) = kernel(body, &by_value, config, &views, None);
+                let (kernel, source) = kernel(body, &by_value, config, &views, None)
+                    .map_err(|e| format!("{}: {e}", step.label))?;
                 step.kernel = Some(Arc::new(Tunable { by_value, views }));
                 (kernel, source)
             }
@@ -118,40 +119,42 @@ fn is_elementwise(body: &Graph) -> bool {
 
 /// Generates the kernel for a fused `body`, returning its name and Metal source.
 /// `by_value[k]` passes input `k` as a constant scalar; `views` maps output index to the
-/// (element offset, strides) it writes through.
+/// (element offset, strides) it writes through. Fails on a body no Metal kernel takes.
 pub(crate) fn kernel(
     body: &Graph,
     by_value: &[bool],
     config: &CompilerConfig,
     views: &HashMap<usize, (usize, Vec<usize>)>,
     tuning: Option<Tuning>,
-) -> (String, String) {
+) -> Result<(String, String), String> {
     if let Some(dot) = row_dot(body) {
-        return gemm_row_kernel(body, by_value, dot, config, gemv_config(body));
+        return Ok(gemm_row_kernel(
+            body,
+            by_value,
+            dot,
+            config,
+            gemv_config(body),
+        ));
     }
 
     if let Some(dot) = gemm_dot(body) {
-        return gemm_kernel(body, by_value, dot);
+        return Ok(gemm_kernel(body, by_value, dot));
     }
 
     if !row_reductions(body).is_empty() {
-        return Mps::row(body, by_value, config).expect("a Metal row kernel of every row body");
+        return Mps::row(body, by_value, config);
     }
 
     if let Some(root) = reduction_root(body) {
-        return Mps::reduction(body, by_value, root)
-            .expect("a Metal reduction of every reduction body");
+        return Mps::reduction(body, by_value, root);
     }
 
     if transpose_tiling(body).is_some() {
-        return Mps::transpose(body, by_value, views)
-            .expect("a Metal kernel of every tiled transpose");
+        return Mps::transpose(body, by_value, views);
     }
 
     let tuning = tuning.unwrap_or_else(|| elementwise_tuning(body));
-
     Mps::elementwise(body, by_value, views, &tuning)
-        .expect("a Metal kernel of every elementwise body")
 }
 
 /// Whether the kernel chosen for `body` can write its outputs through strided views.

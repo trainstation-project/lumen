@@ -162,7 +162,7 @@ pub(crate) fn codegen(plan: &mut Plan, options: &Options) -> Result<(), String> 
     let deterministic = options.config.deterministic;
 
     for step in plan.steps_mut() {
-        if let Some(kernel) = loop_kernel(step, deterministic) {
+        if let Some(kernel) = loop_kernel(step, deterministic)? {
             step.kernel = Some(Arc::new(kernel));
         }
     }
@@ -199,8 +199,8 @@ fn atomic_add(dtype: DType) -> bool {
 
 /// Generates the loop kernel for `step`, or `None` for GEMMs and steps without a Triton loop kernel;
 /// unless `deterministic`, a scatter-add of a dtype with atomic adds adds each update element atomically,
-/// otherwise it sorts its picks by position and adds a row's in order.
-pub(crate) fn loop_kernel(step: &Step, deterministic: bool) -> Option<Kernel> {
+/// otherwise it sorts its picks by position and adds a row's in order. Fails on a body no kernel takes.
+pub(crate) fn loop_kernel(step: &Step, deterministic: bool) -> Result<Option<Kernel>, String> {
     let by_value: Vec<bool> = step
         .inputs
         .iter()
@@ -218,17 +218,17 @@ pub(crate) fn loop_kernel(step: &Step, deterministic: bool) -> Option<Kernel> {
             1,
             1,
         ),
-        Primitive::Fusion { body, .. } if gemm_dot(body).is_some() => return None,
+        Primitive::Fusion { body, .. } if gemm_dot(body).is_some() => return Ok(None),
         Primitive::Fusion { name, body, .. } if name == ROW => {
             let r = codegen::Triton::row(body, &by_value, &())
-                .expect("a Triton row kernel of every row body");
+                .map_err(|e| format!("{}: {e}", step.label))?;
 
             (r.name, r.source, r.lanes, r.splits)
         }
         Primitive::Fusion { body, .. } => match reduction_root(body) {
             Some(root) => {
                 let r = codegen::Triton::reduction(body, &by_value, root)
-                    .expect("a Triton reduction of every reduction body");
+                    .map_err(|e| format!("{}: {e}", step.label))?;
 
                 (r.name, r.source, r.lanes, r.splits)
             }
@@ -275,7 +275,7 @@ pub(crate) fn loop_kernel(step: &Step, deterministic: bool) -> Option<Kernel> {
                 1,
             )
         }
-        _ => return None,
+        _ => return Ok(None),
     };
 
     // Only an elementwise fusion's outputs (a horizontal fusion's) split the grid; a row's are one row each.
@@ -324,7 +324,7 @@ pub(crate) fn loop_kernel(step: &Step, deterministic: bool) -> Option<Kernel> {
         _ => None,
     };
 
-    Some(Kernel {
+    Ok(Some(Kernel {
         name,
         source,
         by_value,
@@ -332,21 +332,20 @@ pub(crate) fn loop_kernel(step: &Step, deterministic: bool) -> Option<Kernel> {
         splits,
         segments,
         template,
-    })
+    }))
 }
 
-/// How the scan template tiles cumsum `step`, or `None` for a step that is not one.
-fn scan(step: &Step) -> Option<Scan> {
+/// How the scan template tiles cumsum `step`.
+fn scan(step: &Step) -> Result<Scan, String> {
     let Primitive::Cumsum {
         axis,
         reverse,
         accum_dtype,
     } = step.primitive
     else {
-        return None;
+        unreachable!("a cumsum")
     };
 
-    let scan = codegen::Triton::scan(&step.inputs[0].1, axis, reverse, accum_dtype);
-
-    Some(scan.expect("a Triton scan of every cumsum"))
+    codegen::Triton::scan(&step.inputs[0].1, axis, reverse, accum_dtype)
+        .map_err(|e| format!("{}: {e}", step.label))
 }

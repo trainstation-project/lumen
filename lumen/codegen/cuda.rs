@@ -60,7 +60,7 @@ fn extent(shape: &[usize], strides: &[usize]) -> usize {
 
 /// Marks `plan` as the CUDA backend's and generates each step's kernel for the layouts the plan gives its
 /// tensors, kept in the step's memo by layout so its launches find it; tensors laid out otherwise when it runs
-/// get theirs then. A step its kernel fails on fails, with the same error, when it runs.
+/// get theirs then. Fails on a step no CUDA kernel takes.
 pub(crate) fn codegen(plan: &mut Plan, _: &Options) -> Result<(), String> {
     plan.cuda = true;
 
@@ -85,7 +85,7 @@ pub(crate) fn codegen(plan: &mut Plan, _: &Options) -> Result<(), String> {
             spans,
         };
 
-        let _ = generated(step, layouts);
+        generated(step, layouts)?;
     }
 
     Ok(())

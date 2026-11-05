@@ -45,18 +45,18 @@ def test_bfloat16_dots_split_their_words_by_parity(lhs, rhs):
 
 
 def test_a_dot_the_kernel_cannot_run_says_why():
-    """An int32 dot raises, saying the kernel needs float32 accumulation."""
+    """An int32 dot fails to compile, saying the kernel needs float32 accumulation."""
     x, w = lumen.zeros([8, 128], "int32").to("tpu"), lumen.zeros([128, 128], "int32").to("tpu")
-    with pytest.raises(ValueError, match="accumulating in float32"):
+    with pytest.raises(RuntimeError, match="accumulating in float32"):
         lumen.compile(lambda x, w: F.matmul(x, w, "int32", "int32"))(x, w)
 
 
 def test_programs_of_other_primitives_say_they_do_not_run_yet():
     """Outside a kernel, a TPU program runs dots, elementwise primitives,
-    reductions and Pallas kernels: another primitive (a cumulative sum) says
-    it does not run on a TPU yet."""
+    reductions and Pallas kernels: another primitive (a cumulative sum) fails
+    to compile, saying it does not run on a TPU yet."""
     x = lumen.ones([8, 128]).to("tpu")
-    with pytest.raises(ValueError, match="cumsum does not run on TPU yet"):
+    with pytest.raises(RuntimeError, match="cumsum does not run on TPU yet"):
         lumen.compile(lambda a: lumen.functional.cumsum(a, 0), device="tpu")(x)
 
 
@@ -87,9 +87,9 @@ def test_the_profiler_times_each_tpu_program():
 
 
 def test_a_sum_over_a_middle_dimension_says_so():
-    """A sum over a middle axis raises, saying it does not run on TPU yet."""
+    """A sum over a middle axis fails to compile, saying it does not run on TPU yet."""
     x = lumen.ones([4, 64, 128]).to("tpu")
-    with pytest.raises(ValueError, match="reduce_sum does not run on TPU yet"):
+    with pytest.raises(RuntimeError, match="reduce_sum does not run on TPU yet"):
         lumen.compile(lambda x: lumen.functional.sum(x, 1))(x)
 
 
