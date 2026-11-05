@@ -152,8 +152,9 @@ def test_dump_to_writes_each_pass(compiler, tmp_path, device, triton_on_cuda):
     """``dump_to``: each compiled graph written before its passes and after
     each, a file each, named by its pipeline, step and pass (XLA's
     ``--xla_dump_to``); the MPS pipeline's last passes place the slices
-    read in place, wrap the lone nodes left in elementwise fusions, then generate the
-    kernels; the Triton pipeline's fuses."""
+    read in place, wrap the lone nodes left in elementwise fusions, then copy the
+    concatenations left unable to be written in place, its fusions still awaiting their
+    kernels (generated once the plan is laid out); the Triton pipeline's fuses."""
     f = lambda x: F.exp(x) * 2.0 + 1.0  # noqa: E731
     graph = lumen.make_graph(f)(lumen.empty([8], device="meta"))
     lumen.config.compiler.dump_to = str(tmp_path)
@@ -166,10 +167,10 @@ def test_dump_to_writes_each_pass(compiler, tmp_path, device, triton_on_cuda):
     assert "cpu.01.simplify.txt" in steps
     if "mps" in devices:
         mps = sorted(s for s in steps if s.startswith("mps."))
-        assert [s.split(".")[2] for s in mps[-3:]] == ["place_views", "alone", "codegen"], mps
+        assert [s.split(".")[2] for s in mps[-3:]] == ["place_views", "alone", "concats"], mps
         assert any(".fusion." in s for s in mps)
         assert (
-            "fusion_" in (tmp_path / next(p.name for p in tmp_path.iterdir() if p.name.endswith(mps[-1]))).read_text()
+            "pending#" in (tmp_path / next(p.name for p in tmp_path.iterdir() if p.name.endswith(mps[-1]))).read_text()
         )
     if "cuda" in devices:
         assert any(s.startswith("triton.") and ".fusion." in s for s in steps), steps

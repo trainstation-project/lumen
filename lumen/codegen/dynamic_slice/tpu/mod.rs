@@ -3,11 +3,11 @@
 use crate::DType;
 use crate::codegen::dot_general::tpu::block;
 use crate::codegen::dynamic_slice::DynamicSliceCodegen;
+use crate::codegen::tpu::{Kernel, Rows};
 use crate::codegen::utils::tpu::Tpu;
 use crate::device::tpu::layout::Layout;
 use crate::graph::{Graph, Primitive, TensorType};
 use crate::plan::Step;
-use crate::runtime::tpu::{Kernel, Rows};
 use crate::tensor::scalar::Scalar;
 
 /// Lane width of a TPU tile.

@@ -1,0 +1,105 @@
+//! CUDA (CuTe DSL) codegen: each planned step's kernel, generated when the plan compiles for the layouts it
+//! gives the step's tensors and kept in the step's memo; tensors laid out otherwise get theirs at launch.
+
+use std::sync::Arc;
+
+use crate::codegen::elementwise::ElementwiseCodegen;
+use crate::codegen::elementwise::cuda::Layouts;
+use crate::codegen::utils::cuda::Cuda;
+use crate::graph::{Graph, Primitive, TensorType};
+use crate::plan::{Plan, Step};
+
+/// The kernel `step` runs as for tensors laid out as `layouts`, generated once per layout and kept in the
+/// step's memo.
+pub(crate) fn generated(step: &Step, layouts: Layouts) -> Result<Arc<(String, String)>, String> {
+    let key = layouts
+        .inputs
+        .iter()
+        .chain(&layouts.outputs)
+        .chain(std::iter::once(&layouts.spans))
+        .fold(0u64, |h, s| {
+            use std::hash::{Hash, Hasher};
+
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            (h, s).hash(&mut hasher);
+            hasher.finish()
+        });
+
+    step.memo.get(key, || {
+        let body = match &step.primitive {
+            Primitive::Fusion { body, .. } => body.clone(),
+            Primitive::Reshape { new_sizes } => copy_body(&step.inputs[0].1, new_sizes),
+            p => {
+                return Err(format!(
+                    "{}: the CUDA backend has no kernel for it yet",
+                    p.name()
+                ));
+            }
+        };
+
+        let by_value = vec![false; layouts.inputs.len()];
+        Cuda::elementwise(&body, &by_value, &Default::default(), &layouts)
+    })
+}
+
+/// Elements a tensor of `shape` laid out at `strides` spans, from its first to its last.
+fn extent(shape: &[usize], strides: &[usize]) -> usize {
+    match shape.contains(&0) {
+        true => 0,
+        false => {
+            shape
+                .iter()
+                .zip(strides)
+                .map(|(&n, &s)| (n - 1) * s)
+                .sum::<usize>()
+                + 1
+        }
+    }
+}
+
+/// Generates each step's kernel for the layouts `plan` gives its tensors, so its launches find it in the
+/// step's memo; tensors laid out otherwise when it runs get theirs then. A step its kernel fails on fails,
+/// with the same error, when it runs.
+pub(crate) fn codegen(plan: &Plan) {
+    for step in plan.steps() {
+        let outputs = std::iter::once(&step.output).chain(&step.extra_outputs);
+
+        if outputs.clone().all(|(_, ty)| ty.numel() == 0) {
+            continue;
+        }
+
+        let (inputs, outputs_at) = (step.input_strides(), step.output_strides());
+        let types = step.inputs.iter().chain(outputs).map(|(_, ty)| &ty.shape);
+
+        let spans = types
+            .zip(inputs.iter().chain(&outputs_at))
+            .map(|(shape, strides)| extent(shape, strides))
+            .collect();
+
+        let layouts = Layouts {
+            inputs,
+            outputs: outputs_at,
+            spans,
+        };
+
+        let _ = generated(step, layouts);
+    }
+}
+
+/// The body of a copy of `x` reshaped to `shape`: its input, reshaped, its output.
+fn copy_body(x: &TensorType, shape: &[usize]) -> Graph {
+    let mut body = Graph::new();
+    let input = body.input(x.clone());
+
+    let output = body
+        .apply(
+            Primitive::Reshape {
+                new_sizes: shape.to_vec(),
+            },
+            &[input],
+        )
+        .expect("a reshape of the copied value");
+
+    body.set_outputs(&[output]).expect("the copied value");
+    body
+}

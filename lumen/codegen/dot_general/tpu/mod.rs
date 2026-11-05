@@ -5,10 +5,10 @@ use crate::codegen::dot_general::GemmCodegen;
 pub(crate) mod codegen;
 pub(crate) mod row;
 
+use crate::codegen::tpu::{Kernel, Rows};
 use crate::codegen::utils::tpu::Tpu;
 use crate::graph::Primitive;
 use crate::plan::Step;
-use crate::runtime::tpu::{Kernel, Rows};
 
 /// The largest block dividing `n` that is a multiple of `unit` and at most `cap`; `n` itself when it fits.
 pub(crate) fn block(n: usize, unit: usize, cap: usize) -> Option<usize> {

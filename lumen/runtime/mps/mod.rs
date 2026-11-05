@@ -263,7 +263,7 @@ pub(crate) fn encode(
     // element; a GEMM strides through its dot's operand views.
     if let Some(encode) = step
         .launch::<Encode>()
-        .filter(|_| !crate::graph_compiler::mps::loads_views(step))
+        .filter(|_| !crate::codegen::mps::loads_views(step))
     {
         return encode(step, inputs, output, scratch, keep);
     }

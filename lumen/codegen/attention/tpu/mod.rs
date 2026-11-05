@@ -7,6 +7,8 @@ mod config;
 
 use super::AttentionCodegen;
 use crate::DType;
+#[cfg(lumen_tpu_linked)]
+use crate::codegen::tpu::{Kernel, Rows};
 use crate::codegen::utils::tpu::Tpu;
 use crate::device::tpu::layout::Layout;
 use crate::graph::{Graph, Node, Primitive, TensorType, Var};
@@ -16,8 +18,6 @@ use crate::graph_compiler::common::attention::{
 use crate::graph_compiler::elementwise;
 #[cfg(lumen_tpu_linked)]
 use crate::plan::Step;
-#[cfg(lumen_tpu_linked)]
-use crate::runtime::tpu::{Kernel, Rows};
 use crate::tensor::contiguous_strides;
 use config::blocks;
 

@@ -358,12 +358,9 @@ impl Plan {
                         Primitive::Fusion { body, .. } => {
                             view.is_none()
                                 && s.inputs[k].1.shape == self.inputs[i].shape
-                                && (crate::graph_compiler::mps::fusion_reads_strided(
-                                    body, k, strides,
-                                ) || crate::graph_compiler::mps::loads_strided(body, k)
-                                    || crate::graph_compiler::mps::attention_reads_strided(
-                                        body, strides,
-                                    ))
+                                && (crate::codegen::mps::fusion_reads_strided(body, k, strides)
+                                    || crate::codegen::mps::loads_strided(body, k)
+                                    || crate::codegen::mps::attention_reads_strided(body, strides))
                         }
                         _ => false,
                     })

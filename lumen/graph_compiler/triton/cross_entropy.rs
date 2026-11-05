@@ -2,9 +2,10 @@
 //! cross-entropy epilogue writing each output tile's per-row max and sum of exponentials (and the label's
 //! logit), then a kernel combining a row's tiles into its loss and `logsumexp`.
 
-use super::{Function, Kernel, Launches, Template};
+use super::{Function, Launches};
 use crate::codegen::dot_general::triton::{self as codegen, Config};
 use crate::codegen::elementwise::triton::{LOOP_CONFIGS, UNTUNED_LOOP};
+use crate::codegen::triton::{Kernel, Template};
 use crate::graph::Primitive;
 use crate::graph_compiler::common::dot::triton::{Epilogue, Gemm};
 use crate::plan::Step;

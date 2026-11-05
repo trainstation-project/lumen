@@ -5,10 +5,10 @@ use std::collections::HashMap;
 use crate::DType;
 use crate::codegen::dot_general::tpu::{block, caps};
 use crate::codegen::row::tpu::{Kind, kinds, readable, row_node, rows};
+use crate::codegen::tpu::{Kernel, Rows};
 use crate::device::tpu::layout::Layout;
 use crate::graph::{Graph, Primitive, Var};
 use crate::plan::Step;
-use crate::runtime::tpu::{Kernel, Rows};
 
 /// VMEM budget, in bytes, a GEMM-row block may use.
 const VMEM: usize = 88 << 20;
