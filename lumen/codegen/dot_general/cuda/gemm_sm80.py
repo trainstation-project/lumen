@@ -18,7 +18,7 @@ import cutlass
 import cutlass.cute as cute
 import cutlass.pipeline as pipeline
 import cutlass.utils.hopper_helpers as sm90_utils
-from cutlass import Int32, const_expr
+from cutlass import Boolean, Int32, const_expr
 from cutlass.cute.nvgpu import cpasync, warp, warpgroup
 from cutlass.experimental import primitives as prims
 from cutlass.utils import LayoutEnum
@@ -346,7 +346,7 @@ class AmpereGemm:
     ):
         """Multistage cp.async mainloop accumulating the tile's `k_tile_cnt` k-tiles into `acc`.
 
-        `copy_A` / `copy_B` (k_tile, stage) start a k-tile's gmem -> smem copy; `copy_block_A` / `copy_block_B`
+        `copy_A` / `copy_B` (k_tile, stage, pred_k) start a k-tile's gmem -> smem copy; `copy_block_A` / `copy_block_B`
         (stage, k_block) load one k16 block of a stage into the fragments. ab_stage - 1 k-tiles are kept in flight:
         k-tile t + ab_stage - 1 is issued into the stage k-tile t - 1 vacated, once every thread has moved past it.
         The register side has the produce rhythm of QuACK's SM120 warp-MMA mainloop: load block k + 1 (slot 0 of
@@ -354,11 +354,14 @@ class AmpereGemm:
         num_k_blocks = cute.size(tCrA, mode=[2])
 
         # Prologue: issue the first ab_stage - 1 k-tiles, one commit group each (empty past the last k-tile, so
-        # the wait_group counts below hold for any k_tile_cnt).
+        # the wait_group counts below hold for any k_tile_cnt). Only the last k-tile can run past K.
         for k_tile in cutlass.range_constexpr(self.ab_stage - 1):
-            if k_tile < k_tile_cnt:
+            if k_tile < k_tile_cnt - 1:
                 copy_A(k_tile, k_tile)
                 copy_B(k_tile, k_tile)
+            if k_tile == k_tile_cnt - 1:
+                copy_A(k_tile, k_tile, pred_k=True)
+                copy_B(k_tile, k_tile, pred_k=True)
             cute.arch.cp_async_commit_group()
 
         read_stage = Int32(0)
@@ -388,9 +391,12 @@ class AmpereGemm:
 
                 if const_expr(k == 0):
                     next_k_tile = k_tile + self.ab_stage - 1
-                    if next_k_tile < k_tile_cnt:
+                    if next_k_tile < k_tile_cnt - 1:
                         copy_A(next_k_tile, write_stage)
                         copy_B(next_k_tile, write_stage)
+                    if next_k_tile == k_tile_cnt - 1:
+                        copy_A(next_k_tile, write_stage, pred_k=True)
+                        copy_B(next_k_tile, write_stage, pred_k=True)
                     cute.arch.cp_async_commit_group()
                     write_stage += 1
                     if write_stage == self.ab_stage:
@@ -447,9 +453,10 @@ class AmpereGemm:
         tile_mn: int,
         tidx: Int32,
     ) -> Callable:
-        """`copy(k_tile, stage)`: the cp.async of k-tile `k_tile` of row tile `tile_idx` of `mX` (mn, k) into stage
-        `stage` of `sX` (tile_mn, tile_k, STAGE), zero-filling vectors outside `mX` (extents are 16-byte multiples,
-        so a vector is wholly inside or outside)."""
+        """`copy(k_tile, stage, pred_k=False)`: the cp.async of k-tile `k_tile` of row tile `tile_idx` of `mX` (mn, k)
+        into stage `stage` of `sX` (tile_mn, tile_k, STAGE). Vectors outside `mX` are zero in smem (extents are
+        16-byte multiples, so a vector is wholly inside or outside): rows past MN are zeroed in every stage here, once
+        per tile, and columns past K by `pred_k`, which only the last k-tile needs."""
         tile_shape = (tile_mn, self.cta_tile_shape_mnk[2])
         # (tile_mn, tile_k, RestK)
         gX = cute.local_tile(mX, tile_shape, (tile_idx, None))
@@ -462,13 +469,32 @@ class AmpereGemm:
         zero = cute.make_rmem_tensor_like(tXsX[None, 0, 0, 0])
         zero.fill(0)
 
-        def copy_fn(k_tile, stage):
-            for i in cutlass.range_constexpr(cute.size(tXsX, mode=[1])):
-                for j in cutlass.range_constexpr(cute.size(tXsX, mode=[2])):
-                    if cute.elem_less(tXcX[0, i, j, k_tile], mX.shape):
-                        cute.copy(tiled_copy, tXgX[None, i, j, k_tile], tXsX[None, i, j, stage])
-                    else:
+        limit_k = mX.shape[1]
+
+        # MN bounds, one predicate per row of vectors, fixed for the tile.
+        num_rows = cute.size(tXsX, mode=[1])
+        tXpX = cute.make_rmem_tensor(num_rows, Boolean)
+        for i in cutlass.range_constexpr(num_rows):
+            tXpX[i] = tXcX[0, i, 0, 0][0] < mX.shape[0]
+
+        # cp.async never writes the rows past MN: zero them in every stage up front.
+        for stage in cutlass.range_constexpr(cute.size(tXsX, mode=[3])):
+            for i in cutlass.range_constexpr(num_rows):
+                if not tXpX[i]:
+                    for j in cutlass.range_constexpr(cute.size(tXsX, mode=[2])):
                         cute.autovec_copy(zero, tXsX[None, i, j, stage])
+
+        def copy_fn(k_tile, stage, pred_k: cutlass.Constexpr[bool] = False):
+            for i in cutlass.range_constexpr(num_rows):
+                for j in cutlass.range_constexpr(cute.size(tXsX, mode=[2])):
+                    if tXpX[i]:
+                        if const_expr(pred_k):
+                            if tXcX[0, i, j, k_tile][1] < limit_k:
+                                cute.copy(tiled_copy, tXgX[None, i, j, k_tile], tXsX[None, i, j, stage])
+                            else:
+                                cute.autovec_copy(zero, tXsX[None, i, j, stage])
+                        else:
+                            cute.copy(tiled_copy, tXgX[None, i, j, k_tile], tXsX[None, i, j, stage])
 
         return copy_fn
 
