@@ -33,7 +33,7 @@
 from __future__ import annotations
 
 import math
-from typing import Tuple, Type
+from typing import Optional, Tuple, Type, Union
 
 import cuda.bindings.driver as cuda
 import cutlass
@@ -77,49 +77,102 @@ Constraints:
 
 
 class AmpereGemm:
-    _FP16_BF16_DTYPES = (cutlass.Float16, cutlass.BFloat16)
-    _FP8_DTYPES = (cutlass.Float8E4M3FN, cutlass.Float8E5M2)
-    _MMA_SHAPE_FP16_BF16 = (16, 8, 16)
-    _MMA_SHAPE_FP8 = (16, 8, 32)
-    _CTA_TILER_FP16_BF16 = (128, 128, 32)
-    _CTA_TILER_FP8 = (128, 128, 64)
+    # lumen: QuACK's GemmSm80 constructor (quack/gemm_sm80.py, commit bb0e6b2), copied as is but its epilogue barrier:
+    # the kernel's shape from its tile, warps and arch.
+    arch = 80
+    _supported_archs = (80, 86, 87, 89)
 
     def __init__(
         self,
-        ab_dtype: Type[cutlass.Numeric],
-        c_dtype: Type[cutlass.Numeric],
         acc_dtype: Type[cutlass.Numeric],
-        atom_layout_mnk: Tuple[int, int, int],
-        is_m_major_c: bool = False,
-    ) -> AmpereGemm:
-        self.ab_dtype = ab_dtype
-        self.c_dtype = c_dtype
+        a_dtype: Type[cutlass.Numeric],
+        tile_shape_mnk: Union[Tuple[int, int], Tuple[int, int, int]],
+        pingpong: bool = False,
+        is_persistent: bool = False,
+        concat_layout: tuple | None = None,
+        use_pdl: bool = False,
+        num_warps: Optional[int] = None,
+        occupancy: Optional[int] = None,
+        arch: int = 80,
+    ):
+        if arch not in self._supported_archs:
+            raise ValueError(f"SM80-family GEMM supports arch in {self._supported_archs}, got {arch}")
+
+        self.arch = arch
         self.acc_dtype = acc_dtype
-        self.is_fp8 = self.ab_dtype in self._FP8_DTYPES
-        assert (
-            self.ab_dtype in self._FP16_BF16_DTYPES + self._FP8_DTYPES
-        ), "ab_dtype must be one of Float16, BFloat16, Float8E4M3FN, Float8E5M2"
-        self.cta_tiler = self._CTA_TILER_FP8 if self.is_fp8 else self._CTA_TILER_FP16_BF16
-        self.num_stages = 4
-        self.atom_layout_mnk = atom_layout_mnk
-        atom_lay_M, atom_lay_N, atom_lay_K = self.atom_layout_mnk
-        self.num_threads = atom_lay_M * atom_lay_N * atom_lay_K * 32
 
-        self.bM, self.bN, self.bK = self.cta_tiler
-        self.mma_inst_shape = self._MMA_SHAPE_FP8 if self.is_fp8 else self._MMA_SHAPE_FP16_BF16
-        mmaM, mmaN, mmaK = self.mma_inst_shape
+        assert not pingpong, "SM8x GEMM does not use pingpong scheduling"
+        self.pingpong = pingpong
 
-        # M-major C uses C^T = B^T * A^T, swapping atom layout M/N roles.
-        if is_m_major_c:
-            assert self.bM % (atom_lay_N * mmaM) == 0, "bM must be divisible by MMA instruction"
-            assert self.bN % (atom_lay_M * mmaN) == 0, "bN must be divisible by MMA instruction"
+        self.is_persistent = is_persistent
+        self.use_pdl = use_pdl
+        self.concat_layout = concat_layout or ()
+        self.mma_inst_mnk = (16, 8, 16)
+
+        if len(tile_shape_mnk) == 3:
+            tile_m, tile_n, tile_k = tile_shape_mnk
+        elif len(tile_shape_mnk) == 2:
+            tile_m, tile_n = tile_shape_mnk
+            tile_k = self.mma_inst_mnk[2] << 2
         else:
-            assert self.bM % (atom_lay_M * mmaM) == 0, "bM must be divisible by MMA instruction"
-            assert self.bN % (atom_lay_N * mmaN) == 0, "bN must be divisible by MMA instruction"
+            raise ValueError("SM80 tile shape must be (M, N) or (M, N, K)")
 
-        assert atom_lay_K == 1, "this example does not support atom layout K > 1"
-        assert self.bK % mmaK == 0, "bK must be divisible by MMA instruction"
-        assert self.num_stages >= 3, "num_stages must be greater than or equal to 3"
+        if tile_m % 16 != 0 or tile_n % 16 != 0:
+            raise ValueError("SM80 tile shape M/N must be divisible by 16")
+
+        self.cta_tile_shape_mnk = (tile_m, tile_n, tile_k)
+
+        if num_warps is None:
+            self.num_warps = 8 if (tile_m, tile_n) in ((128, 256), (128, 192)) else 4
+        else:
+            self.num_warps = num_warps
+
+        if self.num_warps not in (4, 8):
+            raise ValueError("SM80 GEMM supports num_warps=4 or 8")
+
+        self.atom_layout_mnk = (2, self.num_warps // 2, 1)
+        self.mma_inst_tile_k = tile_k // self.mma_inst_mnk[2]
+        self.threads_per_cta = self.num_warps * cute.arch.WARP_SIZE
+
+        self.smem_capacity = self._smem_capacity_for_arch(self.arch)
+        self.buffer_align_bytes = 1024
+        default_occupancy = 1 if self.num_warps == 8 else 2
+        ab_bytes_per_stage = (tile_m + tile_n) * tile_k * a_dtype.width // 8
+        if 3 * ab_bytes_per_stage > self.smem_capacity // default_occupancy - self.buffer_align_bytes:
+            default_occupancy = 1
+        self.occupancy = occupancy if occupancy is not None else default_occupancy
+        self.num_epi_warps = self.num_warps
+        # (lumen: QuACK's epilogue named barrier is left out: it belongs to its GemmBase epilogue, which this kernel
+        # doesn't use.)
+
+        self.ab_stage = None
+        self.epi_stage = None
+        self.epi_c_stage = None
+        self.epi_m_major = True
+        self.a_smem_layout_staged = None
+        self.b_smem_layout_staged = None
+        self.epi_smem_layout_staged = None
+        self.epi_c_smem_layout_staged = None
+        self.epi_tile = None
+        self.shared_storage = None
+
+        # lumen: the names CUTLASS's Ampere kernel body below reads, from QuACK's: A and B share `a_dtype` (16-bit:
+        # QuACK's SM80 MMA instruction is 16x8x16, no float8); D's dtype is read from `mC` when it is traced.
+        self.ab_dtype = a_dtype
+        self.is_fp8 = False
+        self.cta_tiler = self.cta_tile_shape_mnk
+        self.bM, self.bN, self.bK = self.cta_tiler
+        self.mma_inst_shape = self.mma_inst_mnk
+        self.num_threads = self.threads_per_cta
+        self.num_stages = 4
+
+    @staticmethod
+    def _smem_capacity_for_arch(arch: int) -> int:
+        # CUDA documents CC 8.7 with the same shared-memory capacity as CC 8.0,
+        # but this CUTLASS helper build does not accept "sm_87".
+        if arch == 87:
+            arch = 80
+        return cutlass.utils.get_smem_capacity_in_bytes(f"sm_{arch}")
 
     @cute.jit
     def __call__(
@@ -136,6 +189,7 @@ class AmpereGemm:
         mA = self._batch_last(mA)
         mB = self._batch_last(mB)
         mC = self._batch_last(mC)
+        self.c_dtype = mC.element_type
 
         mB = layout_utils.select(mB, [1, 0, 2])
 
@@ -750,6 +804,7 @@ class AmpereGemm:
                 ),
                 cutlass.Boolean,
             )
+
             for rest_v in range(tCpC.shape[0]):
                 for m in range(tCpC.shape[1]):
                     tCpC[rest_v, m, 0] = cute.elem_less(tCcC[(0, rest_v), m, 0][0], mC.shape[0])
@@ -764,7 +819,6 @@ class AmpereGemm:
                             tCgC_epilogue[None, None, n],
                             pred=tCpC[None, None, n],
                         )
-        return
 
     def _make_smem_layout_AB(self, dtype, major_mode, copy_bits, smem_tiler):
         major_mode_size = smem_tiler[1] if major_mode == utils.LayoutEnum.ROW_MAJOR else smem_tiler[0]
