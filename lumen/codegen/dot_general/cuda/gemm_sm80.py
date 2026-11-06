@@ -599,11 +599,11 @@ class AmpereGemm:
     ) -> Tuple[int, int]:
         """The epilogue subtile: at most 64 x 32 of the CTA tile, covering the tiled MMA's warp spans (16 rows per
         M-warp, 16 columns per N-warp) so the r2s partition never wraps across warps."""
-        m_span = atom_layout_mnk[0] * 16
-        n_span = 16 * atom_layout_mnk[1]
+        m_span = atom_layout_mnk[0] << 4
+        n_span = atom_layout_mnk[1] << 4
         tile_m = max(math.gcd(64, cta_tile_shape_mnk[0]), m_span)
         tile_n = max(math.gcd(32, cta_tile_shape_mnk[1]), n_span)
-        return (tile_m, tile_n)
+        return tile_m, tile_n
 
     @classmethod
     def _compute_stages(

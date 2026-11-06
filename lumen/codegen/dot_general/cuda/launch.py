@@ -10,7 +10,6 @@ import cutlass
 import cutlass.cute as cute
 
 from lumen.codegen.dot_general.cuda.gemm_sm80 import AmpereGemm
-from lumen.kernels.cuda.compile_utils import div_for_dtype, fake_batched
 
 # The CuTe type of each dtype a GEMM reads or writes, by lumen's name for it.
 DTYPES = {"float16": cutlass.Float16, "bfloat16": cutlass.BFloat16, "float32": cutlass.Float32}
@@ -34,6 +33,17 @@ class _Ordered:
     def __dlpack_device__(self):
         """The tensor's DLPack device."""
         return self.tensor.__dlpack_device__()
+
+
+def _fake(dtype, rows, columns, batch, contiguous):
+    """A fake (`batch`, `rows`, `columns`) tensor of CuTe type `dtype`, or (`rows`, `columns`) when `batch` is None, to
+    compile against: dimension `contiguous` of (rows, columns) has stride 1, every other stride is a symbolic multiple of
+    16 bytes, and it starts 16-byte aligned."""
+    shape = (rows, columns) if batch is None else (batch, rows, columns)
+    contiguous += len(shape) - 2
+    vector = 128 // dtype.width
+    stride = tuple(1 if i == contiguous else cute.sym_int64(divisibility=vector) for i in range(len(shape)))
+    return cute.runtime.make_fake_tensor(dtype, shape, stride=stride, assumed_align=16)
 
 
 def _major(t, rows, columns):
@@ -61,9 +71,9 @@ def compiled(a_dtype, b_dtype, d_dtype, a_major, b_major, d_major, batched, tile
     m, n, k = cute.sym_int(), cute.sym_int(), cute.sym_int()
     l = cute.sym_int() if batched else None  # noqa: E741
 
-    a = fake_batched(ab, m, k, l, 1 if a_major == "k" else 0, div_for_dtype(ab))
-    b = fake_batched(ab, k, n, l, 1 if b_major == "n" else 0, div_for_dtype(ab))
-    d = fake_batched(out, m, n, l, 1 if d_major == "n" else 0, div_for_dtype(out))
+    a = _fake(ab, m, k, l, 1 if a_major == "k" else 0)
+    b = _fake(ab, k, n, l, 1 if b_major == "n" else 0)
+    d = _fake(out, m, n, l, 1 if d_major == "n" else 0)
 
     return cute.compile(gemm, a, b, d, cute.runtime.make_fake_stream(), options="--enable-tvm-ffi")
 
