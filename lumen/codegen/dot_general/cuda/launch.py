@@ -21,11 +21,31 @@ def _major(t, rows, columns):
     return columns if t.strides[-1] == 1 else rows
 
 
+# CTA tiles (M, N, K): 128 x 256 (8 warps of 64 x 64) when the problem fills the GPU with them, else 128 x 128 (4 warps,
+# two CTAs per SM) so smaller problems still spread over every SM.
+WIDE_TILE, NARROW_TILE = (128, 256, 32), (128, 128, 32)
+
+
 @functools.lru_cache(maxsize=None)
-def compiled(a_dtype, b_dtype, d_dtype, a_major, b_major, d_major, batched):
+def _num_sms(device):
+    """The SM count of CUDA device `device` (lumen's name for it, "cuda:<index>")."""
+    cuda.cuInit(0)
+    _, dev = cuda.cuDeviceGet(int(device.rpartition(":")[2] or 0))
+    return cuda.cuDeviceGetAttribute(cuda.CUdevice_attribute.CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT, dev)[1]
+
+
+def _tile(d):
+    """The CTA tile for output `d` (m, n) or (l, m, n): the wide tile once it alone makes a wave of CTAs."""
+    *batch, m, n = d.shape
+    tiles = (batch[0] if batch else 1) * -(-m // WIDE_TILE[0]) * -(-n // WIDE_TILE[1])
+    return WIDE_TILE if tiles >= _num_sms(str(d.device)) else NARROW_TILE
+
+
+@functools.lru_cache(maxsize=None)
+def compiled(a_dtype, b_dtype, d_dtype, a_major, b_major, d_major, batched, tile=NARROW_TILE):
     """The GEMM compiled for operands of dtypes named `a_dtype`, `b_dtype` and `d_dtype` with majors `a_major` ("m" or
-    "k"), `b_major` ("k" or "n", of B as the caller's (k, n)) and `d_major` ("m" or "n"), batched or not, accumulating
-    in float32."""
+    "k"), `b_major` ("k" or "n", of B as the caller's (k, n)) and `d_major` ("m" or "n"), batched or not, with CTA tile
+    `tile`, accumulating in float32."""
     if a_dtype != b_dtype or a_dtype not in ("float16", "bfloat16"):
         raise RuntimeError(
             f"dot_general: the CUDA GEMM takes two float16 or bfloat16 operands, got {a_dtype} and {b_dtype}"
@@ -35,7 +55,7 @@ def compiled(a_dtype, b_dtype, d_dtype, a_major, b_major, d_major, batched):
         raise RuntimeError(f"dot_general: the CUDA GEMM writes float16, bfloat16 or float32, got {d_dtype}")
 
     ab, out = DTYPES[a_dtype], DTYPES[d_dtype]
-    gemm = AmpereGemm(ab, out, cutlass.Float32, (2, 2, 1), is_m_major_c=d_major == "m")
+    gemm = AmpereGemm(cutlass.Float32, ab, tile_shape_mnk=tile)
 
     # One symbolic extent per problem dimension, shared by the operands that have it.
     m, n, k = cute.sym_int(), cute.sym_int(), cute.sym_int()
@@ -52,5 +72,5 @@ def matmul(a, b, d, stream):
     """Writes ``a @ b`` into ``d``, lumen tensors on one CUDA device, (m, k), (k, n) and (m, n) or batched (l, m, k),
     (l, k, n) and (l, m, n), on CUDA stream `stream` (its handle as an int)."""
     majors = _major(a, "m", "k"), _major(b, "k", "n"), _major(d, "m", "n")
-    gemm = compiled(a.dtype, b.dtype, d.dtype, *majors, len(a.shape) == 3)
+    gemm = compiled(a.dtype, b.dtype, d.dtype, *majors, len(a.shape) == 3, _tile(d))
     gemm(a, b, d, cuda.CUstream(stream))
