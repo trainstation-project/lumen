@@ -91,7 +91,7 @@ class AmpereGemm:
         is_persistent: bool = False,
         concat_layout: tuple | None = None,
         use_pdl: bool = False,
-        num_warps: Optional[int] = None,
+        NUM_WARPS: Optional[int] = None,
         occupancy: Optional[int] = None,
         arch: int = 80,
     ):
@@ -122,28 +122,23 @@ class AmpereGemm:
 
         self.cta_tile_shape_mnk = (tile_m, tile_n, tile_k)
 
-        if num_warps is None:
-            self.num_warps = 8 if (tile_m, tile_n) in ((128, 256), (128, 192)) else 4
+        if NUM_WARPS is None:
+            self.NUM_WARPS = 8 if (tile_m, tile_n) in ((128, 256), (128, 192)) else 4
         else:
-            self.num_warps = num_warps
+            self.NUM_WARPS = NUM_WARPS
 
-        if self.num_warps not in (4, 8):
-            raise ValueError("SM80 GEMM supports num_warps=4 or 8")
+        if self.NUM_WARPS not in (4, 8):
+            raise ValueError("SM80 GEMM supports NUM_WARPS=4 or 8")
 
-        self.atom_layout_mnk = (2, self.num_warps // 2, 1)
+        self.atom_layout_mnk = (2, self.NUM_WARPS >> 1, 1)
         self.mma_inst_tile_k = tile_k // self.mma_inst_mnk[2]
-        self.threads_per_cta = self.num_warps * cute.arch.WARP_SIZE
+        self.NUM_THREADS = self.NUM_WARPS * cute.arch.WARP_SIZE
 
         self.smem_capacity = self._smem_capacity_for_arch(self.arch)
         self.buffer_align_bytes = 1024
-        default_occupancy = 1 if self.num_warps == 8 else 2
-        ab_bytes_per_stage = (tile_m + tile_n) * tile_k * a_dtype.width // 8
-        if 3 * ab_bytes_per_stage > self.smem_capacity // default_occupancy - self.buffer_align_bytes:
-            default_occupancy = 1
-        self.occupancy = occupancy if occupancy is not None else default_occupancy
-        self.num_epi_warps = self.num_warps
-        # (lumen: QuACK's epilogue named barrier is left out: it belongs to its GemmBase epilogue, which this kernel
-        # doesn't use.)
+        self.occupancy = self._default_occupancy(a_dtype) if occupancy is None else occupancy
+
+        self.num_epi_warps = self.NUM_WARPS
 
         self.ab_stage = None
         self.epi_stage = None
@@ -163,8 +158,18 @@ class AmpereGemm:
         self.cta_tiler = self.cta_tile_shape_mnk
         self.bM, self.bN, self.bK = self.cta_tiler
         self.mma_inst_shape = self.mma_inst_mnk
-        self.num_threads = self.threads_per_cta
+        self.num_threads = self.NUM_THREADS
         self.num_stages = 4
+
+    def _default_occupancy(self, a_dtype):
+        """CTAs per SM: two with 4 warps, one with 8, or one when two would not fit three stages of A and B tiles of
+        dtype `a_dtype` in shared memory."""
+        default_occupancy = 1 if self.NUM_WARPS == 8 else 2
+        tile_m, tile_n, tile_k = self.cta_tile_shape_mnk
+        ab_bytes_per_stage = (tile_m + tile_n) * tile_k * a_dtype.width // 8
+        if 3 * ab_bytes_per_stage > self.smem_capacity // default_occupancy - self.buffer_align_bytes:
+            default_occupancy = 1
+        return default_occupancy
 
     @staticmethod
     def _smem_capacity_for_arch(arch: int) -> int:
