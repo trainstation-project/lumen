@@ -2,7 +2,6 @@
 
 import lumen
 import lumen.functional as F
-from lumen import pallas as pl
 from lumen.codegen.attention.tpu.utils import (
     LANES,
     MASK,
@@ -26,6 +25,7 @@ from lumen.codegen.attention.tpu.utils import (
     zeros,
 )
 from lumen.codegen.utils.tpu import computed, pallas
+from lumen.kernels import pallas as pl
 
 
 def program(spec):

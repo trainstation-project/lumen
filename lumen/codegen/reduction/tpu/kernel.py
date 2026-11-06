@@ -4,8 +4,8 @@ import math
 
 import lumen
 import lumen.functional as F
-from lumen import pallas as pl
 from lumen.codegen.utils.tpu import computed, pallas
+from lumen.kernels import pallas as pl
 
 
 def _identity(name, dtype, shape):

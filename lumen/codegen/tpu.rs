@@ -115,7 +115,7 @@ pub(crate) fn kernel(step: &StepBase) -> Result<Option<Kernel>, String> {
         Primitive::PallasCall { kernel, .. } => {
             // Pallas kernels see their inputs, then the output, then any scratch buffers.
             let mut pallas = Kernel::new(
-                "lumen.pallas",
+                "lumen.kernels.pallas",
                 step.primitive.name().to_owned(),
                 format!("\"kernel\": {kernel}"),
                 Rows::Split,

@@ -41,14 +41,14 @@ fn lower_source(
 /// Fails: TPU kernels are traced from Python.
 #[cfg(not(feature = "python"))]
 fn lower_source(_: &str, _: usize, _: Option<usize>, _: usize) -> Result<String, String> {
-    Err("generated TPU kernels are lumen.pallas programs, traced from Python: run lumen from Python".into())
+    Err("generated TPU kernels are lumen.kernels.pallas programs, traced from Python: run lumen from Python".into())
 }
 
 /// Fails: TPU kernels are traced from Python.
 #[cfg(not(feature = "python"))]
 fn lower(module: &str, _spec: &str) -> Result<String, String> {
     Err(format!(
-        "{module}: TPU kernels are lumen.pallas kernels, traced from Python: run lumen from Python"
+        "{module}: TPU kernels are lumen.kernels.pallas kernels, traced from Python: run lumen from Python"
     ))
 }
 

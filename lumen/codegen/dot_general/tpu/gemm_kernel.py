@@ -1,8 +1,8 @@
 """Pallas program for a TPU dot with a fused elementwise epilogue."""
 
 import lumen.functional as F
-from lumen import pallas as pl
 from lumen.codegen.utils.tpu import computed, pallas
+from lumen.kernels import pallas as pl
 
 
 def program(spec):

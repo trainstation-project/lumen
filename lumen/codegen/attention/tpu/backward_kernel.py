@@ -1,7 +1,6 @@
 """Pallas flash attention backward kernels for TPU (dQ, and dK with dV), modeled on splash attention."""
 
 import lumen.functional as F
-from lumen import pallas as pl
 from lumen.codegen.attention.tpu.utils import (
     LANES,
     NN,
@@ -30,6 +29,7 @@ from lumen.codegen.attention.tpu.utils import (
     zeros,
 )
 from lumen.codegen.utils.tpu import pallas
+from lumen.kernels import pallas as pl
 
 
 def program(spec):

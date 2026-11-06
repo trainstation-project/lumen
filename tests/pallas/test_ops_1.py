@@ -1,4 +1,4 @@
-"""Elementwise, comparison, reduction, cast and dot_general tests for lumen.pallas kernels on TPU, ported from JAX."""
+"""Elementwise, comparison, reduction, cast and dot_general tests for lumen.kernels.pallas kernels on TPU, ported from JAX."""
 
 import itertools
 import math
@@ -8,8 +8,8 @@ import pytest
 
 import lumen
 import lumen.functional as F
-from lumen import pallas as pl
 from lumen.graph import prims
+from lumen.kernels import pallas as pl
 
 pytestmark = pytest.mark.tpu
 

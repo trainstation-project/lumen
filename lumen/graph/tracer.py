@@ -182,7 +182,7 @@ def producer(var):
 @contextlib.contextmanager
 def tracing(graph, device=None, sources=None, tape=None, leaves=None, host=None):
     """Ops record into ``graph`` (a ``Graph``, or anything answering as one:
-    a ``lumen.pallas`` kernel) inside: a trace of its own, on ``device``,
+    a ``lumen.kernels.pallas`` kernel) inside: a trace of its own, on ``device``,
     its values' source lines in ``sources``, its nodes on ``tape`` (for
     ``.backward()`` of ``leaves``), its scalars' math on ``host`` (a
     ``_Host``, or None). Yields its random state."""

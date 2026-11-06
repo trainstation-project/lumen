@@ -217,7 +217,7 @@ pub(crate) fn unsupported<S: Step>(
         ));
     }
 
-    // Only a TPU runs a lumen.pallas kernel.
+    // Only a TPU runs a lumen.kernels.pallas kernel.
     steps
         .iter()
         .find(|s| {
@@ -225,7 +225,7 @@ pub(crate) fn unsupported<S: Step>(
         })
         .map(|s| {
             format!(
-                "{}: a lumen.pallas kernel runs on a TPU, not {device}",
+                "{}: a lumen.kernels.pallas kernel runs on a TPU, not {device}",
                 s.label
             )
         })
