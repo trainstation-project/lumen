@@ -209,12 +209,23 @@ type CaptureInfo = unsafe extern "C" fn(
 /// `cuGraphGetNodes`: graph, nodes (null to count them), their count.
 type GraphNodes = unsafe extern "C" fn(*mut c_void, *mut *mut c_void, *mut usize) -> c_int;
 
+/// `cuDeviceGet`: the device handle of an ordinal.
+type DeviceGet = unsafe extern "C" fn(*mut c_int, c_int) -> c_int;
+
+/// `cuDeviceGetAttribute`: value, attribute, device.
+type DeviceAttribute = unsafe extern "C" fn(*mut c_int, c_int, c_int) -> c_int;
+
+/// `CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT`.
+const MULTIPROCESSOR_COUNT: c_int = 16;
+
 /// The CUDA driver entry points this module calls.
 pub(crate) struct Driver {
     pub(crate) launch: LaunchKernel,
     pub(crate) error: ErrorString,
     capture_info: CaptureInfo,
     graph_nodes: GraphNodes,
+    device_get: DeviceGet,
+    device_attribute: DeviceAttribute,
 }
 
 /// Loads `libcuda.so.1` once and resolves the driver entry points.
@@ -259,11 +270,46 @@ pub(crate) fn driver() -> Result<&'static Driver, String> {
                     graph_nodes: std::mem::transmute::<*mut c_void, GraphNodes>(symbol(
                         "cuGraphGetNodes",
                     )?),
+                    device_get: std::mem::transmute::<*mut c_void, DeviceGet>(symbol(
+                        "cuDeviceGet",
+                    )?),
+                    device_attribute: std::mem::transmute::<*mut c_void, DeviceAttribute>(symbol(
+                        "cuDeviceGetAttribute",
+                    )?),
                 })
             }
         })
         .as_ref()
         .map_err(Clone::clone)
+}
+
+/// The SM count of CUDA device `device` (its ordinal), read from the driver once.
+pub(crate) fn sm_count(device: usize) -> Result<usize, String> {
+    static COUNTS: Mutex<Option<HashMap<usize, usize>>> = Mutex::new(None);
+
+    let mut counts = COUNTS.lock().unwrap_or_else(PoisonError::into_inner);
+    let counts = counts.get_or_insert_with(HashMap::new);
+
+    if let Some(&count) = counts.get(&device) {
+        return Ok(count);
+    }
+
+    let driver = driver()?;
+    let (mut handle, mut count) = (0, 0);
+
+    let read = unsafe {
+        match (driver.device_get)(&mut handle, device as c_int) {
+            0 => (driver.device_attribute)(&mut count, MULTIPROCESSOR_COUNT, handle),
+            e => e,
+        }
+    };
+
+    match read {
+        0 => Ok(*counts.entry(device).or_insert(count as usize)),
+        e => Err(format!(
+            "reading cuda:{device}'s SM count failed (CUDA driver error {e})"
+        )),
+    }
 }
 
 /// Nodes in the graph lumen's capture stream is capturing, or `None` while none captures.

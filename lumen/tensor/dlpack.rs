@@ -198,9 +198,13 @@ unsafe extern "C" fn deleter<T: Managed>(arg: *mut T) {
     }
 }
 
-/// Exports `t` as a heap-allocated managed tensor after waiting for its pending writes.
-fn to_managed<T: Managed>(t: &Tensor) -> *mut T {
-    t.wait_();
+/// Exports `t` as a heap-allocated managed tensor, first waiting for its pending writes when `wait` (a consumer
+/// ordered after them on lumen's stream needs no wait).
+fn to_managed<T: Managed>(t: &Tensor, wait: bool) -> *mut T {
+    if wait {
+        t.wait_();
+    }
+
     let shape: Vec<i64> = t.shape().iter().map(|&d| d as i64).collect();
     let strides: Vec<i64> = t.strides().iter().map(|&s| s as i64).collect();
 
@@ -255,8 +259,13 @@ unsafe extern "C" fn capsule_destructor<T: Managed>(capsule: *mut ffi::PyObject)
     }
 }
 
-/// Wraps `t` in a DLPack capsule of kind `T`; meta and TPU tensors cannot be exported.
-fn to_capsule<'py, T: Managed>(py: Python<'py>, t: &Tensor) -> PyResult<Bound<'py, PyCapsule>> {
+/// Wraps `t` in a DLPack capsule of kind `T`, waiting for its pending writes when `wait`; meta and TPU tensors
+/// cannot be exported.
+fn to_capsule<'py, T: Managed>(
+    py: Python<'py>,
+    t: &Tensor,
+    wait: bool,
+) -> PyResult<Bound<'py, PyCapsule>> {
     if t.device() == Device::Meta(0) {
         return Err(pyo3::exceptions::PyRuntimeError::new_err(
             "meta tensors have no data to export",
@@ -269,7 +278,7 @@ fn to_capsule<'py, T: Managed>(py: Python<'py>, t: &Tensor) -> PyResult<Bound<'p
         ));
     }
 
-    let managed = NonNull::new(to_managed::<T>(t).cast()).expect("Box is never null");
+    let managed = NonNull::new(to_managed::<T>(t, wait).cast()).expect("Box is never null");
 
     unsafe {
         PyCapsule::new_with_pointer_and_destructor(
@@ -281,17 +290,22 @@ fn to_capsule<'py, T: Managed>(py: Python<'py>, t: &Tensor) -> PyResult<Bound<'p
     }
 }
 
-/// Exports `t` as a legacy `"dltensor"` capsule.
-pub(crate) fn to_dlpack<'py>(py: Python<'py>, t: &Tensor) -> PyResult<Bound<'py, PyCapsule>> {
-    to_capsule::<DLManagedTensor>(py, t)
+/// Exports `t` as a legacy `"dltensor"` capsule, waiting for its pending writes when `wait`.
+pub(crate) fn to_dlpack<'py>(
+    py: Python<'py>,
+    t: &Tensor,
+    wait: bool,
+) -> PyResult<Bound<'py, PyCapsule>> {
+    to_capsule::<DLManagedTensor>(py, t, wait)
 }
 
-/// Exports `t` as a DLPack 1.0 `"dltensor_versioned"` capsule.
+/// Exports `t` as a DLPack 1.0 `"dltensor_versioned"` capsule, waiting for its pending writes when `wait`.
 pub(crate) fn to_dlpack_versioned<'py>(
     py: Python<'py>,
     t: &Tensor,
+    wait: bool,
 ) -> PyResult<Bound<'py, PyCapsule>> {
-    to_capsule::<DLManagedTensorVersioned>(py, t)
+    to_capsule::<DLManagedTensorVersioned>(py, t, wait)
 }
 
 /// The `DLDevice` for an exportable device.

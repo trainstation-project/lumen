@@ -126,6 +126,60 @@ def test_matmul_tiles_fit_its_rows(m, tiles):
             lumen.config.compiler.reset()
 
 
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype, output", [("bfloat16", "bfloat16"), ("float16", "float16"), ("bfloat16", "float32")])
+@pytest.mark.parametrize("lhs_k, rhs_k", [(1, 0), (1, 1), (0, 0), (0, 1)])
+@pytest.mark.parametrize(
+    "batch, m, k, n", [(None, 128, 64, 128), (None, 200, 72, 136), (None, 512, 256, 384), (3, 64, 96, 80)]
+)
+def test_cuda_gemm_matches_numpy_in_every_layout(dtype, output, lhs_k, rhs_k, batch, m, k, n):
+    """On the CUDA backend (CuTe DSL), a matmul of float16 or bfloat16 runs on the Ampere GEMM, accumulating in float32:
+    either operand may be transposed (contracting its first dimension rather than its last, or its last rather than its
+    first), tiles may be left partial at the edges (200 x 136 of 128-wide tiles), it may be batched, and it may write
+    float32. Each matches NumPy within its output dtype's rounding."""
+    rng = np.random.default_rng(0)
+    lead = () if batch is None else (batch,)
+    shapes = (lead + ((m, k) if lhs_k == 1 else (k, m)), lead + ((k, n) if rhs_k == 0 else (n, k)))
+    try:
+        a, b = (lumen.from_numpy(rng.standard_normal(s).astype(np.float32)).to("cuda").to(dtype=dtype) for s in shapes)
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    x, y = (lumen.to_numpy(t.to(dtype="float32")).astype(np.float64) for t in (a, b))
+    swap = lambda t: np.swapaxes(t, -1, -2)  # noqa: E731
+    want = (x if lhs_k == 1 else swap(x)) @ (y if rhs_k == 0 else swap(y))
+    offset = len(lead)
+    batch_dims = ((0,), (0,)) if batch is not None else ((), ())
+    dims = (((lhs_k + offset,), (rhs_k + offset,)), batch_dims)
+    got = lumen.compile(lambda a, b: prims.dot_general(a, b, dims, "float32").to(dtype=output))(a, b)
+    assert got.dtype == output and list(got.shape) == list(want.shape)
+    rtol = {"float32": 1e-5, "float16": 2**-9, "bfloat16": 2**-6}[output]
+    np.testing.assert_allclose(lumen.to_numpy(got.to(dtype="float32")), want, rtol=rtol, atol=rtol * 16)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("m, k, n", [(128, 4096, 4096), (1024, 1024, 1024)])
+def test_cuda_gemm_autotunes_its_tile(m, k, n, capfd):
+    """With autotuning on, a CUDA matmul of at least 1024^3 multiply-adds times every GEMM tile candidate and runs the
+    fastest, still matching NumPy (a short output, where small tiles win, and a square one)."""
+    rng = np.random.default_rng(0)
+    try:
+        a, b = (
+            lumen.from_numpy(rng.standard_normal(s).astype(np.float32)).to("cuda").to(dtype="bfloat16")
+            for s in ((m, k), (k, n))
+        )
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    x, y = (lumen.to_numpy(t.to(dtype="float32")).astype(np.float64) for t in (a, b))
+    dims = (((1,), (0,)), ((), ()))
+    lumen.config.compiler.autotune = True
+    try:
+        got = lumen.compile(lambda a, b: prims.dot_general(a, b, dims, "float32"))(a, b)
+    finally:
+        lumen.config.compiler.reset()
+    assert "autotuned dot_general" in capfd.readouterr().err
+    np.testing.assert_allclose(lumen.to_numpy(got), x @ y, rtol=1e-3, atol=1e-2)
+
+
 @pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
 @pytest.mark.parametrize("lhs_k, rhs_k", [(1, 0), (1, 1), (0, 0), (0, 1)])

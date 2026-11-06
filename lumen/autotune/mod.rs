@@ -1,5 +1,6 @@
 //! Backend-independent kernel autotuning: benchmarks candidate configs of each plan step and keeps the fastest.
 
+pub(crate) mod cuda;
 #[cfg(lumen_mps_linked)]
 pub(crate) mod mps;
 pub(crate) mod triton;
