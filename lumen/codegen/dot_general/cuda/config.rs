@@ -1,6 +1,6 @@
 //! CUDA (CuTe DSL) GEMM autotuning candidates and the tile it launches with untuned.
 
-/// CTA tile and warps of one Ampere GEMM (`gemm_sm80.AmpereGemm`) candidate.
+/// CTA tile and warps of one Ampere GEMM (`ampere.py`'s `AmpereGemm`) candidate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Config {
     /// Output rows per CTA.
@@ -36,8 +36,8 @@ pub(crate) const CONFIGS: [Config; 7] = [
     config(64, 64, 64, 4),
 ];
 
-/// Fewest multiply-adds a matmul is autotuned at (1024³): below, the GEMM takes tens of microseconds whatever its tile,
-/// while timing every candidate costs a CuTe compile each.
+/// Fewest multiply-adds a matmul is autotuned at (1024³): below, the GEMM takes tens of microseconds whatever its
+/// tile, while timing every candidate costs a CuTe compile each.
 pub(crate) const TUNED_MACS: usize = 1 << 30;
 
 /// Index into `CONFIGS` of the untuned tile for outputs it fills the GPU with: 128 x 256, 8 warps.

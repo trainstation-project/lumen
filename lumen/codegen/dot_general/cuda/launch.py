@@ -1,7 +1,8 @@
-"""Runs lumen's matmuls on CUDA through the Ampere GEMM (`gemm_sm80.AmpereGemm`), the way QuACK hosts its GEMMs: compiled
-once per dtypes, majors and batching against fake tensors whose extents and strides are symbolic (only each operand's
-contiguous dimension static, its other strides 16-byte multiples), then called on lumen tensors through DLPack, each
-passed as it is: A (m, k), B (k, n) and D (m, n), or batched (l, m, k), (l, k, n) and (l, m, n)."""
+"""Runs lumen's matmuls on CUDA through the Ampere GEMM (`ampere.AmpereGemm`), the way QuACK hosts its
+GEMMs: compiled once per dtypes, majors, batching and tile against fake tensors whose extents and strides are symbolic
+(only each operand's contiguous dimension static, its other strides 16-byte multiples), then called on lumen tensors
+through DLPack, each passed as it is: A (m, k), B (k, n) and D (m, n), or batched (l, m, k), (l, k, n) and
+(l, m, n)."""
 
 import functools
 
@@ -9,7 +10,7 @@ import cuda.bindings.driver as cuda
 import cutlass
 import cutlass.cute as cute
 
-from lumen.codegen.dot_general.cuda.gemm_sm80 import AmpereGemm
+from lumen.codegen.dot_general.cuda.ampere import AmpereGemm
 
 # The CuTe type of each dtype a GEMM reads or writes, by lumen's name for it.
 DTYPES = {"float16": cutlass.Float16, "bfloat16": cutlass.BFloat16, "float32": cutlass.Float32}
@@ -36,9 +37,9 @@ class _Ordered:
 
 
 def _fake(dtype, rows, columns, batch, contiguous):
-    """A fake (`batch`, `rows`, `columns`) tensor of CuTe type `dtype`, or (`rows`, `columns`) when `batch` is None, to
-    compile against: dimension `contiguous` of (rows, columns) has stride 1, every other stride is a symbolic multiple of
-    16 bytes, and it starts 16-byte aligned."""
+    """A fake (`batch`, `rows`, `columns`) tensor of CuTe type `dtype`, or (`rows`, `columns`) when `batch` is None,
+    to compile against: dimension `contiguous` of (rows, columns) has stride 1, every other stride is a symbolic
+    multiple of 16 bytes, and it starts 16-byte aligned."""
     shape = (rows, columns) if batch is None else (batch, rows, columns)
     contiguous += len(shape) - 2
     vector = 128 // dtype.width
@@ -80,8 +81,8 @@ def compiled(a_dtype, b_dtype, d_dtype, a_major, b_major, d_major, batched, tile
 
 def matmul(a, b, d, stream, tile):
     """Writes ``a @ b`` into ``d``, lumen tensors on one CUDA device, (m, k), (k, n) and (m, n) or batched (l, m, k),
-    (l, k, n) and (l, m, n), on CUDA stream `stream` (its handle as an int) with `tile` (tile_m, tile_n, tile_k, warps),
-    the config Rust picked (tuned or untuned)."""
+    (l, k, n) and (l, m, n), on CUDA stream `stream` (its handle as an int) with `tile` (tile_m, tile_n, tile_k,
+    warps), the config Rust picked (tuned or untuned)."""
     majors = _major(a, "m", "k"), _major(b, "k", "n"), _major(d, "m", "n")
     gemm = compiled(a.dtype, b.dtype, d.dtype, *majors, len(a.shape) == 3, tuple(tile))
     gemm(_Ordered(a), _Ordered(b), _Ordered(d), cuda.CUstream(stream))
