@@ -16,6 +16,26 @@ from lumen.kernels.cuda.compile_utils import div_for_dtype, fake_batched
 DTYPES = {"float16": cutlass.Float16, "bfloat16": cutlass.BFloat16, "float32": cutlass.Float32}
 
 
+class _Ordered:
+    """A lumen tensor as the GEMM reads it: exported through DLPack without waiting for the device, since the GEMM
+    launches on lumen's stream, after the work writing its operands (a wait would block every launch on the queue, and
+    can't be issued while a CUDA graph captures or the autotuner holds the stream)."""
+
+    __slots__ = ("tensor",)
+
+    def __init__(self, tensor):
+        """Wraps `tensor`."""
+        self.tensor = tensor
+
+    def __dlpack__(self, *, stream=None, max_version=None, **kwargs):
+        """The tensor's capsule, exported without synchronizing."""
+        return self.tensor.__dlpack__(stream=-1, max_version=max_version)
+
+    def __dlpack_device__(self):
+        """The tensor's DLPack device."""
+        return self.tensor.__dlpack_device__()
+
+
 def _major(t, rows, columns):
     """The label of `t`'s contiguous dimension: `columns` when it is its last, else `rows` (QuACK's `_get_major`)."""
     return columns if t.strides[-1] == 1 else rows
@@ -54,4 +74,4 @@ def matmul(a, b, d, stream, tile):
     the config Rust picked (tuned or untuned)."""
     majors = _major(a, "m", "k"), _major(b, "k", "n"), _major(d, "m", "n")
     gemm = compiled(a.dtype, b.dtype, d.dtype, *majors, len(a.shape) == 3, tuple(tile))
-    gemm(a, b, d, cuda.CUstream(stream))
+    gemm(_Ordered(a), _Ordered(b), _Ordered(d), cuda.CUstream(stream))

@@ -32,13 +32,15 @@ def __dlpack_device__(self):
     return (_DEVICE_TYPES[d.type], d.index or 0)
 
 
-def __dlpack__(self, *, stream=-1, max_version=None, dl_device=None, copy=None):
+def __dlpack__(self, *, stream=None, max_version=None, dl_device=None, copy=None):
     """This tensor as a DLPack capsule, a view of the same memory.
 
-    ``stream`` is the consumer's CUDA stream. ``None`` or ``1`` is the legacy
-    default stream, which lumen's work already runs on, and ``-1`` asks for
-    no synchronization (the default, as in PyTorch). For any other stream,
-    the stream waits for lumen's queued work, without blocking the host.
+    ``stream`` is the consumer's CUDA stream. ``None`` (the default) or ``1``
+    is the legacy default stream: the export waits for lumen's queued work on
+    the tensor's device. ``-1`` asks for no synchronization, for a consumer
+    already ordered after that work (one launching on lumen's stream). For any
+    other stream, the stream waits for lumen's queued work, without blocking
+    the host.
 
     ``max_version`` is the newest DLPack version the consumer reads: 1.0 or
     newer gets a versioned capsule, older or ``None`` the legacy one.
@@ -68,9 +70,11 @@ def __dlpack__(self, *, stream=-1, max_version=None, dl_device=None, copy=None):
     elif stream not in (None, -1):
         raise ValueError(f"stream must be None or -1 for a tensor on {self.device}")
 
+    # -1: the consumer is ordered after lumen's queued work already, so the export doesn't wait for it.
+    wait = stream != -1
     if max_version is None or max_version[0] < 1:
-        return _C._to_dlpack(self)
-    return _C._to_dlpack_versioned(self)
+        return _C._to_dlpack(self, wait)
+    return _C._to_dlpack_versioned(self, wait)
 
 
 def _device_of(dl_device):
