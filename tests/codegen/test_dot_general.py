@@ -156,6 +156,30 @@ def test_cuda_gemm_matches_numpy_in_every_layout(dtype, output, lhs_k, rhs_k, ba
     np.testing.assert_allclose(lumen.to_numpy(got.to(dtype="float32")), want, rtol=rtol, atol=rtol * 16)
 
 
+@pytest.mark.cuda
+@pytest.mark.parametrize("m, k, n", [(128, 4096, 4096), (1024, 1024, 1024)])
+def test_cuda_gemm_autotunes_its_tile(m, k, n, capfd):
+    """With autotuning on, a CUDA matmul of at least 1024^3 multiply-adds times every GEMM tile candidate and runs the
+    fastest, still matching NumPy (a short output, where small tiles win, and a square one)."""
+    rng = np.random.default_rng(0)
+    try:
+        a, b = (
+            lumen.from_numpy(rng.standard_normal(s).astype(np.float32)).to("cuda").to(dtype="bfloat16")
+            for s in ((m, k), (k, n))
+        )
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    x, y = (lumen.to_numpy(t.to(dtype="float32")).astype(np.float64) for t in (a, b))
+    dims = (((1,), (0,)), ((), ()))
+    lumen.config.compiler.autotune = True
+    try:
+        got = lumen.compile(lambda a, b: prims.dot_general(a, b, dims, "float32"))(a, b)
+    finally:
+        lumen.config.compiler.reset()
+    assert "autotuned dot_general" in capfd.readouterr().err
+    np.testing.assert_allclose(lumen.to_numpy(got), x @ y, rtol=1e-3, atol=1e-2)
+
+
 @pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
 @pytest.mark.parametrize("lhs_k, rhs_k", [(1, 0), (1, 1), (0, 0), (0, 1)])

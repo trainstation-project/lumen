@@ -822,22 +822,48 @@ fn triton_attention(
 }
 
 /// Writes `a @ b` into `d` (the CUDA backend's matmul, tensors (m, k), (k, n) and (m, n) or batched) on lumen's
-/// stream through `lumen.codegen.dot_general.cuda.launch.matmul`, which compiles its GEMM once for their dtypes and
-/// majors.
+/// stream through `lumen.codegen.dot_general.cuda.launch.matmul`, which compiles its GEMM once for their dtypes,
+/// majors and tile: `config`'s, or untuned the one `codegen::dot_general::cuda::untuned` picks for `d`'s shape.
 #[cfg_attr(not(lumen_cuda_linked), allow(unused_variables))]
-fn cuda_gemm(a: &crate::Tensor, b: &crate::Tensor, d: &crate::Tensor) -> Result<(), String> {
+fn cuda_gemm(
+    a: &crate::Tensor,
+    b: &crate::Tensor,
+    d: &crate::Tensor,
+    config: Option<&crate::codegen::dot_general::cuda::Config>,
+) -> Result<(), String> {
     current(a);
     crate::profiler::launched::launched("dot_general", || None);
 
     #[cfg(lumen_cuda_linked)]
     {
+        let config = match config {
+            Some(c) => *c,
+            None => {
+                let Device::Cuda(device) = d.device() else {
+                    return Err("dot_general: the CUDA GEMM ran on a host tensor".into());
+                };
+
+                let sms = crate::runtime::kernel::cuda::driver::sm_count(device)?;
+                let (batch, rows) = match d.shape() {
+                    [l, m, n] => (*l, [*m, *n]),
+                    [m, n] => (1, [*m, *n]),
+                    _ => {
+                        return Err("dot_general: the CUDA GEMM writes a rank-2 or 3 output".into());
+                    }
+                };
+
+                crate::codegen::dot_general::cuda::untuned(batch, rows[0], rows[1], sms)
+            }
+        };
+
         let stream = crate::runtime::stream::cuda::launch_stream() as usize;
+        let tile = (config.tile_m, config.tile_n, config.tile_k, config.warps);
         let [a, b, d] = [a, b, d].map(|t| PyTensor::wrap(t.clone()));
 
         Python::attach(|py| {
             py.import("lumen.codegen.dot_general.cuda.launch")?
                 .getattr("matmul")?
-                .call1((a, b, d, stream))
+                .call1((a, b, d, stream, tile))
                 .map(|_| ())
         })
         .map_err(|e: PyErr| e.to_string())

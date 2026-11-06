@@ -4,6 +4,7 @@ use std::ops::{Deref, DerefMut};
 
 use super::triton::traced;
 use super::{unsupported, viewed};
+use crate::codegen::dot_general::cuda::Config;
 use crate::codegen::elementwise::cuda::Layouts;
 use crate::graph::Primitive;
 use crate::plan::run::Buffers;
@@ -55,8 +56,9 @@ impl Step for CudaStep {
 }
 
 impl CudaStep {
-    /// Runs the step on the given tensors: a matmul through the GEMM, or an elementwise fusion or an output's copy (a
-    /// reshape) through the kernel generated for the tensors' layouts (kept in the step's memo), launched by Python.
+    /// Runs the step on the given tensors: a matmul through the GEMM (with its tuned tile, if autotuned), or an
+    /// elementwise fusion or an output's copy (a reshape) through the kernel generated for the tensors' layouts (kept in
+    /// the step's memo), launched by Python.
     pub(crate) fn run_raw(
         &self,
         inputs: &[Tensor],
@@ -92,7 +94,7 @@ impl CudaStep {
                 false => inputs[1].transpose(rank - 2, rank - 1),
             };
 
-            return gemm(&a, &b, out);
+            return gemm(&a, &b, out, step.launch::<Config>());
         }
 
         let launch = LAUNCH.get().ok_or(

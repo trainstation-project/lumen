@@ -11,6 +11,7 @@ use std::sync::OnceLock;
 #[cfg(all(feature = "python", lumen_cuda_linked))]
 use super::Launch;
 use crate::Tensor;
+use crate::codegen::dot_general::cuda::Config;
 #[cfg(all(feature = "python", lumen_cuda_linked))]
 use crate::codegen::utils::cuda::Cuda;
 #[cfg(all(feature = "python", lumen_cuda_linked))]
@@ -36,8 +37,9 @@ pub(crate) fn set_launch(launch: Launcher) {
 }
 
 /// Writes `a @ b` into `d`, tensors (m, k), (k, n) and (m, n), or batched (l, m, k), (l, k, n) and (l, m, n), each laid
-/// out as given, compiling its GEMM on first use.
-pub type Gemm = fn(a: &Tensor, b: &Tensor, d: &Tensor) -> Result<(), String>;
+/// out as given, with the tile of `config` (the untuned one when `None`), compiling its GEMM on first use.
+pub type Gemm =
+    fn(a: &Tensor, b: &Tensor, d: &Tensor, config: Option<&Config>) -> Result<(), String>;
 
 /// The GEMM installed from Python (`lumen.codegen.dot_general.cuda.launch`).
 pub(crate) static GEMM: OnceLock<Gemm> = OnceLock::new();

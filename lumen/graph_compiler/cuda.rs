@@ -10,6 +10,8 @@ use super::passes::{CompilerPass, Module};
 use super::pipeline::{Pass, Passes, pipeline, when};
 use super::{Options, plan_options};
 use crate::Device;
+use crate::autotune::Autotuner;
+use crate::autotune::cuda::{Events, Gemms};
 use crate::codegen::utils::cuda::cute_type;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::plan::{CpuPlan, CudaPlan};
@@ -187,14 +189,13 @@ impl Passes for CudaModule<'_> {
 }
 
 /// Compiles `graph` for the CUDA backend on `device`: fuses its elementwise work and plans it, every
-/// runtime scalar a 0-d device input; errors on an op it has no kernel for.
+/// runtime scalar a 0-d device input, and autotunes its GEMM tiles when enabled; errors on an op it has no
+/// kernel for.
 pub(crate) fn compile(
     graph: &Graph,
     device: Device,
     options: &Options,
 ) -> Result<CudaPlan, String> {
-    let _ = device;
-
     let mut module = CudaModule {
         graph: graph.clone(),
         options,
@@ -219,5 +220,15 @@ pub(crate) fn compile(
 
     let config = &options.config;
     let plan = plan_options(&fused, options, config, &Vec::new(), Vec::new());
-    crate::codegen::cuda::codegen(CpuPlan::compile_with(&fused, &plan), options)
+    let mut plan = crate::codegen::cuda::codegen(CpuPlan::compile_with(&fused, &plan), options)?;
+
+    if config.autotune {
+        let tuner = Autotuner {
+            timer: Events { device },
+        };
+
+        tuner.tune(&mut Gemms, &mut plan)?;
+    }
+
+    Ok(plan)
 }
