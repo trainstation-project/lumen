@@ -231,10 +231,12 @@ class AmpereGemm:
                 cute.struct.MemRange[self.d_dtype, cute.cosize(self.epi_smem_layout_staged)],
                 self.buffer_align_bytes,
             ]
+
             sA: cute.struct.Align[
                 cute.struct.MemRange[self.a_dtype, cute.cosize(self.a_smem_layout_staged)],
                 self.buffer_align_bytes,
             ]
+
             sB: cute.struct.Align[
                 cute.struct.MemRange[self.b_dtype, cute.cosize(self.b_smem_layout_staged)],
                 self.buffer_align_bytes,
@@ -282,15 +284,16 @@ class AmpereGemm:
         epilogue storing it to D."""
         tidx, _, _ = cute.arch.thread_idx()
 
-        # Allocate shared memory
         smem = cutlass.utils.SmemAllocator()
         storage = smem.allocate(self.shared_storage)
+
         sA = storage.sA.get_tensor(a_smem_layout.outer, swizzle=a_smem_layout.inner)
         sB = storage.sB.get_tensor(b_smem_layout.outer, swizzle=b_smem_layout.inner)
         sD = storage.sD.get_tensor(epi_smem_layout.outer, swizzle=epi_smem_layout.inner)
 
         # Make fragments
         thr_mma = tiled_mma.get_slice(tidx)
+
         acc = cute.make_rmem_tensor(thr_mma.partition_shape_C(self.cta_tile_shape_mnk[:2]), self.acc_dtype)
         tCrA = thr_mma.make_fragment_A(thr_mma.partition_A(sA)[None, None, None, 0])
         tCrB = thr_mma.make_fragment_B(thr_mma.partition_B(sB)[None, None, None, 0])
@@ -299,6 +302,7 @@ class AmpereGemm:
         copy_block_A = self.smem_load_copy_fn(
             cute.make_tiled_copy_A, tiled_mma, sA, tCrA, self.a_layout.is_m_major_a(), tidx
         )
+
         copy_block_B = self.smem_load_copy_fn(
             cute.make_tiled_copy_B, tiled_mma, sB, tCrB, self.b_layout.is_n_major_b(), tidx
         )
@@ -311,6 +315,7 @@ class AmpereGemm:
 
         tile_scheduler = TileSchedulerCls.create(tile_sched_params)
         work_tile = tile_scheduler.initial_work_tile_info()
+
         while work_tile.is_valid_tile:
             # (pid_m, pid_n, split_idx | None, batch_idx), decoded by the scheduler
             tile_coord_mnkl = work_tile.tile_idx
@@ -319,6 +324,7 @@ class AmpereGemm:
             copy_A = self.gmem_load_copy_fn(
                 tiled_copy_A, mA_mkl[None, None, batch_idx], sA, tile_coord_mnkl[0], self.cta_tile_shape_mnk[0], tidx
             )
+
             copy_B = self.gmem_load_copy_fn(
                 tiled_copy_B, mB_nkl[None, None, batch_idx], sB, tile_coord_mnkl[1], self.cta_tile_shape_mnk[1], tidx
             )
@@ -359,9 +365,10 @@ class AmpereGemm:
             if k_tile < k_tile_cnt - 1:
                 copy_A(k_tile, k_tile)
                 copy_B(k_tile, k_tile)
-            if k_tile == k_tile_cnt - 1:
+            elif k_tile == k_tile_cnt - 1:
                 copy_A(k_tile, k_tile, pred_k=True)
                 copy_B(k_tile, k_tile, pred_k=True)
+
             cute.arch.cp_async_commit_group()
 
         read_stage = Int32(0)
@@ -370,6 +377,7 @@ class AmpereGemm:
         # Load first k-block
         cute.arch.cp_async_wait_group(self.ab_stage - 2)
         cute.arch.sync_threads()
+
         copy_block_A(read_stage, 0)
         copy_block_B(read_stage, 0)
 
