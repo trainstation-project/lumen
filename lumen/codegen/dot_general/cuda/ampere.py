@@ -11,7 +11,7 @@ mma.sync and the epilogue's copies, with no warp specialization.
 from __future__ import annotations
 
 import math
-from typing import Callable, Optional, Tuple, Type, Union
+from typing import Callable, Type
 
 import cuda.bindings.driver as cuda
 import cutlass
@@ -46,11 +46,11 @@ class AmpereGemm:
         self,
         accum_dtype: Type[cutlass.Numeric],
         a_dtype: Type[cutlass.Numeric],
-        tile_shape_mnk: Union[Tuple[int, int], Tuple[int, int, int]],
+        tile_shape_mnk: tuple[int, int] | tuple[int, int, int],
         is_persistent: bool = False,
         use_pdl: bool = False,
-        NUM_WARPS: Optional[int] = None,
-        occupancy: Optional[int] = None,
+        NUM_WARPS: int | None = None,
+        occupancy: int | None = None,
         arch: int = 80,
     ):
         """The GEMM for `a_dtype` operands accumulating in `accum_dtype`, one CTA per (M, N) tile of `tile_shape_mnk`
@@ -67,10 +67,9 @@ class AmpereGemm:
 
         self._set_cta_tile_shape(tile_shape_mnk)
         self._set_warps(NUM_WARPS)
+        self.NUM_THREADS = self.NUM_WARPS * cute.arch.WARP_SIZE
 
         self.atom_layout_mnk = (2, self.NUM_WARPS >> 1, 1)
-        self.mma_inst_tile_k = tile_k // self.mma_inst_mnk[2]
-        self.NUM_THREADS = self.NUM_WARPS * cute.arch.WARP_SIZE
 
         self.smem_capacity = self._smem_capacity_for_arch(self.arch)
         self.buffer_align_bytes = 1024
@@ -94,7 +93,7 @@ class AmpereGemm:
         self.epi_tile = None
         self.shared_storage = None
 
-    def _set_cta_tile_shape(self, tile_shape_mnk: Union[Tuple[int, int], Tuple[int, int, int]]) -> None:
+    def _set_cta_tile_shape(self, tile_shape_mnk: tuple[int, int] | tuple[int, int, int]) -> None:
         if len(tile_shape_mnk) == 3:
             tile_m, tile_n, tile_k = tile_shape_mnk
         elif len(tile_shape_mnk) == 2:
@@ -109,9 +108,9 @@ class AmpereGemm:
         self.cta_tile_shape_mnk = (tile_m, tile_n, tile_k)
 
     def _set_warps(self, NUM_WARPS: int | None) -> None:
-        tile_m, tile_n, _ = self.cta_tile_shape_mnk
-
         if NUM_WARPS is None:
+            tile_m, tile_n, _ = self.cta_tile_shape_mnk
+
             if (tile_m, tile_n) in [(128, 256), (128, 192)]:
                 NUM_WARPS = 8
             else:
@@ -134,13 +133,12 @@ class AmpereGemm:
 
         return default_occupancy
 
-    @staticmethod
-    def _smem_capacity_for_arch(arch: int) -> int:
-        """Shared memory bytes per SM of compute capability `arch`."""
+    def _smem_capacity_for_arch(self, arch: int) -> int:
         # CUDA documents CC 8.7 with the same shared-memory capacity as CC 8.0,
         # but this CUTLASS helper build does not accept "sm_87".
         if arch == 87:
             arch = 80
+
         return cutlass.utils.get_smem_capacity_in_bytes(f"sm_{arch}")
 
     def _setup_tiled_mma(self):
