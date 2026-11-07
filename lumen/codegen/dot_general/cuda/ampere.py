@@ -44,54 +44,29 @@ class AmpereGemm:
 
     def __init__(
         self,
-        acc_dtype: Type[cutlass.Numeric],
+        accum_dtype: Type[cutlass.Numeric],
         a_dtype: Type[cutlass.Numeric],
         tile_shape_mnk: Union[Tuple[int, int], Tuple[int, int, int]],
-        pingpong: bool = False,
         is_persistent: bool = False,
-        concat_layout: tuple | None = None,
         use_pdl: bool = False,
         NUM_WARPS: Optional[int] = None,
         occupancy: Optional[int] = None,
         arch: int = 80,
     ):
-        """The GEMM for `a_dtype` operands accumulating in `acc_dtype`, one CTA per (M, N) tile of `tile_shape_mnk`
+        """The GEMM for `a_dtype` operands accumulating in `accum_dtype`, one CTA per (M, N) tile of `tile_shape_mnk`
         (K defaulting to four MMA instructions), with `NUM_WARPS` warps (4, or 8 for the widest tiles) and
         `occupancy` CTAs per SM."""
         if arch not in self._supported_archs:
             raise ValueError(f"SM80-family GEMM supports arch in {self._supported_archs}, got {arch}")
 
         self.arch = arch
-        self.acc_dtype = acc_dtype
-
-        assert not pingpong, "SM8x GEMM does not use pingpong scheduling"
-        self.pingpong = pingpong
-
+        self.accum_dtype = accum_dtype
         self.is_persistent = is_persistent
         self.use_pdl = use_pdl
-        self.concat_layout = concat_layout or ()
         self.mma_inst_mnk = (16, 8, 16)
 
-        if len(tile_shape_mnk) == 3:
-            tile_m, tile_n, tile_k = tile_shape_mnk
-        elif len(tile_shape_mnk) == 2:
-            tile_m, tile_n = tile_shape_mnk
-            tile_k = self.mma_inst_mnk[2] << 2
-        else:
-            raise ValueError("SM80 tile shape must be (M, N) or (M, N, K)")
-
-        if tile_m % 16 != 0 or tile_n % 16 != 0:
-            raise ValueError("SM80 tile shape M/N must be divisible by 16")
-
-        self.cta_tile_shape_mnk = (tile_m, tile_n, tile_k)
-
-        if NUM_WARPS is None:
-            self.NUM_WARPS = 8 if (tile_m, tile_n) in ((128, 256), (128, 192)) else 4
-        else:
-            self.NUM_WARPS = NUM_WARPS
-
-        if self.NUM_WARPS not in (4, 8):
-            raise ValueError("SM80 GEMM supports NUM_WARPS=4 or 8")
+        self._set_cta_tile_shape(tile_shape_mnk)
+        self._set_warps(NUM_WARPS)
 
         self.atom_layout_mnk = (2, self.NUM_WARPS >> 1, 1)
         self.mma_inst_tile_k = tile_k // self.mma_inst_mnk[2]
@@ -119,6 +94,34 @@ class AmpereGemm:
         self.epi_tile = None
         self.shared_storage = None
 
+    def _set_cta_tile_shape(self, tile_shape_mnk: Union[Tuple[int, int], Tuple[int, int, int]]) -> None:
+        if len(tile_shape_mnk) == 3:
+            tile_m, tile_n, tile_k = tile_shape_mnk
+        elif len(tile_shape_mnk) == 2:
+            tile_m, tile_n = tile_shape_mnk
+            tile_k = self.mma_inst_mnk[2] << 2
+        else:
+            raise ValueError("SM80 tile shape must be (M, N) or (M, N, K)")
+
+        if tile_m % 16 != 0 or tile_n % 16 != 0:
+            raise ValueError("SM80 tile shape M/N must be divisible by 16")
+
+        self.cta_tile_shape_mnk = (tile_m, tile_n, tile_k)
+
+    def _set_warps(self, NUM_WARPS: int | None) -> None:
+        tile_m, tile_n, _ = self.cta_tile_shape_mnk
+
+        if NUM_WARPS is None:
+            if (tile_m, tile_n) in [(128, 256), (128, 192)]:
+                NUM_WARPS = 8
+            else:
+                NUM_WARPS = 4
+
+        if NUM_WARPS not in (4, 8):
+            raise ValueError("SM80 GEMM supports NUM_WARPS=4 or 8")
+
+        self.NUM_WARPS = NUM_WARPS
+
     def _default_occupancy(self, a_dtype):
         """CTAs per SM: two with 4 warps, one with 8, or one when two would not fit three stages of A and B tiles of
         dtype `a_dtype` in shared memory."""
@@ -143,7 +146,7 @@ class AmpereGemm:
     def _setup_tiled_mma(self):
         """The CTA's tiled mma.sync: `atom_layout_mnk` warps of 16x8x16 instructions, each warp two instructions wide
         in N so its B fragments load with 4-matrix ldmatrix."""
-        op = warp.MmaF16BF16Op(self.a_dtype, self.acc_dtype, self.mma_inst_mnk)
+        op = warp.MmaF16BF16Op(self.a_dtype, self.accum_dtype, self.mma_inst_mnk)
         atom_m, atom_n, atom_k = self.atom_layout_mnk
         tC = cute.make_layout(self.atom_layout_mnk)
         permutation_mnk = (
@@ -294,7 +297,7 @@ class AmpereGemm:
         # Make fragments
         thr_mma = tiled_mma.get_slice(tidx)
 
-        acc = cute.make_rmem_tensor(thr_mma.partition_shape_C(self.cta_tile_shape_mnk[:2]), self.acc_dtype)
+        acc = cute.make_rmem_tensor(thr_mma.partition_shape_C(self.cta_tile_shape_mnk[:2]), self.accum_dtype)
         tCrA = thr_mma.make_fragment_A(thr_mma.partition_A(sA)[None, None, None, 0])
         tCrB = thr_mma.make_fragment_B(thr_mma.partition_B(sB)[None, None, None, 0])
 
