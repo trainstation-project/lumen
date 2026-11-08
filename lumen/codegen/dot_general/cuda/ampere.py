@@ -66,15 +66,8 @@ class AmpereGemm:
         self.buffer_align_bytes = 1024
         self.occupancy = self._default_occupancy(a_dtype) if occupancy is None else occupancy
 
-        self.num_epi_warps = self.NUM_WARPS
-        # QuACK's NamedBarrierGemm.Epilogue: barrier 0 is __syncthreads().
-        self.epilogue_barrier = pipeline.NamedBarrier(
-            barrier_id=1,
-            num_threads=self.num_epi_warps * cute.arch.WARP_SIZE,
-        )
+        self.epilogue_barrier = pipeline.NamedBarrier(barrier_id=1, num_threads=self.NUM_WARPS * cute.arch.WARP_SIZE)
 
-        self.ab_stage = None
-        self.epi_stage = None
         self.epi_m_major = True
 
     def _set_cta_tile_shape(self, tile_shape_mnk: tuple[int, int] | tuple[int, int, int]) -> None:
