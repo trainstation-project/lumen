@@ -98,7 +98,7 @@ class AmpereGemm:
 
         self.NUM_WARPS = NUM_WARPS
 
-    def _default_occupancy(self, a_dtype):
+    def _default_occupancy(self, a_dtype) -> int:
         """CTAs per SM: two with 4 warps, one with 8, or one when two would not fit three stages of A and B tiles of
         dtype `a_dtype` in shared memory."""
         default_occupancy = 1 if self.NUM_WARPS == 8 else 2
@@ -118,7 +118,7 @@ class AmpereGemm:
 
         return cutlass.utils.get_smem_capacity_in_bytes(f"sm_{arch}")
 
-    def _setup_tiled_mma(self):
+    def _setup_tiled_mma(self) -> None:
         """The CTA's tiled mma.sync: `atom_layout_mnk` warps of 16x8x16 instructions, each warp two instructions wide
         in N so its B fragments load with 4-matrix ldmatrix."""
         op = warp.MmaF16BF16Op(self.a_dtype, self.accum_dtype, self.mma_inst_mnk)
@@ -132,7 +132,7 @@ class AmpereGemm:
         self.tiled_mma = cute.make_tiled_mma(op, tC, permutation_mnk=permutation_mnk)
         self.tiled_mma_gated_postact = self.tiled_mma
 
-    def _setup_attributes(self):
+    def _setup_attributes(self) -> None:
         """The tiled MMA, epilogue subtile, stage counts and shared memory layouts for the traced operands."""
         assert not self.is_persistent, "lumen's SM80 GEMM launches one CTA per tile"
         self._setup_tiled_mma()
@@ -173,7 +173,7 @@ class AmpereGemm:
         mB: cute.Tensor,
         mD: cute.Tensor,
         stream: cuda.CUstream,
-    ):
+    ) -> None:
         """Writes `mA @ mB` into `mD`, crossing as the caller holds them: A (l, m, k), B (l, k, n) and D (l, m, n), or
         unbatched (m, k), (k, n) and (m, n), each with any one dimension contiguous."""
         # Tensors arrive batch-first: rotate (l, x, y) -> (x, y, l) at trace time, a trivial batch appended to rank-2
@@ -184,6 +184,7 @@ class AmpereGemm:
         self.a_dtype = mA.element_type
         self.b_dtype = mB.element_type
         self.d_dtype = mD.element_type
+
         self.a_layout = LayoutEnum.from_tensor(mA)
         self.b_layout = LayoutEnum.from_tensor(mB)
         self.d_layout = LayoutEnum.from_tensor(mD)
