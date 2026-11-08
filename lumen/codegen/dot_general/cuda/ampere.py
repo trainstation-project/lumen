@@ -33,15 +33,6 @@ from lumen.kernels.cuda.tile_scheduler import (
 
 
 class AmpereGemm:
-    """SM80 GEMM with cp.async loads and warp-level tensor-core MMA.
-
-    SM80 has no TMA, so both the A/B mainloop and the epilogue global memory
-    movement use per-thread copies.
-    """
-
-    arch = 80
-    _supported_archs = (80, 86, 87, 89)
-
     def __init__(
         self,
         accum_dtype: Type[cutlass.Numeric],
@@ -56,7 +47,7 @@ class AmpereGemm:
         """The GEMM for `a_dtype` operands accumulating in `accum_dtype`, one CTA per (M, N) tile of `tile_shape_mnk`
         (K defaulting to four MMA instructions), with `NUM_WARPS` warps (4, or 8 for the widest tiles) and
         `occupancy` CTAs per SM."""
-        if arch not in self._supported_archs:
+        if arch not in (80, 86, 87, 89):
             raise ValueError(f"SM80-family GEMM supports arch in {self._supported_archs}, got {arch}")
 
         self.arch = arch
@@ -84,14 +75,7 @@ class AmpereGemm:
 
         self.ab_stage = None
         self.epi_stage = None
-        self.epi_c_stage = None
         self.epi_m_major = True
-        self.a_smem_layout_staged = None
-        self.b_smem_layout_staged = None
-        self.epi_smem_layout_staged = None
-        self.epi_c_smem_layout_staged = None
-        self.epi_tile = None
-        self.shared_storage = None
 
     def _set_cta_tile_shape(self, tile_shape_mnk: tuple[int, int] | tuple[int, int, int]) -> None:
         if len(tile_shape_mnk) == 3:
