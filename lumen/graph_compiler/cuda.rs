@@ -6,6 +6,7 @@
 use super::config::CompilerConfig;
 use super::passes::alone::{Alone, Lone};
 use super::passes::fusion::{Backend, fuse};
+use super::passes::simplify::Simplify;
 use super::passes::{CompilerPass, Module};
 use super::pipeline::{Pass, Passes, pipeline, when};
 use super::{Options, plan_options};
@@ -173,9 +174,16 @@ impl CompilerPass<CudaModule<'_>> for Fusion {
     }
 }
 
-/// The CUDA backend's passes: it runs elementwise kernels only.
+/// The CUDA backend's passes: it runs elementwise kernels and plain GEMMs only.
 impl Passes for CudaModule<'_> {
     const NAME: &'static str = "cuda";
+
+    /// Always, as on Triton and MPS: a matmul's narrowing cast folds into the GEMM, whose epilogue writes the
+    /// narrow dtype instead of a float32 product a second kernel rounds, and operand transposes fold into its
+    /// strides.
+    fn simplify(_: &CompilerConfig) -> Pass<Self> {
+        Box::new(Simplify { matched: true })
+    }
 
     /// With `fuse`.
     fn fusion(config: &CompilerConfig) -> Pass<Self> {
