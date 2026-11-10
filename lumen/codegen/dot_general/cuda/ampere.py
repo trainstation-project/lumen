@@ -18,7 +18,7 @@ import cutlass
 import cutlass.cute as cute
 import cutlass.utils.hopper_helpers as sm90_utils
 from cutlass import Boolean, Int32, const_expr
-from cutlass.cute.nvgpu import cpasync, warp, warpgroup
+from cutlass.cute.nvgpu import cpasync, warp
 from cutlass.experimental import primitives as prims
 from cutlass.pipeline import NamedBarrier
 from cutlass.utils import LayoutEnum, get_smem_capacity_in_bytes
@@ -580,9 +580,9 @@ class AmpereGemm:
 
     def _compute_tile_shape_or_override(
         self,
-        cta_tile_shape_mnk: Tuple[int, int, int],
-        atom_layout_mnk: Tuple[int, int, int],
-    ) -> Tuple[int, int]:
+        cta_tile_shape_mnk: tuple[int, int, int],
+        atom_layout_mnk: tuple[int, int, int],
+    ) -> tuple[int, int]:
         """The epilogue subtile: at most 64 x 32 of the CTA tile, covering the tiled MMA's warp spans (16 rows per
         M-warp, 16 columns per N-warp) so the r2s partition never wraps across warps."""
         m_span = atom_layout_mnk[0] << 4
@@ -594,14 +594,14 @@ class AmpereGemm:
     @classmethod
     def _compute_stages(
         cls,
-        cta_tile_shape_mnk: Tuple[int, int, int],
-        epi_tile: Tuple[int, int],
+        cta_tile_shape_mnk: tuple[int, int, int],
+        epi_tile: tuple[int, int],
         a_dtype: Type[cutlass.Numeric],
         b_dtype: Type[cutlass.Numeric],
         d_dtype: Type[cutlass.Numeric],
         smem_capacity: int,
         occupancy: int,
-    ) -> Tuple[int, int]:
+    ) -> tuple[int, int]:
         """(A/B stages, D epilogue stages) filling a CTA's share of shared memory: QuACK's split, with the A/B stages
         first and the leftover below one more A/B stage going to D."""
         epi_tiles = (cta_tile_shape_mnk[0] * cta_tile_shape_mnk[1]) // cute.size(cute.shape(epi_tile))
@@ -623,8 +623,8 @@ class AmpereGemm:
 
     @staticmethod
     def _make_smem_layouts(
-        cta_tile_shape_mnk: Tuple[int, int, int],
-        epi_tile: Tuple[int, int],
+        cta_tile_shape_mnk: tuple[int, int, int],
+        epi_tile: tuple[int, int],
         a_dtype: Type[cutlass.Numeric],
         a_layout: LayoutEnum,
         b_dtype: Type[cutlass.Numeric],
@@ -633,37 +633,11 @@ class AmpereGemm:
         d_dtype: Type[cutlass.Numeric],
         d_layout: LayoutEnum,
         epi_stage: int,
-    ) -> Tuple[cute.ComposedLayout, cute.ComposedLayout, cute.ComposedLayout]:
+    ) -> tuple[cute.ComposedLayout, cute.ComposedLayout, cute.ComposedLayout]:
         """Swizzled, staged shared memory layouts for A (tile_m, tile_k, STAGE), B (tile_n, tile_k, STAGE) and the
         epilogue's D (epi_m, epi_n, STAGE), each major the way its tensor is."""
-        a_smem_shape = cute.slice_(cta_tile_shape_mnk, (None, 0, None))
-
-        a_is_k_major = a_layout.sm90_mma_major_mode() == cute.nvgpu.OperandMajorMode.K
-        b_is_k_major = b_layout.sm90_mma_major_mode() == cute.nvgpu.OperandMajorMode.K
-        a_major_mode_size = cta_tile_shape_mnk[2 if a_is_k_major else 0]
-        a_smem_layout_atom = warpgroup.make_smem_layout_atom(
-            sm90_utils.get_smem_layout_atom(a_layout, a_dtype, a_major_mode_size),
-            a_dtype,
-        )
-        a_smem_layout_staged = cute.tile_to_shape(
-            a_smem_layout_atom,
-            cute.append(a_smem_shape, ab_stage),
-            order=(0, 1, 2) if a_is_k_major else (1, 0, 2),
-        )
-
-        b_smem_shape = cute.slice_(cta_tile_shape_mnk, (0, None, None))
-
-        b_major_mode_size = cta_tile_shape_mnk[2 if b_is_k_major else 1]
-        b_smem_layout_atom = warpgroup.make_smem_layout_atom(
-            sm90_utils.get_smem_layout_atom(b_layout, b_dtype, b_major_mode_size),
-            b_dtype,
-        )
-        b_smem_layout_staged = cute.tile_to_shape(
-            b_smem_layout_atom,
-            cute.append(b_smem_shape, ab_stage),
-            order=(0, 1, 2) if b_is_k_major else (1, 0, 2),
-        )
-
+        a_smem_layout_staged = sm90_utils.make_smem_layout_a(a_layout, cta_tile_shape_mnk, a_dtype, ab_stage)
+        b_smem_layout_staged = sm90_utils.make_smem_layout_b(b_layout, cta_tile_shape_mnk, b_dtype, ab_stage)
         epi_smem_layout_staged = sm90_utils.make_smem_layout_epi(d_dtype, d_layout, epi_tile, epi_stage)
 
         return a_smem_layout_staged, b_smem_layout_staged, epi_smem_layout_staged
