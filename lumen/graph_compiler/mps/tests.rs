@@ -2703,8 +2703,10 @@ fn every_tuned_paired_and_wide_norm_gemm_matches_the_reference() {
         g
     };
 
+    // Rows wider than a tile fuse into the GEMM only with `linear_reordering`.
     let mut options = crate::graph_compiler::Options::default();
     options.config.autotune = false;
+    options.config.linear_reordering = true;
 
     for k in [96, 256] {
         let cases = [

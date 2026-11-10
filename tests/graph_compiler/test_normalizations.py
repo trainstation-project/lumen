@@ -246,7 +246,8 @@ def test_rms_norm_backward_recomputes_its_normalized_input(device, triton_on_cud
 @pytest.mark.parametrize("device", [MPS, CUDA])
 def test_wide_rms_norm_of_a_residual_kept_in_float32_fuses(device, triton_on_cuda):
     """A projection plus a residual kept in float32, its bfloat16 rounding
-    RMS-normalized over rows too wide for one GEMM tile: on CUDA the GEMM
+    RMS-normalized over rows too wide for one GEMM tile, with
+    ``linear_reordering`` on (wide rows fuse only with it): on CUDA the GEMM
     writes both values and the norm's partials (``dot_partials``), as it
     writes a single one; the values the CPU's."""
     m, d = 64, 1024
@@ -262,10 +263,14 @@ def test_wide_rms_norm_of_a_residual_kept_in_float32_fuses(device, triton_on_cud
         args = [lumen.from_numpy(a).to(device) for a in (x, w, r, g)]
     except RuntimeError as e:
         pytest.skip(str(e))
-    if device == "cuda":
-        labels = [s["label"] for s in lumen.graph_compiler.Plan(lumen.make_graph(block)(*args), device).steps()]
-        assert any(label.endswith("partials") for label in labels), labels
-    got = lumen.compile(block)(*args)
+    lumen.config.compiler.linear_reordering = True
+    try:
+        if device == "cuda":
+            labels = [s["label"] for s in lumen.graph_compiler.Plan(lumen.make_graph(block)(*args), device).steps()]
+            assert any(label.endswith("partials") for label in labels), labels
+        got = lumen.compile(block)(*args)
+    finally:
+        lumen.config.compiler.linear_reordering = False
     want = lumen.compile(block, device="cpu")(*(lumen.from_numpy(a) for a in (x, w, r, g)))
     for a, b in zip(got, want):
         a, b = (lumen.to_numpy(t.to("cpu").to(dtype="float32")) for t in (a, b))

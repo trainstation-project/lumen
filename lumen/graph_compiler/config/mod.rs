@@ -96,7 +96,8 @@ compiler_config! {
     /// Split long contractions of skinny matmuls across threadgroups.
     split_k, set_split_k: bool = true;
     /// Move a factor of a matmul's operand from a reduction over rows wider than a GEMM's tile to its
-    /// output (CODA's reordering; rounding differs from the traced program).
+    /// output (CODA's reordering; rounding differs from the traced program). Only with it does a GEMM
+    /// fuse with a row wider than its tile.
     linear_reordering, set_linear_reordering: bool = false;
     /// Fuse normalization diamonds (row reductions broadcast back over their rows) into row kernels.
     normalization_diamonds, set_normalization_diamonds: bool = true;
