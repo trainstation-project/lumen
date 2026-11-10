@@ -196,7 +196,19 @@ class AmpereGemm:
         tiled_copy_A = self._make_gmem_tiled_copy_AB(self.a_dtype, self.a_layout, self.cta_tile_shape_mnk[0])
         tiled_copy_B = self._make_gmem_tiled_copy_AB(self.b_dtype, self.b_layout, self.cta_tile_shape_mnk[1])
 
-        tile_sched_args = self.get_scheduler_arguments(mA, mB, mD)
+        tile_sched_args = TileSchedulerArguments(
+            problem_shape_ntile_mnl=(
+                cute.ceil_div(cute.size(mA, mode=[0]), self.cta_tile_shape_mnk[0]),
+                cute.ceil_div(cute.size(mB, mode=[0]), self.cta_tile_shape_mnk[1]),
+                mD.shape[2],
+            ),
+            raster_order=RasterOrderOption.Heuristic,
+            group_size=Int32(8),
+            # SM8x launches independent CTAs: single-CTA clusters.
+            cluster_shape_mnk=(1, 1, 1),
+            persistence_mode=PersistenceMode.NONE,
+        )
+
         tile_sched_params = TileScheduler.to_underlying_arguments(tile_sched_args)
         grid = TileScheduler.get_grid_shape(tile_sched_params, Int32(0))
 
@@ -252,7 +264,7 @@ class AmpereGemm:
         a_smem_layout: cute.ComposedLayout,
         b_smem_layout: cute.ComposedLayout,
         epi_smem_layout: cute.ComposedLayout,
-        tile_sched_params,
+        tile_sched_params: TileSchedulerArguments,
         TileSchedulerCls: cutlass.Constexpr[Callable],
     ):
         """One CTA's GEMM: per scheduled (m, n, batch) tile, the A/B mainloop into a float32 accumulator, then the
@@ -558,22 +570,6 @@ class AmpereGemm:
         acc_divide = cute.flat_divide(acc, epi_acc_shape)
         assert cute.size(acc_divide, mode=[3]) == 1
         return cute.group_modes(acc_divide[None, None, None, 0, None, None], 3, 5)
-
-    def get_scheduler_arguments(self, mA: cute.Tensor, mB: cute.Tensor, mD: cute.Tensor) -> TileSchedulerArguments:
-        """One work tile per (M, N) tile of each batch, in QuACK's L2-friendly swizzled raster."""
-        problem_shape_ntile_mnl = (
-            cute.ceil_div(cute.size(mA, mode=[0]), self.cta_tile_shape_mnk[0]),
-            cute.ceil_div(cute.size(mB, mode=[0]), self.cta_tile_shape_mnk[1]),
-            mD.shape[2],
-        )
-        return TileSchedulerArguments(
-            problem_shape_ntile_mnl=problem_shape_ntile_mnl,
-            raster_order=RasterOrderOption.Heuristic,
-            group_size=Int32(8),
-            # SM8x launches independent CTAs: single-CTA clusters.
-            cluster_shape_mnk=(1, 1, 1),
-            persistence_mode=PersistenceMode.NONE,
-        )
 
     def _compute_tile_shape_or_override(
         self,
