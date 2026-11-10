@@ -16,12 +16,12 @@ from typing import Callable, Type
 import cuda.bindings.driver as cuda
 import cutlass
 import cutlass.cute as cute
-import cutlass.pipeline as pipeline
 import cutlass.utils.hopper_helpers as sm90_utils
 from cutlass import Boolean, Int32, const_expr
 from cutlass.cute.nvgpu import cpasync, warp, warpgroup
 from cutlass.experimental import primitives as prims
-from cutlass.utils import LayoutEnum
+from cutlass.pipeline import NamedBarrier
+from cutlass.utils import LayoutEnum, get_smem_capacity_in_bytes
 
 from lumen.kernels.cuda import copy_utils, layout_utils
 from lumen.kernels.cuda.tile_scheduler import (
@@ -66,8 +66,7 @@ class AmpereGemm:
         self.buffer_align_bytes = 1024
         self.occupancy = self._default_occupancy(a_dtype) if occupancy is None else occupancy
 
-        self.epilogue_barrier = pipeline.NamedBarrier(barrier_id=1, num_threads=self.NUM_WARPS * cute.arch.WARP_SIZE)
-
+        self.epilogue_barrier = NamedBarrier(barrier_id=1, num_threads=self.NUM_WARPS * cute.arch.WARP_SIZE)
         self.epi_m_major = True
 
     def _set_cta_tile_shape(self, tile_shape_mnk: tuple[int, int] | tuple[int, int, int]) -> None:
@@ -116,7 +115,7 @@ class AmpereGemm:
         if arch == 87:
             arch = 80
 
-        return cutlass.utils.get_smem_capacity_in_bytes(f"sm_{arch}")
+        return get_smem_capacity_in_bytes(f"sm_{arch}")
 
     def _setup_tiled_mma(self) -> None:
         """The CTA's tiled mma.sync: `atom_layout_mnk` warps of 16x8x16 instructions, each warp two instructions wide
