@@ -163,168 +163,6 @@ class AmpereGemm:
         )
 
     @cute.jit
-    def __call__(
-        self,
-        mA: cute.Tensor,
-        mB: cute.Tensor,
-        mD: cute.Tensor,
-        stream: cuda.CUstream,
-    ) -> None:
-        """Writes `mA @ mB` into `mD`, crossing as the caller holds them: A (l, m, k), B (l, k, n) and D (l, m, n), or
-        unbatched (m, k), (k, n) and (m, n), each with any one dimension contiguous."""
-        # Tensors arrive batch-first: rotate (l, x, y) -> (x, y, l) at trace time, a trivial batch appended to rank-2
-        # operands, and B relabelled from the caller's (k, n) to the kernel's (n, k) (QuACK's b_transposed).
-        mA, mB, mD = [self._batch_last(t) for t in (mA, mB, mD)]
-        mB = layout_utils.select(mB, [1, 0, 2])
-
-        self.a_dtype = mA.element_type
-        self.b_dtype = mB.element_type
-        self.d_dtype = mD.element_type
-
-        self.a_layout = LayoutEnum.from_tensor(mA)
-        self.b_layout = LayoutEnum.from_tensor(mB)
-        self.d_layout = LayoutEnum.from_tensor(mD)
-
-        if const_expr(self.a_dtype != self.b_dtype):
-            raise TypeError(f"Type mismatch: {self.a_dtype} != {self.b_dtype}")
-
-        if const_expr(self.a_dtype.width != 16):
-            raise TypeError("SM80 GEMM takes float16 or bfloat16 operands")
-
-        self._setup_attributes()
-
-        tiled_copy_A = self._make_gmem_tiled_copy_AB(self.a_dtype, self.a_layout, self.cta_tile_shape_mnk[0])
-        tiled_copy_B = self._make_gmem_tiled_copy_AB(self.b_dtype, self.b_layout, self.cta_tile_shape_mnk[1])
-
-        tile_sched_args = TileSchedulerArguments(
-            problem_shape_ntile_mnl=(
-                cute.ceil_div(cute.size(mA, mode=[0]), self.cta_tile_shape_mnk[0]),
-                cute.ceil_div(cute.size(mB, mode=[0]), self.cta_tile_shape_mnk[1]),
-                mD.shape[2],
-            ),
-            raster_order=RasterOrderOption.Heuristic,
-            group_size=Int32(8),
-            # SM8x launches independent CTAs: single-CTA clusters.
-            cluster_shape_mnk=(1, 1, 1),
-            persistence_mode=PersistenceMode.NONE,
-        )
-
-        tile_sched_params = TileScheduler.to_underlying_arguments(tile_sched_args)
-        grid = TileScheduler.get_grid_shape(tile_sched_params, Int32(0))
-
-        @cute.struct
-        class SharedStorage:
-            sD: cute.struct.Align[
-                cute.struct.MemRange[self.d_dtype, cute.cosize(self.epi_smem_layout_staged)],
-                self.buffer_align_bytes,
-            ]
-
-            sA: cute.struct.Align[
-                cute.struct.MemRange[self.a_dtype, cute.cosize(self.a_smem_layout_staged)],
-                self.buffer_align_bytes,
-            ]
-
-            sB: cute.struct.Align[
-                cute.struct.MemRange[self.b_dtype, cute.cosize(self.b_smem_layout_staged)],
-                self.buffer_align_bytes,
-            ]
-
-        self.shared_storage = SharedStorage
-
-        self.kernel(
-            self.tiled_mma,
-            mA,
-            mB,
-            mD,
-            tiled_copy_A,
-            tiled_copy_B,
-            self.a_smem_layout_staged,
-            self.b_smem_layout_staged,
-            self.epi_smem_layout_staged,
-            tile_sched_params,
-            TileScheduler,
-        ).launch(
-            grid=grid,
-            block=[self.NUM_THREADS, 1, 1],
-            stream=stream,
-            # occupancy > 1 needs the launch bound so ptxas caps registers for 2 resident CTAs
-            min_blocks_per_mp=self.occupancy,
-            use_pdl=self.use_pdl,
-        )
-
-    @cute.kernel
-    def kernel(
-        self,
-        tiled_mma: cute.TiledMma,
-        mA_mkl: cute.Tensor,
-        mB_nkl: cute.Tensor,
-        mD_mnl: cute.Tensor,
-        tiled_copy_A: cute.TiledCopy,
-        tiled_copy_B: cute.TiledCopy,
-        a_smem_layout: cute.ComposedLayout,
-        b_smem_layout: cute.ComposedLayout,
-        epi_smem_layout: cute.ComposedLayout,
-        tile_sched_params: TileSchedulerArguments,
-        TileSchedulerCls: cutlass.Constexpr[Callable],
-    ):
-        """One CTA's GEMM: per scheduled (m, n, batch) tile, the A/B mainloop into a float32 accumulator, then the
-        epilogue storing it to D."""
-        tidx, _, _ = cute.arch.thread_idx()
-
-        smem = cutlass.utils.SmemAllocator()
-        storage = smem.allocate(self.shared_storage)
-
-        sA = storage.sA.get_tensor(a_smem_layout.outer, swizzle=a_smem_layout.inner)
-        sB = storage.sB.get_tensor(b_smem_layout.outer, swizzle=b_smem_layout.inner)
-        sD = storage.sD.get_tensor(epi_smem_layout.outer, swizzle=epi_smem_layout.inner)
-
-        # Make fragments
-        thr_mma = tiled_mma.get_slice(tidx)
-
-        acc = cute.make_rmem_tensor(thr_mma.partition_shape_C(self.cta_tile_shape_mnk[:2]), self.accum_dtype)
-        tCrA = thr_mma.make_fragment_A(thr_mma.partition_A(sA)[None, None, None, 0])
-        tCrB = thr_mma.make_fragment_B(thr_mma.partition_B(sB)[None, None, None, 0])
-
-        # ldmatrix s2r loads; the MMA's operands are K-major, the smem major only picks LDSM vs LDSM.T
-        copy_block_A = self.smem_load_copy_fn(
-            cute.make_tiled_copy_A, tiled_mma, sA, tCrA, self.a_layout.is_m_major_a(), tidx
-        )
-
-        copy_block_B = self.smem_load_copy_fn(
-            cute.make_tiled_copy_B, tiled_mma, sB, tCrB, self.b_layout.is_n_major_b(), tidx
-        )
-
-        k_tile_cnt = cute.ceil_div(cute.size(mA_mkl, mode=[1]), self.cta_tile_shape_mnk[2])
-
-        # PDL: wait for the prior kernel before any gmem reads.
-        if const_expr(self.use_pdl):
-            prims.griddepcontrol(prims.GridDepAction.WAIT)
-
-        tile_scheduler = TileSchedulerCls.create(tile_sched_params)
-        work_tile = tile_scheduler.initial_work_tile_info()
-
-        while work_tile.is_valid_tile:
-            # (pid_m, pid_n, split_idx | None, batch_idx), decoded by the scheduler
-            tile_coord_mnkl = work_tile.tile_idx
-            batch_idx = tile_coord_mnkl[3]
-
-            copy_A = self.gmem_load_copy_fn(
-                tiled_copy_A, mA_mkl[None, None, batch_idx], sA, tile_coord_mnkl[0], self.cta_tile_shape_mnk[0], tidx
-            )
-
-            copy_B = self.gmem_load_copy_fn(
-                tiled_copy_B, mB_nkl[None, None, batch_idx], sB, tile_coord_mnkl[1], self.cta_tile_shape_mnk[1], tidx
-            )
-
-            acc.fill(0.0)
-            self.mma(tiled_mma, acc, k_tile_cnt, copy_A, copy_B, copy_block_A, copy_block_B, tCrA, tCrB)
-
-            self.epilogue(tiled_mma, acc, mD_mnl[None, None, batch_idx], sD, tile_coord_mnkl, tidx)
-
-            tile_scheduler.advance_to_next_work()
-            work_tile = tile_scheduler.get_current_work()
-
-    @cute.jit
     def mma(
         self,
         tiled_mma: cute.TiledMma,
@@ -614,8 +452,8 @@ class AmpereGemm:
         epi_stage += min(leftover // epi_bytes_per_stage, epi_tiles - epi_stage)
         return ab_stage, epi_stage
 
-    @staticmethod
     def _make_smem_layout(
+        self,
         dtype: Type[cutlass.Numeric],
         layout: LayoutEnum,
         shape: tuple[int, int],
@@ -668,10 +506,171 @@ class AmpereGemm:
         )
         return cute.make_tiled_copy_tv(atom_async_copy, thread_layout, value_layout)
 
-    @staticmethod
-    def _batch_last(t: cute.Tensor) -> cute.Tensor:
+    def _batch_last(self, t: cute.Tensor) -> cute.Tensor:
         """Batched `t` (l, x, y) as (x, y, l), or unbatched `t` (x, y) with a size-1 batch (lumen, after QuACK's
         GemmBase.permute_batch_last)."""
         if cutlass.const_expr(cute.rank(t) == 3):
             return layout_utils.select(t, [1, 2, 0])
         return layout_utils.expand(t, 2, 1)
+
+    @cute.kernel
+    def kernel(
+        self,
+        tiled_mma: cute.TiledMma,
+        mA_mkl: cute.Tensor,
+        mB_nkl: cute.Tensor,
+        mD_mnl: cute.Tensor,
+        tiled_copy_A: cute.TiledCopy,
+        tiled_copy_B: cute.TiledCopy,
+        a_smem_layout: cute.ComposedLayout,
+        b_smem_layout: cute.ComposedLayout,
+        epi_smem_layout: cute.ComposedLayout,
+        tile_sched_params: TileSchedulerArguments,
+        TileSchedulerCls: cutlass.Constexpr[Callable],
+    ):
+        """One CTA's GEMM: per scheduled (m, n, batch) tile, the A/B mainloop into a float32 accumulator, then the
+        epilogue storing it to D."""
+        tidx, _, _ = cute.arch.thread_idx()
+
+        smem = cutlass.utils.SmemAllocator()
+        storage = smem.allocate(self.shared_storage)
+
+        sA = storage.sA.get_tensor(a_smem_layout.outer, swizzle=a_smem_layout.inner)
+        sB = storage.sB.get_tensor(b_smem_layout.outer, swizzle=b_smem_layout.inner)
+        sD = storage.sD.get_tensor(epi_smem_layout.outer, swizzle=epi_smem_layout.inner)
+
+        # Make fragments
+        thr_mma = tiled_mma.get_slice(tidx)
+
+        acc = cute.make_rmem_tensor(thr_mma.partition_shape_C(self.cta_tile_shape_mnk[:2]), self.accum_dtype)
+        tCrA = thr_mma.make_fragment_A(thr_mma.partition_A(sA)[None, None, None, 0])
+        tCrB = thr_mma.make_fragment_B(thr_mma.partition_B(sB)[None, None, None, 0])
+
+        # ldmatrix s2r loads; the MMA's operands are K-major, the smem major only picks LDSM vs LDSM.T
+        copy_block_A = self.smem_load_copy_fn(
+            cute.make_tiled_copy_A, tiled_mma, sA, tCrA, self.a_layout.is_m_major_a(), tidx
+        )
+
+        copy_block_B = self.smem_load_copy_fn(
+            cute.make_tiled_copy_B, tiled_mma, sB, tCrB, self.b_layout.is_n_major_b(), tidx
+        )
+
+        k_tile_cnt = cute.ceil_div(cute.size(mA_mkl, mode=[1]), self.cta_tile_shape_mnk[2])
+
+        # PDL: wait for the prior kernel before any gmem reads.
+        if const_expr(self.use_pdl):
+            prims.griddepcontrol(prims.GridDepAction.WAIT)
+
+        tile_scheduler = TileSchedulerCls.create(tile_sched_params)
+        work_tile = tile_scheduler.initial_work_tile_info()
+
+        while work_tile.is_valid_tile:
+            # (pid_m, pid_n, split_idx | None, batch_idx), decoded by the scheduler
+            tile_coord_mnkl = work_tile.tile_idx
+            batch_idx = tile_coord_mnkl[3]
+
+            copy_A = self.gmem_load_copy_fn(
+                tiled_copy_A, mA_mkl[None, None, batch_idx], sA, tile_coord_mnkl[0], self.cta_tile_shape_mnk[0], tidx
+            )
+
+            copy_B = self.gmem_load_copy_fn(
+                tiled_copy_B, mB_nkl[None, None, batch_idx], sB, tile_coord_mnkl[1], self.cta_tile_shape_mnk[1], tidx
+            )
+
+            acc.fill(0.0)
+            self.mma(tiled_mma, acc, k_tile_cnt, copy_A, copy_B, copy_block_A, copy_block_B, tCrA, tCrB)
+
+            self.epilogue(tiled_mma, acc, mD_mnl[None, None, batch_idx], sD, tile_coord_mnkl, tidx)
+
+            tile_scheduler.advance_to_next_work()
+            work_tile = tile_scheduler.get_current_work()
+
+    @cute.jit
+    def __call__(
+        self,
+        mA: cute.Tensor,
+        mB: cute.Tensor,
+        mD: cute.Tensor,
+        stream: cuda.CUstream,
+    ) -> None:
+        """Writes `mA @ mB` into `mD`, crossing as the caller holds them: A (l, m, k), B (l, k, n) and D (l, m, n), or
+        unbatched (m, k), (k, n) and (m, n), each with any one dimension contiguous."""
+        # Tensors arrive batch-first: rotate (l, x, y) -> (x, y, l) at trace time, a trivial batch appended to rank-2
+        # operands, and B relabelled from the caller's (k, n) to the kernel's (n, k) (QuACK's b_transposed).
+        mA, mB, mD = [self._batch_last(t) for t in (mA, mB, mD)]
+        mB = layout_utils.select(mB, [1, 0, 2])
+
+        self.a_dtype = mA.element_type
+        self.b_dtype = mB.element_type
+        self.d_dtype = mD.element_type
+
+        self.a_layout = LayoutEnum.from_tensor(mA)
+        self.b_layout = LayoutEnum.from_tensor(mB)
+        self.d_layout = LayoutEnum.from_tensor(mD)
+
+        if const_expr(self.a_dtype != self.b_dtype):
+            raise TypeError(f"Type mismatch: {self.a_dtype} != {self.b_dtype}")
+
+        if const_expr(self.a_dtype.width != 16):
+            raise TypeError("SM80 GEMM takes float16 or bfloat16 operands")
+
+        self._setup_attributes()
+
+        tiled_copy_A = self._make_gmem_tiled_copy_AB(self.a_dtype, self.a_layout, self.cta_tile_shape_mnk[0])
+        tiled_copy_B = self._make_gmem_tiled_copy_AB(self.b_dtype, self.b_layout, self.cta_tile_shape_mnk[1])
+
+        tile_sched_args = TileSchedulerArguments(
+            problem_shape_ntile_mnl=(
+                cute.ceil_div(cute.size(mA, mode=[0]), self.cta_tile_shape_mnk[0]),
+                cute.ceil_div(cute.size(mB, mode=[0]), self.cta_tile_shape_mnk[1]),
+                mD.shape[2],
+            ),
+            raster_order=RasterOrderOption.Heuristic,
+            group_size=Int32(8),
+            # SM8x launches independent CTAs: single-CTA clusters.
+            cluster_shape_mnk=(1, 1, 1),
+            persistence_mode=PersistenceMode.NONE,
+        )
+
+        tile_sched_params = TileScheduler.to_underlying_arguments(tile_sched_args)
+        grid = TileScheduler.get_grid_shape(tile_sched_params, Int32(0))
+
+        @cute.struct
+        class SharedStorage:
+            sD: cute.struct.Align[
+                cute.struct.MemRange[self.d_dtype, cute.cosize(self.epi_smem_layout_staged)],
+                self.buffer_align_bytes,
+            ]
+
+            sA: cute.struct.Align[
+                cute.struct.MemRange[self.a_dtype, cute.cosize(self.a_smem_layout_staged)],
+                self.buffer_align_bytes,
+            ]
+
+            sB: cute.struct.Align[
+                cute.struct.MemRange[self.b_dtype, cute.cosize(self.b_smem_layout_staged)],
+                self.buffer_align_bytes,
+            ]
+
+        self.shared_storage = SharedStorage
+
+        self.kernel(
+            self.tiled_mma,
+            mA,
+            mB,
+            mD,
+            tiled_copy_A,
+            tiled_copy_B,
+            self.a_smem_layout_staged,
+            self.b_smem_layout_staged,
+            self.epi_smem_layout_staged,
+            tile_sched_params,
+            TileScheduler,
+        ).launch(
+            grid=grid,
+            block=[self.NUM_THREADS, 1, 1],
+            stream=stream,
+            # occupancy > 1 needs the launch bound so ptxas caps registers for 2 resident CTAs
+            min_blocks_per_mp=self.occupancy,
+            use_pdl=self.use_pdl,
+        )
