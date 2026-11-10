@@ -2,7 +2,7 @@
 """lumen's Ampere GEMM, D = A @ B with warp-level tensor-core MMA (mma.sync) and cp.async loads.
 
 Written after QuACK's GEMM classes (https://github.com/Dao-AILab/quack, commit bb0e6b2, Apache-2.0): the constructor,
-`_setup_tiled_mma`, `_make_smem_layouts`, `epi_retile_acc` and the scheduler setup are QuACK's (its `GemmSm80`,
+`_setup_tiled_mma`, `epi_retile_acc` and the scheduler setup are QuACK's (its `GemmSm80`,
 `GemmSm90`, `GemmSm120` and `GemmBase`); QuACK's own SM80 mainloop and epilogue are unimplemented, so the kernel body
 follows its SM120 warp-MMA consumer with the TMA pipelines swapped for SM80's: every CTA thread issues cp.async,
 mma.sync and the epilogue's copies, with no warp specialization.
@@ -16,7 +16,6 @@ from typing import Callable, Type
 import cuda.bindings.driver as cuda
 import cutlass
 import cutlass.cute as cute
-import cutlass.utils.hopper_helpers as sm90_utils
 from cutlass import Boolean, Int32, const_expr
 from cutlass.cute.nvgpu import cpasync, warp
 from cutlass.experimental import primitives as prims
@@ -152,17 +151,15 @@ class AmpereGemm:
         # The mainloop keeps ab_stage - 1 k-tiles in flight while it reads one.
         assert self.ab_stage >= 2, f"SM80 GEMM needs >= 2 A/B stages, shared memory fits {self.ab_stage}"
 
-        self.a_smem_layout_staged, self.b_smem_layout_staged, self.epi_smem_layout_staged = self._make_smem_layouts(
-            self.cta_tile_shape_mnk,
-            self.epi_tile,
-            self.a_dtype,
-            self.a_layout,
-            self.b_dtype,
-            self.b_layout,
-            self.ab_stage,
-            self.d_dtype,
-            self.d_layout,
-            self.epi_stage,
+        tile_m, tile_n, tile_k = self.cta_tile_shape_mnk
+        self.a_smem_layout_staged = self._make_smem_layout(
+            self.a_dtype, self.a_layout, (tile_m, tile_k), self.ab_stage
+        )
+        self.b_smem_layout_staged = self._make_smem_layout(
+            self.b_dtype, self.b_layout, (tile_n, tile_k), self.ab_stage
+        )
+        self.epi_smem_layout_staged = self._make_smem_layout(
+            self.d_dtype, self.d_layout, self.epi_tile, self.epi_stage
         )
 
     @cute.jit
@@ -622,25 +619,29 @@ class AmpereGemm:
         return ab_stage, epi_stage
 
     @staticmethod
-    def _make_smem_layouts(
-        cta_tile_shape_mnk: tuple[int, int, int],
-        epi_tile: tuple[int, int],
-        a_dtype: Type[cutlass.Numeric],
-        a_layout: LayoutEnum,
-        b_dtype: Type[cutlass.Numeric],
-        b_layout: LayoutEnum,
-        ab_stage: int,
-        d_dtype: Type[cutlass.Numeric],
-        d_layout: LayoutEnum,
-        epi_stage: int,
-    ) -> tuple[cute.ComposedLayout, cute.ComposedLayout, cute.ComposedLayout]:
-        """Swizzled, staged shared memory layouts for A (tile_m, tile_k, STAGE), B (tile_n, tile_k, STAGE) and the
-        epilogue's D (epi_m, epi_n, STAGE), each major the way its tensor is."""
-        a_smem_layout_staged = sm90_utils.make_smem_layout_a(a_layout, cta_tile_shape_mnk, a_dtype, ab_stage)
-        b_smem_layout_staged = sm90_utils.make_smem_layout_b(b_layout, cta_tile_shape_mnk, b_dtype, ab_stage)
-        epi_smem_layout_staged = sm90_utils.make_smem_layout_epi(d_dtype, d_layout, epi_tile, epi_stage)
+    def _make_smem_layout(
+        dtype: Type[cutlass.Numeric],
+        layout: LayoutEnum,
+        shape: tuple[int, int],
+        stage: int,
+    ) -> cute.ComposedLayout:
+        """`stage` swizzled (rows, cols) tiles in shared memory, for A (tile_m, tile_k), B (tile_n, tile_k) or the
+        epilogue's D (epi_m, epi_n): contiguous along cols for a row-major `layout`, along rows otherwise, as the
+        tensor is in global memory. The atom is 8 lines of the widest of 128, 64, 32 or 16 bytes the tile's contiguous
+        side holds, XOR-swizzled `Sw<B,4,3>` (B = 3, 2, 1, 0) so the 8 lines of an ldmatrix read hit distinct banks;
+        the atoms tile the other side first, then the contiguous one, then the stages."""
+        row_major = layout == LayoutEnum.ROW_MAJOR
+        contiguous_bits = (shape[1] if row_major else shape[0]) * dtype.width
+        swizzle_bits = next(b for b in (3, 2, 1, 0) if contiguous_bits % (128 << b) == 0)
+        line = (128 << swizzle_bits) // dtype.width
 
-        return a_smem_layout_staged, b_smem_layout_staged, epi_smem_layout_staged
+        if row_major:
+            atom = cute.make_layout((8, line), stride=(line, 1))
+        else:
+            atom = cute.make_layout((line, 8), stride=(1, line))
+
+        atom = cute.make_composed_layout(cute.make_swizzle(swizzle_bits, 4, 3), 0, atom)
+        return cute.tile_to_shape(atom, (*shape, stage), order=(0, 1, 2) if row_major else (1, 0, 2))
 
     def _make_gmem_tiled_copy_AB(self, dtype, major_mode, tile_mn, copy_bits=128):
         """cp.async tiled copy of a (tile_mn, tile_k) operand tile by all CTA threads in `copy_bits` vectors along its
