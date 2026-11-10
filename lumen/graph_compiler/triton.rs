@@ -206,10 +206,14 @@ impl Passes for TritonModule<'_> {
         when(config.fuse, Fusion)
     }
 
-    /// With `fuse` and `normalization_diamonds`: rows too wide for one GEMM tile get the GEMM feeding them
-    /// writing their reductions' partials too.
+    /// With `fuse`, `normalization_diamonds` and `linear_reordering` (as on MPS): rows too wide for one GEMM
+    /// tile get the GEMM feeding them writing their reductions' partials too. Without the reordering the row
+    /// kernel reads the rows back anyway, so the partials save nothing.
     fn wide_rows(config: &CompilerConfig) -> Pass<Self> {
-        when(config.fuse && config.normalization_diamonds, WideRows)
+        when(
+            config.fuse && config.normalization_diamonds && config.linear_reordering,
+            WideRows,
+        )
     }
 
     /// Always: Triton's GEMM reads its operands at any strides.

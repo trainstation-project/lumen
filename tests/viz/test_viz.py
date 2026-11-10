@@ -109,10 +109,7 @@ def test_every_device_kernel_dumps_its_source(device, tmp_path, triton_on_cuda):
     flash attention, the chunked cross entropy's update slices, matmuls,
     each a generated GEMM): each a file of the device's source (Metal on
     MPS, Triton on CUDA), none the step's text in its place."""
-    if device == "mps":
-        lumen.config.compiler.fused_linear_cross_entropy = True
-    lumen.config.compiler.fused_linear_cross_entropy_chunk_size = 32
-    try:
+    with lumen.config.compiler.patch(fused_linear_cross_entropy=True, fused_linear_cross_entropy_chunk_size=32):
         f = lumen.compile(_step)
         try:
             args = _step_args(device)
@@ -120,8 +117,6 @@ def test_every_device_kernel_dumps_its_source(device, tmp_path, triton_on_cuda):
             pytest.skip(str(e))
         f(*args)
         written = f.dump_code(tmp_path)
-    finally:
-        lumen.config.compiler.reset()
     if device == "cuda":
         assert written and all(p.suffix == ".py" and "@triton.jit" in p.read_text() for p in written), [
             p.name for p in written if p.suffix != ".py"

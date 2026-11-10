@@ -1,4 +1,6 @@
-from typing import Optional
+from typing import Any, Optional
+
+from lumen.config import Patch
 
 class CompilerConfig:
     """The compiler's settings (``lumen.config.compiler``): one set every
@@ -30,3 +32,8 @@ class CompilerConfig:
 
     def reset(self) -> None:
         """Every setting back to its default."""
+
+    def patch(self, **values: Any) -> Patch:
+        """The settings in ``values`` set while in use, as a ``with`` block or a
+        function decorator, each restored on the way out:
+        ``lumen.config.compiler.patch(linear_reordering=True)``."""

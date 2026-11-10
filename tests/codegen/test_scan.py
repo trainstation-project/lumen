@@ -14,9 +14,8 @@ DEVICES = ["cpu", MPS, CUDA, TPU]
 @pytest.fixture(autouse=True)
 def triton():
     """CUDA's programs on the Triton backend."""
-    lumen.config.compiler.use_triton_backend = True
-    yield
-    lumen.config.compiler.use_triton_backend = False
+    with lumen.config.compiler.patch(use_triton_backend=True):
+        yield
 
 
 # (shape, axis) pairs: long rows split into chunks, tall columns, strided middle axes, a negative axis and an empty tensor.

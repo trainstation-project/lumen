@@ -29,14 +29,6 @@ class MLP(lumen.nn.Module):
         return F.matmul(h, self.w2, "float32", "float16")
 
 
-@pytest.fixture
-def neural_engine():
-    """Turns on the Neural Engine for one test, then resets the compiler config."""
-    lumen.config.compiler.neural_engine = True
-    yield
-    lumen.config.compiler.reset()
-
-
 def _values(seed=0):
     """Returns seeded float16 MLP weights ``(w1, b1, w2)``."""
     rng = np.random.default_rng(seed)
@@ -85,7 +77,8 @@ def test_neural_engine_off_by_default():
     assert not any(s["label"].startswith("coreml") for s in plan.steps())
 
 
-def test_neural_engine_runs_fixed_weights_dots(neural_engine):
+@lumen.config.compiler.patch(neural_engine=True)
+def test_neural_engine_runs_fixed_weights_dots():
     """An inference MLP (dot, bias, ReLU, dot) of fixed weights: one Core ML
     step (Core ML placing all of it on the Neural Engine, as compiling
     checked), its results float32's to float16's precision."""
@@ -102,7 +95,8 @@ def test_neural_engine_runs_fixed_weights_dots(neural_engine):
     np.testing.assert_allclose(got.astype(np.float32), _want(x, *values), rtol=2e-2, atol=2e-2)
 
 
-def test_neural_engine_bakes_written_weights_in_again(neural_engine):
+@lumen.config.compiler.patch(neural_engine=True)
+def test_neural_engine_bakes_written_weights_in_again():
     """The weights are constants of the Core ML program: written
     (``copy_``), it is compiled again from their new values."""
     x = np.random.default_rng(1).standard_normal((M, K)).astype(np.float16)
@@ -125,7 +119,8 @@ def _ops(f, model, x):
     return [e["name"] for e in p.events() if e["kind"] == "op"]
 
 
-def test_neural_engine_leaves_written_weights_on_mps(neural_engine):
+@lumen.config.compiler.patch(neural_engine=True)
+def test_neural_engine_leaves_written_weights_on_mps():
     """A training step's weight (written by the function) stays on lumen's
     kernels; frozen ones' dots (read, not written) run on the Neural
     Engine; small dots stay on MPS too."""
@@ -157,7 +152,8 @@ def test_neural_engine_leaves_written_weights_on_mps(neural_engine):
     assert not plan.neural_engine
 
 
-def test_neural_engine_steps_are_profiled(neural_engine, tmp_path):
+@lumen.config.compiler.patch(neural_engine=True)
+def test_neural_engine_steps_are_profiled(tmp_path):
     """Each Core ML step's run is on the trace's ``Neural Engine``
     timeline."""
     from lumen.profiler import ProfilerActivity, profile

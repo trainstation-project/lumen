@@ -19,27 +19,24 @@ def test_autotuned_elementwise_fusions_match_untuned(device, dtype, tmp_path, tr
     one does, at lengths no block size divides. A Triton one's dumped source names its
     template kernel and the ``BLOCK_SIZE`` and warps it picked, then its
     generated ``BODY``."""
-    compiler = lumen.config.compiler
-    try:
-        for n in ((1 << 16) + 7, 1 << 20, (3 << 20) + 1):
-            try:
-                x = lumen.from_numpy(rand(n, seed=n)).to(device).to(dtype=dtype)
-            except RuntimeError as e:
-                pytest.skip(str(e))
-            results = []
-            for autotune in (False, True):
-                compiler.autotune = autotune
+    for n in ((1 << 16) + 7, 1 << 20, (3 << 20) + 1):
+        try:
+            x = lumen.from_numpy(rand(n, seed=n)).to(device).to(dtype=dtype)
+        except RuntimeError as e:
+            pytest.skip(str(e))
+        results = []
+        for autotune in (False, True):
+            with lumen.config.compiler.patch(autotune=autotune):
                 y = lumen.compile(lambda x: -x * 2)(x)
-                results.append(lumen.to_numpy(y.to(dtype="float32").to("cpu")))
-            assert np.array_equal(results[0], results[1]), n
-        if device != "cuda":
-            return
+            results.append(lumen.to_numpy(y.to(dtype="float32").to("cpu")))
+        assert np.array_equal(results[0], results[1]), n
+    if device != "cuda":
+        return
+    with lumen.config.compiler.patch(autotune=True):
         lumen.compile(lambda x: -x * 2).dump_code(str(tmp_path), x)
-        source = "".join(p.read_text() for p in tmp_path.glob("*elementwise_*.py"))
-        assert re.search(r"elementwise_kernel, BLOCK_SIZE=\d+ warps=\d+", source)
-        assert re.search(r"def elementwise_[0-9a-f]+\(EXTRA, BLOCK, MASK, SEGMENT: tl.constexpr\)", source)
-    finally:
-        compiler.autotune = True
+    source = "".join(p.read_text() for p in tmp_path.glob("*elementwise_*.py"))
+    assert re.search(r"elementwise_kernel, BLOCK_SIZE=\d+ warps=\d+", source)
+    assert re.search(r"def elementwise_[0-9a-f]+\(EXTRA, BLOCK, MASK, SEGMENT: tl.constexpr\)", source)
 
 
 @pytest.mark.parametrize("device", [MPS, CUDA])

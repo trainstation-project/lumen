@@ -604,11 +604,8 @@ def test_an_attentions_elementwise_consumers_are_its_epilogue(training):
     assert labels[0] == "flash_attention → reshape → cast(bfloat16 -> float32) → mul", labels
     assert len(labels) == (4 if training else 1), labels
     got = [floats(t) for t in lumen.compile(step)(q, k, v, g)]
-    lumen.config.compiler.contraction_epilogues = False
-    try:
+    with lumen.config.compiler.patch(contraction_epilogues=False):
         want = [floats(t) for t in lumen.compile(step)(q, k, v, g)]
-    finally:
-        lumen.config.compiler.reset()
     for a, w in zip(got, want):
         np.testing.assert_array_equal(a, w)
 

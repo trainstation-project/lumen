@@ -136,14 +136,8 @@ def test_tuned_flash_attention(dtype):
     and key block timed on MPS, Metal Performance Primitives among them in bfloat16) agrees with attention
     in float64, causal with grouped heads."""
     (q, k, v), arrays = tensors("mps", dtype, (1, 1024, 4, 64), (1, 1024, 2, 64), (1, 1024, 2, 64))
-    config = lumen.config.compiler
-    tuned = config.autotune
-    config.autotune = True
-
-    try:
+    with lumen.config.compiler.patch(autotune=True):
         out = lumen.compile(lambda q, k, v: F.flash_attention(q, k, v, is_causal=True))(q, k, v)
-    finally:
-        config.autotune = tuned
 
     np.testing.assert_allclose(
         lumen.to_numpy(out.to(dtype="float32")), reference(*arrays, causal=True), rtol=TOL[dtype], atol=TOL[dtype]
@@ -199,17 +193,13 @@ def test_attention_as_traced_without_flash_attention(device, triton_on_cuda):
         """Causal flash attention."""
         return F.flash_attention(q, k, v, is_causal=True)
 
-    config = lumen.config.compiler
-    assert config.flash_attention is True
+    assert lumen.config.compiler.flash_attention is True
     assert steps(f, q, k, v, device=device) == ["flash_attention"]
     flash = lumen.to_numpy(lumen.compile(f)(q, k, v).to(dtype="float32").to("cpu"))
-    try:
-        config.flash_attention = False
+    with lumen.config.compiler.patch(flash_attention=False):
         labels = steps(f, q, k, v, device=device)
         assert len(labels) > 1 and "flash_attention" not in labels
         traced = lumen.to_numpy(lumen.compile(f)(q, k, v).to(dtype="float32").to("cpu"))
-    finally:
-        config.flash_attention = True
     np.testing.assert_allclose(flash, traced, rtol=4e-3, atol=4e-3)
 
 
@@ -303,12 +293,9 @@ def test_attention_epilogues_fuse(f, sq, device, triton_on_cuda):
     assert label.startswith("flash_attention → reshape → "), label
     if device != "mps":
         return
-    lumen.config.compiler.contraction_epilogues = False
-    try:
+    with lumen.config.compiler.patch(contraction_epilogues=False):
         assert len(steps(f, *ts)) == 2
         unfused = lumen.to_numpy(lumen.compile(f)(*ts).to(dtype="float32"))
-    finally:
-        lumen.config.compiler.reset()
     np.testing.assert_allclose(got, unfused, rtol=1e-6, atol=1e-6)
 
 
@@ -402,9 +389,7 @@ def test_attention_backward_is_flash_attention(device, case, dtype, deterministi
         return F.sum((F.flash_attention(q, k, v, is_causal=causal) * w).float())
 
     grad = lumen.grad(loss, (0, 1, 2))
-    config = lumen.config.compiler
-    config.deterministic = deterministic
-    try:
+    with lumen.config.compiler.patch(deterministic=deterministic):
         labels = steps(grad, q, k, v, w, device=device)
         for kernel in ["flash_attention", *backward_kernels(h, hv, dtype, deterministic, device)]:
             assert kernel in labels, labels
@@ -414,8 +399,6 @@ def test_attention_backward_is_flash_attention(device, case, dtype, deterministi
             for g, again in zip(got, compiled(q, k, v, w)):
                 g, again = (lumen.to_numpy(t.to(dtype="float32").to("cpu")) for t in (g, again))
                 np.testing.assert_array_equal(g, again)
-    finally:
-        config.deterministic = False
     cpu = [lumen.from_numpy(a).to(dtype=dtype) for a in arrays]
     want = lumen.compile(grad, device="cpu")(*cpu)
     tol = {"float32": 1e-5, "bfloat16": 2e-2}[dtype]
@@ -444,8 +427,7 @@ def test_attention_dropout_is_in_its_kernels(case, attention, dtype, determinist
         return F.sum((attention(q, k, v, is_causal=causal, dropout_p=0.25) * w).float())
 
     step = lumen.value_and_grad(loss, (0, 1, 2))
-    lumen.config.compiler.deterministic = deterministic
-    try:
+    with lumen.config.compiler.patch(deterministic=deterministic):
         labels = steps(step, q, k, v, w)
         kernels = [label.split(" → ")[0] for label in labels]
         for kernel in ["flash_attention", *backward_kernels(h, hv, dtype, deterministic)]:
@@ -453,8 +435,6 @@ def test_attention_dropout_is_in_its_kernels(case, attention, dtype, determinist
         assert not [label for label in labels if "random_bits" in label], labels
         lumen.manual_seed(3)
         got = lumen.compile(step)(q, k, v, w)
-    finally:
-        lumen.config.compiler.reset()
     lumen.manual_seed(3)
     cpu = [lumen.from_numpy(a).to(dtype=dtype) for a in arrays]
     want = lumen.compile(step, device="cpu")(*cpu)
@@ -651,12 +631,12 @@ def test_naive_attention_is_flash_attention(causal):
 
 @pytest.mark.mps
 @pytest.mark.parametrize("sq", [40, 1], ids=["tiled", "decode"])
+@lumen.config.compiler.patch(deterministic=True)
 def test_attention_epilogue_fuses_in_training(sq):
     """In a training step the attention's value is read by its epilogue (a
     residual) and by the backward: the epilogue still runs in its kernel,
     which writes the attention's value too; the step agrees exactly with
     the unfused one (``deterministic``: dQ in a fixed order)."""
-    lumen.config.compiler.deterministic = True
     shapes = [(1, sq, 4, 32), (1, 40, 2, 32), (1, 40, 2, 32), (sq, 128)]
     ts, _ = tensors("mps", "float32", *shapes)
 
@@ -670,11 +650,8 @@ def test_attention_epilogue_fuses_in_training(sq):
     assert "flash_attention_backward(dk, dv)" in labels and "flash_attention_backward(dq)" in labels
     loss, grads = lumen.compile(step)(*ts)
     got = [lumen.to_numpy(t) for t in (loss, *grads)]
-    lumen.config.compiler.contraction_epilogues = False
-    try:
+    with lumen.config.compiler.patch(contraction_epilogues=False):
         loss, grads = lumen.compile(step)(*ts)
-    finally:
-        lumen.config.compiler.reset()
     for g, w in zip(got, (loss, *grads)):
         np.testing.assert_array_equal(g, lumen.to_numpy(w))
 
