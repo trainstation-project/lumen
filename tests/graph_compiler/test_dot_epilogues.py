@@ -89,12 +89,9 @@ def test_matmul_epilogues_fuse(device, f, shapes, dtype, triton_on_cuda):
     (step,) = lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), "mps").steps()
     assert step["label"].startswith("dot_general →"), step["label"]
     fused = lumen.to_numpy(lumen.compile(f)(*args).to(dtype="float32"))
-    lumen.config.compiler.contraction_epilogues = False
-    try:
+    with lumen.config.compiler.patch(contraction_epilogues=False):
         assert len(lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), "mps").steps()) == 2
         unfused = lumen.to_numpy(lumen.compile(f)(*args).to(dtype="float32"))
-    finally:
-        lumen.config.compiler.reset()
     np.testing.assert_array_equal(fused, unfused)
 
 
@@ -120,45 +117,6 @@ def _softmax_block(x, wo, r, norm, w1):
     return F.matmul(F.softmax(x * norm, dim=-1).bfloat16(), w1.t().bfloat16(), "float32", "float32")
 
 
-@pytest.mark.mps
-def test_wide_row_matmul_profiles_its_partials_and_combine():
-    """An RMS norm of a matmul's rows wider than its 64-wide tiles runs as two
-    launches, profiled as LCE's are: ``(partials)``, reading the matmul's
-    operands and the residual and writing the residual stream (it reads no
-    reduction) and each 64-wide tile's sums of squares (``[rows, 10]``),
-    then ``(combine)``, reading those and the norm's weight and writing the
-    normalized rows: the residual stream, already written, is the cheapest
-    value to read the rows from, so neither the product nor the residual
-    is read again."""
-    from lumen.profiler import ProfilerActivity, profile
-
-    m, d = 256, 640
-    rng = np.random.default_rng(0)
-    shapes = [(m, d), (d, d), (m, d), (d,), (96, d)]
-    try:
-        args = [lumen.from_numpy(rng.standard_normal(s).astype(np.float32)).to("mps") for s in shapes]
-    except RuntimeError as e:
-        pytest.skip(str(e))
-    f = lumen.compile(_rms_block)
-    f(*args)
-    steps = lumen.graph_compiler.Plan(lumen.make_graph(_rms_block)(*args), "mps").steps()
-    (step,) = [s for s in steps if "rsqrt" in s["label"]]
-    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS], record_shapes=True) as prof:
-        f(*args)
-        lumen.mps.synchronize()
-    partials, combine = [e for e in prof.events() if e["kind"] == "gpu" and "rsqrt" in e["name"]]
-    assert partials["name"] == step["label"] + " (partials)", partials["name"]
-    assert combine["name"] == step["label"] + " (combine)", combine["name"]
-    assert partials["kernel"].endswith("_partials") and combine["kernel"].endswith("_combine")
-    tiles = ("float32", [m, d // 64])
-    residual, weight, operands = ("float32", [m, d]), ("float32", [d]), [("bfloat16", [m, d]), ("bfloat16", [d, d])]
-    (stream,) = [tuple(o[1:]) for o in step["extra_outputs"]]
-    assert stream == residual, step["extra_outputs"]
-    assert partials["inputs"] == [residual, *operands] and partials["outputs"] == [stream, tiles], partials
-    assert combine["inputs"] == [weight, tiles, stream], combine
-    assert combine["outputs"] == [tuple(step["output"][1:])], combine
-
-
 @pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("f", [_rms_block, _layer_norm_block, _softmax_block], ids=["rms", "layer", "softmax"])
 @pytest.mark.parametrize("m, d", [(1024, 64), (1000, 48), (37, 64), (512, 128), (300, 200), (1000, 1000), (256, 4096)])
@@ -169,16 +127,9 @@ def test_matmul_epilogue_normalizes_its_rows(device, f, m, d, triton_on_cuda):
     product never in memory, its residual stream written too where it is
     read again; exactly the unfused plan's result. On CUDA (Triton) the
     matmul's tiles hold whole rows up to 256 wide: one kernel normalizing
-    them from its accumulators; wider (a multiple of 8), the matmul writes
-    its tiles' partials of the rows' first reductions too, which the row
-    kernel then reads; a softmax's (online) and other widths, a matmul then
-    a row kernel. Wider rows: the matmul's
-    kernel writes its product and each tile's partials of the rows' first
-    reductions (an RMS norm's sum of squares, a layer norm's mean), then a
-    row kernel takes them from those partials (CODA's following
-    reduction), one step: the unfused result but where a row's sums add in
-    another order. A softmax's max and sum (combined online) not so: a row
-    kernel of their own, as before."""
+    them from its accumulators. Wider rows, without ``linear_reordering``,
+    run as a matmul then a row kernel: its partials would save nothing,
+    as the row kernel reads the rows back anyway."""
     rng = np.random.default_rng(0)
     shapes = [(m, d), (d, d), (m, d), (d,), (96, d)]
     try:
@@ -191,10 +142,7 @@ def test_matmul_epilogue_normalizes_its_rows(device, f, m, d, triton_on_cuda):
         steps = lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), "cuda").steps()
         rows = [s for s in steps if s["label"].startswith("dot_general") and "reduce" in s["label"]]
         assert len(rows) == (d <= 256), [s["label"] for s in steps]
-        partials = [s for s in steps if s["label"].endswith("partials")]
-        # A power of two of at least 8 divides the row: its partials' width.
-        wide = d > 256 and d & -d >= 8 and f is not _softmax_block
-        assert len(partials) == wide, [s["label"] for s in steps]
+        assert not any(s["label"].endswith("partials") for s in steps), [s["label"] for s in steps]
         got = flatten(lumen.compile(f)(*args))
         want = flatten(lumen.compile(f, device="cpu")(*(lumen.from_numpy(a) for a in arrays)))
         for g, w in zip(got, want):
@@ -203,13 +151,10 @@ def test_matmul_epilogue_normalizes_its_rows(device, f, m, d, triton_on_cuda):
     steps = lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), "mps").steps()
     rows = [s for s in steps if s["label"].startswith("dot_general") and "reduce" in s["label"]]
     wide = d > 64
-    assert len(rows) == (not wide or f is not _softmax_block), [s["label"] for s in steps]
+    assert len(rows) == (not wide), [s["label"] for s in steps]
     fused = flatten(lumen.compile(f)(*args))
-    lumen.config.compiler.contraction_epilogues = False
-    try:
+    with lumen.config.compiler.patch(contraction_epilogues=False):
         unfused = flatten(lumen.compile(f)(*args))
-    finally:
-        lumen.config.compiler.reset()
     for k, (got, want) in enumerate(zip(fused, unfused)):
         if wide and k == 0:
             np.testing.assert_allclose(got, want, rtol=2e-2, atol=2e-2 * np.abs(want).max())
@@ -279,11 +224,8 @@ def test_trained_matmul_epilogue_normalizes_its_rows(device, triton_on_cuda):
     fused = [label for label in labels if label.startswith("dot_general → add") and "reduce_sum" in label]
     assert len(fused) == 1, labels
     got = run()
-    lumen.config.compiler.contraction_epilogues = False
-    try:
+    with lumen.config.compiler.patch(contraction_epilogues=False):
         want = run()
-    finally:
-        lumen.config.compiler.reset()
     for g, w in zip(got, want):
         np.testing.assert_array_equal(g, w)
 
@@ -385,25 +327,19 @@ def test_narrowing_cast_of_a_matmul_is_its_output_dtype():
         """Each MPS plan step of `f`'s graph as its matmul description, or its text."""
         return [_dot(s) or s["text"] for s in lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), "mps").steps()]
 
-    lumen.config.compiler.contraction_epilogues = False
-    try:
+    with lumen.config.compiler.patch(contraction_epilogues=False):
         (dot,) = dots(rounded, x, w)
         assert dot.startswith("dot_general") and "output_dtype=bf16" in dot
         (step,) = lumen.graph_compiler.Plan(lumen.make_graph(rounded)(x, w), "mps").steps()
         code = [open(f).read().splitlines()[line - 1].strip() for f, line in step["sources"]]
         assert sorted(code) == ["return y.bfloat16()", 'y = F.matmul(x, w, "float32", "float32")'], code
         assert [t.split("[")[0] for t in dots(both, x, w)] == ["dot_general", "cast(float32 -> bfloat16)"]
-    finally:
-        lumen.config.compiler.reset()
     got = lumen.to_numpy(lumen.compile(rounded)(x, w).to(dtype="float32"))
     want = lumen.to_numpy(lumen.compile(both)(x, w)[0].to(dtype="float32"))
     np.testing.assert_array_equal(got, want)
     half = lambda x, w: F.matmul(x, w, "float32", "float32").half()  # noqa: E731
-    lumen.config.compiler.contraction_epilogues = False
-    try:
+    with lumen.config.compiler.patch(contraction_epilogues=False):
         assert [t.split("[")[0] for t in dots(half, x, w)] == ["dot_general", "cast(float32 -> float16)"]
-    finally:
-        lumen.config.compiler.reset()
 
 
 @pytest.mark.parametrize("device", [MPS, CUDA])
@@ -544,8 +480,7 @@ def test_matmul_epilogue_writes_values_the_backward_reads(device, triton_on_cuda
         return
     results = []
     for epilogues in (True, False):
-        lumen.config.compiler.contraction_epilogues = epilogues
-        try:
+        with lumen.config.compiler.patch(contraction_epilogues=epilogues):
             model = _ReluMLP(lumen.empty([64, 96], device="meta"), lumen.empty([96, 32], device="meta"))
             f = lumen.compile(step, device="mps")
             try:
@@ -559,8 +494,6 @@ def test_matmul_epilogue_writes_values_the_backward_reads(device, triton_on_cuda
             labels = [s["label"] for s in plan.steps()]
             if epilogues:
                 assert "dot_general → max" in labels, labels
-        finally:
-            lumen.config.compiler.reset()
     for a, b in zip(*results):
         np.testing.assert_array_equal(a, b)
 
@@ -597,12 +530,9 @@ def test_linear_reordering_keeps_the_values(device, triton_on_cuda):
     config = lumen.config.compiler
     assert not config.linear_reordering
     exact = [lumen.to_numpy(t) for t in lumen.compile(block)(*args)]
-    config.linear_reordering = True
-    try:
+    with config.patch(linear_reordering=True):
         moved = [lumen.to_numpy(t) for t in lumen.compile(block)(*args)]
         steps = lumen.graph_compiler.Plan(lumen.make_graph(block)(*args), device).steps()
-    finally:
-        config.linear_reordering = False
     dots = [s["label"] for s in steps if s["label"].startswith("dot_general")]
     # Only the norm's projection applies a moved factor, in its epilogue.
     assert sum(d.endswith("broadcast_in_dim → mul") for d in dots) == 1, dots
@@ -640,18 +570,15 @@ def test_linear_reordering_runs_rms_norm_as_coda():
         args = [lumen.from_numpy(rng.standard_normal(s).astype(np.float32) / 8).to("mps") for s in shapes]
     except RuntimeError as e:
         pytest.skip(str(e))
-    lumen.config.compiler.linear_reordering = True
-    try:
+    with lumen.config.compiler.patch(linear_reordering=True):
         steps = lumen.graph_compiler.Plan(lumen.make_graph(_coda_block)(*args), "mps").steps()
         f = lumen.compile(_coda_block)
         got = [lumen.to_numpy(t.to(dtype="float32")) for t in f(*args)]
         with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS], record_shapes=True) as prof:
             f(*args)
             lumen.mps.synchronize()
-        lumen.config.compiler.contraction_epilogues = False
-        want = [lumen.to_numpy(t.to(dtype="float32")) for t in lumen.compile(_coda_block)(*args)]
-    finally:
-        lumen.config.compiler.reset()
+        with lumen.config.compiler.patch(contraction_epilogues=False):
+            want = [lumen.to_numpy(t.to(dtype="float32")) for t in lumen.compile(_coda_block)(*args)]
     labels = [s["label"] for s in steps]
     (norm,) = [s for s in steps if "rsqrt" in s["label"]]
     written = sorted(tuple(o[1:]) for o in [norm["output"], *norm["extra_outputs"]])
@@ -696,11 +623,8 @@ def test_linear_reordering_keeps_a_norm_in_its_profiler_range():
         with record_function("projection"):
             return F.matmul(h, wg.t().bfloat16(), "float32", "float32"), x
 
-    lumen.config.compiler.linear_reordering = True
-    try:
+    with lumen.config.compiler.patch(linear_reordering=True):
         steps = lumen.graph_compiler.Plan(lumen.make_graph(block)(*args), "mps").steps()
-    finally:
-        lumen.config.compiler.reset()
     (norm,) = [s for s in steps if "rsqrt" in s["label"]]
     (projection,) = [s for s in steps if s["label"].endswith("broadcast_in_dim → mul")]
     assert norm["scope"] == ["norm"], (norm["label"], norm["scope"])

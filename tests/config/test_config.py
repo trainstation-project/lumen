@@ -79,9 +79,51 @@ def test_stub_defaults_are_the_compilers(compiler):
     (cls,) = [c for c in stub.body if isinstance(c, ast.ClassDef) and c.name == "CompilerConfig"]
     documented = {a.target.id: ast.literal_eval(a.value) for a in cls.body if isinstance(a, ast.AnnAssign)}
     compiler.reset()
-    actual = {k for k in dir(compiler) if not k.startswith("_") and k != "reset"}
+    actual = {k for k in dir(compiler) if not k.startswith("_") and k not in ("reset", "patch")}
     assert set(documented) == actual
     assert {k: getattr(compiler, k) for k in documented} == documented
+
+
+def test_patch_sets_settings_while_in_use():
+    """``patch`` sets settings while in use, as a ``with`` block or a
+    function decorator (its name and signature kept, so pytest still sees
+    its fixtures), and restores the earlier values on the way out, after an
+    exception too and nested; an unknown setting fails up front, a rejected
+    value restores the ones already set. ``lumen.config.patch`` does the
+    same for the allocator's size."""
+    import inspect
+
+    compiler = lumen.config.compiler
+    with compiler.patch(linear_reordering=True, split_k=False, dump_to="dumps"):
+        assert (compiler.linear_reordering, compiler.split_k, compiler.dump_to) == (True, False, "dumps")
+    assert (compiler.linear_reordering, compiler.split_k, compiler.dump_to) == (False, True, None)
+
+    @compiler.patch(fuse=False)
+    def fused(device, n=1):
+        """Whether ``fuse`` is on inside the call."""
+        return compiler.fuse
+
+    assert fused("mps") is False and compiler.fuse
+    assert fused.__name__ == "fused" and list(inspect.signature(fused).parameters) == ["device", "n"]
+    with pytest.raises(ValueError), compiler.patch(fuse=False):
+        raise ValueError
+    assert compiler.fuse
+    patch = compiler.patch(row_cache=4)
+    with patch, compiler.patch(row_cache=2):
+        assert compiler.row_cache == 2
+        with patch:
+            assert compiler.row_cache == 4
+        assert compiler.row_cache == 2
+    assert compiler.row_cache == 8
+    with pytest.raises(AttributeError):
+        compiler.patch(fast=True)
+    with pytest.raises(TypeError), compiler.patch(fuse=False, split_k="yes"):
+        pass
+    assert compiler.fuse and compiler.split_k
+    before = lumen.config.static_allocator_bytes
+    with lumen.config.patch(static_allocator_bytes=4 << 20):
+        assert lumen.config.static_allocator_bytes == 4 << 20
+    assert lumen.config.static_allocator_bytes == before
 
 
 @pytest.mark.mps
@@ -89,47 +131,41 @@ def test_compiler_flags_change_what_compiles(compiler):
     """Each flag turns its pass or kernel shape on or off (on MPS)."""
     x = lumen.empty([64, 300], device="meta")
     assert len(_labels(_manual_softmax, x)) == 1
-    compiler.normalization_diamonds = False
-    assert len(_labels(_manual_softmax, x)) > 1
-    compiler.reset()
+    with compiler.patch(normalization_diamonds=False):
+        assert len(_labels(_manual_softmax, x)) > 1
 
     cast = lambda a: F.sum(a.float(), -1).half()  # noqa: E731
     h = lumen.empty([64, 300], dtype="float16", device="meta")
     assert len(_labels(cast, h)) == 1
-    compiler.reduction_epilogues = False
-    assert len(_labels(cast, h)) == 2
-    compiler.reset()
+    with compiler.patch(reduction_epilogues=False):
+        assert len(_labels(cast, h)) == 2
 
-    compiler.fuse = False
-    assert "fusion" not in " ".join(_labels(_manual_softmax, x)) and len(_labels(_manual_softmax, x)) > 3
-    compiler.reset()
+    with compiler.patch(fuse=False):
+        assert "fusion" not in " ".join(_labels(_manual_softmax, x)) and len(_labels(_manual_softmax, x)) > 3
 
     big = lumen.empty([8, 65536], device="meta")
     online = lambda: lumen.graph_compiler.Plan(lumen.make_graph(_manual_softmax)(big), "mps").steps()[0]  # noqa: E731
     assert "maxima" in online()["fusion"]["source"]
-    compiler.online_softmax = False
-    assert "maxima" not in online()["fusion"]["source"]
-    compiler.reset()
+    with compiler.patch(online_softmax=False):
+        assert "maxima" not in online()["fusion"]["source"]
 
     loss = lambda h, w, t: F.cross_entropy(F.matmul(h, w.t(), "float32", "float32"), t)  # noqa: E731
     args = (lumen.empty([64, 32], device="meta"), lumen.empty([1000, 32], device="meta"))
     args += (lumen.empty([64], dtype="int64", device="meta"),)
     assert "linear_cross_entropy" in _labels(loss, *args)
-    compiler.fused_linear_cross_entropy = False
-    assert "linear_cross_entropy" not in _labels(loss, *args)
-    compiler.reset()
+    with compiler.patch(fused_linear_cross_entropy=False):
+        assert "linear_cross_entropy" not in _labels(loss, *args)
 
     (step,) = lumen.graph_compiler.Plan(lumen.make_graph(_manual_softmax)(x), "mps").steps()
     assert "kept0[" in step["fusion"]["source"]
-    compiler.row_cache = 0
-    (step,) = lumen.graph_compiler.Plan(lumen.make_graph(_manual_softmax)(x), "mps").steps()
+    with compiler.patch(row_cache=0):
+        (step,) = lumen.graph_compiler.Plan(lumen.make_graph(_manual_softmax)(x), "mps").steps()
     assert "kept0[" not in step["fusion"]["source"]
-    compiler.reset()
 
     apart = lambda a, b: (F.exp(a) + 1.0, b * 2.0 - 1.0)  # noqa: E731
     assert len(_labels(apart, x, x)) == 1
-    compiler.horizontal_fusion = False
-    assert len(_labels(apart, x, x)) == 2
+    with compiler.patch(horizontal_fusion=False):
+        assert len(_labels(apart, x, x)) == 2
 
 
 def _read_early_and_late(a, w):
@@ -150,11 +186,11 @@ def test_dump_to_writes_each_pass(compiler, tmp_path, device, triton_on_cuda):
     kernels (generated once the plan is laid out); the Triton pipeline's fuses."""
     f = lambda x: F.exp(x) * 2.0 + 1.0  # noqa: E731
     graph = lumen.make_graph(f)(lumen.empty([8], device="meta"))
-    lumen.config.compiler.dump_to = str(tmp_path)
     available = getattr(lumen, device).is_available()
     devices = ["cpu"] + ([device] if available else [])
-    for d in devices:
-        lumen.graph_compiler.Plan(graph, d)
+    with compiler.patch(dump_to=str(tmp_path)):
+        for d in devices:
+            lumen.graph_compiler.Plan(graph, d)
     steps = {p.name.split(".", 1)[1] for p in tmp_path.iterdir()}
     assert {"frontend.00.input.txt", "frontend.01.cse.txt", "frontend.02.simplify.txt"} <= steps
     assert "cpu.01.simplify.txt" in steps
@@ -167,7 +203,6 @@ def test_dump_to_writes_each_pass(compiler, tmp_path, device, triton_on_cuda):
         )
     if "cuda" in devices:
         assert any(s.startswith("triton.") and ".fusion." in s for s in steps), steps
-    lumen.config.compiler.reset()
     count = len(list(tmp_path.iterdir()))
     lumen.graph_compiler.Plan(graph, "cpu")
     assert len(list(tmp_path.iterdir())) == count
@@ -193,17 +228,16 @@ def test_memory_limit_recomputes(compiler, device, triton_on_cuda):
         """Number of dot steps in plan `p`."""
         return sum("dot_general" in s["label"] for s in p.steps())
 
-    config = lumen.config.compiler
     kept = plan()
-    config.memory_limit = 1
-    recomputed = plan()
+    with compiler.patch(memory_limit=1):
+        recomputed = plan()
     if device == "mps":
         assert recomputed.workspace_bytes == kept.workspace_bytes - 512 * 512 * 4
         assert dots(recomputed) == dots(kept) + 1
     rng = np.random.default_rng(0)
     a, w = (lumen.from_numpy(rng.standard_normal((512, 512)).astype(np.float32) / 16).to(device) for _ in range(2))
-    got = lumen.to_numpy(lumen.compile(_read_early_and_late)(a, w).to("cpu"))
-    config.memory_limit = 0
+    with compiler.patch(memory_limit=1):
+        got = lumen.to_numpy(lumen.compile(_read_early_and_late)(a, w).to("cpu"))
     want = lumen.to_numpy(lumen.compile(_read_early_and_late)(a, w).to("cpu"))
     if device == "mps":
         np.testing.assert_array_equal(got, want)
@@ -234,8 +268,8 @@ def test_online_softmax_agrees(compiler, n):
         return out, kernel
 
     online, online_kernel = run()
-    compiler.online_softmax = False
-    exact, exact_kernel = run()
+    with compiler.patch(online_softmax=False):
+        exact, exact_kernel = run()
     assert online_kernel != exact_kernel
     e = np.exp(x - x.max(-1, keepdims=True))
     np.testing.assert_allclose(exact, e / e.sum(-1, keepdims=True), rtol=1e-5, atol=1e-7)

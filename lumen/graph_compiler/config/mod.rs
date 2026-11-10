@@ -51,6 +51,16 @@ macro_rules! compiler_config {
                 update(|c| *c = CompilerConfig::default());
             }
 
+            /// The settings in `values` set while in use, as a `with` block or a function decorator,
+            /// each restored on the way out (`lumen.config.compiler.patch(linear_reordering=True)`).
+            #[pyo3(signature = (**values))]
+            fn patch<'py>(
+                slf: &pyo3::Bound<'py, Self>,
+                values: Option<&pyo3::Bound<'py, pyo3::types::PyDict>>,
+            ) -> pyo3::PyResult<pyo3::Bound<'py, pyo3::PyAny>> {
+                crate::config::python::patch(slf.as_any(), values)
+            }
+
             /// Counter bumped on every config change, used to invalidate compiled caches.
             #[getter]
             fn _version(&self) -> u64 {
@@ -96,7 +106,8 @@ compiler_config! {
     /// Split long contractions of skinny matmuls across threadgroups.
     split_k, set_split_k: bool = true;
     /// Move a factor of a matmul's operand from a reduction over rows wider than a GEMM's tile to its
-    /// output (CODA's reordering; rounding differs from the traced program).
+    /// output (CODA's reordering; rounding differs from the traced program). Only with it does a GEMM
+    /// fuse with a row wider than its tile.
     linear_reordering, set_linear_reordering: bool = false;
     /// Fuse normalization diamonds (row reductions broadcast back over their rows) into row kernels.
     normalization_diamonds, set_normalization_diamonds: bool = true;

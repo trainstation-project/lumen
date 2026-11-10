@@ -62,9 +62,9 @@ x = lumen.from_numpy(rng.standard_normal((TOKENS, DIM)).astype(np.float16)).to("
 
 out = {}
 for on in (False, True):
-    lumen.config.compiler.neural_engine = on
-    start = time.perf_counter()
-    out[on] = lumen.to_numpy(predict(model, x)).astype(np.float32)
+    with lumen.config.compiler.patch(neural_engine=on):
+        start = time.perf_counter()
+        out[on] = lumen.to_numpy(predict(model, x)).astype(np.float32)
     print(f"neural engine {'on ' if on else 'off'}  first call {time.perf_counter() - start:6.2f} s")
 scale = np.abs(out[False]).max()
 print(f"largest difference {np.abs(out[True] - out[False]).max():.4f} (outputs up to {scale:.2f})")
@@ -72,11 +72,11 @@ print(f"largest difference {np.abs(out[True] - out[False]).max():.4f} (outputs u
 lumen.mps.synchronize()
 with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS]) as prof:
     for on in (False, True):
-        lumen.config.compiler.neural_engine = on
-        with record_function(f"neural engine {'on' if on else 'off'}"):
-            for _ in range(PROFILED_CALLS):
-                predict(model, x)
-            lumen.mps.synchronize()
+        with lumen.config.compiler.patch(neural_engine=on):
+            with record_function(f"neural engine {'on' if on else 'off'}"):
+                for _ in range(PROFILED_CALLS):
+                    predict(model, x)
+                lumen.mps.synchronize()
 
 events = prof.events()
 # split each profiled range into GPU time and CoreML (Neural Engine) host-kernel time per call

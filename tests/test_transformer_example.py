@@ -303,10 +303,7 @@ def test_transformer_train_step_matches_cpu(device, chunk, triton_on_cuda):
     two 2% (at most 3.4%) from each other: rounded at different places (a
     fused kernel's, flash attention's), not wrongly."""
     results = {}
-    configs = (lumen.config.compiler, lumen.config.compiler)
-    for config in configs:
-        config.fused_linear_cross_entropy_chunk_size = chunk
-    try:
+    with lumen.config.compiler.patch(fused_linear_cross_entropy_chunk_size=chunk):
         for on in ("cpu", device):
             model = _model()
             opt = AdamW(model.parameters(), lr=LR, weight_decay=0.0)
@@ -318,9 +315,6 @@ def test_transformer_train_step_matches_cpu(device, chunk, triton_on_cuda):
             loss = float(lumen.to_numpy(f(model, opt, lumen.from_numpy(ids), lumen.from_numpy(targets))))
             state = {name: lumen.to_numpy(t._placed(on).to("cpu")) for name, t in opt.named_parameters()}
             results[on] = loss, state
-    finally:
-        for config in configs:
-            config.fused_linear_cross_entropy_chunk_size = None
     (cpu_loss, cpu), (mps_loss, mps) = results["cpu"], results[device]
     assert mps_loss == pytest.approx(cpu_loss, rel=1e-2), (mps_loss, cpu_loss)
     assert cpu.keys() == mps.keys()

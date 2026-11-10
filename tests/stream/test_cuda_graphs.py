@@ -11,10 +11,8 @@ import lumen.functional as F
 @pytest.fixture
 def cuda_graphs(triton_on_cuda):
     """Turns ``config.compiler.cuda_graphs`` on for the test, then back as it was."""
-    before = lumen.config.compiler.cuda_graphs
-    lumen.config.compiler.cuda_graphs = True
-    yield
-    lumen.config.compiler.cuda_graphs = before
+    with lumen.config.compiler.patch(cuda_graphs=True):
+        yield
 
 
 def on_cpu(f, *arrays):

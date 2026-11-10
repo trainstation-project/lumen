@@ -211,7 +211,6 @@ def test_values_read_outside_an_elementwise_fusion_are_its_extra_outputs(device,
     as with the flag off, where it is a step of its own. A value two fusions
     read is recomputed in each and both run as one horizontal kernel (MPS's
     fusion, Triton's too)."""
-    compiler = lumen.config.compiler
     a, b = rand(64, 32), rand(32, seed=1)
     try:
         args = [lumen.from_numpy(v).to(device) for v in (a, b)]
@@ -232,17 +231,11 @@ def test_values_read_outside_an_elementwise_fusion_are_its_extra_outputs(device,
         plan = lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), device).steps()
         assert len(plan) == steps and sum(len(s["extra_outputs"]) for s in plan) == extra, [s["label"] for s in plan]
         fused = [lumen.to_numpy(v) for v in lumen.compile(f)(*args)]
-        compiler.multi_output_fusion = False
-        try:
+        with lumen.config.compiler.patch(multi_output_fusion=False):
             alone = [lumen.to_numpy(v) for v in lumen.compile(f)(*args)]
-        finally:
-            compiler.multi_output_fusion = True
         want = lumen.compile(f)(*(lumen.from_numpy(v) for v in (a, b)))
         for g, u, w in zip(fused, alone, want):
             np.testing.assert_array_equal(g, u)
             np.testing.assert_allclose(g, lumen.to_numpy(w), rtol=1e-5, atol=1e-6)
-    compiler.multi_output_fusion = False
-    try:
+    with lumen.config.compiler.patch(multi_output_fusion=False):
         assert len(lumen.graph_compiler.Plan(lumen.make_graph(returned)(*args), device).steps()) == 2
-    finally:
-        compiler.multi_output_fusion = True

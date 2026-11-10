@@ -58,8 +58,19 @@ pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
 }
 
 /// The shared fusion's view of Metal: its kernels bind at most 29 buffers, a GEMM epilogue
-/// writes at most 4 extra outputs, and the GEMM shapes the Metal kernels take.
+/// writes at most 4 extra outputs, and the GEMM shapes the Metal kernels take. A GEMM joins a row
+/// wider than one tile only with `linear_reordering`: otherwise the combine reads the rows back,
+/// as a row kernel after the GEMM would, and the split saves nothing.
 fn backend(config: &CompilerConfig) -> Backend {
+    let row_dot: fn(&Graph) -> bool = match config.linear_reordering {
+        true => |body| crate::codegen::dot_general::mps::row_dot(body).is_some(),
+        false => |body| {
+            crate::codegen::dot_general::mps::row_dot(body).is_some()
+                && crate::codegen::row::mps::row_shape(body).1
+                    <= crate::codegen::dot_general::mps::ROW_TILE
+        },
+    };
+
     Backend {
         fusible,
         max_inputs: 29,
@@ -70,7 +81,7 @@ fn backend(config: &CompilerConfig) -> Backend {
         expansion: |graph, dot, concat| {
             crate::codegen::regions::expansion(graph, dot, concat).is_some()
         },
-        row_dot: |body| crate::codegen::dot_general::mps::row_dot(body).is_some(),
+        row_dot,
     }
 }
 

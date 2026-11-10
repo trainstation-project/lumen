@@ -17,10 +17,8 @@ DEVICES = ["cpu", MPS, CUDA, TPU]
 @pytest.fixture(autouse=True)
 def triton_backend():
     """Each test with CUDA's programs on the Triton backend."""
-    compiler = lumen.config.compiler
-    compiler.use_triton_backend = True
-    yield
-    compiler.use_triton_backend = False
+    with lumen.config.compiler.patch(use_triton_backend=True):
+        yield
 
 
 def _tensor(a, device, dtype=None):
@@ -163,6 +161,7 @@ def test_gather_checks_its_operands():
 @pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("width, rows, picks", [(64, 5, 300), (7, 5, 300), (7, 1, 2500)])
 @pytest.mark.parametrize("dtype", ["float32", "float16", "bfloat16", "int32", "int8"])
+@lumen.config.compiler.patch(deterministic=True)
 def test_scatter_add_is_deterministic(device, dtype, width, rows, picks):
     """A deterministic scatter_add (``deterministic``;
     by default it adds by atomics, as torch's ``index_add``) adds each element's
@@ -172,7 +171,6 @@ def test_scatter_add_is_deterministic(device, dtype, width, rows, picks):
     the reference rounds it), the same each run; a lookup's gradient too
     (deterministic training). 2500 picks at one row are more than either sorts
     at once (1024), so that row walks every index in order instead."""
-    lumen.config.compiler.deterministic = True
     rng = np.random.default_rng(4)
     x = (rng.standard_normal((rows, width)) * 4).astype(np.float32)
     ids = rng.integers(0, rows, (picks,))
@@ -183,12 +181,9 @@ def test_scatter_add_is_deterministic(device, dtype, width, rows, picks):
     ]  # noqa: E731
     want = lumen.to_numpy(lumen.compile(f, device="cpu")(*on("cpu")).to(dtype="float32"))
     compiled = lumen.compile(f, device=device)
-    try:
-        for _ in range(3):
-            got = lumen.to_numpy(compiled(*on(device)).to(dtype="float32").to("cpu"))
-            np.testing.assert_array_equal(got, want)
-    finally:
-        lumen.config.compiler.deterministic = False
+    for _ in range(3):
+        got = lumen.to_numpy(compiled(*on(device)).to(dtype="float32").to("cpu"))
+        np.testing.assert_array_equal(got, want)
 
 
 # Unit roundoff of each float dtype: the largest relative error of rounding one result.
