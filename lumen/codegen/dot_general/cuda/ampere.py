@@ -525,7 +525,7 @@ class AmpereGemm:
         a_smem_layout: cute.ComposedLayout,
         b_smem_layout: cute.ComposedLayout,
         epi_smem_layout: cute.ComposedLayout,
-        tile_sched_params: TileSchedulerArguments,
+        tile_sched_params: TileScheduler.Params,
         TileSchedulerCls: cutlass.Constexpr[Callable],
     ):
         """One CTA's GEMM: per scheduled (m, n, batch) tile, the A/B mainloop into a float32 accumulator, then the
