@@ -186,27 +186,20 @@ def test_autotuned_elementwise_fusions_match_untuned_and_dump_their_launch(tmp_p
     elements per thread and threadgroup size it picked."""
     if not lumen.mps.is_available():
         pytest.skip("no MPS device")
-    compiler = lumen.config.compiler
-    try:
-        # Lengths that are not multiples of any elements-per-thread choice, plus one large power of two.
-        for n in ((1 << 16) + 7, 1 << 20, (3 << 20) + 1):
-            x = (
-                lumen.from_numpy(np.random.default_rng(n).uniform(-1, 1, n).astype(np.float32))
-                .to("mps")
-                .to(dtype=dtype)
-            )
-            results = []
-            for autotune in (False, True):
-                compiler.autotune = autotune
+    # Lengths that are not multiples of any elements-per-thread choice, plus one large power of two.
+    for n in ((1 << 16) + 7, 1 << 20, (3 << 20) + 1):
+        x = lumen.from_numpy(np.random.default_rng(n).uniform(-1, 1, n).astype(np.float32)).to("mps").to(dtype=dtype)
+        results = []
+        for autotune in (False, True):
+            with lumen.config.compiler.patch(autotune=autotune):
                 y = lumen.compile(lambda x: -x * 2)(x)
-                results.append(lumen.to_numpy(y.to(dtype="float32").to("cpu")))
-            assert np.array_equal(results[0], results[1]), n
+            results.append(lumen.to_numpy(y.to(dtype="float32").to("cpu")))
+        assert np.array_equal(results[0], results[1]), n
+    with lumen.config.compiler.patch(autotune=True):
         lumen.compile(lambda x: -x * 2).dump_code(str(tmp_path), x)
-        source = "".join(p.read_text() for p in tmp_path.glob("*fusion_*.metal"))
-        assert "[[max_total_threads_per_threadgroup(" in source
-        assert "constexpr uint ELEMENTS_PER_THREAD = " in source and "elementwise<ELEMENTS_PER_THREAD, " in source
-    finally:
-        compiler.autotune = True
+    source = "".join(p.read_text() for p in tmp_path.glob("*fusion_*.metal"))
+    assert "[[max_total_threads_per_threadgroup(" in source
+    assert "constexpr uint ELEMENTS_PER_THREAD = " in source and "elementwise<ELEMENTS_PER_THREAD, " in source
 
 
 @pytest.mark.parametrize(

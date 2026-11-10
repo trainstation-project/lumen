@@ -14,13 +14,6 @@ def _bf16(a):
     return lumen.to_numpy(lumen.from_numpy(a).to(dtype="bfloat16").to(dtype="float32"))
 
 
-def _compile(fn, device, preserve):
-    """``fn`` compiled for ``device`` with ``preserve_precision`` set to ``preserve``."""
-    config = lumen.config.compiler
-    config.preserve_precision = preserve
-    return lumen.compile(fn, device=device)
-
-
 @pytest.mark.parametrize("device", ["cpu", MPS, CUDA, TPU])
 def test_a_forward_round_trip_is_dropped(device, triton_on_cuda):
     """``x.bfloat16().float() * 3`` of a float32 ``x``: with
@@ -37,12 +30,10 @@ def test_a_forward_round_trip_is_dropped(device, triton_on_cuda):
         """Three times ``x`` after its round trip through bfloat16."""
         return x.bfloat16().float() * 3.0
 
-    try:
-        assert not lumen.config.compiler.preserve_precision
-        traced = lumen.to_numpy(_compile(f, device, False)(xt).to("cpu"))
-        kept = lumen.to_numpy(_compile(f, device, True)(xt).to("cpu"))
-    finally:
-        lumen.config.compiler.reset()
+    assert not lumen.config.compiler.preserve_precision
+    traced = lumen.to_numpy(lumen.compile(f, device=device)(xt).to("cpu"))
+    with lumen.config.compiler.patch(preserve_precision=True):
+        kept = lumen.to_numpy(lumen.compile(f, device=device)(xt).to("cpu"))
     np.testing.assert_array_equal(traced, _bf16(x) * np.float32(3))
     np.testing.assert_array_equal(kept, x * np.float32(3))
 
@@ -68,9 +59,7 @@ def test_gradients_keep_the_activation_saved_in_the_narrower_dtype(device, trito
         """The loss and its gradient."""
         return loss(x), lumen.grad(loss)(x)
 
-    try:
-        value, gradient = (lumen.to_numpy(t.to("cpu")) for t in _compile(step, device, True)(xt))
-    finally:
-        lumen.config.compiler.reset()
+    with lumen.config.compiler.patch(preserve_precision=True):
+        value, gradient = (lumen.to_numpy(t.to("cpu")) for t in lumen.compile(step, device=device)(xt))
     np.testing.assert_allclose(value, np.sum(x.astype(np.float64) ** 2), rtol=1e-5)
     np.testing.assert_array_equal(gradient, 2 * _bf16(x))

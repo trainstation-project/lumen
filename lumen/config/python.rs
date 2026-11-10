@@ -1,6 +1,7 @@
 //! The `lumen.config` Python object: allocator size and the compiler's config.
 
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 
 use crate as core;
 use crate::graph_compiler::config::PyCompilerConfig;
@@ -37,6 +38,34 @@ impl Config {
             core::allocator::config::static_allocator_bytes()
         )
     }
+
+    /// The settings in `values` set while in use, as a `with` block or a function decorator, each
+    /// restored on the way out (`lumen.config.patch(static_allocator_bytes=...)`).
+    #[pyo3(signature = (**values))]
+    fn patch<'py>(
+        slf: &Bound<'py, Self>,
+        values: Option<&Bound<'py, PyDict>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        patch(slf.as_any(), values)
+    }
+}
+
+/// A `lumen.config.Patch` of `target`'s settings in `values` (none if `None`): the Python shim's context
+/// manager and decorator, shared by `lumen.config` and `lumen.config.compiler`.
+pub(crate) fn patch<'py>(
+    target: &Bound<'py, PyAny>,
+    values: Option<&Bound<'py, PyDict>>,
+) -> PyResult<Bound<'py, PyAny>> {
+    let py = target.py();
+
+    let values = match values {
+        Some(v) => v.clone(),
+        None => PyDict::new(py),
+    };
+
+    py.import("lumen.config")?
+        .getattr("Patch")?
+        .call1((target, values))
 }
 
 /// Adds the config classes and the `config` singleton to the Python module.

@@ -51,6 +51,16 @@ macro_rules! compiler_config {
                 update(|c| *c = CompilerConfig::default());
             }
 
+            /// The settings in `values` set while in use, as a `with` block or a function decorator,
+            /// each restored on the way out (`lumen.config.compiler.patch(linear_reordering=True)`).
+            #[pyo3(signature = (**values))]
+            fn patch<'py>(
+                slf: &pyo3::Bound<'py, Self>,
+                values: Option<&pyo3::Bound<'py, pyo3::types::PyDict>>,
+            ) -> pyo3::PyResult<pyo3::Bound<'py, pyo3::PyAny>> {
+                crate::config::python::patch(slf.as_any(), values)
+            }
+
             /// Counter bumped on every config change, used to invalidate compiled caches.
             #[getter]
             fn _version(&self) -> u64 {

@@ -259,12 +259,9 @@ def test_chunked_linear_cross_entropy(device, n, d, vocab, chunk, reduce, head, 
     H, W = H.to(dtype="bfloat16"), W.to(dtype=head)
     step = trained(unfused)
     config = lumen.config.compiler
-    config.fused_linear_cross_entropy_chunk_size = chunk
-    try:
+    with config.patch(fused_linear_cross_entropy_chunk_size=chunk):
         plan = lumen.graph_compiler.Plan(lumen.make_graph(step)(H, W, T, C), device)
         got = [lumen.to_numpy(v.to(dtype="float32")) for v in lumen.compile(step)(H, W, T, C)]
-    finally:
-        config.fused_linear_cross_entropy_chunk_size = None
     sizes = [min(chunk, n - start) for start in range(0, n, chunk)]
     steps = plan.steps()
     labels = [s["label"] for s in steps]
@@ -324,12 +321,9 @@ def test_chunked_gradients_alone_keep_no_logits(device, triton_on_cuda):
         pytest.skip(str(e))
     want = [lumen.to_numpy(g) for g in lumen.compile(grads)(H, W, T)]
     config = lumen.config.compiler
-    config.fused_linear_cross_entropy_chunk_size = chunk
-    try:
+    with config.patch(fused_linear_cross_entropy_chunk_size=chunk):
         plan = lumen.graph_compiler.Plan(lumen.make_graph(grads)(H, W, T), device)
         got = [lumen.to_numpy(g) for g in lumen.compile(grads)(H, W, T)]
-    finally:
-        config.fused_linear_cross_entropy_chunk_size = None
     labels = [s["label"] for s in plan.steps()]
     assert all(s["output"][2] != [n, vocab] for s in plan.steps()), labels
     assert labels.count("linear_cross_entropy") == 1, labels

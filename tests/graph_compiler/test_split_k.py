@@ -8,13 +8,6 @@ import lumen
 import lumen.functional as F
 
 
-@pytest.fixture
-def compiler(device, triton_on_cuda):
-    """``device``'s compiler settings (CUDA's running Triton), reset to their defaults after the test."""
-    yield lumen.config.compiler
-    lumen.config.compiler.reset()
-
-
 def _labels(f, device, *args):
     """Step labels of `f` traced on `args` and planned for `device`."""
     return [s["label"] for s in lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), device).steps()]
@@ -30,7 +23,7 @@ def _placed(device, dtype, *arrays):
 
 @pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
-def test_split_k_agrees(device, compiler, dtype):
+def test_split_k_agrees(device, dtype, triton_on_cuda):
     """With ``split_k`` (the default) a matmul launching few tiles and of a
     long contraction (a decode step's) is one dot of the chunks' partials,
     then their sum (each labelled split-K), rounded to bfloat16 once, after
@@ -47,13 +40,12 @@ def test_split_k_agrees(device, compiler, dtype):
     split_plan = ["dot_general (split-K)", "reduce_sum (split-K)" + rounded]
     assert _labels(f, device, x, w) == split_plan
     results = [lumen.to_numpy(lumen.compile(f)(x, w).to(dtype="float32"))]
-    compiler.split_k = False
-    assert _labels(f, device, x, w) == ["dot_general" + rounded]
-    results.append(lumen.to_numpy(lumen.compile(f)(x, w).to(dtype="float32")))
+    with lumen.config.compiler.patch(split_k=False):
+        assert _labels(f, device, x, w) == ["dot_general" + rounded]
+        results.append(lumen.to_numpy(lumen.compile(f)(x, w).to(dtype="float32")))
     tol = {"float32": 1e-4, "bfloat16": 2e-2}[dtype] * np.abs(want).max()
     for got in results:
         np.testing.assert_allclose(got, want, atol=tol)
-    compiler.split_k = True
     big = lumen.empty([1024, 1024], device="meta")
     assert _labels(f, device, big, big) == ["dot_general"]
     if device != "mps":
@@ -68,7 +60,7 @@ def test_split_k_agrees(device, compiler, dtype):
 
 @pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
-def test_split_k_then_silu(device, compiler, dtype):
+def test_split_k_then_silu(device, dtype, triton_on_cuda):
     """SiLU after a matmul of few output tiles and a long contraction: not
     split, it is the matmul's epilogue (one kernel); split, it needs every
     chunk's products: the epilogue of the ``reduce_sum`` of the dot's
@@ -94,9 +86,7 @@ def test_split_k_then_silu(device, compiler, dtype):
         plans["deterministic"] = plans["split"]
     tol = {"float32": 1e-4, "bfloat16": 2e-2}[dtype] * np.abs(want).max()
     for mode, plan in plans.items():
-        compiler.split_k = mode != "unsplit"
-        if device == "mps":
-            compiler.deterministic = mode == "deterministic"
-        assert _labels(f, device, x, w) == plan, mode
-        got = lumen.to_numpy(lumen.compile(f)(x, w).to(dtype="float32"))
+        with lumen.config.compiler.patch(split_k=mode != "unsplit", deterministic=mode == "deterministic"):
+            assert _labels(f, device, x, w) == plan, mode
+            got = lumen.to_numpy(lumen.compile(f)(x, w).to(dtype="float32"))
         np.testing.assert_allclose(got, want, atol=tol, err_msg=mode)

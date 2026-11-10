@@ -113,8 +113,7 @@ def test_matmul_tiles_fit_its_rows(m, tiles):
         return F.relu(plain(a, b))
 
     for tuned in (False, True):
-        lumen.config.compiler.autotune = tuned
-        try:
+        with lumen.config.compiler.patch(autotune=tuned):
             for f, want in ((plain, product), (fused, np.maximum(product, 0))):
                 with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS]) as prof:
                     got = lumen.to_numpy(lumen.compile(f)(a, b))
@@ -122,8 +121,6 @@ def test_matmul_tiles_fit_its_rows(m, tiles):
                 ran = "small" if "small" in kernel else "mid" if "mid" in kernel else "large"
                 assert tuned or ran == tiles, kernel
                 np.testing.assert_allclose(got, want, rtol=1e-4, atol=1e-3)
-        finally:
-            lumen.config.compiler.reset()
 
 
 @pytest.mark.parametrize("device", [MPS, CUDA])

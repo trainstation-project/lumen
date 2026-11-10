@@ -263,14 +263,11 @@ def test_wide_rms_norm_of_a_residual_kept_in_float32_fuses(device, triton_on_cud
         args = [lumen.from_numpy(a).to(device) for a in (x, w, r, g)]
     except RuntimeError as e:
         pytest.skip(str(e))
-    lumen.config.compiler.linear_reordering = True
-    try:
+    with lumen.config.compiler.patch(linear_reordering=True):
         if device == "cuda":
             labels = [s["label"] for s in lumen.graph_compiler.Plan(lumen.make_graph(block)(*args), device).steps()]
             assert any(label.endswith("partials") for label in labels), labels
         got = lumen.compile(block)(*args)
-    finally:
-        lumen.config.compiler.linear_reordering = False
     want = lumen.compile(block, device="cpu")(*(lumen.from_numpy(a) for a in (x, w, r, g)))
     for a, b in zip(got, want):
         a, b = (lumen.to_numpy(t.to("cpu").to(dtype="float32")) for t in (a, b))

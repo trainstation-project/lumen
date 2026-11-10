@@ -15,13 +15,6 @@ DEVICES = [MPS, CUDA]
 MAX_BUFFERS = {"mps": 30, "cuda": 64}
 
 
-@pytest.fixture
-def compiler(device, triton_on_cuda):
-    """``device``'s compiler settings (CUDA's running Triton), reset to their defaults after the test."""
-    yield lumen.config.compiler
-    lumen.config.compiler.reset()
-
-
 def _device(device, *arrays):
     """`arrays` on `device`; skips the test when it is unavailable."""
     try:
@@ -47,7 +40,7 @@ def _independent(a, b, c):
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_independent_elementwise_fusions_are_one_kernel(device, compiler):
+def test_independent_elementwise_fusions_are_one_kernel(device, triton_on_cuda):
     """Independent elementwise fusions (and a lone cast) of as many elements are
     one step, each output what it was alone, bit for bit; with
     ``horizontal_fusion`` off, a step each."""
@@ -57,18 +50,18 @@ def test_independent_elementwise_fusions_are_one_kernel(device, compiler):
     assert len(steps) == 1, [s["label"] for s in steps]
     assert len(steps[0]["extra_outputs"]) == 2
     got = [lumen.to_numpy(v.to(dtype="float32")) for v in lumen.compile(_independent)(*args)]
-    compiler.horizontal_fusion = False
-    assert len(_steps(device, _independent, *args)) == 3
-    alone = [lumen.to_numpy(v.to(dtype="float32")) for v in lumen.compile(_independent)(*args)]
-    for g, a in zip(got, alone):
-        np.testing.assert_array_equal(g, a)
-    want = lumen.compile(_independent, device="cpu")(*(lumen.from_numpy(a) for a in arrays))
-    for g, w in zip(got, want):
-        np.testing.assert_allclose(g, lumen.to_numpy(w.to(dtype="float32")), rtol=1e-6)
+    with lumen.config.compiler.patch(horizontal_fusion=False):
+        assert len(_steps(device, _independent, *args)) == 3
+        alone = [lumen.to_numpy(v.to(dtype="float32")) for v in lumen.compile(_independent)(*args)]
+        for g, a in zip(got, alone):
+            np.testing.assert_array_equal(g, a)
+        want = lumen.compile(_independent, device="cpu")(*(lumen.from_numpy(a) for a in arrays))
+        for g, w in zip(got, want):
+            np.testing.assert_allclose(g, lumen.to_numpy(w.to(dtype="float32")), rtol=1e-6)
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_fusions_of_one_chain_are_labelled_by_their_count(device, compiler):
+def test_fusions_of_one_chain_are_labelled_by_their_count(device, triton_on_cuda):
     """Members computing the same primitives are labelled once, with how
     many there are, as merged dots are (``3x dot_general``)."""
     args = _device(device, rand(64, 32), rand(64, 32, seed=1), rand(64, 32, seed=2))
@@ -79,7 +72,7 @@ def test_fusions_of_one_chain_are_labelled_by_their_count(device, compiler):
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_fusions_of_different_record_function_calls_are_not_fused(device, compiler):
+def test_fusions_of_different_record_function_calls_are_not_fused(device, triton_on_cuda):
     """Fusions traced in different ``record_function`` calls (two layers'
     weight casts) stay apart, so each kernel runs in its own call's range
     when profiled; the same fusions outside any range are one."""
@@ -100,7 +93,7 @@ def test_fusions_of_different_record_function_calls_are_not_fused(device, compil
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_different_sizes_split_the_grid(device, compiler):
+def test_different_sizes_split_the_grid(device, triton_on_cuda):
     """Fusions of different element counts are one kernel too: each count
     runs on its own range of threads, each output what it was alone, bit for
     bit, under every elementwise tuning."""
@@ -113,18 +106,18 @@ def test_different_sizes_split_the_grid(device, compiler):
     steps = _steps(device, f, *args)
     assert len(steps) == 1 and len(steps[0]["extra_outputs"]) == 3, [s["label"] for s in steps]
     got = [lumen.to_numpy(v) for v in lumen.compile(f)(*args)]
-    compiler.autotune = False
-    untuned = [lumen.to_numpy(v) for v in lumen.compile(f)(*args)]
-    compiler.horizontal_fusion = False
-    assert len(_steps(device, f, *args)) == 4
-    alone = [lumen.to_numpy(v) for v in lumen.compile(f)(*args)]
-    for g, u, a in zip(got, untuned, alone):
-        np.testing.assert_array_equal(g, a)
-        np.testing.assert_array_equal(u, a)
+    with lumen.config.compiler.patch(autotune=False):
+        untuned = [lumen.to_numpy(v) for v in lumen.compile(f)(*args)]
+        with lumen.config.compiler.patch(horizontal_fusion=False):
+            assert len(_steps(device, f, *args)) == 4
+            alone = [lumen.to_numpy(v) for v in lumen.compile(f)(*args)]
+            for g, u, a in zip(got, untuned, alone):
+                np.testing.assert_array_equal(g, a)
+                np.testing.assert_array_equal(u, a)
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_dependent_fusions_are_not_fused(device, compiler):
+def test_dependent_fusions_are_not_fused(device, triton_on_cuda):
     """A fusion reading another's value, or one computed from it (through a
     reduction between them), is not fused with it: that would be a cycle."""
     (a,) = _device(device, rand(64, 32))
@@ -143,7 +136,7 @@ def test_dependent_fusions_are_not_fused(device, compiler):
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_fusions_bind_at_most_a_kernels_buffers(device, compiler):
+def test_fusions_bind_at_most_a_kernels_buffers(device, triton_on_cuda):
     """Many independent fusions are fused in groups, each kernel binding
     at most the device's buffers: 30 on MPS (Metal's 31, less the element
     count), 64 on Triton."""
@@ -170,7 +163,7 @@ class _Parameters(lumen.nn.Module):
 
 
 @pytest.mark.parametrize("device", DEVICES)
-def test_in_place_updates_fused(device, compiler):
+def test_in_place_updates_fused(device, triton_on_cuda):
     """An optimizer's updates of its parameters, each written in place over
     the parameter, fused into one step: each parameter as updated alone,
     every step, the same bits each run."""
@@ -179,24 +172,24 @@ def test_in_place_updates_fused(device, compiler):
     def run(horizontal):
         """Compiles an in-place update step with `horizontal` fusion on or off, runs it three times on
         fresh parameters and returns the parameters and the plan's step labels."""
-        compiler.horizontal_fusion = horizontal
-        params = _Parameters([lumen.empty(list(s), "float32", device="meta") for s in shapes])
+        with lumen.config.compiler.patch(horizontal_fusion=horizontal):
+            params = _Parameters([lumen.empty(list(s), "float32", device="meta") for s in shapes])
 
-        def step(p, *grads):
-            """Updates every parameter in place from its gradient."""
-            for x, g in zip(p.xs, grads):
-                x.copy_(x * 0.99 - 0.1 * g)
-            return grads[0] * 1.0
+            def step(p, *grads):
+                """Updates every parameter in place from its gradient."""
+                for x, g in zip(p.xs, grads):
+                    x.copy_(x * 0.99 - 0.1 * g)
+                return grads[0] * 1.0
 
-        metas = [lumen.empty(list(s), "float32", device="meta") for s in shapes]
-        labels = [s["label"] for s in _steps(device, step, params, *metas)]
-        step = lumen.compile(step, device=device)
-        step(params, *metas)
-        params.load_state_dict({f"xs.{k}": lumen.from_numpy(rand(*s, seed=k)) for k, s in enumerate(shapes)})
-        grads = _device(device, *(rand(*s, seed=10 + k) for k, s in enumerate(shapes)))
-        for _ in range(3):
-            step(params, *grads)
-        return [lumen.to_numpy(x._placed(device)) for x in params.xs], labels
+            metas = [lumen.empty(list(s), "float32", device="meta") for s in shapes]
+            labels = [s["label"] for s in _steps(device, step, params, *metas)]
+            step = lumen.compile(step, device=device)
+            step(params, *metas)
+            params.load_state_dict({f"xs.{k}": lumen.from_numpy(rand(*s, seed=k)) for k, s in enumerate(shapes)})
+            grads = _device(device, *(rand(*s, seed=10 + k) for k, s in enumerate(shapes)))
+            for _ in range(3):
+                step(params, *grads)
+            return [lumen.to_numpy(x._placed(device)) for x in params.xs], labels
 
     fused, labels = run(True)
     assert any(_merged(label) for label in labels), labels
