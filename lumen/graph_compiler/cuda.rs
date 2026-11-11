@@ -1,14 +1,18 @@
 //! The CUDA backend, CUDA's default (`config.compiler.use_triton_backend` off): kernels in
 //! NVIDIA's CuTe DSL, generated per step (`codegen::cuda`) and launched by `runtime::kernel::cuda`. It runs elementwise fusions (any layout: broadcasts, transposes, slices and strided inputs
-//! read through index math) and errors on graphs needing any other kernel.
+//! read through index math) and plain matmuls (the Ampere GEMM, `lumen.codegen.dot_general.cuda`), and errors on
+//! graphs needing any other kernel.
 
 use super::config::CompilerConfig;
 use super::passes::alone::{Alone, Lone};
 use super::passes::fusion::{Backend, fuse};
+use super::passes::simplify::Simplify;
 use super::passes::{CompilerPass, Module};
 use super::pipeline::{Pass, Passes, pipeline, when};
 use super::{Options, plan_options};
 use crate::Device;
+use crate::autotune::Autotuner;
+use crate::autotune::cuda::{Events, Gemms};
 use crate::codegen::utils::cuda::cute_type;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::plan::{CpuPlan, CudaPlan};
@@ -55,6 +59,46 @@ pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
 
     let typed = |v: &Var| cute_type(graph.type_of(*v).dtype).is_some();
     op && node.inputs.iter().chain([&node.output]).all(typed)
+}
+
+/// Whether `node` is a matmul the GEMM runs: float16 or bfloat16 operands of rank 2, or 3 with a leading batch dim,
+/// contracting one dim each, accumulated in float32 and written as float16, bfloat16 or float32, every extent a
+/// multiple of 8 (its tiles move 16-byte vectors along whichever dim is contiguous).
+fn matmul(graph: &Graph, node: &Node) -> bool {
+    use crate::DType::{BF16, F16, F32};
+
+    let Primitive::DotGeneral {
+        lhs_contracting,
+        rhs_contracting,
+        lhs_batch,
+        rhs_batch,
+        accum_dtype,
+        ..
+    } = &node.primitive
+    else {
+        return false;
+    };
+
+    let (lhs, rhs) = (graph.type_of(node.inputs[0]), graph.type_of(node.inputs[1]));
+    let out = graph.type_of(node.output);
+    let rank = lhs.shape.len();
+
+    let batched = match rank {
+        2 => lhs_batch.is_empty() && rhs_batch.is_empty(),
+        3 => *lhs_batch == [0] && *rhs_batch == [0],
+        _ => false,
+    };
+
+    let contracting = matches!((lhs_contracting.as_slice(), rhs_contracting.as_slice()), ([l], [r]) if *l >= rank - 2 && *r >= rank - 2);
+    let typed = lhs.dtype == rhs.dtype && matches!(lhs.dtype, F16 | BF16) && *accum_dtype == F32;
+    let extents = lhs.shape[rank - 2..].iter().chain(&rhs.shape[rank - 2..]);
+
+    batched
+        && contracting
+        && rhs.shape.len() == rank
+        && typed
+        && matches!(out.dtype, F16 | BF16 | F32)
+        && extents.into_iter().all(|&d| d > 0 && d % 8 == 0)
 }
 
 /// The shared fusion's view of the CUDA backend: elementwise loops only (no reductions, GEMMs or
@@ -130,9 +174,16 @@ impl CompilerPass<CudaModule<'_>> for Fusion {
     }
 }
 
-/// The CUDA backend's passes: it runs elementwise kernels only.
+/// The CUDA backend's passes: it runs elementwise kernels and plain GEMMs only.
 impl Passes for CudaModule<'_> {
     const NAME: &'static str = "cuda";
+
+    /// Always, as on Triton and MPS: a matmul's narrowing cast folds into the GEMM, whose epilogue writes the
+    /// narrow dtype instead of a float32 product a second kernel rounds, and operand transposes fold into its
+    /// strides.
+    fn simplify(_: &CompilerConfig) -> Pass<Self> {
+        Box::new(Simplify { matched: true })
+    }
 
     /// With `fuse`.
     fn fusion(config: &CompilerConfig) -> Pass<Self> {
@@ -146,14 +197,13 @@ impl Passes for CudaModule<'_> {
 }
 
 /// Compiles `graph` for the CUDA backend on `device`: fuses its elementwise work and plans it, every
-/// runtime scalar a 0-d device input; errors on an op it has no kernel for.
+/// runtime scalar a 0-d device input, and autotunes its GEMM tiles when enabled; errors on an op it has no
+/// kernel for.
 pub(crate) fn compile(
     graph: &Graph,
     device: Device,
     options: &Options,
 ) -> Result<CudaPlan, String> {
-    let _ = device;
-
     let mut module = CudaModule {
         graph: graph.clone(),
         options,
@@ -167,7 +217,7 @@ pub(crate) fn compile(
         !matches!(
             n.primitive,
             Primitive::Fusion { .. } | Primitive::FusionOutput { .. } | Primitive::Reshape { .. }
-        )
+        ) && !matmul(&fused, n)
     }) {
         return Err(format!(
             "{}: the CUDA (CuTe DSL) backend has no kernel for it yet; turn \
@@ -178,5 +228,15 @@ pub(crate) fn compile(
 
     let config = &options.config;
     let plan = plan_options(&fused, options, config, &Vec::new(), Vec::new());
-    crate::codegen::cuda::codegen(CpuPlan::compile_with(&fused, &plan), options)
+    let mut plan = crate::codegen::cuda::codegen(CpuPlan::compile_with(&fused, &plan), options)?;
+
+    if config.autotune {
+        let tuner = Autotuner {
+            timer: Events { device },
+        };
+
+        tuner.tune(&mut Gemms, &mut plan)?;
+    }
+
+    Ok(plan)
 }

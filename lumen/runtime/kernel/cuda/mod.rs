@@ -1,5 +1,5 @@
 //! Launching CUDA kernels: a compiled kernel (a Triton or CuTe cubin) enqueued with `cuLaunchKernel` straight from
-//! Rust, through the driver entry points `driver` loads; and the CuTe launcher Python installs.
+//! Rust, through the driver entry points `driver` loads; and the CuTe launcher and GEMM Python installs.
 
 #[cfg(all(feature = "python", lumen_cuda_linked))]
 pub(crate) mod driver;
@@ -11,10 +11,11 @@ use std::sync::OnceLock;
 #[cfg(all(feature = "python", lumen_cuda_linked))]
 use super::Launch;
 use crate::Tensor;
+use crate::codegen::dot_general::cuda::Config;
 #[cfg(all(feature = "python", lumen_cuda_linked))]
 use crate::codegen::utils::cuda::Cuda;
 #[cfg(all(feature = "python", lumen_cuda_linked))]
-use driver::{Compiled, Value, bytes, driver};
+use driver::{Compiled, PARAM_BYTES, Value, bytes, driver};
 
 /// Launches kernel `name` of module `source` (compiling it on its first launch) on `tensors`, its
 /// inputs then its `outputs` outputs, each a flat view of the elements it spans, over `n` elements.
@@ -35,6 +36,20 @@ pub(crate) fn set_launch(launch: Launcher) {
     let _ = LAUNCH.set(launch);
 }
 
+/// Writes `a @ b` into `d`, tensors (m, k), (k, n) and (m, n), or batched (l, m, k), (l, k, n) and (l, m, n), each laid
+/// out as given, with the tile of `config` (the untuned one when `None`), compiling its GEMM on first use.
+pub type Gemm =
+    fn(a: &Tensor, b: &Tensor, d: &Tensor, config: Option<&Config>) -> Result<(), String>;
+
+/// The GEMM installed from Python (`lumen.codegen.dot_general.cuda.launch`).
+pub(crate) static GEMM: OnceLock<Gemm> = OnceLock::new();
+
+/// Installs the GEMM; later calls are ignored.
+#[cfg_attr(not(feature = "python"), allow(dead_code))]
+pub(crate) fn set_gemm(gemm: Gemm) {
+    let _ = GEMM.set(gemm);
+}
+
 #[cfg(all(feature = "python", lumen_cuda_linked))]
 /// One CUDA launch: a compiled kernel, its grid and its runtime parameters in order.
 pub(crate) struct CudaLaunch<'a> {
@@ -48,9 +63,9 @@ pub(crate) struct CudaLaunch<'a> {
 impl Launch for Cuda {
     type Args<'a> = CudaLaunch<'a>;
 
-    /// Launches its `kernel` on `grid` with `values` (its runtime parameters in order) on lumen's stream (a
-    /// CUDA graph's capture stream while it captures), then the two scratch pointers Triton appends,
-    /// null since the kernel needs no scratch.
+    /// Launches its `kernel` on `grid` with `values` (its runtime parameters in order: scalars, or the structs
+    /// of a CuTe kernel's `tensor` parameters) on lumen's stream (a CUDA graph's capture stream while it
+    /// captures), then the two scratch pointers Triton appends, null since the kernel needs no scratch.
     fn launch(args: CudaLaunch<'_>) -> Result<(), String> {
         let CudaLaunch {
             kernel,
@@ -66,15 +81,24 @@ impl Launch for Cuda {
             ));
         }
 
-        let mut storage: Vec<[u8; 8]> = Vec::with_capacity(values.len() + 2);
+        let mut storage: Vec<[u8; PARAM_BYTES]> = Vec::with_capacity(values.len() + 2);
 
         for (ty, &value) in kernel.types.iter().zip(values) {
-            if let Some(b) = bytes(ty, value)? {
-                storage.push(b);
+            let mut slot = [0u8; PARAM_BYTES];
+
+            match (ty.as_str(), value) {
+                ("tensor", Value::Struct(raw, _)) => slot = raw,
+                ("tensor", v) => return Err(format!("a tensor parameter got {v:?}")),
+                (ty, v) => match bytes(ty, v)? {
+                    Some(b) => slot[..8].copy_from_slice(&b),
+                    None => continue,
+                },
             }
+
+            storage.push(slot);
         }
 
-        storage.extend([[0u8; 8]; 2]);
+        storage.extend([[0u8; PARAM_BYTES]; 2]);
         let mut params: Vec<*mut c_void> =
             storage.iter_mut().map(|b| b.as_mut_ptr().cast()).collect();
 

@@ -42,12 +42,19 @@ INTEGERS = ("int32",)
 # Published peak memory bandwidth (GB/s) and float32 TFLOPS of known devices.
 SPEC_MEMORY_GBS = {
     "Apple M4 Pro": 273,
+    "NVIDIA A100-SXM4-40GB": 1555,
     "NVIDIA A100-SXM4-80GB": 2039,
     "NVIDIA H100 80GB HBM3": 3350,
     "NVIDIA H200": 4800,
     "NVIDIA B200": 8000,
 }
-SPEC_TFLOPS = {"NVIDIA A100-SXM4-80GB": 19.5, "NVIDIA H100 80GB HBM3": 66.9, "NVIDIA H200": 66.9, "NVIDIA B200": 80}
+SPEC_TFLOPS = {
+    "NVIDIA A100-SXM4-40GB": 19.5,
+    "NVIDIA A100-SXM4-80GB": 19.5,
+    "NVIDIA H100 80GB HBM3": 66.9,
+    "NVIDIA H200": 66.9,
+    "NVIDIA B200": 80,
+}
 # GPU clocks (GHz) for estimating peak TFLOPS of devices without a published figure.
 GPU_GHZ = {"Apple M4 Pro": 1.578}
 LANES_PER_CORE = 128
@@ -384,7 +391,7 @@ OPS = {
     "dot_general": Op(
         "contraction",
         "A · B, square, accumulated in float32",
-        lambda a, b: prims.dot_general(a, b, DOT, "float32", a.dtype),
+        lambda a, b: prims.dot_general(a, b, DOT, "float32").to(dtype=a.dtype),
         lambda a, b: a @ b,
         square,
         sizes=SQUARE_SIZES,
@@ -683,18 +690,19 @@ def peak_tflops(device):
     return round(cores * LANES_PER_CORE * 2 * ghz / 1e3, 2) if cores and ghz else None
 
 
-def use(device):
+def use(device, backend="triton"):
     """Benchmark on ``device``: MPS (``data/elementwise_mps``), or CUDA with
-    the Triton backend (``data/elementwise_triton/<gpu>``)."""
+    ``backend``, Triton (``data/elementwise_triton/<gpu>``) or CuTe DSL
+    (``data/elementwise_cute/<gpu>``)."""
     global DEVICE, DATA
     DEVICE = device
     if device == "cuda":
-        lumen.config.compiler.use_triton_backend = True
+        lumen.config.compiler.use_triton_backend = backend == "triton"
         name = device_name()
         gpu = next((g for g in GPUS if g in name.upper()), None)
         if gpu is None:
             raise SystemExit(f"{name}: not a GPU the dashboard lists ({', '.join(GPUS)})")
-        DATA = pathlib.Path(__file__).parent / "data" / "elementwise_triton" / gpu.lower()
+        DATA = pathlib.Path(__file__).parent / "data" / f"elementwise_{backend}" / gpu.lower()
 
 
 def synchronize(module):
@@ -1002,9 +1010,14 @@ if __name__ == "__main__":
     lumen.config.static_allocator_bytes = 4 << 30
     dry_run = "--dry-run" in sys.argv
     args = [a for a in sys.argv[1:] if a != "--dry-run"]
+    backend = "triton"
+    if "--backend" in args:
+        at = args.index("--backend")
+        backend = args[at + 1]
+        del args[at : at + 2]
     if "--device" in args:
         at = args.index("--device")
-        use(args[at + 1])
+        use(args[at + 1], backend)
         del args[at : at + 2]
     data = load()
     for name in args or OPS:

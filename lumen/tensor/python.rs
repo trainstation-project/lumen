@@ -791,16 +791,22 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_from_dlpack, m)?)
 }
 
-/// Exports a tensor as a legacy DLPack capsule.
+/// Exports a tensor as a legacy DLPack capsule, first waiting for its device's queued work when `wait`.
 #[pyfunction]
-fn _to_dlpack<'py>(py: Python<'py>, t: &PyTensor) -> PyResult<Bound<'py, PyCapsule>> {
-    crate::tensor::dlpack::to_dlpack(py, &t.inner)
+#[pyo3(signature = (t, wait = true))]
+fn _to_dlpack<'py>(py: Python<'py>, t: &PyTensor, wait: bool) -> PyResult<Bound<'py, PyCapsule>> {
+    crate::tensor::dlpack::to_dlpack(py, &t.inner, wait)
 }
 
-/// Exports a tensor as a DLPack 1.0 versioned capsule.
+/// Exports a tensor as a DLPack 1.0 versioned capsule, first waiting for its device's queued work when `wait`.
 #[pyfunction]
-fn _to_dlpack_versioned<'py>(py: Python<'py>, t: &PyTensor) -> PyResult<Bound<'py, PyCapsule>> {
-    crate::tensor::dlpack::to_dlpack_versioned(py, &t.inner)
+#[pyo3(signature = (t, wait = true))]
+fn _to_dlpack_versioned<'py>(
+    py: Python<'py>,
+    t: &PyTensor,
+    wait: bool,
+) -> PyResult<Bound<'py, PyCapsule>> {
+    crate::tensor::dlpack::to_dlpack_versioned(py, &t.inner, wait)
 }
 
 /// Imports a DLPack capsule as a tensor sharing its memory.

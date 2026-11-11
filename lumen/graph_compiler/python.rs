@@ -821,6 +821,154 @@ fn triton_attention(
     Python::attach(|py| call(py, None).map(|_| ())).map_err(|e| e.to_string())
 }
 
+/// Writes `a @ b` into `d` (the CUDA backend's matmul, tensors (m, k), (k, n) and (m, n) or batched) on lumen's
+/// stream with `config`'s tile, or untuned the one `codegen::dot_general::cuda::untuned` picks for `d`'s shape, as
+/// elementwise kernels launch: `lumen.codegen.dot_general.cuda.launch.compile` compiles the GEMM once for the
+/// tensors' dtypes, majors and batching, the tile, and whether the tile divides m, n and k (an `aligned` GEMM, without
+/// bounds checks), and every launch is a `cuLaunchKernel` from here, passing each tensor as the struct CuTe's kernel
+/// takes it (`gemm_tensor`), without Python.
+#[cfg_attr(not(lumen_cuda_linked), allow(unused_variables))]
+fn cuda_gemm(
+    a: &crate::Tensor,
+    b: &crate::Tensor,
+    d: &crate::Tensor,
+    config: Option<&crate::codegen::dot_general::cuda::Config>,
+) -> Result<(), String> {
+    current(a);
+    crate::profiler::launched::launched("dot_general", || None);
+
+    #[cfg(lumen_cuda_linked)]
+    {
+        use crate::runtime::kernel::cuda::driver;
+
+        let Device::Cuda(device) = d.device() else {
+            return Err("dot_general: the CUDA GEMM ran on a host tensor".into());
+        };
+
+        let (batch, [m, n]) = match d.shape() {
+            [l, m, n] => (*l, [*m, *n]),
+            [m, n] => (1, [*m, *n]),
+            _ => return Err("dot_general: the CUDA GEMM writes a rank-2 or 3 output".into()),
+        };
+
+        let config = match config {
+            Some(c) => *c,
+            None => {
+                let sms = driver::sm_count(device)?;
+                crate::codegen::dot_general::cuda::untuned(batch, m, n, sms)
+            }
+        };
+
+        let batched = d.shape().len() == 3;
+        let tile = (config.tile_m, config.tile_n, config.tile_k, config.warps);
+        let k = a.shape()[a.shape().len() - 1];
+        let aligned = m % config.tile_m == 0 && n % config.tile_n == 0 && k % config.tile_k == 0;
+        let dtypes = [a, b, d].map(|t| dtype_name(t.dtype()));
+
+        // Each operand as the kernel takes it, its (rows, cols) in the kernel's mode order: A (m, k), B (n, k), D (m, n).
+        let (a_major, a) = gemm_tensor(a, false, ["m", "k"])?;
+        let (b_major, b) = gemm_tensor(b, true, ["k", "n"])?;
+        let (d_major, d) = gemm_tensor(d, false, ["m", "n"])?;
+
+        let key = format!(
+            "gemm|cuda:{device}|{dtypes:?}|{a_major}{b_major}{d_major}|{batched}|{tile:?}|{aligned}"
+        );
+
+        let kernel = driver::compiled(&key, || {
+            Python::attach(|py| {
+                let (function, warps, shared, plain, types) = py
+                    .import("lumen.codegen.dot_general.cuda.launch")?
+                    .getattr("compile")?
+                    .call1((
+                        dtypes[0], dtypes[1], dtypes[2], a_major, b_major, d_major, batched, tile,
+                        aligned,
+                    ))?
+                    .extract()?;
+
+                Ok(driver::Compiled {
+                    function,
+                    warps,
+                    shared,
+                    plain,
+                    types,
+                })
+            })
+            .map_err(|e: PyErr| e.to_string())
+        })?;
+
+        let tiles = m.div_ceil(config.tile_m) * n.div_ceil(config.tile_n);
+
+        Cuda::launch(CudaLaunch {
+            kernel: &kernel,
+            grid: [tiles, 1, batch],
+            values: &[a, b, d],
+        })
+    }
+
+    #[cfg(not(lumen_cuda_linked))]
+    Err("dot_general: CUDA kernels launch only where lumen links CUDA".into())
+}
+
+/// Matrix `t` (rank 2, or 3 with a leading batch dim) as the CUDA GEMM's kernel takes it: the name (of `names`, its
+/// rows' and columns') of its contiguous dim, and the struct CuTe passes a tensor by: its address, its extents as
+/// int32 padded to 8 bytes, then its strides but the contiguous one's as int64, each in the kernel's mode order,
+/// (rows, cols, batch), or (cols, rows, batch) when `swapped` (B, which the kernel reads as (n, k)).
+/// `launch.compile` checks the struct's size against the compiled kernel's; an error when neither of `t`'s last two
+/// dims is contiguous.
+#[cfg(lumen_cuda_linked)]
+fn gemm_tensor(
+    t: &crate::Tensor,
+    swapped: bool,
+    names: [&'static str; 2],
+) -> Result<(&'static str, crate::runtime::kernel::cuda::driver::Value), String> {
+    use crate::runtime::kernel::cuda::driver::{PARAM_BYTES, Value};
+
+    let (shape, strides, rank) = (t.shape(), t.strides(), t.shape().len());
+    let (rows, cols) = (rank - 2, rank - 1);
+
+    let contiguous = match (strides[rows], strides[cols]) {
+        (_, 1) => cols,
+        (1, _) => rows,
+        _ => {
+            return Err(format!(
+                "dot_general: the CUDA GEMM read an operand of strides {strides:?}"
+            ));
+        }
+    };
+
+    let mut modes = if swapped {
+        vec![cols, rows]
+    } else {
+        vec![rows, cols]
+    };
+    modes.extend((rank == 3).then_some(0));
+
+    let mut raw = [0u8; PARAM_BYTES];
+    let mut at = 0;
+
+    let mut put = |bytes: &[u8]| {
+        raw[at..at + bytes.len()].copy_from_slice(bytes);
+        at += bytes.len();
+    };
+
+    put(&(t.data_ptr() as u64).to_le_bytes());
+
+    for &mode in &modes {
+        put(&(shape[mode] as i32).to_le_bytes());
+    }
+
+    if modes.len() % 2 == 1 {
+        put(&[0; 4]);
+    }
+
+    for &mode in modes.iter().filter(|&&mode| mode != contiguous) {
+        put(&(strides[mode] as i64).to_le_bytes());
+    }
+
+    let name = names[(contiguous == cols) as usize];
+    Ok((name, Value::Struct(raw, at)))
+}
+
 /// Launches the CUDA backend's kernel `name` of module `source` on `tensors` (inputs, then its `outputs`
 /// outputs, each a flat view) over `n` elements, as a Triton kernel launches:
 /// `lumen.codegen.utils.cuda.compile` compiles it once for its tensors' dtypes and 16-byte alignment and
@@ -1023,6 +1171,7 @@ fn tuned(
 /// Registers the Triton and CUDA launch hooks and the module's Python functions and class.
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     crate::runtime::kernel::cuda::set_launch(cuda_launch);
+    crate::runtime::kernel::cuda::set_gemm(cuda_gemm);
     crate::codegen::dot_general::triton::launch::set_gemm(triton_gemm);
     crate::runtime::kernel::triton::set_loop(triton_loop);
     crate::codegen::attention::triton::launch::set_attention(triton_attention);
