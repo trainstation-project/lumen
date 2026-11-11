@@ -44,17 +44,21 @@ class AmpereGemm:
         arch: int = 80,
         aligned_mn: bool = False,
         aligned_k: bool = False,
+        ab_stage: int | None = None,
     ):
         """The GEMM for `a_dtype` operands accumulating in `accum_dtype`, one CTA per (M, N) tile of `tile_shape_mnk`
         (K defaulting to four MMA instructions), with `NUM_WARPS` warps (4, or 8 for the widest tiles) and
         `occupancy` CTAs per SM. `aligned_mn` compiles it for M and N that are multiples of the tile's (no bounds
-        checks on the rows and columns it loads and stores), `aligned_k` for such a K (no partial last k-tile)."""
+        checks on the rows and columns it loads and stores), `aligned_k` for such a K (no partial last k-tile).
+        `ab_stage` fixes the A/B pipeline stages (as many as fit otherwise); unless `occupancy` is given, it runs as
+        many CTAs per SM as fit them, at most the default."""
         if arch not in (80, 86, 87, 89):
             raise ValueError(f"SM80-family GEMM supports arch in {self._supported_archs}, got {arch}")
 
         self.arch = arch
         self.aligned_mn = aligned_mn
         self.aligned_k = aligned_k
+        self.fixed_ab_stage = ab_stage
         self.accum_dtype = accum_dtype
         self.is_persistent = is_persistent
         self.use_pdl = use_pdl
@@ -69,6 +73,7 @@ class AmpereGemm:
         self.smem_capacity = self._smem_capacity_for_arch(self.arch)
         self.buffer_align_bytes = 1024
         self.occupancy = self._default_occupancy(a_dtype) if occupancy is None else occupancy
+        self.occupancy_given = occupancy is not None
 
         self.epilogue_barrier = NamedBarrier(barrier_id=1, num_threads=self.NUM_WARPS * cute.arch.WARP_SIZE)
         self.epi_m_major = True
@@ -143,15 +148,25 @@ class AmpereGemm:
         self.epi_tile = self._compute_tile_shape_or_override(self.cta_tile_shape_mnk, self.atom_layout_mnk)
         self.epi_tile_shape = cute.ceil_div(self.cta_tile_shape_mnk[:2], self.epi_tile)
 
-        self.ab_stage, self.epi_stage = self._compute_stages(
+        stages = lambda occupancy, ab_stage=None: self._compute_stages(  # noqa: E731
             self.cta_tile_shape_mnk,
             self.epi_tile,
             self.a_dtype,
             self.b_dtype,
             self.d_dtype,
             self.smem_capacity,
-            self.occupancy,
+            occupancy,
+            ab_stage,
         )
+
+        if self.fixed_ab_stage is not None:
+            # The most CTAs per SM (up to the default, or exactly `occupancy` when given) fitting the fixed stages.
+            fits = [o for o in range(self.occupancy, 0, -1) if stages(o)[0] >= self.fixed_ab_stage]
+            if not fits or (self.occupancy_given and fits[0] != self.occupancy):
+                raise ValueError(f"SM80 GEMM: {self.fixed_ab_stage} A/B stages do not fit shared memory")
+            self.occupancy = fits[0]
+
+        self.ab_stage, self.epi_stage = stages(self.occupancy, self.fixed_ab_stage)
 
         # The mainloop keeps ab_stage - 1 k-tiles in flight while it reads one.
         assert self.ab_stage >= 2, f"SM80 GEMM needs >= 2 A/B stages, shared memory fits {self.ab_stage}"
@@ -454,9 +469,10 @@ class AmpereGemm:
         d_dtype: Type[cutlass.Numeric],
         smem_capacity: int,
         occupancy: int,
+        ab_stage: int | None = None,
     ) -> tuple[int, int]:
         """(A/B stages, D epilogue stages) filling a CTA's share of shared memory: QuACK's split, with the A/B stages
-        first and the leftover below one more A/B stage going to D."""
+        first (`ab_stage` of them when given, else as many as fit) and the leftover going to D."""
         epi_tiles = (cta_tile_shape_mnk[0] * cta_tile_shape_mnk[1]) // cute.size(cute.shape(epi_tile))
         epi_stage = min(epi_tiles, 4 if epi_tile[1] <= 16 else 2)
         epi_bytes_per_stage = cute.size(cute.shape(epi_tile)) * d_dtype.width // 8
@@ -468,7 +484,7 @@ class AmpereGemm:
         mbar_helpers_bytes = 1024
 
         remaining_bytes = smem_capacity // occupancy - mbar_helpers_bytes - epi_bytes
-        ab_stage = remaining_bytes // ab_bytes_per_stage
+        ab_stage = remaining_bytes // ab_bytes_per_stage if ab_stage is None else ab_stage
 
         leftover = remaining_bytes - ab_bytes_per_stage * ab_stage
         epi_stage += min(leftover // epi_bytes_per_stage, epi_tiles - epi_stage)

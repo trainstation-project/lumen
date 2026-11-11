@@ -860,7 +860,13 @@ fn cuda_gemm(
         };
 
         let batched = d.shape().len() == 3;
-        let tile = (config.tile_m, config.tile_n, config.tile_k, config.warps);
+        let tile = (
+            config.tile_m,
+            config.tile_n,
+            config.tile_k,
+            config.warps,
+            config.stages,
+        );
         let k = a.shape()[a.shape().len() - 1];
         let aligned_mn = m % config.tile_m == 0 && n % config.tile_n == 0;
         let aligned_k = k % config.tile_k == 0;
