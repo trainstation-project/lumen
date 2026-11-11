@@ -513,6 +513,24 @@ class AmpereGemm:
             return layout_utils.select(t, [1, 2, 0])
         return layout_utils.expand(t, 2, 1)
 
+    def _scheduler_params(self, mA: cute.Tensor, mB: cute.Tensor, mD: cute.Tensor) -> TileScheduler.Params:
+        """The tile scheduler's parameters for A (m, k, l), B (n, k, l) and D (m, n, l): one CTA per tile, grouped by 8
+        along the heuristic's raster order."""
+        tile_sched_args = TileSchedulerArguments(
+            problem_shape_ntile_mnl=(
+                cute.ceil_div(cute.size(mA, mode=[0]), self.cta_tile_shape_mnk[0]),
+                cute.ceil_div(cute.size(mB, mode=[0]), self.cta_tile_shape_mnk[1]),
+                mD.shape[2],
+            ),
+            raster_order=RasterOrderOption.Heuristic,
+            group_size=Int32(8),
+            # SM8x launches independent CTAs: single-CTA clusters.
+            cluster_shape_mnk=(1, 1, 1),
+            persistence_mode=PersistenceMode.NONE,
+        )
+
+        return TileScheduler.to_underlying_arguments(tile_sched_args)
+
     @cute.kernel
     def kernel(
         self,
@@ -525,11 +543,11 @@ class AmpereGemm:
         a_smem_layout: cute.ComposedLayout,
         b_smem_layout: cute.ComposedLayout,
         epi_smem_layout: cute.ComposedLayout,
-        tile_sched_params: TileScheduler.Params,
         TileSchedulerCls: cutlass.Constexpr[Callable],
     ):
         """One CTA's GEMM: per scheduled (m, n, batch) tile, the A/B mainloop into a float32 accumulator, then the
-        epilogue storing it to D."""
+        epilogue storing it to D. Its runtime parameters are the three tensors alone (the rest is static), so Rust
+        launches it with a plain `cuLaunchKernel`; the scheduler's parameters are built here from their shapes."""
         tidx, _, _ = cute.arch.thread_idx()
 
         smem = cutlass.utils.SmemAllocator()
@@ -561,7 +579,7 @@ class AmpereGemm:
         if const_expr(self.use_pdl):
             prims.griddepcontrol(prims.GridDepAction.WAIT)
 
-        tile_scheduler = TileSchedulerCls.create(tile_sched_params)
+        tile_scheduler = TileSchedulerCls.create(self._scheduler_params(mA_mkl, mB_nkl, mD_mnl))
         work_tile = tile_scheduler.initial_work_tile_info()
 
         while work_tile.is_valid_tile:
@@ -594,7 +612,8 @@ class AmpereGemm:
         stream: cuda.CUstream,
     ) -> None:
         """Writes `mA @ mB` into `mD`, crossing as the caller holds them: A (l, m, k), B (l, k, n) and D (l, m, n), or
-        unbatched (m, k), (k, n) and (m, n), each with any one dimension contiguous."""
+        unbatched (m, k), (k, n) and (m, n), each with any one dimension contiguous. lumen only compiles through this
+        (`launch.compile`) and launches the kernel from Rust."""
         # Tensors arrive batch-first: rotate (l, x, y) -> (x, y, l) at trace time, a trivial batch appended to rank-2
         # operands, and B relabelled from the caller's (k, n) to the kernel's (n, k) (QuACK's b_transposed).
         mA, mB, mD = [self._batch_last(t) for t in (mA, mB, mD)]
@@ -619,21 +638,7 @@ class AmpereGemm:
         tiled_copy_A = self._make_gmem_tiled_copy_AB(self.a_dtype, self.a_layout, self.cta_tile_shape_mnk[0])
         tiled_copy_B = self._make_gmem_tiled_copy_AB(self.b_dtype, self.b_layout, self.cta_tile_shape_mnk[1])
 
-        tile_sched_args = TileSchedulerArguments(
-            problem_shape_ntile_mnl=(
-                cute.ceil_div(cute.size(mA, mode=[0]), self.cta_tile_shape_mnk[0]),
-                cute.ceil_div(cute.size(mB, mode=[0]), self.cta_tile_shape_mnk[1]),
-                mD.shape[2],
-            ),
-            raster_order=RasterOrderOption.Heuristic,
-            group_size=Int32(8),
-            # SM8x launches independent CTAs: single-CTA clusters.
-            cluster_shape_mnk=(1, 1, 1),
-            persistence_mode=PersistenceMode.NONE,
-        )
-
-        tile_sched_params = TileScheduler.to_underlying_arguments(tile_sched_args)
-        grid = TileScheduler.get_grid_shape(tile_sched_params, Int32(0))
+        grid = TileScheduler.get_grid_shape(self._scheduler_params(mA, mB, mD), Int32(0))
 
         @cute.struct
         class SharedStorage:
@@ -653,6 +658,7 @@ class AmpereGemm:
             ]
 
         self.shared_storage = SharedStorage
+        self.shared_bytes = SharedStorage.size_in_bytes()
 
         self.kernel(
             self.tiled_mma,
@@ -664,11 +670,11 @@ class AmpereGemm:
             self.a_smem_layout_staged,
             self.b_smem_layout_staged,
             self.epi_smem_layout_staged,
-            tile_sched_params,
             TileScheduler,
         ).launch(
             grid=grid,
             block=[self.NUM_THREADS, 1, 1],
+            smem=self.shared_bytes,
             stream=stream,
             # occupancy > 1 needs the launch bound so ptxas caps registers for 2 resident CTAs
             min_blocks_per_mp=self.occupancy,

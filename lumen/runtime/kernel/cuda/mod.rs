@@ -15,7 +15,7 @@ use crate::codegen::dot_general::cuda::Config;
 #[cfg(all(feature = "python", lumen_cuda_linked))]
 use crate::codegen::utils::cuda::Cuda;
 #[cfg(all(feature = "python", lumen_cuda_linked))]
-use driver::{Compiled, Value, bytes, driver};
+use driver::{Compiled, PARAM_BYTES, Value, bytes, driver};
 
 /// Launches kernel `name` of module `source` (compiling it on its first launch) on `tensors`, its
 /// inputs then its `outputs` outputs, each a flat view of the elements it spans, over `n` elements.
@@ -81,15 +81,24 @@ impl Launch for Cuda {
             ));
         }
 
-        let mut storage: Vec<[u8; 8]> = Vec::with_capacity(values.len() + 2);
+        let mut storage: Vec<[u8; PARAM_BYTES]> = Vec::with_capacity(values.len() + 2);
 
         for (ty, &value) in kernel.types.iter().zip(values) {
-            if let Some(b) = bytes(ty, value)? {
-                storage.push(b);
+            let mut slot = [0u8; PARAM_BYTES];
+
+            match (ty.as_str(), value) {
+                ("tensor", Value::Struct(raw, _)) => slot = raw,
+                ("tensor", v) => return Err(format!("a tensor parameter got {v:?}")),
+                (ty, v) => match bytes(ty, v)? {
+                    Some(b) => slot[..8].copy_from_slice(&b),
+                    None => continue,
+                },
             }
+
+            storage.push(slot);
         }
 
-        storage.extend([[0u8; 8]; 2]);
+        storage.extend([[0u8; PARAM_BYTES]; 2]);
         let mut params: Vec<*mut c_void> =
             storage.iter_mut().map(|b| b.as_mut_ptr().cast()).collect();
 

@@ -17,7 +17,12 @@ pub(crate) enum Value {
     Int(i128),
     Float(f64),
     Bool(bool),
+    /// A struct passed by value, its first `.1` bytes (a CuTe tensor: see `cuda_gemm`).
+    Struct([u8; PARAM_BYTES], usize),
 }
+
+/// Bytes of the widest parameter a launch passes (a rank-3 CuTe tensor's struct).
+pub(crate) const PARAM_BYTES: usize = 40;
 
 impl Value {
     /// Tensor `t` passed by its device address.
@@ -72,6 +77,7 @@ impl Value {
             }
             Value::Float(_) => Class::Float,
             Value::Bool(_) => Class::Bool,
+            Value::Struct(_, len) => Class::Struct(len),
         }
     }
 }
@@ -93,6 +99,8 @@ pub(crate) enum Class {
     Int(Width, bool, bool),
     Float,
     Bool,
+    /// A struct of this many bytes.
+    Struct(usize),
 }
 
 impl Class {
@@ -117,6 +125,7 @@ impl Class {
             }
             Class::Float => "fp32".into(),
             Class::Bool => "i1".into(),
+            Class::Struct(len) => format!("struct{len}"),
         }
     }
 }
