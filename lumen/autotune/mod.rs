@@ -94,9 +94,9 @@ pub(crate) struct Autotuner<T> {
 const WARMUP_RUNS: usize = 5;
 /// Runs a candidate's time averages over.
 const TIMED_RUNS: usize = 10;
-/// Time the device runs the first candidate before a tuning run times anything: a GPU takes about this long under
-/// load to reach its sustained clocks, which the candidates timed first would otherwise run below (as QuACK's
-/// autotuner warms up before benchmarking).
+/// Time the device runs a candidate after a step's candidates compile and before any is timed: a GPU takes about
+/// this long under load to reach its sustained clocks, which the candidates timed first would otherwise run below
+/// (as QuACK's autotuner warms up before benchmarking).
 const WARMUP_SECONDS: f64 = 0.2;
 
 /// Steps with the same kernel, operand types and views share one tuning result.
@@ -173,7 +173,6 @@ impl<T: Timer> Autotuner<T> {
 
         kernels.compile()?;
         let picks = || PICKS.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut warm = false;
 
         for (steps, candidates) in jobs {
             let picked = pick::<K>(self.timer.device(), &plan.steps()[steps[0]]);
@@ -216,18 +215,35 @@ impl<T: Timer> Autotuner<T> {
                 candidates.len()
             );
 
-            // Once per tuning run: the jobs follow each other closely enough to keep the clocks up.
-            if !warm {
-                trial.tuned = Some(candidates[0].clone());
-                warm = warm_up(&self.timer, &buffers, &trial).is_ok();
-            }
-
-            // Each candidate's average over `TIMED_RUNS` runs; a failing candidate is dropped.
-            let seconds: Vec<f64> = candidates
+            // Every candidate's first run (its compile) before any is timed: a compile idles the GPU long enough
+            // to drop it to base clocks, which would slow whichever candidate ran next. A failing one is dropped.
+            let runs: Vec<bool> = candidates
                 .iter()
                 .map(|candidate| {
                     trial.tuned = Some(candidate.clone());
-                    time(&self.timer, &buffers, &trial, TIMED_RUNS).unwrap_or(f64::INFINITY)
+                    self.timer.run(&buffers, &trial, 0).is_ok()
+                })
+                .collect();
+
+            // Then back up to sustained clocks, on the first candidate that runs.
+            if let Some(k) = runs.iter().position(|&ran| ran) {
+                trial.tuned = Some(candidates[k].clone());
+                warm_up(&self.timer, &buffers, &trial).ok();
+            }
+
+            // Each candidate's average over `TIMED_RUNS` runs.
+            let seconds: Vec<f64> = candidates
+                .iter()
+                .zip(&runs)
+                .map(|(candidate, &ran)| {
+                    trial.tuned = Some(candidate.clone());
+
+                    match ran {
+                        true => {
+                            time(&self.timer, &buffers, &trial, TIMED_RUNS).unwrap_or(f64::INFINITY)
+                        }
+                        false => f64::INFINITY,
+                    }
                 })
                 .collect();
 
