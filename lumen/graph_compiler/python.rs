@@ -824,9 +824,9 @@ fn triton_attention(
 /// Writes `a @ b` into `d` (the CUDA backend's matmul, tensors (m, k), (k, n) and (m, n) or batched) on lumen's
 /// stream with `config`'s tile, or untuned the one `codegen::dot_general::cuda::untuned` picks for `d`'s shape, as
 /// elementwise kernels launch: `lumen.codegen.dot_general.cuda.launch.compile` compiles the GEMM once for the
-/// tensors' dtypes, majors and batching, the tile, and whether the tile divides m, n and k (an `aligned` GEMM, without
-/// bounds checks), and every launch is a `cuLaunchKernel` from here, passing each tensor as the struct CuTe's kernel
-/// takes it (`gemm_tensor`), without Python.
+/// tensors' dtypes, majors and batching, the tile, and whether the tile divides m and n, and k (each an `aligned` GEMM
+/// without those bounds checks), and every launch is a `cuLaunchKernel` from here, passing each tensor as the struct
+/// CuTe's kernel takes it (`gemm_tensor`), without Python.
 #[cfg_attr(not(lumen_cuda_linked), allow(unused_variables))]
 fn cuda_gemm(
     a: &crate::Tensor,
@@ -862,7 +862,8 @@ fn cuda_gemm(
         let batched = d.shape().len() == 3;
         let tile = (config.tile_m, config.tile_n, config.tile_k, config.warps);
         let k = a.shape()[a.shape().len() - 1];
-        let aligned = m % config.tile_m == 0 && n % config.tile_n == 0 && k % config.tile_k == 0;
+        let aligned_mn = m % config.tile_m == 0 && n % config.tile_n == 0;
+        let aligned_k = k % config.tile_k == 0;
         let dtypes = [a, b, d].map(|t| dtype_name(t.dtype()));
 
         // Each operand as the kernel takes it, its (rows, cols) in the kernel's mode order: A (m, k), B (n, k), D (m, n).
@@ -871,7 +872,7 @@ fn cuda_gemm(
         let (d_major, d) = gemm_tensor(d, false, ["m", "n"])?;
 
         let key = format!(
-            "gemm|cuda:{device}|{dtypes:?}|{a_major}{b_major}{d_major}|{batched}|{tile:?}|{aligned}"
+            "gemm|cuda:{device}|{dtypes:?}|{a_major}{b_major}{d_major}|{batched}|{tile:?}|{aligned_mn}{aligned_k}"
         );
 
         let kernel = driver::compiled(&key, || {
@@ -881,7 +882,7 @@ fn cuda_gemm(
                     .getattr("compile")?
                     .call1((
                         dtypes[0], dtypes[1], dtypes[2], a_major, b_major, d_major, batched, tile,
-                        aligned,
+                        aligned_mn, aligned_k,
                     ))?
                     .extract()?;
 

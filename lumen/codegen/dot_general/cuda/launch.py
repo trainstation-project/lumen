@@ -33,13 +33,14 @@ def tensor_bytes(rank):
     return 8 + (4 * rank + 7) // 8 * 8 + 8 * (rank - 1)
 
 
-def compile(a_dtype, b_dtype, d_dtype, a_major, b_major, d_major, batched, tile, aligned):
+def compile(a_dtype, b_dtype, d_dtype, a_major, b_major, d_major, batched, tile, aligned_mn, aligned_k):
     """The GEMM for operands of dtypes named `a_dtype` and `b_dtype` writing `d_dtype`, with majors `a_major` ("m" or
     "k"), `b_major` ("k" or "n", of B as the caller's (k, n)) and `d_major` ("m" or "n"), batched or not, with `tile`
     (tile_m, tile_n, tile_k, warps) from `codegen/dot_general/cuda/config.rs`, accumulating in float32, loaded into the
-    current context; `aligned`, for m, n and k that are multiples of the tile's (no bounds checks, see `AmpereGemm`). Returns its launch info as `lumen.codegen.utils.cuda.compile` does: its ``CUfunction``, warps per
-    block, dynamic shared bytes, that a plain ``cuLaunchKernel`` runs it, and its parameters' types (a tensor
-    struct each, of `tensor_bytes` bytes, checked against the loaded kernel)."""
+    current context; `aligned_mn` for m and n multiples of the tile's, `aligned_k` for such a k (fewer bounds
+    checks, see `AmpereGemm`). Returns its launch info as `lumen.codegen.utils.cuda.compile` does: its
+    ``CUfunction``, warps per block, dynamic shared bytes, that a plain ``cuLaunchKernel`` runs it, and its parameters'
+    types (a tensor struct each, of `tensor_bytes` bytes, checked against the loaded kernel)."""
     if a_dtype != b_dtype or a_dtype not in ("float16", "bfloat16"):
         raise RuntimeError(
             f"dot_general: the CUDA GEMM takes two float16 or bfloat16 operands, got {a_dtype} and {b_dtype}"
@@ -49,7 +50,9 @@ def compile(a_dtype, b_dtype, d_dtype, a_major, b_major, d_major, batched, tile,
         raise RuntimeError(f"dot_general: the CUDA GEMM writes float16, bfloat16 or float32, got {d_dtype}")
 
     ab, out = DTYPES[a_dtype], DTYPES[d_dtype]
-    gemm = AmpereGemm(cutlass.Float32, ab, tile_shape_mnk=tile[:3], NUM_WARPS=tile[3], aligned=aligned)
+    gemm = AmpereGemm(
+        cutlass.Float32, ab, tile_shape_mnk=tile[:3], NUM_WARPS=tile[3], aligned_mn=aligned_mn, aligned_k=aligned_k
+    )
 
     # One symbolic extent per problem dimension, shared by the operands that have it.
     m, n, k = cute.sym_int(), cute.sym_int(), cute.sym_int()
