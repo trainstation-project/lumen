@@ -71,15 +71,32 @@ fn time<T: Timer>(
     Ok(start.elapsed_time(end.as_ref())? / 1e3 / reps as f64)
 }
 
+/// Runs `step` back to back for at least `WARMUP_SECONDS`, bringing the device to its sustained clocks.
+fn warm_up<T: Timer>(timer: &T, buffers: &T::Buffers, step: &T::Step) -> Result<(), String> {
+    let once = time(timer, buffers, step, 1)?;
+    let reps = ((BUDGET_SECONDS / once) as usize).clamp(*REPS.start(), *REPS.end());
+    let mut elapsed = 0.0;
+
+    while elapsed < WARMUP_SECONDS {
+        elapsed += time(timer, buffers, step, reps)? * reps as f64;
+    }
+
+    Ok(())
+}
+
 /// Picks the fastest config for every tunable step of a plan, timing with `timer`.
 pub(crate) struct Autotuner<T> {
     pub timer: T,
 }
 
 /// Timing passes over all candidates; each keeps a candidate's best time.
-const PASSES: usize = 2;
+const PASSES: usize = 3;
 /// Time each candidate aims to run for per measurement.
-const BUDGET_SECONDS: f64 = 1e-3;
+const BUDGET_SECONDS: f64 = 5e-3;
+/// Time the device runs the first candidate before a tuning run times anything: a GPU takes about this long under
+/// load to reach its sustained clocks, which the candidates timed first would otherwise run below (as QuACK's
+/// autotuner warms up before benchmarking).
+const WARMUP_SECONDS: f64 = 0.2;
 /// Bounds on repetitions per measurement.
 const REPS: std::ops::RangeInclusive<usize> = 2..=256;
 
@@ -157,6 +174,7 @@ impl<T: Timer> Autotuner<T> {
 
         kernels.compile()?;
         let picks = || PICKS.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut warm = false;
 
         for (steps, candidates) in jobs {
             let picked = pick::<K>(self.timer.device(), &plan.steps()[steps[0]]);
@@ -198,6 +216,12 @@ impl<T: Timer> Autotuner<T> {
                 self.timer.device(),
                 candidates.len()
             );
+
+            // Once per tuning run: the jobs follow each other closely enough to keep the clocks up.
+            if !warm {
+                trial.tuned = Some(candidates[0].clone());
+                warm = warm_up(&self.timer, &buffers, &trial).is_ok();
+            }
 
             let mut reps = vec![0; candidates.len()];
             let mut seconds = vec![f64::INFINITY; candidates.len()];

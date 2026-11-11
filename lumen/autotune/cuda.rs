@@ -51,17 +51,22 @@ impl Timer for Events {
         self.device
     }
 
-    /// Zeroed inputs and outputs for `step`, all on the device (the CUDA backend passes runtime scalars as 0-d
-    /// device tensors).
+    /// Inputs and outputs for `step`, all on the device (the CUDA backend passes runtime scalars as 0-d device
+    /// tensors): float inputs hold values in [-1, 1), since a GPU's clocks under math on zeros differ from those
+    /// under real data; every other buffer is zeroed (integer inputs may be indices, which must stay in bounds).
     fn buffers(&self, step: &CudaStep) -> Result<Option<Self::Buffers>, String> {
-        let zeros = |ty: &crate::graph::TensorType| {
-            Tensor::zeros(
-                &ty.shape,
-                TensorOptions::new().dtype(ty.dtype).device(self.device),
-            )
+        let options = |ty: &crate::graph::TensorType| {
+            TensorOptions::new().dtype(ty.dtype).device(self.device)
+        };
+        let zeros = |ty: &crate::graph::TensorType| Tensor::zeros(&ty.shape, options(ty));
+
+        let input = |ty: &crate::graph::TensorType| match ty.dtype.is_float() {
+            true => Tensor::from_slice(&noise(ty.shape.iter().product()), options(ty))
+                .reshape(&ty.shape),
+            false => zeros(ty),
         };
 
-        let inputs = step.inputs.iter().map(|(_, ty)| zeros(ty)).collect();
+        let inputs = step.inputs.iter().map(|(_, ty)| input(ty)).collect();
         let outs = step.extra_outputs.iter().map(|(_, ty)| zeros(ty)).collect();
         Ok(Some((inputs, zeros(&step.output.1), outs)))
     }
@@ -75,4 +80,19 @@ impl Timer for Events {
     ) -> Result<(), String> {
         step.run_raw(inputs, out, outs)
     }
+}
+
+/// `n` pseudo-random values in [-1, 1), the same every call (a 64-bit LCG's high bits).
+fn noise(n: usize) -> Vec<f32> {
+    let mut state = 0x9E37_79B9_7F4A_7C15u64;
+
+    (0..n)
+        .map(|_| {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+
+            (state >> 40) as f32 / (1u64 << 23) as f32 - 1.0
+        })
+        .collect()
 }
