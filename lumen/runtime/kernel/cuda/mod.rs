@@ -63,9 +63,9 @@ pub(crate) struct CudaLaunch<'a> {
 impl Launch for Cuda {
     type Args<'a> = CudaLaunch<'a>;
 
-    /// Launches its `kernel` on `grid` with `values` (its runtime parameters in order) on lumen's stream (a
-    /// CUDA graph's capture stream while it captures), then the two scratch pointers Triton appends,
-    /// null since the kernel needs no scratch.
+    /// Launches its `kernel` on `grid` with `values` (its runtime parameters in order: scalars, or the structs
+    /// of a CuTe kernel's `tensor` parameters) on lumen's stream (a CUDA graph's capture stream while it
+    /// captures), then the two scratch pointers Triton appends, null since the kernel needs no scratch.
     fn launch(args: CudaLaunch<'_>) -> Result<(), String> {
         let CudaLaunch {
             kernel,

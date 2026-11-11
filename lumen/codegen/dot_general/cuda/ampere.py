@@ -42,14 +42,17 @@ class AmpereGemm:
         NUM_WARPS: int | None = None,
         occupancy: int | None = None,
         arch: int = 80,
+        aligned: bool = False,
     ):
         """The GEMM for `a_dtype` operands accumulating in `accum_dtype`, one CTA per (M, N) tile of `tile_shape_mnk`
         (K defaulting to four MMA instructions), with `NUM_WARPS` warps (4, or 8 for the widest tiles) and
-        `occupancy` CTAs per SM."""
+        `occupancy` CTAs per SM. `aligned` compiles it for M, N and K that are multiples of the tile's: no bounds
+        checks on loads or stores, and no partial last k-tile."""
         if arch not in (80, 86, 87, 89):
             raise ValueError(f"SM80-family GEMM supports arch in {self._supported_archs}, got {arch}")
 
         self.arch = arch
+        self.aligned = aligned
         self.accum_dtype = accum_dtype
         self.is_persistent = is_persistent
         self.use_pdl = use_pdl
@@ -187,7 +190,11 @@ class AmpereGemm:
         # Prologue: issue the first ab_stage - 1 k-tiles, one commit group each (empty past the last k-tile, so
         # the wait_group counts below hold for any k_tile_cnt). Only the last k-tile can run past K.
         for k_tile in cutlass.range_constexpr(self.ab_stage - 1):
-            if k_tile < k_tile_cnt - 1:
+            if const_expr(self.aligned):
+                if k_tile < k_tile_cnt:
+                    copy_A(k_tile, k_tile)
+                    copy_B(k_tile, k_tile)
+            elif k_tile < k_tile_cnt - 1:
                 copy_A(k_tile, k_tile)
                 copy_B(k_tile, k_tile)
             elif k_tile == k_tile_cnt - 1:
@@ -224,12 +231,17 @@ class AmpereGemm:
 
                 if const_expr(k == 0):
                     next_k_tile = k_tile + self.ab_stage - 1
-                    if next_k_tile < k_tile_cnt - 1:
-                        copy_A(next_k_tile, write_stage)
-                        copy_B(next_k_tile, write_stage)
-                    if next_k_tile == k_tile_cnt - 1:
-                        copy_A(next_k_tile, write_stage, pred_k=True)
-                        copy_B(next_k_tile, write_stage, pred_k=True)
+                    if const_expr(self.aligned):
+                        if next_k_tile < k_tile_cnt:
+                            copy_A(next_k_tile, write_stage)
+                            copy_B(next_k_tile, write_stage)
+                    else:
+                        if next_k_tile < k_tile_cnt - 1:
+                            copy_A(next_k_tile, write_stage)
+                            copy_B(next_k_tile, write_stage)
+                        if next_k_tile == k_tile_cnt - 1:
+                            copy_A(next_k_tile, write_stage, pred_k=True)
+                            copy_B(next_k_tile, write_stage, pred_k=True)
                     cute.arch.cp_async_commit_group()
                     write_stage += 1
                     if write_stage == self.ab_stage:
@@ -289,7 +301,8 @@ class AmpereGemm:
         """`copy(k_tile, stage, pred_k=False)`: the cp.async of k-tile `k_tile` of row tile `tile_idx` of `mX` (mn, k)
         into stage `stage` of `sX` (tile_mn, tile_k, STAGE). Vectors outside `mX` are zero in smem (extents are
         16-byte multiples, so a vector is wholly inside or outside): rows past MN are zeroed in every stage here, once
-        per tile, and columns past K by `pred_k`, which only the last k-tile needs."""
+        per tile, and columns past K by `pred_k`, which only the last k-tile needs. An `aligned` GEMM copies every
+        vector unchecked."""
         tile_shape = (tile_mn, self.cta_tile_shape_mnk[2])
         # (tile_mn, tile_k, RestK)
         gX = cute.local_tile(mX, tile_shape, (tile_idx, None))
@@ -311,16 +324,19 @@ class AmpereGemm:
             tXpX[i] = tXcX[0, i, 0, 0][0] < mX.shape[0]
 
         # cp.async never writes the rows past MN: zero them in every stage up front.
-        for stage in cutlass.range_constexpr(cute.size(tXsX, mode=[3])):
-            for i in cutlass.range_constexpr(num_rows):
-                if not tXpX[i]:
-                    for j in cutlass.range_constexpr(cute.size(tXsX, mode=[2])):
-                        cute.autovec_copy(zero, tXsX[None, i, j, stage])
+        if const_expr(not self.aligned):
+            for stage in cutlass.range_constexpr(cute.size(tXsX, mode=[3])):
+                for i in cutlass.range_constexpr(num_rows):
+                    if not tXpX[i]:
+                        for j in cutlass.range_constexpr(cute.size(tXsX, mode=[2])):
+                            cute.autovec_copy(zero, tXsX[None, i, j, stage])
 
         def copy_fn(k_tile, stage, pred_k: cutlass.Constexpr[bool] = False):
             for i in cutlass.range_constexpr(num_rows):
                 for j in cutlass.range_constexpr(cute.size(tXsX, mode=[2])):
-                    if tXpX[i]:
+                    if const_expr(self.aligned):
+                        cute.copy(tiled_copy, tXgX[None, i, j, k_tile], tXsX[None, i, j, stage])
+                    elif tXpX[i]:
                         if const_expr(pred_k):
                             if tXcX[0, i, j, k_tile][1] < limit_k:
                                 cute.copy(tiled_copy, tXgX[None, i, j, k_tile], tXsX[None, i, j, stage])
@@ -364,7 +380,8 @@ class AmpereGemm:
         tidx: Int32,
     ) -> Callable:
         """`copy_D(src_idx, dst_idx)`: stage `src_idx` of `sD` to epilogue subtile `dst_idx` (epi_m, epi_n) of D's
-        tile `tile_coord_mnkl`, in 16-byte vectors along D's contiguous dimension, skipping those outside D."""
+        tile `tile_coord_mnkl`, in 16-byte vectors along D's contiguous dimension, skipping those outside D (none when
+        `aligned`)."""
         tile_mn = self.cta_tile_shape_mnk[:2]
         gD = cute.local_tile(mD_mn, tile_mn, (tile_coord_mnkl[0], tile_coord_mnkl[1]))
         cD = cute.local_tile(cute.make_identity_tensor(mD_mn.shape), tile_mn, (tile_coord_mnkl[0], tile_coord_mnkl[1]))
@@ -393,7 +410,9 @@ class AmpereGemm:
             for i in cutlass.range_constexpr(cute.size(tDsD, mode=[1])):
                 for j in cutlass.range_constexpr(cute.size(tDsD, mode=[2])):
                     # The (n, m) views reorder the modes, not the coordinates: they stay (m, n).
-                    if cute.elem_less(tDcD[0, i, j, dst_idx[0], dst_idx[1]], mD_mn.shape):
+                    if const_expr(self.aligned):
+                        cute.copy(tiled_copy, tDsD[None, i, j, src_idx], tDgD[None, i, j, dst_idx[0], dst_idx[1]])
+                    elif cute.elem_less(tDcD[0, i, j, dst_idx[0], dst_idx[1]], mD_mn.shape):
                         cute.copy(tiled_copy, tDsD[None, i, j, src_idx], tDgD[None, i, j, dst_idx[0], dst_idx[1]])
 
         return copy_fn
