@@ -201,7 +201,7 @@ class AmpereGemm:
         (stage, k_block) load one k16 block of a stage into the fragments. ab_stage - 1 k-tiles are kept in flight:
         k-tile t + ab_stage - 1 is issued into the stage k-tile t - 1 vacated, once every thread has moved past it.
         The register side has the produce rhythm of QuACK's SM120 warp-MMA mainloop: load block k + 1 (slot 0 of
-        the next stage at the tile's last block), then MMA block k."""
+        the next stage at the tile's last block), then MMA block k; the last k-tile is peeled off the loop."""
         num_k_blocks = cute.size(tCrA, mode=[2])
 
         # Prologue: issue the first ab_stage - 1 k-tiles, one commit group each (empty past the last k-tile, so
@@ -230,7 +230,7 @@ class AmpereGemm:
         copy_block_A(read_stage, 0)
         copy_block_B(read_stage, 0)
 
-        for k_tile in cutlass.range(k_tile_cnt, unroll=1):
+        for k_tile in cutlass.range(k_tile_cnt - 1, unroll=1):
             for k in cutlass.range_constexpr(num_k_blocks):
                 if const_expr(k == num_k_blocks - 1):
                     # The next k-tile's stage: wait for its copy, and for every thread to finish reading the
@@ -265,6 +265,15 @@ class AmpereGemm:
                         write_stage = Int32(0)
 
                 cute.gemm(tiled_mma, acc, tCrA[None, None, k], tCrB[None, None, k], acc)
+
+        # Last k-tile (hoisted, as QuACK's SM120 mainloop): no next stage to wait for or preload, and no copy to
+        # issue, so it skips the CTA barrier. K >= 1, so there always is one.
+        for k in cutlass.range_constexpr(num_k_blocks):
+            if const_expr(k + 1 < num_k_blocks):
+                copy_block_A(read_stage, k + 1)
+                copy_block_B(read_stage, k + 1)
+
+            cute.gemm(tiled_mma, acc, tCrA[None, None, k], tCrB[None, None, k], acc)
 
         cute.arch.cp_async_wait_group(0)
 
