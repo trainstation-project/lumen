@@ -248,7 +248,7 @@ fn _captured_launches() -> Vec<Captured> {
 #[pyfunction]
 fn _kernel_source(name: &str) -> Option<String> {
     #[cfg(lumen_mps_linked)]
-    return super::mps::fusion_source(name);
+    return crate::runtime::kernel::mps::encode::fusion_source(name);
 
     #[cfg(not(lumen_mps_linked))]
     return {

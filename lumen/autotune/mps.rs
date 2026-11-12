@@ -1,23 +1,22 @@
 //! MPS autotuning backends: candidate tunings for elementwise fusions and GEMM configs, and the timer that runs them.
 
-use std::collections::{BTreeMap, HashMap};
-use std::sync::PoisonError;
-
 use super::{Kernels, Timer};
 use crate::allocator::Scratch;
 use crate::codegen::dot_general::mps::{self as gemm, GemmConfig};
-use crate::codegen::elementwise::mps::TUNED_ELEMENTS;
-use crate::codegen::elementwise::mps::Tuning;
+use crate::codegen::elementwise::mps::{TUNED_ELEMENTS, Tuning};
 use crate::codegen::kinds::gemm_dot;
 use crate::device::Device;
 use crate::graph::{Primitive, TensorType, Var, View};
 use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::mps::{
-    SOURCES, compile_kernels, compile_mpp_kernels, compile_routed, record_launch,
-};
 use crate::plan::step::mps::Encode;
 use crate::plan::{Buffer, MpsStep, Tuned};
 use crate::tensor::contiguous_strides;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::PoisonError;
+
+use crate::runtime::kernel::mps::encode::{
+    SOURCES, compile_kernels, compile_mpp_kernels, compile_routed, record_launch,
+};
 
 /// What a tunable elementwise fusion needs to regenerate its kernel under another tuning.
 #[derive(Debug, Clone)]
@@ -94,7 +93,7 @@ impl Kernels for Elementwise<'_> {
         let name = kernel.clone();
 
         let encode: Encode = Box::new(move |step, inputs, output, scratch, keep| {
-            crate::graph_compiler::mps::encode_with(
+            crate::runtime::kernel::mps::encode::encode_with(
                 step, &name, None, None, inputs, output, scratch, keep,
             )
         });
@@ -167,8 +166,8 @@ fn tiled_gemm(step: &MpsStep) -> bool {
     let tiled = match &step.primitive {
         Primitive::Fusion { name, body, .. } => {
             !name.starts_with(crate::graph::NEURAL_ENGINE)
-                && crate::graph_compiler::mps::launch_of(body)
-                    == crate::graph_compiler::mps::Launch::Gemm
+                && crate::runtime::kernel::mps::encode::launch_of(body)
+                    == crate::runtime::kernel::mps::encode::Launch::Gemm
                 && (gemm::row_dot(body).is_none() || gemm::tile_scratch(body).is_some())
         }
         _ => false,
@@ -246,7 +245,7 @@ impl Kernels for Gemms {
                 && group.is_none()
                 && layout.is_some()
                 && layout == gemm::mpp_transposes(dot, lhs, rhs, out)
-                && crate::graph_compiler::mps::mpp_available();
+                && crate::runtime::kernel::mps::encode::mpp_available();
 
             let mpp: &[GemmConfig] = match mpp {
                 true => gemm::mpp_configs(),
@@ -291,7 +290,7 @@ impl Kernels for Gemms {
 
         let mpp = large
             && gemm::mpp_transposes(dot, lhs, rhs, out).is_some()
-            && crate::graph_compiler::mps::mpp_available();
+            && crate::runtime::kernel::mps::encode::mpp_available();
 
         let mpp: Vec<GemmConfig> = match mpp {
             true => gemm::mpp_configs()
@@ -371,7 +370,7 @@ impl Kernels for Gemms {
 
             let tuned = (step.views == views).then_some((name.as_str(), config));
 
-            crate::graph_compiler::mps::encode_with(
+            crate::runtime::kernel::mps::encode::encode_with(
                 step, fusion, tuned, None, inputs, output, scratch, keep,
             )
         });
@@ -408,7 +407,7 @@ impl Kernels for Attentions {
             return Vec::new();
         };
 
-        let strides = crate::graph_compiler::mps::attention_strides(step, body);
+        let strides = crate::runtime::kernel::mps::encode::attention_strides(step, body);
 
         match crate::graph_compiler::passes::attention::of_body_strided(body, &strides) {
             Some(a) => crate::codegen::attention::mps::tunings(&a),
@@ -423,7 +422,7 @@ impl Kernels for Attentions {
             return false;
         };
 
-        let strides = crate::graph_compiler::mps::attention_strides(step, body);
+        let strides = crate::runtime::kernel::mps::encode::attention_strides(step, body);
 
         crate::graph_compiler::passes::attention::of_body_strided(body, &strides)
             .is_some_and(|a| !crate::codegen::attention::mps::decodes(&a))
@@ -435,7 +434,7 @@ impl Kernels for Attentions {
             unreachable!("an attention fusion")
         };
 
-        let strides = crate::graph_compiler::mps::attention_strides(step, body);
+        let strides = crate::runtime::kernel::mps::encode::attention_strides(step, body);
         let a = crate::graph_compiler::passes::attention::of_body_strided(body, &strides)
             .expect("an attention it was tuned for");
 
@@ -454,7 +453,7 @@ impl Kernels for Attentions {
 
             let tuned = (step.views == views).then_some((name.as_str(), tuning));
 
-            crate::graph_compiler::mps::encode_with(
+            crate::runtime::kernel::mps::encode::encode_with(
                 step, fusion, None, tuned, inputs, output, scratch, keep,
             )
         });

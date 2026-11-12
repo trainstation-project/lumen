@@ -5,7 +5,7 @@
 
 pub(crate) mod canonicalize;
 pub(crate) mod fold_reshapes;
+pub(crate) mod fuse;
 pub(crate) mod rows;
 pub(crate) mod split_k;
 pub(crate) mod strength;
-pub(crate) mod tpu;

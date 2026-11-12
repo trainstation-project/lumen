@@ -2,8 +2,6 @@
 //! fusion step its kernel name; and the kernel shape (GEMV row, GEMM, row reduction, reduction, transpose or
 //! elementwise) each fused body lowers to.
 
-use std::collections::{BTreeMap, HashMap};
-
 use crate::autotune::mps::Tunable;
 use crate::codegen::attention::AttentionCodegen;
 use crate::codegen::dot_general::mps::{gemm_kernel, gemm_row_kernel, gemv_config, row_dot};
@@ -16,11 +14,13 @@ use crate::codegen::reduction::ReductionCodegen;
 use crate::codegen::row::RowCodegen;
 use crate::codegen::utils::mps::Mps;
 use crate::graph::{Graph, Primitive, TensorType};
-use crate::graph_compiler::mps::{Kernel, compile_routed, record_launch};
+use crate::graph_compiler::device::{Device, DeviceModule};
 use crate::graph_compiler::passes::attention::{self, Strides};
 use crate::graph_compiler::passes::place_views;
 use crate::graph_compiler::{CompilerConfig, Options};
-use crate::plan::{Buffer, CpuPlan, MpsPlan, MpsStep, Step as _, StepBase};
+use crate::plan::{Buffer, CpuPlan, MpsPlan, MpsStep, Plan, PlanOptions, Step as _, StepBase};
+use crate::runtime::kernel::mps::encode::{compile_routed, record_launch};
+use std::collections::{BTreeMap, HashMap};
 
 /// The MPS plan of `plan`: generates and compiles each pending fusion step's kernel, writing its outputs through
 /// the step's output views and reading its by-value inputs as scalars, and names the step after it. An
@@ -223,7 +223,9 @@ pub(crate) fn scratch_bytes(p: &Primitive, inputs: &[&TensorType], _output: &Ten
         Primitive::Cumsum {
             axis, accum_dtype, ..
         } => crate::codegen::scan::mps::scratch_bytes(inputs[0], *axis, *accum_dtype),
-        Primitive::Fusion { body, .. } => crate::graph_compiler::mps::fusion_scratch_bytes(body),
+        Primitive::Fusion { body, .. } => {
+            crate::runtime::kernel::mps::encode::fusion_scratch_bytes(body)
+        }
         Primitive::LinearCrossEntropy => {
             crate::codegen::dot_general::mps::linear_cross_entropy_scratch(inputs[0], inputs[1])
         }
@@ -232,4 +234,190 @@ pub(crate) fn scratch_bytes(p: &Primitive, inputs: &[&TensorType], _output: &Ten
         }
         _ => 0,
     }
+}
+
+/// Kind of kernel a fusion requests, generated later by codegen.
+pub(crate) enum Kernel {
+    /// A fusion's kernel generated from its body.
+    Fusion,
+    /// Flash attention forward.
+    Attention,
+    /// Flash attention backward.
+    AttentionBackward,
+}
+
+impl Kernel {
+    /// The name a fusion awaiting this kind of kernel goes by until codegen.
+    fn pending(&self) -> &'static str {
+        match self {
+            Kernel::Fusion => "pending#fusion",
+            Kernel::Attention => "pending#attention",
+            Kernel::AttentionBackward => "pending#attention_backward",
+        }
+    }
+
+    /// The kind of kernel a fusion named `name` awaits, or `None` once it has one.
+    pub(crate) fn of(name: &str) -> Option<Kernel> {
+        [Kernel::Fusion, Kernel::Attention, Kernel::AttentionBackward]
+            .into_iter()
+            .find(|k| k.pending() == name)
+    }
+}
+
+/// Requests a kernel, returning the placeholder name a fusion uses until codegen generates it.
+pub(crate) fn request(kernel: Kernel) -> String {
+    kernel.pending().to_owned()
+}
+
+/// MPS rejects ops Metal has no kernel for; it plans its passed graph with scratch, generates and compiles the
+/// kernels, optionally autotunes them, and labels the dots reading packed weight blocks.
+impl Device for Mps {
+    const NAME: &'static str = "mps";
+
+    /// Plans `module`'s graph, generates its kernels and autotunes them.
+    fn lower(module: DeviceModule<'_, Self>, _: crate::Device) -> Result<Box<dyn Plan>, String> {
+        Ok(Box::new(lower(module)?))
+    }
+}
+
+/// Compiles `graph` for MPS as `device::compile` does, keeping the plan's MPS type for tests to inspect.
+#[cfg(test)]
+pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<MpsPlan, String> {
+    let mut module = DeviceModule::<Mps>::new(graph, options);
+    crate::graph_compiler::pipeline::pipeline::<Mps>(&options.config).run(&mut module)?;
+    lower(module)
+}
+
+/// Plans MPS `module`'s passed graph with scratch, generates and compiles the kernels, optionally autotunes, and
+/// labels the dots reading packed weight blocks.
+fn lower(module: DeviceModule<'_, Mps>) -> Result<MpsPlan, String> {
+    let options = module.options;
+    let config = &options.config;
+
+    let DeviceModule {
+        graph: fused,
+        packed,
+        interleaved,
+        scalars,
+        ..
+    } = module;
+
+    let plan = PlanOptions {
+        scratch: Some(scratch_bytes),
+        ..crate::graph_compiler::plan_options(&fused, options, config, &packed, scalars)
+    };
+
+    let mut plan = codegen(CpuPlan::compile_with(&fused, &plan), options)?;
+
+    if config.autotune || crate::autotune::forcing() {
+        let tuner = crate::autotune::Autotuner {
+            timer: crate::autotune::mps::Mps,
+            autotune: config.autotune,
+        };
+
+        let mut elementwise = crate::autotune::mps::Elementwise {
+            config,
+            sources: BTreeMap::new(),
+        };
+
+        tuner.tune(&mut elementwise, &mut plan)?;
+        tuner.tune(&mut crate::autotune::mps::Gemms::new(config), &mut plan)?;
+        tuner.tune(&mut crate::autotune::mps::Attentions::default(), &mut plan)?;
+    }
+
+    // Relabel dots reading packed weight blocks (directly or through same-sized elementwise steps) as `Nx dot_general`.
+    let first_block = fused.inputs().len() - packed.len();
+    let mut derived: Vec<(Buffer, usize)> = Vec::new();
+
+    for step in plan.steps_mut() {
+        let whole = step
+            .inputs
+            .iter()
+            .zip(&step.views)
+            .filter(|(_, v)| v.is_none());
+
+        let block = whole.map(|(input, _)| input).find_map(|(b, _)| match *b {
+            Buffer::Input(i) if i >= first_block => Some(i - first_block),
+            b => derived.iter().find(|(d, _)| *d == b).map(|&(_, k)| k),
+        });
+
+        let outputs: Vec<Buffer> = std::iter::once(&step.output)
+            .chain(&step.extra_outputs)
+            .map(|(b, _)| *b)
+            .collect();
+
+        derived.retain(|(d, _)| !outputs.contains(d));
+        let gemm =
+            matches!(&step.primitive, Primitive::Fusion { body, .. } if gemm_dot(body).is_some());
+
+        if matches!(step.primitive, Primitive::DotGeneral { .. }) || gemm {
+            if let Some((k, rest)) = block.zip(step.label.strip_prefix("dot_general")) {
+                step.label =
+                    crate::graph::intern(format!("{}x dot_general{rest}", packed[k].0.len()));
+            }
+        } else if block.is_some() {
+            // Each output (a horizontal fusion's of several sizes too) derives from the block
+            // when the inputs it is computed from are the block or same-sized.
+            let types = std::iter::once(&step.output).chain(&step.extra_outputs);
+            let mut found = Vec::new();
+
+            for (p, (buffer, ty)) in types.enumerate() {
+                let reads = feeding(&step.primitive, p, step.inputs.len());
+                let n = ty.numel();
+
+                let of_block = reads.iter().all(|&i| {
+                    let m = step.inputs[i].1.numel();
+                    m == n || m == 1
+                });
+
+                let block = reads
+                    .iter()
+                    .filter(|&&i| step.views[i].is_none())
+                    .find_map(|&i| match step.inputs[i].0 {
+                        Buffer::Input(i) if i >= first_block => Some(i - first_block),
+                        b => derived.iter().find(|(d, _)| *d == b).map(|&(_, k)| k),
+                    });
+
+                if let Some(k) = block.filter(|_| of_block) {
+                    found.push((*buffer, k));
+                }
+            }
+
+            derived.extend(found);
+        }
+    }
+
+    plan.packed = packed;
+    plan.interleaved = interleaved;
+    Ok(plan)
+}
+
+/// Positions of the step inputs that output `p` of `primitive` is computed from: those its fusion
+/// body reads for that output, or every input of another primitive.
+fn feeding(primitive: &Primitive, p: usize, inputs: usize) -> Vec<usize> {
+    let Primitive::Fusion { body, .. } = primitive else {
+        return (0..inputs).collect();
+    };
+
+    let mut producer = vec![None; body.types.len()];
+
+    for node in body.nodes() {
+        producer[node.output] = Some(node);
+    }
+
+    let (mut seen, mut stack) = (vec![false; body.types.len()], vec![body.outputs()[p]]);
+    let mut reads = Vec::new();
+
+    while let Some(v) = stack.pop() {
+        if std::mem::replace(&mut seen[v], true) {
+            continue;
+        }
+
+        match producer[v] {
+            Some(node) => stack.extend(&node.inputs),
+            None => reads.extend(body.inputs().iter().position(|&i| i == v)),
+        }
+    }
+
+    reads
 }

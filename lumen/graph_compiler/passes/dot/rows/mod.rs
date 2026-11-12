@@ -3,11 +3,16 @@
 //! elementwise op may sit between them (a residual added to the product), its value written too where
 //! it is read again.
 
+use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
+#[cfg(lumen_mps_linked)]
+use crate::graph_compiler::device::Mps;
+use crate::graph_compiler::device::{Cpu, Cuda, DeviceModule};
+use crate::graph_compiler::passes::identity::Identity;
+use crate::graph_compiler::pipeline::Pass;
+use crate::graph_compiler::{CompilerConfig, elementwise};
+
 pub(crate) mod tpu;
 pub(crate) mod triton;
-
-use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
-use crate::graph_compiler::elementwise;
 
 /// Whether a row fusion's body reads its input `at` as whole rows, so a matmul can feed it.
 pub(crate) type Joins = fn(&Graph, usize) -> bool;
@@ -301,3 +306,23 @@ pub(crate) fn dot_rows(
     out.set_outputs(&outputs).expect("values of the graph");
     out
 }
+
+/// What each device runs for this pass (each device's in its own file here); a device it doesn't run on runs the
+/// identity pass.
+pub(crate) trait DotRowsDevice: Sized + 'static {
+    /// Fuses a matmul into the `row` fusion reading its whole output rows.
+    fn dot_rows<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
+        Box::new(Identity)
+    }
+
+    /// Splits rows too wide for one GEMM tile.
+    fn wide_rows<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
+        Box::new(Identity)
+    }
+}
+
+/// Devices this pass doesn't run on: the identity pass.
+impl DotRowsDevice for Cpu {}
+impl DotRowsDevice for Cuda {}
+#[cfg(lumen_mps_linked)]
+impl DotRowsDevice for Mps {}

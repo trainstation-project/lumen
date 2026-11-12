@@ -6,10 +6,12 @@
 use crate::codegen::dot_general::triton::partial_tile;
 use crate::codegen::kinds::gemm_dot;
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
-use crate::graph_compiler::elementwise;
+use crate::graph_compiler::device::{DeviceModule, Triton};
 use crate::graph_compiler::passes::CompilerPass;
 use crate::graph_compiler::passes::diamonds::tile_reductions;
-use crate::graph_compiler::triton::TritonModule;
+use crate::graph_compiler::passes::dot::rows::DotRowsDevice;
+use crate::graph_compiler::pipeline::{Pass, when};
+use crate::graph_compiler::{CompilerConfig, elementwise};
 
 /// Name of a GEMM writing a row's operand and its first reductions' partials.
 const DOT_PARTIALS: &str = "dot_partials";
@@ -294,7 +296,7 @@ fn finished_body(rows: &Graph, split: &[Var]) -> Graph {
 /// Compiler pass splitting wide GEMM-fed rows into `dot_partials`, their partials' reduction and the row.
 pub(crate) struct WideRows;
 
-impl CompilerPass<TritonModule<'_>> for WideRows {
+impl CompilerPass<DeviceModule<'_, Triton>> for WideRows {
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "wide_rows"
@@ -302,7 +304,7 @@ impl CompilerPass<TritonModule<'_>> for WideRows {
 
     /// Splits each wide row a GEMM feeds into a `dot_partials` fusion, the reduction of its partials, and
     /// the row reading them.
-    fn apply(&mut self, m: &mut TritonModule<'_>) -> Result<(), String> {
+    fn apply(&mut self, m: &mut DeviceModule<'_, Triton>) -> Result<(), String> {
         let graph = &m.graph;
 
         let nodes = graph.nodes();
@@ -461,5 +463,18 @@ impl CompilerPass<TritonModule<'_>> for WideRows {
 
         m.graph = out;
         Ok(())
+    }
+}
+
+/// Triton's answers to the pass.
+impl DotRowsDevice for Triton {
+    /// With `fuse`, `normalization_diamonds` and `linear_reordering` (as on MPS): rows too wide for one GEMM
+    /// tile get the GEMM feeding them writing their reductions' partials too. Without the reordering the row
+    /// kernel reads the rows back anyway, so the partials save nothing.
+    fn wide_rows<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
+        when(
+            config.fuse && config.normalization_diamonds && config.linear_reordering,
+            WideRows,
+        )
     }
 }

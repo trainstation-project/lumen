@@ -1,8 +1,16 @@
 //! Pass replacing an unfused `cross_entropy(h @ w, target)` with one `LinearCrossEntropy` op that
 //! never materializes the logits.
 
+#[cfg(lumen_mps_linked)]
+mod mps;
+mod triton;
+
 use crate::graph::{Graph, Node, Primitive, Var};
+use crate::graph_compiler::CompilerConfig;
+use crate::graph_compiler::device::{Cpu, Cuda, DeviceModule, Tpu};
+use crate::graph_compiler::passes::identity::Identity;
 use crate::graph_compiler::passes::{CompilerPass, Module};
+use crate::graph_compiler::pipeline::Pass;
 use crate::{DType, Scalar};
 
 /// A matched linear cross entropy.
@@ -404,3 +412,17 @@ impl<M: Module> CompilerPass<M> for LinearCrossEntropy {
         Ok(())
     }
 }
+
+/// What each device runs for this pass (each device's in its own file here); a device it doesn't run on runs the
+/// identity pass.
+pub(crate) trait LinearCrossEntropyDevice: Sized + 'static {
+    /// Replaces `cross_entropy(h @ w, target)` with one `LinearCrossEntropy` op.
+    fn linear_cross_entropy<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
+        Box::new(Identity)
+    }
+}
+
+/// Devices this pass doesn't run on: the identity pass.
+impl LinearCrossEntropyDevice for Cpu {}
+impl LinearCrossEntropyDevice for Cuda {}
+impl LinearCrossEntropyDevice for Tpu {}

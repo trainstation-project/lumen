@@ -7,9 +7,11 @@ use crate::codegen::kinds::{gemm_dot, reduction_root, row_reductions};
 use crate::codegen::regions::expansion;
 use crate::codegen::utils::triton::triton_type;
 use crate::graph::{Graph, Node, Primitive, Var};
+use crate::graph_compiler::CompilerConfig;
+use crate::graph_compiler::device::{DeviceModule, Triton};
 use crate::graph_compiler::passes::CompilerPass;
-use crate::graph_compiler::passes::alone::Lone;
-use crate::graph_compiler::triton::TritonModule;
+use crate::graph_compiler::passes::fusion::FusionDevice;
+use crate::graph_compiler::pipeline::{Pass, when};
 
 /// Whether `node` can be emitted inside a Triton fusion kernel: a supported primitive whose
 /// inputs and output all have Triton dtypes.
@@ -70,7 +72,7 @@ const ELEMENTWISE: &str = "elementwise";
 /// The shared fusion's view of Triton: kernels take any number of tensors, a GEMM epilogue
 /// writes at most 4 extra outputs and its two results into a concatenation's slots (as on MPS), and
 /// a GEMM joins the row reading it when one tile holds whole rows (`dot_row_fits`).
-fn backend(m: &TritonModule<'_>) -> Backend {
+fn backend(m: &DeviceModule<'_, Triton>) -> Backend {
     let config = &m.options.config;
 
     Backend {
@@ -88,7 +90,7 @@ fn backend(m: &TritonModule<'_>) -> Backend {
 /// The name of a fused `body`, by its kind as MPS's codegen reads it (`codegen::kinds`): a GEMM and the
 /// row reading it, a normalization row, a GEMM with its epilogue, a reduction with its prologue and
 /// epilogue, or an elementwise fusion.
-fn named(body: &Graph) -> String {
+pub(crate) fn named(body: &Graph) -> String {
     let row = !row_reductions(body).is_empty();
 
     match (gemm_dot(body).is_some(), row) {
@@ -104,14 +106,14 @@ fn named(body: &Graph) -> String {
 /// Compiler pass running the shared fusion for Triton.
 pub(crate) struct Fusion;
 
-impl CompilerPass<TritonModule<'_>> for Fusion {
+impl CompilerPass<DeviceModule<'_, Triton>> for Fusion {
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "fusion"
     }
 
     /// Fuses the graph around the normalization rows the diamonds pass found.
-    fn apply(&mut self, m: &mut TritonModule<'_>) -> Result<(), String> {
+    fn apply(&mut self, m: &mut DeviceModule<'_, Triton>) -> Result<(), String> {
         let scalars: Vec<Var> = crate::graph_compiler::positions(&m.options.scalars)
             .into_iter()
             .map(|i| m.graph.inputs()[i])
@@ -121,31 +123,6 @@ impl CompilerPass<TritonModule<'_>> for Fusion {
         m.graph = fuse(&m.graph, &m.rows, &scalars, &backend, |body, _| named(body));
         m.rows.clear();
         Ok(())
-    }
-}
-
-impl Lone for TritonModule<'_> {
-    /// Whether lone `n` is one a Triton loop kernel computes (Triton has no other kernel for it): every
-    /// fusible node but views of their operand (reshapes, slices placed as views) and in-place
-    /// concatenations.
-    fn alone(graph: &Graph, n: &Node) -> bool {
-        fusible(graph, n)
-            && !matches!(
-                n.primitive,
-                Primitive::Reshape { .. }
-                    | Primitive::Slice { view: true, .. }
-                    | Primitive::Concatenate { in_place: true, .. }
-            )
-    }
-
-    /// Triton passes no inputs by value.
-    fn scalars(&mut self) -> Option<&mut Vec<usize>> {
-        None
-    }
-
-    /// Names the kernel by the body's kind.
-    fn kernel(&mut self, body: &Graph, _: &[bool]) -> String {
-        named(body)
     }
 }
 
@@ -184,4 +161,12 @@ pub(crate) fn slot_writes(graph: &Graph, producer: &Node) -> bool {
         && (crate::graph_compiler::elementwise(&producer.primitive) || copies);
 
     kernel || matches!(producer.primitive, Primitive::DotGeneral { .. })
+}
+
+/// Triton's answers to the pass.
+impl FusionDevice for Triton {
+    /// With `fuse`.
+    fn fusion<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
+        when(config.fuse, Fusion)
+    }
 }

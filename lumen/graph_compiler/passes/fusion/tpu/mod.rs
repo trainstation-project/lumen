@@ -1,21 +1,25 @@
 //! TPU fusion passes: elementwise/reduction fusion and horizontal fusion (its dot fusions live in
 //! `passes::dot`).
+
+use crate::codegen::utils::tpu::LANES;
+use crate::graph::{Graph, Node, Primitive};
+use crate::graph_compiler::CompilerConfig;
+use crate::graph_compiler::device::{DeviceModule, Tpu};
+use crate::graph_compiler::passes::CompilerPass;
+use crate::graph_compiler::passes::fusion::FusionDevice;
+use crate::graph_compiler::pipeline::Pass;
 mod emit;
 mod groups;
-
-use crate::graph::{Graph, Node, Primitive};
-use crate::graph_compiler::passes::CompilerPass;
-use crate::graph_compiler::tpu::{LANES, TpuModule};
 
 /// Groups elementwise and reduction nodes into `elementwise` and `reduction` fusions.
 pub(crate) struct Fusion;
 
-impl CompilerPass<TpuModule<'_>> for Fusion {
+impl CompilerPass<DeviceModule<'_, Tpu>> for Fusion {
     fn name(&self) -> &'static str {
         "fusion"
     }
 
-    fn apply(&mut self, m: &mut TpuModule<'_>) -> Result<(), String> {
+    fn apply(&mut self, m: &mut DeviceModule<'_, Tpu>) -> Result<(), String> {
         m.graph = emit::elementwise_fusion(&m.graph);
         Ok(())
     }
@@ -67,4 +71,12 @@ pub(crate) fn slot_writes(graph: &Graph, concat: &Node, k: usize, producer: &Nod
     dimension + 1 == graph.type_of(concat.output).shape.len()
         && graph.type_of(concat.inputs[k]).shape[dimension].is_multiple_of(LANES)
         && writes
+}
+
+/// TPU's answers to the pass.
+impl FusionDevice for Tpu {
+    /// Always.
+    fn fusion<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
+        Box::new(Fusion)
+    }
 }

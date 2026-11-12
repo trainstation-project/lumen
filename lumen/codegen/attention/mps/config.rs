@@ -119,7 +119,7 @@ fn mpp_fits(a: &Attention) -> bool {
         && a.hv.is_multiple_of(16)
         && a.sq.is_multiple_of(16)
         && a.sk.is_multiple_of(32)
-        && crate::graph_compiler::mps::mpp_available()
+        && crate::runtime::kernel::mps::encode::mpp_available()
 }
 
 /// Whether the forward uses the decode kernel (few query rows).

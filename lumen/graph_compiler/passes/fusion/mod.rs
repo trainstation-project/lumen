@@ -2,6 +2,16 @@
 //! and GEMM epilogues into `Fusion` nodes, each compiled by the backend to one kernel. `mps` and `triton`
 //! run it with their kernels' limits; `tpu` groups nodes into the TPU's elementwise and reduction kernels.
 
+pub(crate) mod cuda;
+
+use crate::graph::{Graph, Node, Primitive, Var};
+use crate::graph_compiler::CompilerConfig;
+use crate::graph_compiler::device::{Cpu, DeviceModule};
+use crate::graph_compiler::passes::diamonds::Row;
+use crate::graph_compiler::passes::identity::Identity;
+use crate::graph_compiler::pipeline::Pass;
+pub(crate) use crate::graph_compiler::{constant, elementwise, label};
+
 mod analysis;
 mod dot_epilogues;
 mod emit;
@@ -12,10 +22,6 @@ mod reduction_epilogues;
 mod rows;
 pub(crate) mod tpu;
 pub(crate) mod triton;
-
-use crate::graph::{Graph, Node, Primitive, Var};
-use crate::graph_compiler::passes::diamonds::Row;
-pub(crate) use crate::graph_compiler::{constant, elementwise, label};
 
 /// What a backend brings to fusion: the nodes its kernels compute, their limits, the fusions it
 /// turns on, and the GEMM shapes its kernels take.
@@ -96,3 +102,15 @@ pub(crate) fn fuse(
         kernel,
     )
 }
+
+/// What each device runs for this pass (each device's in its own file here); a device it doesn't run on runs the
+/// identity pass.
+pub(crate) trait FusionDevice: Sized + 'static {
+    /// Fuses the graph into kernels.
+    fn fusion<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
+        Box::new(Identity)
+    }
+}
+
+/// Devices this pass doesn't run on: the identity pass.
+impl FusionDevice for Cpu {}

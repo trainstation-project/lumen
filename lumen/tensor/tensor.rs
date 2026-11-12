@@ -1,6 +1,4 @@
 //! `Tensor`: a strided view of shared device storage, with factories, views, host access and copies.
-use std::sync::Arc;
-
 use super::dtype::{DType, Element, bf16, dispatch_dtype, f16};
 use super::scalar::Scalar;
 use super::storage::Storage;
@@ -9,6 +7,7 @@ use crate::device::Device;
 use crate::graph::TensorType;
 use crate::profiler::RecordGuard;
 use crate::runtime::device_transfer::{copy_d2h, copy_h2d};
+use std::sync::Arc;
 
 /// The device in `options`, defaulting to the CPU.
 fn device_of(options: &TensorOptions) -> Device {
@@ -184,7 +183,7 @@ impl Tensor {
 
         #[cfg(lumen_mps_linked)]
         if let Device::Mps(_) = self.device() {
-            return crate::graph_compiler::mps::fill(self, value)
+            return crate::runtime::kernel::mps::encode::fill(self, value)
                 .unwrap_or_else(|e| panic!("fill_: {e}"));
         }
 
@@ -838,7 +837,7 @@ impl Tensor {
         #[cfg(lumen_mps_linked)]
         if self.device() == Device::Mps(0) && src.device() == Device::Mps(0) {
             if self.numel() > 0 {
-                crate::graph_compiler::mps::copy(self, src)?;
+                crate::runtime::kernel::mps::encode::copy(self, src)?;
             }
 
             return Ok(self);

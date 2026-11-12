@@ -4,7 +4,11 @@
 use super::Rules;
 use crate::codegen::dot_general::mps::{float_groups, gemv, skinny_rows};
 use crate::graph::Graph;
+use crate::graph_compiler::CompilerConfig;
+use crate::graph_compiler::device::{DeviceModule, Mps};
+use crate::graph_compiler::passes::dot::split_k::SplitKDevice;
 use crate::graph_compiler::passes::{CompilerPass, Module};
+use crate::graph_compiler::pipeline::{Pass, when};
 
 /// Most rows of a skinny product kept whole: its lanes already split K, while split, each chunk runs on a
 /// tiled GEMM of mostly-padding 32-row tiles. On an M4 Pro, bf16 [4, 4096] · [4096, 1024] runs 59 µs split
@@ -54,5 +58,13 @@ impl<M: Module> CompilerPass<M> for SplitK {
     fn apply(&mut self, m: &mut M) -> Result<(), String> {
         *m.graph_mut() = split_k(m.graph());
         Ok(())
+    }
+}
+
+/// MPS's answers to the pass.
+impl SplitKDevice for Mps {
+    /// With `split_k`.
+    fn split_k<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
+        when(config.split_k, SplitK)
     }
 }

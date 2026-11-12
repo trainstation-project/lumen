@@ -3,7 +3,11 @@
 
 use super::{Rules, split_k};
 use crate::codegen::dot_general::triton::{CONFIGS, UNTUNED};
+use crate::graph_compiler::CompilerConfig;
+use crate::graph_compiler::device::{DeviceModule, Triton};
+use crate::graph_compiler::passes::dot::split_k::SplitKDevice;
 use crate::graph_compiler::passes::{CompilerPass, Module};
+use crate::graph_compiler::pipeline::{Pass, when};
 
 /// Tiles a Triton split aims for: on an H100, outputs of 64 or more 128x128 tiles already keep the
 /// GPU busy (a 1024x1024 bfloat16 matmul is slower split), while 16 tiles gain about 2x.
@@ -31,5 +35,13 @@ impl<M: Module> CompilerPass<M> for SplitK {
 
         *m.graph_mut() = split_k(m.graph(), &rules);
         Ok(())
+    }
+}
+
+/// Triton's answers to the pass.
+impl SplitKDevice for Triton {
+    /// With `split_k`.
+    fn split_k<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
+        when(config.split_k, SplitK)
     }
 }

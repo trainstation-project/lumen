@@ -1,11 +1,15 @@
 //! Split-K shared by the backends: long-K matmuls with too few output tiles become partial products
 //! over K chunks summed over the chunks.
 
+use crate::graph::{Graph, Primitive, TensorType, Var};
+use crate::graph_compiler::CompilerConfig;
+use crate::graph_compiler::device::{Cpu, Cuda, DeviceModule, Tpu};
+use crate::graph_compiler::passes::identity::Identity;
+use crate::graph_compiler::pipeline::Pass;
+
 #[cfg(lumen_mps_linked)]
 pub(crate) mod mps;
 pub(crate) mod triton;
-
-use crate::graph::{Graph, Primitive, TensorType, Var};
 
 /// Most K chunks a matmul is split into.
 const MAX_SPLIT: usize = 8;
@@ -169,3 +173,17 @@ pub(crate) fn divides(mut s: usize, k: usize) -> Option<usize> {
 
     (s >= 2).then_some(s)
 }
+
+/// What each device runs for this pass (each device's in its own file here); a device it doesn't run on runs the
+/// identity pass.
+pub(crate) trait SplitKDevice: Sized + 'static {
+    /// Splits long-K matmuls with too few output tiles.
+    fn split_k<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
+        Box::new(Identity)
+    }
+}
+
+/// Devices this pass doesn't run on: the identity pass.
+impl SplitKDevice for Cpu {}
+impl SplitKDevice for Cuda {}
+impl SplitKDevice for Tpu {}

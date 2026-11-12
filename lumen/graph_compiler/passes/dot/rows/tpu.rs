@@ -4,8 +4,11 @@
 use super::dot_rows;
 use crate::codegen::row::tpu::{Kind, kinds};
 use crate::graph::Graph;
+use crate::graph_compiler::CompilerConfig;
+use crate::graph_compiler::device::{DeviceModule, Tpu};
 use crate::graph_compiler::passes::CompilerPass;
-use crate::graph_compiler::tpu::TpuModule;
+use crate::graph_compiler::passes::dot::rows::DotRowsDevice;
+use crate::graph_compiler::pipeline::{Pass, when};
 
 /// Whether the TPU row kernel reads input `at` of row body `body` as full rows.
 fn full(body: &Graph, at: usize) -> bool {
@@ -15,18 +18,26 @@ fn full(body: &Graph, at: usize) -> bool {
 /// Fuses dots into the row fusions that read them when contraction epilogues are enabled.
 pub(crate) struct DotRows;
 
-impl CompilerPass<TpuModule<'_>> for DotRows {
+impl CompilerPass<DeviceModule<'_, Tpu>> for DotRows {
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "dot_rows"
     }
 
     /// Fuses the module's dots into the row fusions reading their whole rows.
-    fn apply(&mut self, m: &mut TpuModule<'_>) -> Result<(), String> {
+    fn apply(&mut self, m: &mut DeviceModule<'_, Tpu>) -> Result<(), String> {
         if m.options.config.contraction_epilogues {
             m.graph = dot_rows(&m.graph, full, |_| true, false);
         }
 
         Ok(())
+    }
+}
+
+/// TPU's answers to the pass.
+impl DotRowsDevice for Tpu {
+    /// With `normalization_diamonds`.
+    fn dot_rows<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
+        when(config.normalization_diamonds, DotRows)
     }
 }

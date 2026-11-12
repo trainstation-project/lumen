@@ -2,9 +2,13 @@
 //! the backward's `delta` dot (`backward::tpu`) into the fusions, then checks the TPU codegen takes each.
 
 use crate::graph::{Graph, Primitive, Var};
-use crate::graph_compiler::passes::CompilerPass;
-use crate::graph_compiler::passes::attention;
-use crate::graph_compiler::tpu::TpuModule;
+use crate::graph_compiler::CompilerConfig;
+use crate::graph_compiler::device::{DeviceModule, Tpu};
+use crate::graph_compiler::passes::attention::{
+    AttentionDevice, FlashAttention, FlashAttentionBackward,
+};
+use crate::graph_compiler::passes::{CompilerPass, attention};
+use crate::graph_compiler::pipeline::{Pass, when};
 
 /// Indices of the attention fusion's outputs written with rows narrower than their last axis.
 fn unreadable(body: &Graph, forward: bool) -> Vec<usize> {
@@ -350,15 +354,33 @@ fn attentions(graph: &Graph) -> Result<(), String> {
 /// checks the TPU codegen takes each.
 pub(crate) struct AttentionLayouts;
 
-impl CompilerPass<TpuModule<'_>> for AttentionLayouts {
+impl CompilerPass<DeviceModule<'_, Tpu>> for AttentionLayouts {
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "attention_layouts"
     }
 
     /// Rewrites the graph's attention fusions for the TPU kernels and checks each.
-    fn apply(&mut self, m: &mut TpuModule<'_>) -> Result<(), String> {
+    fn apply(&mut self, m: &mut DeviceModule<'_, Tpu>) -> Result<(), String> {
         m.graph = super::backward::tpu::delta_inside(&reshaped_outputs(&merged_outputs(&m.graph)));
         attentions(&m.graph)
+    }
+}
+
+/// TPU's answers to the pass.
+impl AttentionDevice for Tpu {
+    /// With `flash_attention`.
+    fn flash_attention<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
+        when(config.flash_attention, FlashAttention)
+    }
+
+    /// With `flash_attention`.
+    fn flash_attention_backward<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
+        when(config.flash_attention, FlashAttentionBackward)
+    }
+
+    /// With `flash_attention`.
+    fn attention_layouts<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
+        when(config.flash_attention, AttentionLayouts)
     }
 }

@@ -2,11 +2,18 @@
 //! them, so the concatenate copies nothing. `mps` holds MPS's slot rules and its pass, after fusion, copying
 //! the concatenations fusion left unable to be written in place.
 
-#[cfg(lumen_mps_linked)]
-pub(crate) mod mps;
+mod tpu;
+mod triton;
 
 use crate::graph::{Graph, Node, Primitive};
+use crate::graph_compiler::CompilerConfig;
+use crate::graph_compiler::device::{Cpu, Cuda, DeviceModule};
+use crate::graph_compiler::passes::identity::Identity;
 use crate::graph_compiler::passes::{CompilerPass, Module};
+use crate::graph_compiler::pipeline::Pass;
+
+#[cfg(lumen_mps_linked)]
+pub(crate) mod mps;
 
 /// A module whose backend's kernels may write a concatenation's operands into their slots. Operand `k` of
 /// `concat` is made by `producer`, the fusion itself when the operand is its output `index`.
@@ -113,3 +120,21 @@ impl<M: Slots> CompilerPass<M> for PlaceConcats {
         Ok(())
     }
 }
+
+/// What each device runs for this pass (each device's in its own file here); a device it doesn't run on runs the
+/// identity pass.
+pub(crate) trait PlaceConcatsDevice: Sized + 'static {
+    /// Places concatenations whose operands can be written straight into their slots.
+    fn place_concats<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
+        Box::new(Identity)
+    }
+
+    /// Copies the concatenations fusion left unable to be written in place.
+    fn concats<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
+        Box::new(Identity)
+    }
+}
+
+/// Devices this pass doesn't run on: the identity pass.
+impl PlaceConcatsDevice for Cpu {}
+impl PlaceConcatsDevice for Cuda {}

@@ -1,12 +1,15 @@
 //! What the TPU code generators share: the backend type, which primitives a plain elementwise kernel runs, the JSON
 //! nodes the Pallas programs rebuild primitives from, and outputs written into windows of wider matrices.
 
+use crate::Scalar;
+use crate::graph::{Primitive, UnaryOp};
+use crate::graph_compiler::device::{Device, DeviceModule};
+use crate::graph_compiler::{plan_options, positions};
+use crate::plan::{CpuPlan, DeviceLayout, Plan, PlanOptions};
+
 #[cfg(lumen_tpu_linked)]
 pub(crate) mod lowering;
 
-use crate::Scalar;
-use crate::graph::Primitive;
-use crate::graph::UnaryOp;
 #[cfg(lumen_tpu_linked)]
 use crate::plan::StepBase;
 
@@ -96,4 +99,59 @@ pub(crate) fn window(step: &StepBase, k: usize) -> Option<(usize, usize)> {
 pub(crate) fn window_at(offset: usize, strides: &[usize]) -> Option<(usize, usize)> {
     let rank = strides.len();
     (rank >= 2).then(|| (strides[rank - 2], offset % strides[rank - 2]))
+}
+
+/// Vector lane width of a TPU register; concatenated and merged dot widths are aligned to it.
+pub(crate) const LANES: usize = 128;
+
+/// Buffer layout of TPU tensors, which are stored TPU-tiled in the shared region.
+const LAYOUT: DeviceLayout = DeviceLayout {
+    bytes: |t| {
+        // Shapes the tiled layout can't describe fall back to their dense size.
+        crate::device::tpu::layout::bytes(t.dtype, &t.shape)
+            .unwrap_or(t.numel() * t.dtype.size_of())
+    },
+    same: crate::device::tpu::layout::same,
+    align: |t| crate::device::tpu::layout::alignment(t.dtype, &t.shape),
+};
+
+/// TPU plans its passed graph's buffers with the TPU tiled layout and generates each step's kernel; without a TPU
+/// linked, the plan stays the CPU's.
+impl Device for Tpu {
+    const NAME: &'static str = "tpu";
+
+    /// Plans `module`'s graph with its packed blocks in the tiled layout, generating its kernels.
+    fn lower(module: DeviceModule<'_, Self>, _: crate::Device) -> Result<Box<dyn Plan>, String> {
+        let DeviceModule {
+            graph,
+            options,
+            packed,
+            interleaved,
+            ..
+        } = module;
+
+        let config = &options.config;
+
+        let plan = PlanOptions {
+            layout: Some(LAYOUT),
+            ..plan_options(
+                &graph,
+                options,
+                config,
+                &packed,
+                positions(&options.scalars),
+            )
+        };
+
+        let mut plan = CpuPlan::compile_with(&graph, &plan);
+        plan.packed = packed;
+        plan.interleaved = interleaved;
+
+        // Each step's kernel is generated now, so running the plan only launches them.
+        #[cfg(lumen_tpu_linked)]
+        return Ok(Box::new(crate::codegen::tpu::codegen(plan, options)?));
+
+        #[cfg(not(lumen_tpu_linked))]
+        Ok(Box::new(plan))
+    }
 }

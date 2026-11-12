@@ -1,10 +1,11 @@
 //! How MPS fuses forward attention: its answers to the forward `FlashAttention` pass.
 
+use crate::codegen::mps::{Kernel, request};
 use crate::graph::Var;
-use crate::graph_compiler::mps::{Kernel, MpsModule, request};
+use crate::graph_compiler::device::{DeviceModule, Mps};
 use crate::graph_compiler::passes::attention::Attentions;
 
-impl Attentions for MpsModule<'_> {
+impl Attentions for DeviceModule<'_, Mps> {
     /// Whether attention may absorb elementwise epilogues.
     fn contraction_epilogues(&self) -> bool {
         self.options.config.contraction_epilogues

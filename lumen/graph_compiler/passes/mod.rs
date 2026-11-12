@@ -2,7 +2,6 @@
 //! backend compilers run (in a `graph_compiler::pipeline::Pipeline`).
 
 pub(crate) mod alone;
-#[cfg(lumen_mps_linked)]
 pub(crate) mod ane;
 #[cfg_attr(not(all(feature = "python", lumen_mps_linked)), allow(dead_code))]
 pub(crate) mod attention;
@@ -13,9 +12,9 @@ pub(crate) mod cse;
 pub(crate) mod diamonds;
 pub(crate) mod dot;
 pub(crate) mod elementwise;
-pub(crate) mod empty;
 pub(crate) mod fusion;
 pub(crate) mod horizontal;
+pub(crate) mod identity;
 #[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
 pub(crate) mod linear_cross_entropy;
 pub(crate) mod linear_reordering;
@@ -29,6 +28,7 @@ pub(crate) mod rms_norm;
 pub(crate) mod simplify;
 #[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
 pub(crate) mod take_along_axis;
+pub(crate) mod unsupported;
 pub(crate) mod updates;
 
 use super::{CompilerConfig, Options};
@@ -50,7 +50,7 @@ pub(crate) trait CompilerPass<M> {
     fn name(&self) -> &'static str;
     /// Rewrites `module` in place.
     fn apply(&mut self, module: &mut M) -> Result<(), String>;
-    /// Whether the pass does nothing (`empty::Empty`), so a pipeline skips it.
+    /// Whether the pass does nothing (`identity::Identity`), so a pipeline skips it.
     fn is_empty(&self) -> bool {
         false
     }
