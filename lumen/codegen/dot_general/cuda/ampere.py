@@ -42,17 +42,26 @@ class AmpereGemm:
         NUM_WARPS: int | None = None,
         occupancy: int | None = None,
         arch: int = 80,
-        aligned: bool = False,
+        aligned_m: bool = False,
+        aligned_n: bool = False,
+        aligned_k: bool = False,
+        ab_stage: int | None = None,
     ):
         """The GEMM for `a_dtype` operands accumulating in `accum_dtype`, one CTA per (M, N) tile of `tile_shape_mnk`
         (K defaulting to four MMA instructions), with `NUM_WARPS` warps (4, or 8 for the widest tiles) and
-        `occupancy` CTAs per SM. `aligned` compiles it for M, N and K that are multiples of the tile's: no bounds
-        checks on loads or stores, and no partial last k-tile."""
+        `occupancy` CTAs per SM. `aligned_m`, `aligned_n` and `aligned_k` compile it for an M, N or K that is a
+        multiple of the tile's: no bounds checks on A's rows (and D's), B's rows (and D's columns), or a partial last
+        k-tile, each set independently so only a dimension that needs them is checked.
+        `ab_stage` fixes the A/B pipeline stages (as many as fit otherwise); unless `occupancy` is given, it runs as
+        many CTAs per SM as fit them, at most the default."""
         if arch not in (80, 86, 87, 89):
             raise ValueError(f"SM80-family GEMM supports arch in {self._supported_archs}, got {arch}")
 
         self.arch = arch
-        self.aligned = aligned
+        self.aligned_m = aligned_m
+        self.aligned_n = aligned_n
+        self.aligned_k = aligned_k
+        self.fixed_ab_stage = ab_stage
         self.accum_dtype = accum_dtype
         self.is_persistent = is_persistent
         self.use_pdl = use_pdl
@@ -67,6 +76,7 @@ class AmpereGemm:
         self.smem_capacity = self._smem_capacity_for_arch(self.arch)
         self.buffer_align_bytes = 1024
         self.occupancy = self._default_occupancy(a_dtype) if occupancy is None else occupancy
+        self.occupancy_given = occupancy is not None
 
         self.epilogue_barrier = NamedBarrier(barrier_id=1, num_threads=self.NUM_WARPS * cute.arch.WARP_SIZE)
         self.epi_m_major = True
@@ -141,15 +151,25 @@ class AmpereGemm:
         self.epi_tile = self._compute_tile_shape_or_override(self.cta_tile_shape_mnk, self.atom_layout_mnk)
         self.epi_tile_shape = cute.ceil_div(self.cta_tile_shape_mnk[:2], self.epi_tile)
 
-        self.ab_stage, self.epi_stage = self._compute_stages(
+        stages = lambda occupancy, ab_stage=None: self._compute_stages(  # noqa: E731
             self.cta_tile_shape_mnk,
             self.epi_tile,
             self.a_dtype,
             self.b_dtype,
             self.d_dtype,
             self.smem_capacity,
-            self.occupancy,
+            occupancy,
+            ab_stage,
         )
+
+        if self.fixed_ab_stage is not None:
+            # The most CTAs per SM (up to the default, or exactly `occupancy` when given) fitting the fixed stages.
+            fits = [o for o in range(self.occupancy, 0, -1) if stages(o)[0] >= self.fixed_ab_stage]
+            if not fits or (self.occupancy_given and fits[0] != self.occupancy):
+                raise ValueError(f"SM80 GEMM: {self.fixed_ab_stage} A/B stages do not fit shared memory")
+            self.occupancy = fits[0]
+
+        self.ab_stage, self.epi_stage = stages(self.occupancy, self.fixed_ab_stage)
 
         # The mainloop keeps ab_stage - 1 k-tiles in flight while it reads one.
         assert self.ab_stage >= 2, f"SM80 GEMM needs >= 2 A/B stages, shared memory fits {self.ab_stage}"
@@ -184,13 +204,13 @@ class AmpereGemm:
         (stage, k_block) load one k16 block of a stage into the fragments. ab_stage - 1 k-tiles are kept in flight:
         k-tile t + ab_stage - 1 is issued into the stage k-tile t - 1 vacated, once every thread has moved past it.
         The register side has the produce rhythm of QuACK's SM120 warp-MMA mainloop: load block k + 1 (slot 0 of
-        the next stage at the tile's last block), then MMA block k."""
+        the next stage at the tile's last block), then MMA block k; the last k-tile is peeled off the loop."""
         num_k_blocks = cute.size(tCrA, mode=[2])
 
         # Prologue: issue the first ab_stage - 1 k-tiles, one commit group each (empty past the last k-tile, so
         # the wait_group counts below hold for any k_tile_cnt). Only the last k-tile can run past K.
         for k_tile in cutlass.range_constexpr(self.ab_stage - 1):
-            if const_expr(self.aligned):
+            if const_expr(self.aligned_k):
                 if k_tile < k_tile_cnt:
                     copy_A(k_tile, k_tile)
                     copy_B(k_tile, k_tile)
@@ -203,8 +223,8 @@ class AmpereGemm:
 
             cute.arch.cp_async_commit_group()
 
-        read_stage = Int32(0)
-        write_stage = Int32(self.ab_stage - 1)
+        # The stage being read, and the one being refilled (the one read the k-tile before).
+        read_stage, write_stage = Int32(0), Int32(self.ab_stage - 1)
 
         # Load first k-block
         cute.arch.cp_async_wait_group(self.ab_stage - 2)
@@ -213,43 +233,82 @@ class AmpereGemm:
         copy_block_A(read_stage, 0)
         copy_block_B(read_stage, 0)
 
-        for k_tile in cutlass.range(k_tile_cnt, unroll=1):
-            for k in cutlass.range_constexpr(num_k_blocks):
-                if const_expr(k == num_k_blocks - 1):
-                    # The next k-tile's stage: wait for its copy, and for every thread to finish reading the
-                    # stage the copy below overwrites.
-                    read_stage += 1
-                    if read_stage == self.ab_stage:
-                        read_stage = Int32(0)
-                    cute.arch.cp_async_wait_group(self.ab_stage - 2)
-                    cute.arch.sync_threads()
+        # The k-tile loop split by what each refills, so no k-tile checks whether it has a copy to issue (and only
+        # the one copying the last k-tile, when K is not a tile multiple, checks K): full copies while the k-tile
+        # refilled precedes the last, then the last's, then none.
+        steady = k_tile_cnt - self.ab_stage
+        operands = (tiled_mma, acc, copy_A, copy_B, copy_block_A, copy_block_B, tCrA, tCrB)
+        stages = (read_stage, write_stage)
+        for k_tile in cutlass.range(steady, unroll=1):
+            stages = self.k_tile_step(*operands, k_tile, *stages, 1)
 
-                # the wrap load is the NEXT tile's slot-0 preload
-                k_next = 0 if k + 1 == num_k_blocks else k + 1
-                copy_block_A(read_stage, k_next)
-                copy_block_B(read_stage, k_next)
+        if steady >= 0:
+            stages = self.k_tile_step(*operands, steady, *stages, 1 if const_expr(self.aligned_k) else 2)
 
-                if const_expr(k == 0):
-                    next_k_tile = k_tile + self.ab_stage - 1
-                    if const_expr(self.aligned):
-                        if next_k_tile < k_tile_cnt:
-                            copy_A(next_k_tile, write_stage)
-                            copy_B(next_k_tile, write_stage)
-                    else:
-                        if next_k_tile < k_tile_cnt - 1:
-                            copy_A(next_k_tile, write_stage)
-                            copy_B(next_k_tile, write_stage)
-                        if next_k_tile == k_tile_cnt - 1:
-                            copy_A(next_k_tile, write_stage, pred_k=True)
-                            copy_B(next_k_tile, write_stage, pred_k=True)
-                    cute.arch.cp_async_commit_group()
-                    write_stage += 1
-                    if write_stage == self.ab_stage:
-                        write_stage = Int32(0)
+        for k_tile in cutlass.range(cutlass.max(steady + 1, 0), k_tile_cnt - 1, unroll=1):
+            stages = self.k_tile_step(*operands, k_tile, *stages, 0)
 
-                cute.gemm(tiled_mma, acc, tCrA[None, None, k], tCrB[None, None, k], acc)
+        read_stage = stages[0]
+
+        # Last k-tile (hoisted, as QuACK's SM120 mainloop): no next stage to wait for or preload, and no copy to
+        # issue, so it skips the CTA barrier. K >= 1, so there always is one.
+        for k in cutlass.range_constexpr(num_k_blocks):
+            if const_expr(k + 1 < num_k_blocks):
+                copy_block_A(read_stage, k + 1)
+                copy_block_B(read_stage, k + 1)
+
+            cute.gemm(tiled_mma, acc, tCrA[None, None, k], tCrB[None, None, k], acc)
 
         cute.arch.cp_async_wait_group(0)
+
+    @cute.jit
+    def k_tile_step(
+        self,
+        tiled_mma: cute.TiledMma,
+        acc: cute.Tensor,
+        copy_A: Callable,
+        copy_B: Callable,
+        copy_block_A: Callable,
+        copy_block_B: Callable,
+        tCrA: cute.Tensor,
+        tCrB: cute.Tensor,
+        k_tile: Int32,
+        read_stage: Int32,
+        write_stage: Int32,
+        refill: cutlass.Constexpr[int],
+    ):
+        """One k-tile of the loop (all but the last): its MMAs, the next k-tile's first block preloaded, and the
+        stage the k-tile before read refilled with k-tile `k_tile + ab_stage - 1`: a full copy (`refill` 1), one
+        checked against K (2, the last k-tile when K is not a tile multiple), or none (0, past the last).
+        Returns the updated (read_stage, write_stage)."""
+        num_k_blocks = cute.size(tCrA, mode=[2])
+
+        for k in cutlass.range_constexpr(num_k_blocks):
+            if const_expr(k == num_k_blocks - 1):
+                # The next k-tile's stage: wait for its copy, and for every thread to finish reading the
+                # stage the copy below overwrites.
+                write_stage = read_stage
+                read_stage += 1
+                if read_stage == self.ab_stage:
+                    read_stage = Int32(0)
+                cute.arch.cp_async_wait_group(self.ab_stage - 2)
+                cute.arch.sync_threads()
+
+            # the wrap load is the NEXT tile's slot-0 preload
+            k_next = 0 if k + 1 == num_k_blocks else k + 1
+            copy_block_A(read_stage, k_next)
+            copy_block_B(read_stage, k_next)
+
+            if const_expr(k == 0):
+                if const_expr(refill > 0):
+                    copy_A(k_tile + self.ab_stage - 1, write_stage, pred_k=refill == 2)
+                    copy_B(k_tile + self.ab_stage - 1, write_stage, pred_k=refill == 2)
+                # A commit group even when empty, so the wait_group counts hold.
+                cute.arch.cp_async_commit_group()
+
+            cute.gemm(tiled_mma, acc, tCrA[None, None, k], tCrB[None, None, k], acc)
+
+        return read_stage, write_stage
 
     @cute.jit
     def epilogue(
@@ -296,13 +355,14 @@ class AmpereGemm:
         sX: cute.Tensor,
         tile_idx: Int32,
         tile_mn: int,
+        aligned: cutlass.Constexpr[bool],
         tidx: Int32,
     ) -> Callable:
         """`copy(k_tile, stage, pred_k=False)`: the cp.async of k-tile `k_tile` of row tile `tile_idx` of `mX` (mn, k)
         into stage `stage` of `sX` (tile_mn, tile_k, STAGE). Vectors outside `mX` are zero in smem (extents are
         16-byte multiples, so a vector is wholly inside or outside): rows past MN are zeroed in every stage here, once
-        per tile, and columns past K by `pred_k`, which only the last k-tile needs. An `aligned` GEMM copies every
-        vector unchecked."""
+        per tile, and columns past K by `pred_k`, which only the last k-tile needs. With `aligned` (the tile divides
+        `mX`'s rows) no row is checked."""
         tile_shape = (tile_mn, self.cta_tile_shape_mnk[2])
         # (tile_mn, tile_k, RestK)
         gX = cute.local_tile(mX, tile_shape, (tile_idx, None))
@@ -317,14 +377,17 @@ class AmpereGemm:
 
         limit_k = mX.shape[1]
 
-        # MN bounds, one predicate per row of vectors, fixed for the tile.
+        # Row bounds, one predicate per row of vectors, fixed for the tile (all true when `aligned`).
         num_rows = cute.size(tXsX, mode=[1])
         tXpX = cute.make_rmem_tensor(num_rows, Boolean)
-        for i in cutlass.range_constexpr(num_rows):
-            tXpX[i] = tXcX[0, i, 0, 0][0] < mX.shape[0]
+        if const_expr(aligned):
+            tXpX.fill(True)
+        else:
+            for i in cutlass.range_constexpr(num_rows):
+                tXpX[i] = tXcX[0, i, 0, 0][0] < mX.shape[0]
 
         # cp.async never writes the rows past MN: zero them in every stage up front.
-        if const_expr(not self.aligned):
+        if const_expr(not aligned):
             for stage in cutlass.range_constexpr(cute.size(tXsX, mode=[3])):
                 for i in cutlass.range_constexpr(num_rows):
                     if not tXpX[i]:
@@ -334,9 +397,7 @@ class AmpereGemm:
         def copy_fn(k_tile, stage, pred_k: cutlass.Constexpr[bool] = False):
             for i in cutlass.range_constexpr(num_rows):
                 for j in cutlass.range_constexpr(cute.size(tXsX, mode=[2])):
-                    if const_expr(self.aligned):
-                        cute.copy(tiled_copy, tXgX[None, i, j, k_tile], tXsX[None, i, j, stage])
-                    elif tXpX[i]:
+                    if tXpX[i]:
                         if const_expr(pred_k):
                             if tXcX[0, i, j, k_tile][1] < limit_k:
                                 cute.copy(tiled_copy, tXgX[None, i, j, k_tile], tXsX[None, i, j, stage])
@@ -381,7 +442,7 @@ class AmpereGemm:
     ) -> Callable:
         """`copy_D(src_idx, dst_idx)`: stage `src_idx` of `sD` to epilogue subtile `dst_idx` (epi_m, epi_n) of D's
         tile `tile_coord_mnkl`, in 16-byte vectors along D's contiguous dimension, skipping those outside D (none when
-        `aligned`)."""
+        `aligned_m` and `aligned_n`; only the coordinate of a dimension the tile does not divide is checked)."""
         tile_mn = self.cta_tile_shape_mnk[:2]
         gD = cute.local_tile(mD_mn, tile_mn, (tile_coord_mnkl[0], tile_coord_mnkl[1]))
         cD = cute.local_tile(cute.make_identity_tensor(mD_mn.shape), tile_mn, (tile_coord_mnkl[0], tile_coord_mnkl[1]))
@@ -410,9 +471,16 @@ class AmpereGemm:
             for i in cutlass.range_constexpr(cute.size(tDsD, mode=[1])):
                 for j in cutlass.range_constexpr(cute.size(tDsD, mode=[2])):
                     # The (n, m) views reorder the modes, not the coordinates: they stay (m, n).
-                    if const_expr(self.aligned):
+                    coord = tDcD[0, i, j, dst_idx[0], dst_idx[1]]
+                    if const_expr(self.aligned_m and self.aligned_n):
                         cute.copy(tiled_copy, tDsD[None, i, j, src_idx], tDgD[None, i, j, dst_idx[0], dst_idx[1]])
-                    elif cute.elem_less(tDcD[0, i, j, dst_idx[0], dst_idx[1]], mD_mn.shape):
+                    elif const_expr(self.aligned_m):
+                        if coord[1] < mD_mn.shape[1]:
+                            cute.copy(tiled_copy, tDsD[None, i, j, src_idx], tDgD[None, i, j, dst_idx[0], dst_idx[1]])
+                    elif const_expr(self.aligned_n):
+                        if coord[0] < mD_mn.shape[0]:
+                            cute.copy(tiled_copy, tDsD[None, i, j, src_idx], tDgD[None, i, j, dst_idx[0], dst_idx[1]])
+                    elif cute.elem_less(coord, mD_mn.shape):
                         cute.copy(tiled_copy, tDsD[None, i, j, src_idx], tDgD[None, i, j, dst_idx[0], dst_idx[1]])
 
         return copy_fn
@@ -451,9 +519,10 @@ class AmpereGemm:
         d_dtype: Type[cutlass.Numeric],
         smem_capacity: int,
         occupancy: int,
+        ab_stage: int | None = None,
     ) -> tuple[int, int]:
         """(A/B stages, D epilogue stages) filling a CTA's share of shared memory: QuACK's split, with the A/B stages
-        first and the leftover below one more A/B stage going to D."""
+        first (`ab_stage` of them when given, else as many as fit) and the leftover going to D."""
         epi_tiles = (cta_tile_shape_mnk[0] * cta_tile_shape_mnk[1]) // cute.size(cute.shape(epi_tile))
         epi_stage = min(epi_tiles, 4 if epi_tile[1] <= 16 else 2)
         epi_bytes_per_stage = cute.size(cute.shape(epi_tile)) * d_dtype.width // 8
@@ -465,7 +534,7 @@ class AmpereGemm:
         mbar_helpers_bytes = 1024
 
         remaining_bytes = smem_capacity // occupancy - mbar_helpers_bytes - epi_bytes
-        ab_stage = remaining_bytes // ab_bytes_per_stage
+        ab_stage = remaining_bytes // ab_bytes_per_stage if ab_stage is None else ab_stage
 
         leftover = remaining_bytes - ab_bytes_per_stage * ab_stage
         epi_stage += min(leftover // epi_bytes_per_stage, epi_tiles - epi_stage)
@@ -607,11 +676,23 @@ class AmpereGemm:
             batch_idx = tile_coord_mnkl[3]
 
             copy_A = self.gmem_load_copy_fn(
-                tiled_copy_A, mA_mkl[None, None, batch_idx], sA, tile_coord_mnkl[0], self.cta_tile_shape_mnk[0], tidx
+                tiled_copy_A,
+                mA_mkl[None, None, batch_idx],
+                sA,
+                tile_coord_mnkl[0],
+                self.cta_tile_shape_mnk[0],
+                self.aligned_m,
+                tidx,
             )
 
             copy_B = self.gmem_load_copy_fn(
-                tiled_copy_B, mB_nkl[None, None, batch_idx], sB, tile_coord_mnkl[1], self.cta_tile_shape_mnk[1], tidx
+                tiled_copy_B,
+                mB_nkl[None, None, batch_idx],
+                sB,
+                tile_coord_mnkl[1],
+                self.cta_tile_shape_mnk[1],
+                self.aligned_n,
+                tidx,
             )
 
             acc.fill(0.0)

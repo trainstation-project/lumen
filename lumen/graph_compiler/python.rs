@@ -824,9 +824,9 @@ fn triton_attention(
 /// Writes `a @ b` into `d` (the CUDA backend's matmul, tensors (m, k), (k, n) and (m, n) or batched) on lumen's
 /// stream with `config`'s tile, or untuned the one `codegen::dot_general::cuda::untuned` picks for `d`'s shape, as
 /// elementwise kernels launch: `lumen.codegen.dot_general.cuda.launch.compile` compiles the GEMM once for the
-/// tensors' dtypes, majors and batching, the tile, and whether the tile divides m, n and k (an `aligned` GEMM, without
-/// bounds checks), and every launch is a `cuLaunchKernel` from here, passing each tensor as the struct CuTe's kernel
-/// takes it (`gemm_tensor`), without Python.
+/// tensors' dtypes, majors and batching, the tile, and whether the tile divides m and n, and k (each an `aligned` GEMM
+/// without those bounds checks), and every launch is a `cuLaunchKernel` from here, passing each tensor as the struct
+/// CuTe's kernel takes it (`gemm_tensor`), without Python.
 #[cfg_attr(not(lumen_cuda_linked), allow(unused_variables))]
 fn cuda_gemm(
     a: &crate::Tensor,
@@ -860,10 +860,19 @@ fn cuda_gemm(
         };
 
         let batched = d.shape().len() == 3;
-        let tile = (config.tile_m, config.tile_n, config.tile_k, config.warps);
+        let tile = (
+            config.tile_m,
+            config.tile_n,
+            config.tile_k,
+            config.warps,
+            config.stages,
+        );
         let k = a.shape()[a.shape().len() - 1];
-        let aligned = m % config.tile_m == 0 && n % config.tile_n == 0 && k % config.tile_k == 0;
+        let aligned_m = m % config.tile_m == 0;
+        let aligned_n = n % config.tile_n == 0;
+        let aligned_k = k % config.tile_k == 0;
         let dtypes = [a, b, d].map(|t| dtype_name(t.dtype()));
+        let layouts = [a, b, d].map(|t| (t.shape().to_vec(), t.strides().to_vec()));
 
         // Each operand as the kernel takes it, its (rows, cols) in the kernel's mode order: A (m, k), B (n, k), D (m, n).
         let (a_major, a) = gemm_tensor(a, false, ["m", "k"])?;
@@ -871,7 +880,7 @@ fn cuda_gemm(
         let (d_major, d) = gemm_tensor(d, false, ["m", "n"])?;
 
         let key = format!(
-            "gemm|cuda:{device}|{dtypes:?}|{a_major}{b_major}{d_major}|{batched}|{tile:?}|{aligned}"
+            "gemm|cuda:{device}|{dtypes:?}|{a_major}{b_major}{d_major}|{batched}|{tile:?}|{aligned_m}{aligned_n}{aligned_k}|{layouts:?}"
         );
 
         let kernel = driver::compiled(&key, || {
@@ -880,8 +889,18 @@ fn cuda_gemm(
                     .import("lumen.codegen.dot_general.cuda.launch")?
                     .getattr("compile")?
                     .call1((
-                        dtypes[0], dtypes[1], dtypes[2], a_major, b_major, d_major, batched, tile,
-                        aligned,
+                        dtypes[0],
+                        dtypes[1],
+                        dtypes[2],
+                        a_major,
+                        b_major,
+                        d_major,
+                        batched,
+                        tile,
+                        aligned_m,
+                        aligned_n,
+                        aligned_k,
+                        layouts.clone(),
                     ))?
                     .extract()?;
 
@@ -898,10 +917,16 @@ fn cuda_gemm(
 
         let tiles = m.div_ceil(config.tile_m) * n.div_ceil(config.tile_n);
 
+        // Compiled for these exact shapes and strides, the kernel takes each tensor as its address alone.
+        let address = |v: driver::Value| match v {
+            driver::Value::Struct(raw, _) => driver::Value::Struct(raw, 8),
+            v => v,
+        };
+
         Cuda::launch(CudaLaunch {
             kernel: &kernel,
             grid: [tiles, 1, batch],
-            values: &[a, b, d],
+            values: &[address(a), address(b), address(d)],
         })
     }
 

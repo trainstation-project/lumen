@@ -33,13 +33,18 @@ def tensor_bytes(rank):
     return 8 + (4 * rank + 7) // 8 * 8 + 8 * (rank - 1)
 
 
-def compile(a_dtype, b_dtype, d_dtype, a_major, b_major, d_major, batched, tile, aligned):
+def compile(
+    a_dtype, b_dtype, d_dtype, a_major, b_major, d_major, batched, tile, aligned_m, aligned_n, aligned_k, layouts
+):
     """The GEMM for operands of dtypes named `a_dtype` and `b_dtype` writing `d_dtype`, with majors `a_major` ("m" or
     "k"), `b_major` ("k" or "n", of B as the caller's (k, n)) and `d_major` ("m" or "n"), batched or not, with `tile`
-    (tile_m, tile_n, tile_k, warps) from `codegen/dot_general/cuda/config.rs`, accumulating in float32, loaded into the
-    current context; `aligned`, for m, n and k that are multiples of the tile's (no bounds checks, see `AmpereGemm`). Returns its launch info as `lumen.codegen.utils.cuda.compile` does: its ``CUfunction``, warps per
-    block, dynamic shared bytes, that a plain ``cuLaunchKernel`` runs it, and its parameters' types (a tensor
-    struct each, of `tensor_bytes` bytes, checked against the loaded kernel)."""
+    (tile_m, tile_n, tile_k, warps, stages) from `codegen/dot_general/cuda/config.rs` (stages 0 for as many as fit),
+    accumulating in float32, loaded into the current context; `aligned_m`, `aligned_n` and `aligned_k` for an m, n or
+    k that is a multiple of the tile's (fewer bounds checks, see `AmpereGemm`); `layouts`, A's, B's and D's (shape,
+    strides) as the caller holds them, compiles it for exactly those (each tensor then passed as its address alone).
+    Returns its launch info as `lumen.codegen.utils.cuda.compile` does: its ``CUfunction``, warps per block, dynamic
+    shared bytes, that a plain ``cuLaunchKernel`` runs it, and its parameters' types (a tensor struct each, of
+    `tensor_bytes` bytes, checked against the loaded kernel)."""
     if a_dtype != b_dtype or a_dtype not in ("float16", "bfloat16"):
         raise RuntimeError(
             f"dot_general: the CUDA GEMM takes two float16 or bfloat16 operands, got {a_dtype} and {b_dtype}"
@@ -49,7 +54,16 @@ def compile(a_dtype, b_dtype, d_dtype, a_major, b_major, d_major, batched, tile,
         raise RuntimeError(f"dot_general: the CUDA GEMM writes float16, bfloat16 or float32, got {d_dtype}")
 
     ab, out = DTYPES[a_dtype], DTYPES[d_dtype]
-    gemm = AmpereGemm(cutlass.Float32, ab, tile_shape_mnk=tile[:3], NUM_WARPS=tile[3], aligned=aligned)
+    gemm = AmpereGemm(
+        cutlass.Float32,
+        ab,
+        tile_shape_mnk=tile[:3],
+        NUM_WARPS=tile[3],
+        ab_stage=tile[4] or None,
+        aligned_m=aligned_m,
+        aligned_n=aligned_n,
+        aligned_k=aligned_k,
+    )
 
     # One symbolic extent per problem dimension, shared by the operands that have it.
     m, n, k = cute.sym_int(), cute.sym_int(), cute.sym_int()
@@ -58,6 +72,12 @@ def compile(a_dtype, b_dtype, d_dtype, a_major, b_major, d_major, batched, tile,
     a = _fake(ab, m, k, l, 1 if a_major == "k" else 0)
     b = _fake(ab, k, n, l, 1 if b_major == "n" else 0)
     d = _fake(out, m, n, l, 1 if d_major == "n" else 0)
+
+    # Static shapes and strides: CuTe folds them into the kernel.
+    a, b, d = (
+        cute.runtime.make_fake_tensor(dtype, tuple(shape), stride=tuple(strides), assumed_align=16)
+        for dtype, (shape, strides) in zip((ab, ab, out), layouts)
+    )
 
     compiled = cute.compile(gemm, a, b, d, cute.runtime.make_fake_stream(), options="--keep-cubin")
     (entry,) = compiled.kernel_info
@@ -69,12 +89,11 @@ def compile(a_dtype, b_dtype, d_dtype, a_major, b_major, d_major, batched, tile,
     check(status, entry)
 
     # Rust packs each tensor as CuTe lays its struct out: a mismatch must fail here, not launch on garbage.
-    rank = 3 if batched else 2
     sizes = []
     while (info := cuda.cuFuncGetParamInfo(function, len(sizes)))[0] == cuda.CUresult.CUDA_SUCCESS:
         sizes.append(info[2])
-    if sizes != [tensor_bytes(rank)] * 3:
-        raise RuntimeError(f"dot_general: the CUDA GEMM's parameters are {sizes} bytes, not 3 x {tensor_bytes(rank)}")
+    if sizes != [8] * 3:
+        raise RuntimeError(f"dot_general: the CUDA GEMM's parameters are {sizes} bytes, not 3 addresses")
 
     attribute = cuda.CUfunction_attribute.CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES
     (status,) = cuda.cuFuncSetAttribute(function, attribute, gemm.shared_bytes)

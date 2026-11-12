@@ -127,7 +127,16 @@ def test_matmul_tiles_fit_its_rows(m, tiles):
 @pytest.mark.parametrize("dtype, output", [("bfloat16", "bfloat16"), ("float16", "float16"), ("bfloat16", "float32")])
 @pytest.mark.parametrize("lhs_k, rhs_k", [(1, 0), (1, 1), (0, 0), (0, 1)])
 @pytest.mark.parametrize(
-    "batch, m, k, n", [(None, 128, 64, 128), (None, 200, 72, 136), (None, 512, 256, 384), (3, 64, 96, 80)]
+    "batch, m, k, n",
+    [
+        (None, 128, 64, 128),
+        (None, 200, 72, 136),
+        (None, 256, 72, 256),
+        (None, 256, 64, 136),
+        (None, 200, 64, 256),
+        (None, 512, 256, 384),
+        (3, 64, 96, 80),
+    ],
 )
 def test_cuda_gemm_matches_numpy_in_every_layout(dtype, output, lhs_k, rhs_k, batch, m, k, n):
     """On the CUDA backend (CuTe DSL), a matmul of float16 or bfloat16 runs on the Ampere GEMM, accumulating in float32:

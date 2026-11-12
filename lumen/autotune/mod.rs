@@ -46,14 +46,17 @@ pub(crate) trait Timer {
     fn run(&self, buffers: &Self::Buffers, step: &Self::Step, rep: usize) -> Result<(), String>;
 }
 
-/// Average seconds per run of `step` over `reps` runs after one warm-up run.
+/// Average seconds per run of `step` over `reps` runs after `WARMUP_RUNS` untimed ones.
 fn time<T: Timer>(
     timer: &T,
     buffers: &T::Buffers,
     step: &T::Step,
     reps: usize,
 ) -> Result<f64, String> {
-    timer.run(buffers, step, 0)?;
+    for rep in 0..WARMUP_RUNS {
+        timer.run(buffers, step, rep)?;
+    }
+
     let device = timer.device();
     let mut start = event_for(device, true)?;
     let mut end = event_for(device, true)?;
@@ -73,12 +76,10 @@ fn time<T: Timer>(
 
 /// Runs `step` back to back for at least `WARMUP_SECONDS`, bringing the device to its sustained clocks.
 fn warm_up<T: Timer>(timer: &T, buffers: &T::Buffers, step: &T::Step) -> Result<(), String> {
-    let once = time(timer, buffers, step, 1)?;
-    let reps = ((BUDGET_SECONDS / once) as usize).clamp(*REPS.start(), *REPS.end());
     let mut elapsed = 0.0;
 
     while elapsed < WARMUP_SECONDS {
-        elapsed += time(timer, buffers, step, reps)? * reps as f64;
+        elapsed += time(timer, buffers, step, TIMED_RUNS)? * TIMED_RUNS as f64;
     }
 
     Ok(())
@@ -89,16 +90,14 @@ pub(crate) struct Autotuner<T> {
     pub timer: T,
 }
 
-/// Timing passes over all candidates; each keeps a candidate's best time.
-const PASSES: usize = 3;
-/// Time each candidate aims to run for per measurement.
-const BUDGET_SECONDS: f64 = 5e-3;
-/// Time the device runs the first candidate before a tuning run times anything: a GPU takes about this long under
-/// load to reach its sustained clocks, which the candidates timed first would otherwise run below (as QuACK's
-/// autotuner warms up before benchmarking).
+/// Untimed runs of a candidate before it is timed.
+const WARMUP_RUNS: usize = 5;
+/// Runs a candidate's time averages over.
+const TIMED_RUNS: usize = 10;
+/// Time the device runs a candidate after a step's candidates compile and before any is timed: a GPU takes about
+/// this long under load to reach its sustained clocks, which the candidates timed first would otherwise run below
+/// (as QuACK's autotuner warms up before benchmarking).
 const WARMUP_SECONDS: f64 = 0.2;
-/// Bounds on repetitions per measurement.
-const REPS: std::ops::RangeInclusive<usize> = 2..=256;
 
 /// Steps with the same kernel, operand types and views share one tuning result.
 fn key(step: &StepBase) -> String {
@@ -174,7 +173,6 @@ impl<T: Timer> Autotuner<T> {
 
         kernels.compile()?;
         let picks = || PICKS.lock().unwrap_or_else(PoisonError::into_inner);
-        let mut warm = false;
 
         for (steps, candidates) in jobs {
             let picked = pick::<K>(self.timer.device(), &plan.steps()[steps[0]]);
@@ -217,36 +215,37 @@ impl<T: Timer> Autotuner<T> {
                 candidates.len()
             );
 
-            // Once per tuning run: the jobs follow each other closely enough to keep the clocks up.
-            if !warm {
-                trial.tuned = Some(candidates[0].clone());
-                warm = warm_up(&self.timer, &buffers, &trial).is_ok();
+            // Every candidate's first run (its compile) before any is timed: a compile idles the GPU long enough
+            // to drop it to base clocks, which would slow whichever candidate ran next. A failing one is dropped.
+            let runs: Vec<bool> = candidates
+                .iter()
+                .map(|candidate| {
+                    trial.tuned = Some(candidate.clone());
+                    self.timer.run(&buffers, &trial, 0).is_ok()
+                })
+                .collect();
+
+            // Then back up to sustained clocks, on the first candidate that runs.
+            if let Some(k) = runs.iter().position(|&ran| ran) {
+                trial.tuned = Some(candidates[k].clone());
+                warm_up(&self.timer, &buffers, &trial).ok();
             }
 
-            let mut reps = vec![0; candidates.len()];
-            let mut seconds = vec![f64::INFINITY; candidates.len()];
-            let mut runs = vec![true; candidates.len()];
-
-            for _ in 0..PASSES {
-                for (k, candidate) in candidates.iter().enumerate() {
+            // Each candidate's average over `TIMED_RUNS` runs.
+            let seconds: Vec<f64> = candidates
+                .iter()
+                .zip(&runs)
+                .map(|(candidate, &ran)| {
                     trial.tuned = Some(candidate.clone());
 
-                    // The first run sizes the repetitions to the time budget; a failing candidate is dropped.
-                    if reps[k] == 0 && runs[k] {
-                        match time(&self.timer, &buffers, &trial, 1) {
-                            Ok(warm) => {
-                                reps[k] = ((BUDGET_SECONDS / warm) as usize)
-                                    .clamp(*REPS.start(), *REPS.end())
-                            }
-                            Err(_) => runs[k] = false,
+                    match ran {
+                        true => {
+                            time(&self.timer, &buffers, &trial, TIMED_RUNS).unwrap_or(f64::INFINITY)
                         }
+                        false => f64::INFINITY,
                     }
-
-                    if runs[k] {
-                        seconds[k] = seconds[k].min(time(&self.timer, &buffers, &trial, reps[k])?);
-                    }
-                }
-            }
+                })
+                .collect();
 
             let fastest = (0..seconds.len()).min_by(|&a, &b| seconds[a].total_cmp(&seconds[b]));
 
