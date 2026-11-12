@@ -1,13 +1,12 @@
 //! TPU codegen: each planned step's kernel, generated once when the plan compiles and kept in the step's
 //! memo; the runtime lowers it once per device and launches it.
 
-use std::collections::HashMap;
-
 use crate::codegen::elementwise::ElementwiseCodegen;
 use crate::codegen::utils::tpu::Tpu;
 use crate::graph::Primitive;
 use crate::graph_compiler::Options;
 use crate::plan::{CpuPlan, Step as _, StepBase, TpuPlan, TpuStep};
+use std::collections::HashMap;
 
 /// The `module` of a launch whose `spec` is the generated source of its program rather than a spec for a
 /// module's.

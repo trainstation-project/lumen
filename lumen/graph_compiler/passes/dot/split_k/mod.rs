@@ -1,11 +1,11 @@
 //! Split-K shared by the backends: long-K matmuls with too few output tiles become partial products
 //! over K chunks summed over the chunks.
 
+use crate::graph::{Graph, Primitive, TensorType, Var};
+
 #[cfg(lumen_mps_linked)]
 pub(crate) mod mps;
 pub(crate) mod triton;
-
-use crate::graph::{Graph, Primitive, TensorType, Var};
 
 /// Most K chunks a matmul is split into.
 const MAX_SPLIT: usize = 8;
@@ -169,3 +169,6 @@ pub(crate) fn divides(mut s: usize, k: usize) -> Option<usize> {
 
     (s >= 2).then_some(s)
 }
+
+/// The split-K pass's slot (each device runs its own `SplitK`).
+pub(crate) struct SplitK;

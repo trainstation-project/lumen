@@ -5,8 +5,7 @@ use super::Options;
 use crate::Device;
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::{Source, Stage, Staged};
-use crate::plan::{ALIGNMENT, lcm};
-use crate::plan::{Plan, StagedPlan};
+use crate::plan::{ALIGNMENT, Plan, StagedPlan, lcm};
 
 /// Where a value must be computed.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -190,7 +189,14 @@ pub(crate) fn compile(
         };
 
         let plan: Box<dyn Plan> = if b.host {
-            Box::new(super::cpu::compile(&b.graph, &stage_options)?)
+            (|| {
+                super::device::compile!(
+                    super::device::Cpu,
+                    &b.graph,
+                    Device::Cpu(0),
+                    &stage_options
+                )
+            })()?
         } else {
             stage_options.parameters = options.parameters.as_ref().map(|p| mask(p));
             stage_options.packable = mask(&options.packable);

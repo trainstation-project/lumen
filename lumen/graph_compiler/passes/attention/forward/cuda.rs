@@ -1,14 +1,14 @@
 //! How the CUDA (CuTe DSL) backend fuses forward attention: its answers to the forward `FlashAttention` pass.
 
 use crate::graph::Var;
-use crate::graph_compiler::cuda::CudaModule;
+use crate::graph_compiler::device::{Cuda, DeviceModule};
 use crate::graph_compiler::passes::attention::FORWARD;
 
 use super::{Attentions, Supports};
 
 /// Flash-attention matching for CUDA: no epilogues, a static causal diagonal, and only the attentions its SM80
 /// kernel runs (the rest stay unfused, and fail compiling as any op the backend has no kernel for).
-impl Attentions for CudaModule<'_> {
+impl Attentions for DeviceModule<'_, Cuda> {
     /// No: the kernel writes the attention alone.
     fn contraction_epilogues(&self) -> bool {
         false

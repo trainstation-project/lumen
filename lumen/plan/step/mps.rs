@@ -1,28 +1,27 @@
 //! Running plan steps on MPS: each step's kernels encoded by primitive into the MPS stream, its launches
 //! captured on its first run and replayed with new pointers on later ones.
 
-use std::ops::{Deref, DerefMut};
-use std::sync::OnceLock;
-
 use super::unsupported;
 use crate::autotune::mps::Tunable;
 use crate::codegen::dot_general::mps::plan_matmul;
 use crate::codegen::dynamic_slice::mps::{MAX_RANK, copy};
 use crate::codegen::utils::mps::Mps;
-use crate::graph::Primitive;
-use crate::graph::{NEURAL_ENGINE, TensorType, View};
-use crate::plan::StepBase;
+use crate::graph::{NEURAL_ENGINE, Primitive, TensorType, View};
 use crate::plan::run::Buffers;
-use crate::plan::{Buffer, Step};
+use crate::plan::{Buffer, Step, StepBase};
 use crate::runtime::kernel::Launch as _;
-use crate::runtime::kernel::mps::MpsLaunch;
 use crate::runtime::kernel::mps::{
-    Grid, dims_arg, element_arg, elementwise_grid, u32_arg, u64_arg,
+    MpsLaunch, Pointers, Prepared, Unprepared, capture, prepare, replay,
 };
-use crate::runtime::kernel::mps::{Pointers, Prepared, Unprepared, capture, prepare, replay};
 use crate::runtime::wait::wait;
 use crate::tensor::contiguous_strides;
 use crate::{Device, Tensor};
+use std::ops::{Deref, DerefMut};
+use std::sync::OnceLock;
+
+use crate::runtime::kernel::mps::{
+    Grid, dims_arg, element_arg, elementwise_grid, u32_arg, u64_arg,
+};
 
 /// A specialized encoder a step carries in its launch slot: `(step, inputs, output, scratch, keep)`.
 pub(crate) type Encode = Box<
@@ -257,7 +256,9 @@ impl MpsStep {
             return crate::codegen::scatter_add::mps::encode(step, inputs, output, scratch, keep);
         }
         if let Fusion { .. } = step.primitive {
-            return crate::graph_compiler::mps::encode(step, inputs, output, scratch, keep);
+            return crate::runtime::kernel::mps::encode::encode(
+                step, inputs, output, scratch, keep,
+            );
         }
         if let LinearCrossEntropy = step.primitive {
             return crate::codegen::dot_general::mps::encode_linear_cross_entropy(

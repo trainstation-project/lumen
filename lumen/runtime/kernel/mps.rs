@@ -2,18 +2,19 @@
 //! `capture` so a plan can replay it against new buffer addresses; the argument packing and grids kernels launch
 //! with; and the event markers streams record.
 
+pub(crate) mod encode;
+
+use super::Launch;
+use crate::codegen::utils::mps::Mps;
+pub(crate) use crate::custom_op::mps::Grid;
+use crate::runtime::stream::mps::{self, Completion};
+use crate::tensor::dtype::dispatch_dtype;
+use crate::tensor::storage::as_bytes;
+use crate::{DType, Element, Scalar, Tensor};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ffi::{CString, c_char, c_void};
 use std::sync::{Mutex, PoisonError};
-
-use super::Launch;
-use crate::Tensor;
-use crate::codegen::utils::mps::Mps;
-use crate::runtime::stream::mps::{self, Completion};
-use crate::tensor::dtype::dispatch_dtype;
-use crate::tensor::storage::as_bytes;
-use crate::{DType, Element, Scalar};
 
 unsafe extern "C" {
     /// Looks up kernel `name` and dispatches it once; returns nonzero on failure.
@@ -405,5 +406,3 @@ pub(crate) fn elementwise_grid(n: usize, dtype: DType) -> Grid {
     let most = (BYTES_PER_THREAD / dtype.size_of()).max(1);
     Grid::Threads([n.div_ceil((n / GRID_THREADS).clamp(1, most)), 1, 1])
 }
-
-pub(crate) use crate::custom_op::mps::Grid;

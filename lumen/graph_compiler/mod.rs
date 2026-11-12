@@ -2,10 +2,7 @@
 //! [`Plan`] for the target device, plus helpers shared by the device backends.
 
 pub mod config;
-mod cpu;
-pub(crate) mod cuda;
-#[cfg(lumen_mps_linked)]
-pub(crate) mod mps;
+pub(crate) mod device;
 pub(crate) mod passes;
 pub(crate) mod pipeline;
 #[cfg(feature = "python")]
@@ -15,20 +12,18 @@ pub(crate) mod schedule;
 mod stages;
 #[cfg(test)]
 mod tests;
-mod tpu;
-pub(crate) mod triton;
 
 use crate::Device;
 use crate::graph::{FUSION_SEPARATOR, Graph, Primitive, Var, intern};
-
-pub use crate::plan::{Plan, PlanOptions};
 pub(crate) use crate::plan::{Source, Stage, Staged};
-pub use config::CompilerConfig;
 use passes::cse::Cse;
 use passes::merge_dots::Packs;
 use passes::preserve_precision::PreservePrecision;
 use passes::simplify::Simplify;
 use pipeline::{GraphModule, Pipeline};
+
+pub use crate::plan::{Plan, PlanOptions};
+pub use config::CompilerConfig;
 
 /// Per-compilation options: compiler configs and how the graph's inputs may be used.
 #[derive(Debug, Clone)]
@@ -85,10 +80,7 @@ pub fn compile_with(
 
 /// `graph` after the frontend passes every device runs first: CSE and simplification.
 pub(crate) fn frontend(graph: &Graph, options: &Options) -> Result<Graph, String> {
-    let mut module = GraphModule {
-        graph: graph.clone(),
-        options,
-    };
+    let mut module = GraphModule::new(graph, options);
 
     let mut frontend = Pipeline::new("frontend");
 
@@ -111,17 +103,19 @@ fn device_compile(
     device: Device,
     options: &Options,
 ) -> Result<Box<dyn Plan>, String> {
-    Ok(match device {
+    use device::{Cpu, Cuda, Tpu, Triton, compile};
+
+    match device {
         // CUDA runs on the Triton backend when asked, else on the CUDA (CuTe DSL) one.
         Device::Cuda(_) if options.config.use_triton_backend => {
-            Box::new(triton::compile(graph, device, options)?)
+            compile!(Triton, graph, device, options)
         }
-        Device::Cuda(_) => Box::new(cuda::compile(graph, device, options)?),
+        Device::Cuda(_) => compile!(Cuda, graph, device, options),
         #[cfg(lumen_mps_linked)]
-        Device::Mps(_) => Box::new(mps::compile(graph, options)?),
-        Device::Tpu(_) => tpu::compile(graph, options)?,
-        _ => Box::new(cpu::compile(graph, options)?),
-    })
+        Device::Mps(_) => compile!(device::Mps, graph, device, options),
+        Device::Tpu(_) => compile!(Tpu, graph, device, options),
+        _ => compile!(Cpu, graph, device, options),
+    }
 }
 
 /// Indices of the `true` entries of `mask`.
@@ -132,7 +126,7 @@ pub(crate) fn positions(mask: &[bool]) -> Vec<usize> {
 /// Options planning `graph`, compiled under `options` and `config`, with `scalars` passed by value:
 /// the `packed` weight blocks dot merging appended as its last inputs count as parameters, and a
 /// member is kept while its block is read. No scratch, dense row-major layout.
-fn plan_options(
+pub(crate) fn plan_options(
     graph: &Graph,
     options: &Options,
     config: &CompilerConfig,

@@ -1,11 +1,10 @@
 //! Python bindings for building, inspecting and running lumen graphs (`lumen.graph._C`).
 
+use crate::graph::{Graph, Primitive, TensorType, Var};
+use crate::tensor::python::{PyTensor, dtype_name, parse_dtype, to_scalar};
 use pyo3::exceptions::{PyKeyError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-
-use crate::graph::{Graph, Primitive, TensorType, Var};
-use crate::tensor::python::{PyTensor, dtype_name, parse_dtype, to_scalar};
 
 /// A graph being traced from Python, exposed as `lumen.Graph`.
 #[pyclass(name = "Graph", module = "lumen")]
@@ -600,7 +599,10 @@ pub(crate) fn primitive_dict<'py>(py: Python<'py>, p: &Primitive) -> PyResult<Bo
             fusion.set_item("body", body.to_string())?;
 
             #[cfg(lumen_mps_linked)]
-            fusion.set_item("source", crate::graph_compiler::mps::fusion_source(name))?;
+            fusion.set_item(
+                "source",
+                crate::runtime::kernel::mps::encode::fusion_source(name),
+            )?;
 
             #[cfg(not(lumen_mps_linked))]
             fusion.set_item("source", py.None())?;

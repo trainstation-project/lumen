@@ -2,6 +2,12 @@
 //! and GEMM epilogues into `Fusion` nodes, each compiled by the backend to one kernel. `mps` and `triton`
 //! run it with their kernels' limits; `tpu` groups nodes into the TPU's elementwise and reduction kernels.
 
+pub(crate) mod cuda;
+
+use crate::graph::{Graph, Node, Primitive, Var};
+use crate::graph_compiler::passes::diamonds::Row;
+pub(crate) use crate::graph_compiler::{constant, elementwise, label};
+
 mod analysis;
 mod dot_epilogues;
 mod emit;
@@ -12,10 +18,6 @@ mod reduction_epilogues;
 mod rows;
 pub(crate) mod tpu;
 pub(crate) mod triton;
-
-use crate::graph::{Graph, Node, Primitive, Var};
-use crate::graph_compiler::passes::diamonds::Row;
-pub(crate) use crate::graph_compiler::{constant, elementwise, label};
 
 /// What a backend brings to fusion: the nodes its kernels compute, their limits, the fusions it
 /// turns on, and the GEMM shapes its kernels take.
@@ -96,3 +98,6 @@ pub(crate) fn fuse(
         kernel,
     )
 }
+
+/// The fusion pass's slot (each device runs its own `Fusion`).
+pub(crate) struct Fusion;

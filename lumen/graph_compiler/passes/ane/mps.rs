@@ -1,19 +1,21 @@
 //! Offloads float16 GEMM regions that read fixed weights to the Apple Neural Engine through Core ML,
 //! and runs those programs on a host thread synchronized with the Metal command stream by shared events.
 
+use super::mil;
+use crate::graph::{FUSION_SEPARATOR, Graph, NEURAL_ENGINE, Primitive, TensorType, Var, intern};
+use crate::graph_compiler::CompilerConfig;
+use crate::graph_compiler::device::{DeviceModule, Mps};
+use crate::graph_compiler::passes::CompilerPass;
+use crate::graph_compiler::passes::DevicePass;
+use crate::graph_compiler::pipeline::{Pass, when};
+use crate::plan::StepBase;
+use crate::tensor::contiguous_strides;
+use crate::{DType, Tensor};
 use std::collections::BTreeMap;
 use std::ffi::{CStr, c_char, c_void};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
-
-use super::mil;
-use crate::graph::{FUSION_SEPARATOR, Graph, NEURAL_ENGINE, Primitive, TensorType, Var, intern};
-use crate::graph_compiler::mps::MpsModule;
-use crate::graph_compiler::passes::CompilerPass;
-use crate::plan::StepBase;
-use crate::tensor::contiguous_strides;
-use crate::{DType, Tensor};
 
 // Core ML bridge implemented in the Objective-C shim.
 unsafe extern "C" {
@@ -850,13 +852,13 @@ pub(crate) fn invalidate<'a>(steps: impl IntoIterator<Item = &'a StepBase>) {
 /// Compiler pass offloading eligible regions to the Neural Engine.
 pub(crate) struct NeuralEngine;
 
-impl<'a> CompilerPass<MpsModule<'a>> for NeuralEngine {
+impl<'a> CompilerPass<DeviceModule<'a, Mps>> for NeuralEngine {
     fn name(&self) -> &'static str {
         "neural_engine"
     }
 
     /// Marks parameters and packed blocks that are never donated as fixed weights, then offloads.
-    fn apply(&mut self, m: &mut MpsModule<'a>) -> Result<(), String> {
+    fn apply(&mut self, m: &mut DeviceModule<'a, Mps>) -> Result<(), String> {
         let options = m.options;
 
         let written = |i: usize| {
@@ -875,5 +877,12 @@ impl<'a> CompilerPass<MpsModule<'a>> for NeuralEngine {
 
         m.graph = offload(&m.graph, &fixed);
         Ok(())
+    }
+}
+
+/// With `neural_engine`.
+impl DevicePass<Mps> for super::NeuralEngine {
+    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, Mps>> {
+        when(config.neural_engine, NeuralEngine)
     }
 }
