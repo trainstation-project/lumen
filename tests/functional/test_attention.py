@@ -8,6 +8,7 @@ import pytest
 from helpers import CUDA, MPS
 
 import lumen
+import lumen.autotune
 import lumen.functional as F
 from lumen import prims
 from lumen.profiler import ProfilerActivity, profile
@@ -711,3 +712,25 @@ def test_flash_attention_training_has_no_precision_warning():
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         lumen.make_graph(lumen.grad(loss, (0, 1, 2)))(*m)
+
+
+@pytest.mark.parametrize(
+    "device, config",
+    [
+        pytest.param("cuda", c, marks=pytest.mark.cuda, id=repr(c))
+        for c in lumen.autotune.TritonAttentionConfig.candidates()
+    ]
+    + [
+        pytest.param("mps", c, marks=pytest.mark.mps, id=repr(c))
+        for c in (lumen.autotune.MpsAttentionConfig.candidates() if lumen.autotune.MpsAttentionConfig else [])
+    ],
+)
+def test_flash_attention_runs_every_candidate(device, config):
+    """Forced by ``lumen.autotune.use``, each autotuning candidate of a backend's flash attention (Triton's on CUDA,
+    Metal's on MPS) agrees with attention in float64: bfloat16, causal, with grouped heads."""
+    (q, k, v), arrays = tensors(device, "bfloat16", (1, 256, 4, 64), (1, 256, 2, 64), (1, 256, 2, 64))
+    with lumen.config.compiler.patch(use_triton_backend=device == "cuda"), lumen.autotune.use(config):
+        out = lumen.compile(lambda q, k, v: F.flash_attention(q, k, v, is_causal=True))(q, k, v)
+    want = reference(*arrays, causal=True)
+    tol = TOL["bfloat16"]
+    np.testing.assert_allclose(lumen.to_numpy(out.to(dtype="float32")), want, rtol=tol, atol=tol)

@@ -43,7 +43,12 @@ pub(crate) fn elementwise_tuning(body: &Graph) -> Tuning {
 /// Every power-of-two per-thread count up to the cap, crossed with threadgroup sizes and
 /// (when more than one element per thread) both access orders.
 pub(crate) fn elementwise_tunings(body: &Graph) -> Vec<Tuning> {
-    let most = most_per_thread(body);
+    tunings_up_to(most_per_thread(body))
+}
+
+/// Every power-of-two per-thread count up to `most`, crossed with threadgroup sizes and (when more than one element
+/// per thread) both access orders.
+fn tunings_up_to(most: usize) -> Vec<Tuning> {
     let per_threads = (0..).map(|k| 1 << k).take_while(|&p| p <= most);
 
     per_threads
@@ -62,4 +67,74 @@ pub(crate) fn elementwise_tunings(body: &Graph) -> Vec<Tuning> {
             })
         })
         .collect()
+}
+
+/// `lumen.autotune.MpsElementwiseConfig`: the launch of a Metal elementwise kernel, `per_thread` elements a thread in
+/// threadgroups of `group`, each thread's a contiguous run when `contiguous` (else grid-strided).
+#[cfg(feature = "python")]
+#[pyo3::pyclass(
+    name = "MpsElementwiseConfig",
+    module = "lumen.autotune",
+    frozen,
+    eq,
+    from_py_object
+)]
+#[derive(Clone, PartialEq)]
+pub(crate) struct PyMpsElementwiseConfig(pub(crate) Tuning);
+
+#[cfg(feature = "python")]
+#[pyo3::pymethods]
+impl PyMpsElementwiseConfig {
+    /// The launch of `per_thread` elements a thread in threadgroups of `group`.
+    #[new]
+    #[pyo3(signature = (per_thread, group, contiguous=false))]
+    fn new(per_thread: usize, group: usize, contiguous: bool) -> Self {
+        PyMpsElementwiseConfig(Tuning::Elementwise {
+            per_thread,
+            group,
+            contiguous,
+        })
+    }
+
+    /// Every launch the autotuner times for an output of `itemsize`-byte elements.
+    #[staticmethod]
+    #[pyo3(signature = (itemsize=4))]
+    fn candidates(itemsize: usize) -> Vec<Self> {
+        let most = (crate::runtime::kernel::mps::BYTES_PER_THREAD / itemsize.max(1)).max(1);
+        tunings_up_to(most)
+            .into_iter()
+            .map(PyMpsElementwiseConfig)
+            .collect()
+    }
+
+    /// Elements each thread handles.
+    #[getter]
+    fn per_thread(&self) -> usize {
+        let Tuning::Elementwise { per_thread, .. } = self.0;
+        per_thread
+    }
+
+    /// Threads per threadgroup.
+    #[getter]
+    fn group(&self) -> usize {
+        let Tuning::Elementwise { group, .. } = self.0;
+        group
+    }
+
+    /// Whether each thread handles a contiguous run of elements.
+    #[getter]
+    fn contiguous(&self) -> bool {
+        let Tuning::Elementwise { contiguous, .. } = self.0;
+        contiguous
+    }
+
+    /// The launch as its constructor call.
+    fn __repr__(&self) -> String {
+        format!(
+            "MpsElementwiseConfig(per_thread={}, group={}, contiguous={})",
+            self.per_thread(),
+            self.group(),
+            crate::autotune::python::py_repr(&self.contiguous())
+        )
+    }
 }

@@ -87,3 +87,22 @@ pub(crate) fn untuned(batch: usize, m: usize, n: usize, sms: usize) -> Config {
         false => NARROW,
     }
 }
+
+#[cfg(feature = "python")]
+crate::autotune::python::config_class! {
+    /// `lumen.autotune.CudaGemmConfig`: a tile of the CUDA backend's SM80 GEMM, one of its autotuning candidates or
+    /// any other (`stages` 0 for as many as fit).
+    PyCudaGemmConfig(Config) = "CudaGemmConfig" {
+        tile_m: usize,
+        tile_n: usize,
+        tile_k: usize,
+        warps: usize,
+        stages: usize = 0,
+    }
+
+    /// Every config the autotuner times, in its order.
+    #[staticmethod]
+    fn candidates() -> Vec<Self> {
+        CONFIGS.iter().copied().map(PyCudaGemmConfig).collect()
+    }
+}

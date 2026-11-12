@@ -3,7 +3,7 @@
 //! with too.
 
 /// Block size and warp count for a kernel that loops over a flat range or a row.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(not(feature = "python"), allow(dead_code))]
 pub struct LoopConfig {
     /// Elements handled per program per iteration.
@@ -68,5 +68,28 @@ pub(crate) fn untuned_loop(lanes: usize) -> LoopConfig {
     LoopConfig {
         block_size: config.block_size.max(lanes),
         ..config
+    }
+}
+
+#[cfg(feature = "python")]
+crate::autotune::python::config_class! {
+    /// `lumen.autotune.TritonLoopConfig`: the block and warps of the Triton backend's loop kernels (elementwise,
+    /// row, reduction and scan kernels).
+    PyTritonLoopConfig(LoopConfig) = "TritonLoopConfig" {
+        block_size: usize,
+        warps: usize,
+    }
+
+    /// Every config the autotuner times, or those it times for a kernel of `lanes` (blocks covering them).
+    #[staticmethod]
+    #[pyo3(signature = (lanes=None))]
+    fn candidates(lanes: Option<usize>) -> Vec<Self> {
+        match lanes {
+            Some(lanes) => loop_configs(lanes),
+            None => LOOP_CONFIGS.to_vec(),
+        }
+        .into_iter()
+        .map(PyTritonLoopConfig)
+        .collect()
     }
 }

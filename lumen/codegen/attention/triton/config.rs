@@ -1,7 +1,7 @@
 //! Triton flash-attention autotuning candidates and launch default.
 
 /// Tile shape and launch parameters for one Triton flash-attention candidate.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(not(feature = "python"), allow(dead_code))]
 pub struct AttentionConfig {
     /// Query rows per tile.
@@ -43,5 +43,22 @@ pub(crate) fn untuned_attention(head_bytes: usize) -> AttentionConfig {
     match head_bytes <= 256 {
         true => ATTENTION_CONFIGS[5],
         false => ATTENTION_CONFIGS[7],
+    }
+}
+
+#[cfg(feature = "python")]
+crate::autotune::python::config_class! {
+    /// `lumen.autotune.TritonAttentionConfig`: a tile of the Triton backend's flash attention.
+    PyTritonAttentionConfig(AttentionConfig) = "TritonAttentionConfig" {
+        block_m: usize,
+        block_n: usize,
+        stages: usize,
+        warps: usize,
+    }
+
+    /// Every config the autotuner times, in its order.
+    #[staticmethod]
+    fn candidates() -> Vec<Self> {
+        ATTENTION_CONFIGS.iter().copied().map(PyTritonAttentionConfig).collect()
     }
 }

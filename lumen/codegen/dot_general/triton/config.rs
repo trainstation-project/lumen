@@ -1,7 +1,7 @@
 //! Triton GEMM autotuning candidates and launch defaults, plain and with a row epilogue.
 
 /// Tile shape and launch parameters for one Triton GEMM candidate.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[cfg_attr(not(feature = "python"), allow(dead_code))]
 pub struct Config {
     /// Output rows per program.
@@ -115,4 +115,30 @@ const LEAST_PARTIAL_WIDTH: usize = 8;
 pub(crate) fn partial_tile(n: usize) -> Option<usize> {
     let tile = (1 << n.trailing_zeros()).min(PARTIAL_WIDTH);
     (n > MOST_GEMM_ROW && tile >= LEAST_PARTIAL_WIDTH).then_some(tile)
+}
+
+#[cfg(feature = "python")]
+crate::autotune::python::config_class! {
+    /// `lumen.autotune.TritonGemmConfig`: a tile of the Triton backend's GEMM.
+    PyTritonGemmConfig(Config) = "TritonGemmConfig" {
+        block_m: usize,
+        block_n: usize,
+        block_k: usize,
+        stages: usize,
+        warps: usize,
+        group_m: usize = 8,
+    }
+
+    /// Every config the autotuner times for a plain GEMM, or for one with a row epilogue over rows `row` wide.
+    #[staticmethod]
+    #[pyo3(signature = (row=None))]
+    fn candidates(row: Option<usize>) -> Vec<Self> {
+        match row {
+            Some(n) => row_gemm_configs(n),
+            None => CONFIGS.to_vec(),
+        }
+        .into_iter()
+        .map(PyTritonGemmConfig)
+        .collect()
+    }
 }

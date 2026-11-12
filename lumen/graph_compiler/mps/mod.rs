@@ -443,9 +443,10 @@ pub(super) fn compile(graph: &Graph, options: &Options) -> Result<MpsPlan, Strin
 
     let mut plan = codegen(CpuPlan::compile_with(&fused, &plan), options)?;
 
-    if config.autotune {
+    if config.autotune || crate::autotune::forcing() {
         let tuner = crate::autotune::Autotuner {
             timer: crate::autotune::mps::Mps,
+            autotune: config.autotune,
         };
 
         let mut elementwise = crate::autotune::mps::Elementwise {

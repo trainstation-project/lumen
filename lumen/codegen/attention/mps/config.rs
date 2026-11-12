@@ -143,3 +143,27 @@ fn key_blocks(a: &Attention) -> Vec<usize> {
         false => fits,
     }
 }
+
+#[cfg(feature = "python")]
+crate::autotune::python::config_class! {
+    /// `lumen.autotune.MpsAttentionConfig`: how the Metal flash-attention forward runs (`mpp`: on Metal Performance
+    /// Primitives, 32 keys a block), its simdgroups a threadgroup and its keys a block.
+    PyMpsAttentionConfig(Tuning) = "MpsAttentionConfig" {
+        mpp: bool,
+        groups: usize,
+        keys: usize,
+    }
+
+    /// Every config the autotuner can time: 8x8 matrices with 4 or 8 simdgroups and each key block (one fits a
+    /// given attention only when its K/V tiles fit threadgroup memory), and Metal Performance Primitives with 4
+    /// or 8.
+    #[staticmethod]
+    fn candidates() -> Vec<Self> {
+        let tiled = [32, 16, 64, 8]
+            .into_iter()
+            .flat_map(|keys| [4, 8].map(|groups| Tuning { mpp: false, groups, keys }));
+        let mpp = [4, 8].map(|groups| Tuning { mpp: true, groups, keys: 32 });
+
+        tiled.chain(mpp).map(PyMpsAttentionConfig).collect()
+    }
+}
