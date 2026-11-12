@@ -7,14 +7,14 @@ import cutlass
 import cutlass.cute as cute
 import cutlass.pipeline
 import cutlass.utils.blackwell_helpers as sm100_utils
-from cutlass import Boolean, Int16, Int32, const_expr
+from cutlass import Boolean, Int16, Int32, Int64, const_expr
 from cutlass._mlir import ir
 from cutlass._mlir.dialects import cute_nvgpu as _cute_nvgpu_ir
 from cutlass._mlir.dialects import llvm
 from cutlass.base_dsl.enums import Arch
 from cutlass.cute.nvgpu import cpasync, tcgen05, warp
 from cutlass.cute.nvgpu.tcgen05.mma import CtaGroup  # noqa
-from cutlass.cutlass_dsl import dsl_user_op
+from cutlass.cutlass_dsl import T, dsl_user_op
 from cutlass.experimental import primitives as prims
 from cutlass.utils import LayoutEnum, block_copy
 
@@ -512,6 +512,47 @@ def swizzle_ptr(ptr: cute.Pointer):
     swz = ptr.type.swizzle_type
     ptr_int = swizzle_int(ptr.toint(), swz.num_bits, swz.num_base, swz.num_shift)
     return cute.make_ptr(ptr.dtype, ptr_int, ptr.memspace, assumed_align=ptr.alignment)
+
+
+def smem_address(ptr: cute.Pointer) -> Int32:
+    """The shared memory byte address `ptr` points at, its swizzle applied (for the raw-address copies below)."""
+    return Int32(swizzle_ptr(ptr).toint())
+
+
+@dsl_user_op
+def ldmatrix_x4(addr: Int32, transpose: bool = False, *, loc=None, ip=None) -> list:
+    """`ldmatrix.x4` (`.trans` when `transpose`) of four 8x8 b16 matrices, this thread's row of them at shared
+    byte address `addr`: the thread's four 32-bit fragment registers, as cute.copy with an LdMatrix8x8x16bOp(4)
+    atom fills them. Taking a plain address lets a caller add a stage's byte offset itself, which the compiler
+    folds into the instruction (`LDSM [R+UR]`) instead of multiplying a stage index out per address."""
+    trans = ".trans" if transpose else ""
+    res = llvm.inline_asm(
+        llvm.StructType.get_literal([T.i32()] * 4),
+        [Int32(addr).ir_value(loc=loc, ip=ip)],
+        f"ldmatrix.sync.aligned.m8n8.x4{trans}.shared.b16 {{$0, $1, $2, $3}}, [$4];",
+        "=r,=r,=r,=r,r",
+        has_side_effects=True,
+        is_align_stack=False,
+        loc=loc,
+        ip=ip,
+    )
+    return [Int32(llvm.extractvalue(T.i32(), res, [i], loc=loc, ip=ip)) for i in range(4)]
+
+
+@dsl_user_op
+def cp_async_16(dst: Int32, src: Int64, *, loc=None, ip=None) -> None:
+    """`cp.async.cg` of 16 bytes from global address `src` to shared byte address `dst`, without the source-size
+    operand of the zero-filling form (which ptxas pads with dummy loads); for copies known in bounds."""
+    llvm.inline_asm(
+        res=None,
+        operands_=[Int32(dst).ir_value(loc=loc, ip=ip), Int64(src).ir_value(loc=loc, ip=ip)],
+        asm_string="cp.async.cg.shared.global [$0], [$1], 16;",
+        constraints="r,l",
+        has_side_effects=True,
+        is_align_stack=False,
+        loc=loc,
+        ip=ip,
+    )
 
 
 def as_position_independent_swizzle_tensor(tensor: cute.Tensor) -> cute.Tensor:

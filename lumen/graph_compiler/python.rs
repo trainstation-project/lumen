@@ -868,7 +868,8 @@ fn cuda_gemm(
             config.stages,
         );
         let k = a.shape()[a.shape().len() - 1];
-        let aligned_mn = m % config.tile_m == 0 && n % config.tile_n == 0;
+        let aligned_m = m % config.tile_m == 0;
+        let aligned_n = n % config.tile_n == 0;
         let aligned_k = k % config.tile_k == 0;
         let dtypes = [a, b, d].map(|t| dtype_name(t.dtype()));
         let layouts = [a, b, d].map(|t| (t.shape().to_vec(), t.strides().to_vec()));
@@ -879,7 +880,7 @@ fn cuda_gemm(
         let (d_major, d) = gemm_tensor(d, false, ["m", "n"])?;
 
         let key = format!(
-            "gemm|cuda:{device}|{dtypes:?}|{a_major}{b_major}{d_major}|{batched}|{tile:?}|{aligned_mn}{aligned_k}|{layouts:?}"
+            "gemm|cuda:{device}|{dtypes:?}|{a_major}{b_major}{d_major}|{batched}|{tile:?}|{aligned_m}{aligned_n}{aligned_k}|{layouts:?}"
         );
 
         let kernel = driver::compiled(&key, || {
@@ -896,7 +897,8 @@ fn cuda_gemm(
                         d_major,
                         batched,
                         tile,
-                        aligned_mn,
+                        aligned_m,
+                        aligned_n,
                         aligned_k,
                         layouts.clone(),
                     ))?

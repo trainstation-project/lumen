@@ -33,16 +33,18 @@ def tensor_bytes(rank):
     return 8 + (4 * rank + 7) // 8 * 8 + 8 * (rank - 1)
 
 
-def compile(a_dtype, b_dtype, d_dtype, a_major, b_major, d_major, batched, tile, aligned_mn, aligned_k, layouts):
+def compile(
+    a_dtype, b_dtype, d_dtype, a_major, b_major, d_major, batched, tile, aligned_m, aligned_n, aligned_k, layouts
+):
     """The GEMM for operands of dtypes named `a_dtype` and `b_dtype` writing `d_dtype`, with majors `a_major` ("m" or
     "k"), `b_major` ("k" or "n", of B as the caller's (k, n)) and `d_major` ("m" or "n"), batched or not, with `tile`
     (tile_m, tile_n, tile_k, warps, stages) from `codegen/dot_general/cuda/config.rs` (stages 0 for as many as fit),
-    accumulating in float32, loaded into the current context; `aligned_mn` for m and n multiples of the tile's,
-    `aligned_k` for such a k (fewer bounds checks, see `AmpereGemm`); `layouts`, A's, B's and D's (shape, strides)
-    as the caller holds them, compiles it for exactly those (each tensor then passed as its address alone). Returns its launch info as
-    `lumen.codegen.utils.cuda.compile` does: its ``CUfunction``, warps per block, dynamic shared bytes, that a plain
-    ``cuLaunchKernel`` runs it, and its parameters' types (a tensor struct each, of `tensor_bytes` bytes, checked
-    against the loaded kernel)."""
+    accumulating in float32, loaded into the current context; `aligned_m`, `aligned_n` and `aligned_k` for an m, n or
+    k that is a multiple of the tile's (fewer bounds checks, see `AmpereGemm`); `layouts`, A's, B's and D's (shape,
+    strides) as the caller holds them, compiles it for exactly those (each tensor then passed as its address alone).
+    Returns its launch info as `lumen.codegen.utils.cuda.compile` does: its ``CUfunction``, warps per block, dynamic
+    shared bytes, that a plain ``cuLaunchKernel`` runs it, and its parameters' types (a tensor struct each, of
+    `tensor_bytes` bytes, checked against the loaded kernel)."""
     if a_dtype != b_dtype or a_dtype not in ("float16", "bfloat16"):
         raise RuntimeError(
             f"dot_general: the CUDA GEMM takes two float16 or bfloat16 operands, got {a_dtype} and {b_dtype}"
@@ -58,7 +60,8 @@ def compile(a_dtype, b_dtype, d_dtype, a_major, b_major, d_major, batched, tile,
         tile_shape_mnk=tile[:3],
         NUM_WARPS=tile[3],
         ab_stage=tile[4] or None,
-        aligned_mn=aligned_mn,
+        aligned_m=aligned_m,
+        aligned_n=aligned_n,
         aligned_k=aligned_k,
     )
 
