@@ -8,7 +8,7 @@ mod triton;
 use crate::DType;
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::device::{Cpu, Cuda, DeviceModule};
+use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::identity::Identity;
 use crate::graph_compiler::passes::{CompilerPass, Module};
 use crate::graph_compiler::pipeline::Pass;
@@ -213,7 +213,3 @@ pub(crate) trait DotStrengthDevice: Sized + 'static {
         Box::new(Identity)
     }
 }
-
-/// Devices this pass doesn't run on: the identity pass.
-impl DotStrengthDevice for Cpu {}
-impl DotStrengthDevice for Cuda {}

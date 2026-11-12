@@ -1134,3 +1134,65 @@ fn preserve_precision_drops_forward_round_trips() {
         "{out}"
     );
 }
+
+/// Each device's default pass list is the passes it implements (picked over the identity pass), in the one order:
+/// the CPU only simplifies, CuTe fuses elementwise work, Triton and TPU run their own versions.
+#[test]
+fn devices_run_the_passes_they_implement() {
+    use super::device::{Cpu, Cuda, Tpu, Triton};
+    use super::pipeline::pipeline;
+
+    let config = super::CompilerConfig::default();
+
+    assert_eq!(pipeline!(Cpu, &config).names(), ["simplify"]);
+    assert_eq!(
+        pipeline!(Cuda, &config).names(),
+        ["simplify", "fusion", "alone"]
+    );
+
+    assert_eq!(
+        pipeline!(Triton, &config).names(),
+        [
+            "unsupported",
+            "take_along_axis",
+            "chunked_cross_entropy",
+            "merge_dots_backward",
+            "merge_dots",
+            "flash_attention",
+            "flash_attention_backward",
+            "linear_cross_entropy",
+            "simplify",
+            "dot_strength",
+            "split_k",
+            "dynamic_update_slices",
+            "normalization_diamonds",
+            "place_concats",
+            "fusion",
+            "place_views",
+            "alone",
+            "horizontal_fusion",
+        ]
+    );
+
+    assert_eq!(
+        pipeline!(Tpu, &config).names(),
+        [
+            "merge_dots_backward",
+            "flash_attention",
+            "flash_attention_backward",
+            "attention_layouts",
+            "fold_dot_reshapes",
+            "simplify",
+            "dot_strength",
+            "merge_dots",
+            "canonicalize_dots",
+            "normalization_diamonds",
+            "dot_rows",
+            "dynamic_update_slices",
+            "fuse_dots",
+            "place_concats",
+            "fusion",
+            "horizontal_fusion",
+        ]
+    );
+}

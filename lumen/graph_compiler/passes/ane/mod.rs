@@ -2,7 +2,7 @@
 //! lowers them to Core ML (MIL) programs, serialized by `proto`.
 
 use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::device::{Cpu, Cuda, DeviceModule, Tpu, Triton};
+use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::identity::Identity;
 use crate::graph_compiler::pipeline::Pass;
 
@@ -21,9 +21,3 @@ pub(crate) trait NeuralEngineDevice: Sized + 'static {
         Box::new(Identity)
     }
 }
-
-/// Devices this pass doesn't run on: the identity pass.
-impl NeuralEngineDevice for Cpu {}
-impl NeuralEngineDevice for Cuda {}
-impl NeuralEngineDevice for Triton {}
-impl NeuralEngineDevice for Tpu {}

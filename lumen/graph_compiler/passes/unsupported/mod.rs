@@ -7,7 +7,7 @@ mod triton;
 
 use crate::graph::Graph;
 use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::device::{Cpu, Cuda, DeviceModule, Tpu};
+use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::identity::Identity;
 use crate::graph_compiler::passes::{CompilerPass, Module};
 use crate::graph_compiler::pipeline::Pass;
@@ -37,8 +37,3 @@ pub(crate) trait UnsupportedDevice: Sized + 'static {
         Box::new(Identity)
     }
 }
-
-/// Devices this pass doesn't run on: the identity pass.
-impl UnsupportedDevice for Cpu {}
-impl UnsupportedDevice for Cuda {}
-impl UnsupportedDevice for Tpu {}

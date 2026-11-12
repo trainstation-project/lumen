@@ -3,7 +3,7 @@
 
 use crate::graph::{Graph, Primitive, TensorType, Var};
 use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::device::{Cpu, Cuda, DeviceModule, Tpu};
+use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::identity::Identity;
 use crate::graph_compiler::pipeline::Pass;
 
@@ -182,8 +182,3 @@ pub(crate) trait SplitKDevice: Sized + 'static {
         Box::new(Identity)
     }
 }
-
-/// Devices this pass doesn't run on: the identity pass.
-impl SplitKDevice for Cpu {}
-impl SplitKDevice for Cuda {}
-impl SplitKDevice for Tpu {}

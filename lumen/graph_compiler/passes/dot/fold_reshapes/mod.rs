@@ -4,9 +4,7 @@ mod tpu;
 
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
-#[cfg(lumen_mps_linked)]
-use crate::graph_compiler::device::Mps;
-use crate::graph_compiler::device::{Cpu, Cuda, DeviceModule, Triton};
+use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::identity::Identity;
 use crate::graph_compiler::passes::{CompilerPass, Module};
 use crate::graph_compiler::pipeline::Pass;
@@ -113,10 +111,3 @@ pub(crate) trait FoldDotReshapesDevice: Sized + 'static {
         Box::new(Identity)
     }
 }
-
-/// Devices this pass doesn't run on: the identity pass.
-impl FoldDotReshapesDevice for Cpu {}
-impl FoldDotReshapesDevice for Cuda {}
-impl FoldDotReshapesDevice for Triton {}
-#[cfg(lumen_mps_linked)]
-impl FoldDotReshapesDevice for Mps {}

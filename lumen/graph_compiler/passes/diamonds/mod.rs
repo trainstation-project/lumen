@@ -8,7 +8,7 @@ mod tpu;
 mod triton;
 
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
-use crate::graph_compiler::device::{Cpu, Cuda, DeviceModule};
+use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::identity::Identity;
 use crate::graph_compiler::passes::{CompilerPass, Module};
 use crate::graph_compiler::pipeline::Pass;
@@ -1587,7 +1587,3 @@ pub(crate) trait DiamondsDevice: Sized + 'static {
         Box::new(Identity)
     }
 }
-
-/// Devices this pass doesn't run on: the identity pass.
-impl DiamondsDevice for Cpu {}
-impl DiamondsDevice for Cuda {}

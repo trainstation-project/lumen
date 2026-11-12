@@ -3,9 +3,7 @@
 mod tpu;
 
 use crate::graph_compiler::CompilerConfig;
-#[cfg(lumen_mps_linked)]
-use crate::graph_compiler::device::Mps;
-use crate::graph_compiler::device::{Cpu, Cuda, DeviceModule, Triton};
+use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::identity::Identity;
 use crate::graph_compiler::pipeline::Pass;
 
@@ -17,10 +15,3 @@ pub(crate) trait FuseDotsDevice: Sized + 'static {
         Box::new(Identity)
     }
 }
-
-/// Devices this pass doesn't run on: the identity pass.
-impl FuseDotsDevice for Cpu {}
-impl FuseDotsDevice for Cuda {}
-impl FuseDotsDevice for Triton {}
-#[cfg(lumen_mps_linked)]
-impl FuseDotsDevice for Mps {}

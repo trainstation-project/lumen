@@ -10,7 +10,7 @@ mod triton;
 
 use crate::DType;
 use crate::graph::{Graph, Node, Primitive, Var};
-use crate::graph_compiler::device::{Cpu, Cuda, DeviceModule};
+use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::identity::Identity;
 use crate::graph_compiler::pipeline::Pass;
 use crate::graph_compiler::{CompilerConfig, constant};
@@ -978,7 +978,3 @@ pub(crate) trait AttentionDevice: Sized + 'static {
         Box::new(Identity)
     }
 }
-
-/// Devices this pass doesn't run on: the identity pass.
-impl AttentionDevice for Cpu {}
-impl AttentionDevice for Cuda {}

@@ -4,9 +4,7 @@
 //! it is read again.
 
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
-#[cfg(lumen_mps_linked)]
-use crate::graph_compiler::device::Mps;
-use crate::graph_compiler::device::{Cpu, Cuda, DeviceModule};
+use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::identity::Identity;
 use crate::graph_compiler::pipeline::Pass;
 use crate::graph_compiler::{CompilerConfig, elementwise};
@@ -320,9 +318,3 @@ pub(crate) trait DotRowsDevice: Sized + 'static {
         Box::new(Identity)
     }
 }
-
-/// Devices this pass doesn't run on: the identity pass.
-impl DotRowsDevice for Cpu {}
-impl DotRowsDevice for Cuda {}
-#[cfg(lumen_mps_linked)]
-impl DotRowsDevice for Mps {}

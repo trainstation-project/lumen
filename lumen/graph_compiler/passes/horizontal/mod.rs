@@ -6,9 +6,7 @@ mod triton;
 use crate::codegen::layout::{MAX_HEROES, transpose_tiling};
 use crate::graph::{Graph, Node, Primitive, Scope, Var, intern};
 use crate::graph_compiler::CompilerConfig;
-#[cfg(lumen_mps_linked)]
-use crate::graph_compiler::device::Mps;
-use crate::graph_compiler::device::{Cpu, Cuda, DeviceModule};
+use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::identity::Identity;
 use crate::graph_compiler::passes::{CompilerPass, Module};
 use crate::graph_compiler::pipeline::Pass;
@@ -578,9 +576,3 @@ pub(crate) trait HorizontalFusionDevice: Sized + 'static {
         Box::new(Identity)
     }
 }
-
-/// Devices this pass doesn't run on: the identity pass.
-impl HorizontalFusionDevice for Cpu {}
-impl HorizontalFusionDevice for Cuda {}
-#[cfg(lumen_mps_linked)]
-impl HorizontalFusionDevice for Mps {}

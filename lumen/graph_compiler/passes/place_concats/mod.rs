@@ -7,7 +7,7 @@ mod triton;
 
 use crate::graph::{Graph, Node, Primitive};
 use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::device::{Cpu, Cuda, DeviceModule};
+use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::identity::Identity;
 use crate::graph_compiler::passes::{CompilerPass, Module};
 use crate::graph_compiler::pipeline::Pass;
@@ -134,7 +134,3 @@ pub(crate) trait PlaceConcatsDevice: Sized + 'static {
         Box::new(Identity)
     }
 }
-
-/// Devices this pass doesn't run on: the identity pass.
-impl PlaceConcatsDevice for Cpu {}
-impl PlaceConcatsDevice for Cuda {}

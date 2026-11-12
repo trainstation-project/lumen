@@ -1,29 +1,10 @@
 //! The devices the graph compiler targets and the one module every device's passes rewrite: each device is a type
 //! implementing [`Device`], its answers to each pass living beside the pass (`passes/<pass>/<device>.rs`), so the
-//! compiler is one pass list (`pipeline::pipeline`) and one `compile` for every device.
+//! compiler is one pass list (`pipeline::pipeline!`) and one `compile!` for every device.
 
 use super::passes::Module;
-use super::passes::alone::AloneDevice;
-use super::passes::ane::NeuralEngineDevice;
-use super::passes::attention::AttentionDevice;
-use super::passes::chunked_cross_entropy::ChunkedCrossEntropyDevice;
-use super::passes::diamonds::{DiamondsDevice, Row, RowsModule};
-use super::passes::dot::canonicalize::CanonicalizeDotsDevice;
-use super::passes::dot::fold_reshapes::FoldDotReshapesDevice;
-use super::passes::dot::fuse::FuseDotsDevice;
-use super::passes::dot::rows::DotRowsDevice;
-use super::passes::dot::split_k::SplitKDevice;
-use super::passes::dot::strength::DotStrengthDevice;
-use super::passes::fusion::FusionDevice;
-use super::passes::horizontal::HorizontalFusionDevice;
-use super::passes::linear_cross_entropy::LinearCrossEntropyDevice;
-use super::passes::linear_reordering::LinearReorderingDevice;
-use super::passes::merge_dots::{Blocks, MergeDotsDevice, Packs};
-use super::passes::place_concats::PlaceConcatsDevice;
-use super::passes::place_views::PlaceViewsDevice;
-use super::passes::take_along_axis::TakeAlongAxisDevice;
-use super::passes::unsupported::UnsupportedDevice;
-use super::passes::updates::UpdatesDevice;
+use super::passes::diamonds::{Row, RowsModule};
+use super::passes::merge_dots::{Blocks, Packs};
 use super::{CompilerConfig, Options};
 pub(crate) use crate::codegen::utils::{cuda::Cuda, tpu::Tpu, triton::Triton};
 use crate::graph::Graph;
@@ -102,31 +83,9 @@ impl<D> RowsModule for DeviceModule<'_, D> {
     }
 }
 
-/// A device the graph compiler targets: its answer to every pass (each pass's own trait, implemented beside the
-/// pass), and how its passed graph becomes a plan.
-pub(crate) trait Device:
-    TakeAlongAxisDevice
-    + ChunkedCrossEntropyDevice
-    + MergeDotsDevice
-    + AttentionDevice
-    + LinearCrossEntropyDevice
-    + FoldDotReshapesDevice
-    + DotStrengthDevice
-    + NeuralEngineDevice
-    + LinearReorderingDevice
-    + SplitKDevice
-    + CanonicalizeDotsDevice
-    + DiamondsDevice
-    + DotRowsDevice
-    + UpdatesDevice
-    + FuseDotsDevice
-    + PlaceConcatsDevice
-    + FusionDevice
-    + PlaceViewsDevice
-    + AloneDevice
-    + HorizontalFusionDevice
-    + UnsupportedDevice
-{
+/// A device the graph compiler targets: its name and how its passed graph becomes a plan (its passes are the ones
+/// it implements beside each pass, `passes/<pass>/<device>.rs`; `pipeline::pipeline!` picks them).
+pub(crate) trait Device: Sized + 'static {
     /// The device's name, in profiler ranges and dump files.
     const NAME: &'static str;
 
@@ -137,16 +96,21 @@ pub(crate) trait Device:
     ) -> Result<Box<dyn Plan>, String>;
 }
 
-/// Compiles `graph` for device `D` (`device`): runs the one pass list, then lowers the result to a plan.
-pub(crate) fn compile<D: Device>(
-    graph: &Graph,
-    device: crate::Device,
-    options: &Options,
-) -> Result<Box<dyn Plan>, String> {
-    let mut module = DeviceModule::<D>::new(graph, options);
-    super::pipeline::pipeline::<D>(&options.config).run(&mut module)?;
-    D::lower(module, device)
+/// Compiles `graph` for concrete device `$device` (a `crate::Device`, `$at`) under `$options`: runs the one pass
+/// list, then lowers the result to a plan.
+macro_rules! compile {
+    ($device:ty, $graph:expr, $at:expr, $options:expr) => {{
+        use $crate::graph_compiler::device::Device as _;
+
+        let options: &$crate::graph_compiler::Options = $options;
+        let mut module =
+            $crate::graph_compiler::device::DeviceModule::<$device>::new($graph, options);
+        $crate::graph_compiler::pipeline::pipeline!($device, &options.config).run(&mut module)?;
+        <$device>::lower(module, $at)
+    }};
 }
+
+pub(crate) use compile;
 
 /// The CPU plans the simplified graph as given.
 impl Device for Cpu {

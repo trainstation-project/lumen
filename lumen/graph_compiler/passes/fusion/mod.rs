@@ -6,7 +6,7 @@ pub(crate) mod cuda;
 
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::device::{Cpu, DeviceModule};
+use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::diamonds::Row;
 use crate::graph_compiler::passes::identity::Identity;
 use crate::graph_compiler::pipeline::Pass;
@@ -111,6 +111,3 @@ pub(crate) trait FusionDevice: Sized + 'static {
         Box::new(Identity)
     }
 }
-
-/// Devices this pass doesn't run on: the identity pass.
-impl FusionDevice for Cpu {}

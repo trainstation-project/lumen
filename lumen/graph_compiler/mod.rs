@@ -108,13 +108,13 @@ fn device_compile(
     match device {
         // CUDA runs on the Triton backend when asked, else on the CUDA (CuTe DSL) one.
         Device::Cuda(_) if options.config.use_triton_backend => {
-            compile::<Triton>(graph, device, options)
+            compile!(Triton, graph, device, options)
         }
-        Device::Cuda(_) => compile::<Cuda>(graph, device, options),
+        Device::Cuda(_) => compile!(Cuda, graph, device, options),
         #[cfg(lumen_mps_linked)]
-        Device::Mps(_) => compile::<device::Mps>(graph, device, options),
-        Device::Tpu(_) => compile::<Tpu>(graph, device, options),
-        _ => compile::<Cpu>(graph, device, options),
+        Device::Mps(_) => compile!(device::Mps, graph, device, options),
+        Device::Tpu(_) => compile!(Tpu, graph, device, options),
+        _ => compile!(Cpu, graph, device, options),
     }
 }
 

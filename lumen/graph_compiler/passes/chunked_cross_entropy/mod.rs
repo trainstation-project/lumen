@@ -8,7 +8,7 @@ mod triton;
 use super::linear_cross_entropy::{Found, matched, uses};
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::device::{Cpu, Cuda, DeviceModule, Tpu};
+use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::identity::Identity;
 use crate::graph_compiler::passes::{CompilerPass, Module};
 use crate::graph_compiler::pipeline::Pass;
@@ -323,8 +323,3 @@ pub(crate) trait ChunkedCrossEntropyDevice: Sized + 'static {
         Box::new(Identity)
     }
 }
-
-/// Devices this pass doesn't run on: the identity pass.
-impl ChunkedCrossEntropyDevice for Cpu {}
-impl ChunkedCrossEntropyDevice for Cuda {}
-impl ChunkedCrossEntropyDevice for Tpu {}
