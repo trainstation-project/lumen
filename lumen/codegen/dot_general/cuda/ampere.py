@@ -31,14 +31,6 @@ from lumen.kernels.cuda.tile_scheduler import (
 )
 
 
-def _moved(tensor: cute.Tensor, offset, divby: int) -> cute.Tensor:
-    """`tensor` moved `offset` elements on, a multiple of `divby` (whole stages, keeping the view's alignment)."""
-    if not isinstance(offset, int):
-        offset = cute.assume(offset, divby=divby)
-
-    return cute.make_tensor(tensor.iterator + offset, tensor.layout)
-
-
 class AmpereGemm:
     def __init__(
         self,
@@ -208,67 +200,62 @@ class AmpereGemm:
     ):
         """Multistage cp.async mainloop accumulating the tile's `k_tile_cnt` k-tiles into `acc`.
 
-        `copy_A` / `copy_B` (k_tile, offset, pred_k) start a k-tile's gmem -> smem copy into the stage `offset`
-        bytes in; `copy_block_A` / `copy_block_B` (offset, k_block) load one k16 block of the stage at `offset` into
-        the fragments. Stages are tracked as running byte offsets (as cuBLAS's kernels do), which the compiler
-        keeps out of the per-address arithmetic. ab_stage - 1 k-tiles are kept in flight:
+        `copy_A` / `copy_B` (k_tile, stage, pred_k) start a k-tile's gmem -> smem copy; `copy_block_A` / `copy_block_B`
+        (stage, k_block) load one k16 block of a stage into the fragments. ab_stage - 1 k-tiles are kept in flight:
         k-tile t + ab_stage - 1 is issued into the stage k-tile t - 1 vacated, once every thread has moved past it.
         The register side has the produce rhythm of QuACK's SM120 warp-MMA mainloop: load block k + 1 (slot 0 of
         the next stage at the tile's last block), then MMA block k; the last k-tile is peeled off the loop."""
         num_k_blocks = cute.size(tCrA, mode=[2])
-        a_bytes, b_bytes = copy_A.stage_bytes, copy_B.stage_bytes
 
         # Prologue: issue the first ab_stage - 1 k-tiles, one commit group each (empty past the last k-tile, so
         # the wait_group counts below hold for any k_tile_cnt). Only the last k-tile can run past K.
         for k_tile in cutlass.range_constexpr(self.ab_stage - 1):
             if const_expr(self.aligned_k):
                 if k_tile < k_tile_cnt:
-                    copy_A(k_tile, k_tile * a_bytes)
-                    copy_B(k_tile, k_tile * b_bytes)
+                    copy_A(k_tile, k_tile)
+                    copy_B(k_tile, k_tile)
             elif k_tile < k_tile_cnt - 1:
-                copy_A(k_tile, k_tile * a_bytes)
-                copy_B(k_tile, k_tile * b_bytes)
+                copy_A(k_tile, k_tile)
+                copy_B(k_tile, k_tile)
             elif k_tile == k_tile_cnt - 1:
-                copy_A(k_tile, k_tile * a_bytes, pred_k=True)
-                copy_B(k_tile, k_tile * b_bytes, pred_k=True)
+                copy_A(k_tile, k_tile, pred_k=True)
+                copy_B(k_tile, k_tile, pred_k=True)
 
             cute.arch.cp_async_commit_group()
 
-        # Byte offsets of the stage being read and of the one being refilled (the one read the k-tile before), in
-        # A's and B's smem.
-        a_read, b_read = Int32(0), Int32(0)
-        a_write, b_write = Int32((self.ab_stage - 1) * a_bytes), Int32((self.ab_stage - 1) * b_bytes)
+        # The stage being read, and the one being refilled (the one read the k-tile before).
+        read_stage, write_stage = Int32(0), Int32(self.ab_stage - 1)
 
         # Load first k-block
         cute.arch.cp_async_wait_group(self.ab_stage - 2)
         cute.arch.sync_threads()
 
-        copy_block_A(a_read, 0)
-        copy_block_B(b_read, 0)
+        copy_block_A(read_stage, 0)
+        copy_block_B(read_stage, 0)
 
         # The k-tile loop split by what each refills, so no k-tile checks whether it has a copy to issue (and only
         # the one copying the last k-tile, when K is not a tile multiple, checks K): full copies while the k-tile
         # refilled precedes the last, then the last's, then none.
         steady = k_tile_cnt - self.ab_stage
         operands = (tiled_mma, acc, copy_A, copy_B, copy_block_A, copy_block_B, tCrA, tCrB)
-        offsets = (a_read, b_read, a_write, b_write)
+        stages = (read_stage, write_stage)
         for k_tile in cutlass.range(steady, unroll=1):
-            offsets = self.k_tile_step(*operands, k_tile, *offsets, 1)
+            stages = self.k_tile_step(*operands, k_tile, *stages, 1)
 
         if steady >= 0:
-            offsets = self.k_tile_step(*operands, steady, *offsets, 1 if const_expr(self.aligned_k) else 2)
+            stages = self.k_tile_step(*operands, steady, *stages, 1 if const_expr(self.aligned_k) else 2)
 
         for k_tile in cutlass.range(cutlass.max(steady + 1, 0), k_tile_cnt - 1, unroll=1):
-            offsets = self.k_tile_step(*operands, k_tile, *offsets, 0)
+            stages = self.k_tile_step(*operands, k_tile, *stages, 0)
 
-        a_read, b_read = offsets[0], offsets[1]
+        read_stage = stages[0]
 
         # Last k-tile (hoisted, as QuACK's SM120 mainloop): no next stage to wait for or preload, and no copy to
         # issue, so it skips the CTA barrier. K >= 1, so there always is one.
         for k in cutlass.range_constexpr(num_k_blocks):
             if const_expr(k + 1 < num_k_blocks):
-                copy_block_A(a_read, k + 1)
-                copy_block_B(b_read, k + 1)
+                copy_block_A(read_stage, k + 1)
+                copy_block_B(read_stage, k + 1)
 
             cute.gemm(tiled_mma, acc, tCrA[None, None, k], tCrB[None, None, k], acc)
 
@@ -286,48 +273,42 @@ class AmpereGemm:
         tCrA: cute.Tensor,
         tCrB: cute.Tensor,
         k_tile: Int32,
-        a_read: Int32,
-        b_read: Int32,
-        a_write: Int32,
-        b_write: Int32,
+        read_stage: Int32,
+        write_stage: Int32,
         refill: cutlass.Constexpr[int],
     ):
         """One k-tile of the loop (all but the last): its MMAs, the next k-tile's first block preloaded, and the
         stage the k-tile before read refilled with k-tile `k_tile + ab_stage - 1`: a full copy (`refill` 1), one
         checked against K (2, the last k-tile when K is not a tile multiple), or none (0, past the last).
-        Returns the updated (a_read, b_read, a_write, b_write), the byte offsets `mma` tracks the stages by."""
+        Returns the updated (read_stage, write_stage)."""
         num_k_blocks = cute.size(tCrA, mode=[2])
-        a_bytes, b_bytes = copy_A.stage_bytes, copy_B.stage_bytes
-        # The next k-tile's stage, computed a k-tile ahead of its loads: a warp-uniform offset used right after
-        # it is computed stalls on the uniform datapath's latency.
-        a_next, b_next = a_read + a_bytes, b_read + b_bytes
-        if a_next == self.ab_stage * a_bytes:
-            a_next, b_next = Int32(0), Int32(0)
 
         for k in cutlass.range_constexpr(num_k_blocks):
             if const_expr(k == num_k_blocks - 1):
                 # The next k-tile's stage: wait for its copy, and for every thread to finish reading the
                 # stage the copy below overwrites.
-                a_write, b_write = a_read, b_read
-                a_read, b_read = a_next, b_next
+                write_stage = read_stage
+                read_stage += 1
+                if read_stage == self.ab_stage:
+                    read_stage = Int32(0)
                 cute.arch.cp_async_wait_group(self.ab_stage - 2)
                 cute.arch.sync_threads()
 
             # the wrap load is the NEXT tile's slot-0 preload
             k_next = 0 if k + 1 == num_k_blocks else k + 1
-            copy_block_A(a_read, k_next)
-            copy_block_B(b_read, k_next)
+            copy_block_A(read_stage, k_next)
+            copy_block_B(read_stage, k_next)
 
             if const_expr(k == 0):
                 if const_expr(refill > 0):
-                    copy_A(k_tile + self.ab_stage - 1, a_write, pred_k=refill == 2)
-                    copy_B(k_tile + self.ab_stage - 1, b_write, pred_k=refill == 2)
+                    copy_A(k_tile + self.ab_stage - 1, write_stage, pred_k=refill == 2)
+                    copy_B(k_tile + self.ab_stage - 1, write_stage, pred_k=refill == 2)
                 # A commit group even when empty, so the wait_group counts hold.
                 cute.arch.cp_async_commit_group()
 
             cute.gemm(tiled_mma, acc, tCrA[None, None, k], tCrB[None, None, k], acc)
 
-        return a_read, b_read, a_write, b_write
+        return read_stage, write_stage
 
     @cute.jit
     def epilogue(
@@ -377,13 +358,11 @@ class AmpereGemm:
         aligned: cutlass.Constexpr[bool],
         tidx: Int32,
     ) -> Callable:
-        """`copy(k_tile, offset, pred_k=False)`: the cp.async of k-tile `k_tile` of row tile `tile_idx` of `mX` (mn, k)
-        into the stage of `sX` (tile_mn, tile_k, STAGE) `offset` bytes in (`copy.stage_bytes` a stage). Vectors
-        outside `mX` are zero in smem (extents are 16-byte multiples, so a vector is wholly inside or outside): rows
-        past MN are zeroed in every stage here, once per tile, and columns past K by `pred_k`, which only the last
-        k-tile needs. With `aligned` (the tile divides `mX`'s rows) no row is checked. In-bounds vectors are copied
-        by raw address (each one's stage-0 address computed here once, plus `offset`), so the stage costs no address
-        arithmetic per copy."""
+        """`copy(k_tile, stage, pred_k=False)`: the cp.async of k-tile `k_tile` of row tile `tile_idx` of `mX` (mn, k)
+        into stage `stage` of `sX` (tile_mn, tile_k, STAGE). Vectors outside `mX` are zero in smem (extents are
+        16-byte multiples, so a vector is wholly inside or outside): rows past MN are zeroed in every stage here, once
+        per tile, and columns past K by `pred_k`, which only the last k-tile needs. With `aligned` (the tile divides
+        `mX`'s rows) no row is checked."""
         tile_shape = (tile_mn, self.cta_tile_shape_mnk[2])
         # (tile_mn, tile_k, RestK)
         gX = cute.local_tile(mX, tile_shape, (tile_idx, None))
@@ -415,31 +394,18 @@ class AmpereGemm:
                         for j in cutlass.range_constexpr(cute.size(tXsX, mode=[2])):
                             cute.autovec_copy(zero, tXsX[None, i, j, stage])
 
-        # One 16-byte vector per (row, column) copy, and its stage-0 shared memory address.
-        assert cute.size(tXsX, mode=[0]) * sX.element_type.width == 128
-        num_cols = cute.size(tXsX, mode=[2])
-        elem_bytes = sX.element_type.width // 8
-        stage_bytes = cute.size(sX, mode=[0]) * cute.size(sX, mode=[1]) * elem_bytes
-        # Swizzled once at the thread's base, the rest static: each vector's address is that base plus a constant.
-        tXsX_flat = copy_utils.partition_D_position_independent(thr_copy, sX)
-        dst_base = [
-            [Int32(tXsX_flat[None, i, j, 0].iterator.toint()) for j in range(num_cols)] for i in range(num_rows)
-        ]
-
-        def copy_fn(k_tile, offset, pred_k: cutlass.Constexpr[bool] = False):
+        def copy_fn(k_tile, stage, pred_k: cutlass.Constexpr[bool] = False):
             for i in cutlass.range_constexpr(num_rows):
-                for j in cutlass.range_constexpr(num_cols):
+                for j in cutlass.range_constexpr(cute.size(tXsX, mode=[2])):
                     if tXpX[i]:
                         if const_expr(pred_k):
-                            dst = _moved(tXsX[None, i, j, 0], offset // elem_bytes, stage_bytes // elem_bytes)
                             if tXcX[0, i, j, k_tile][1] < limit_k:
-                                cute.copy(tiled_copy, tXgX[None, i, j, k_tile], dst)
+                                cute.copy(tiled_copy, tXgX[None, i, j, k_tile], tXsX[None, i, j, stage])
                             else:
-                                cute.autovec_copy(zero, dst)
+                                cute.autovec_copy(zero, tXsX[None, i, j, stage])
                         else:
-                            copy_utils.cp_async_16(dst_base[i][j] + offset, tXgX[None, i, j, k_tile].iterator.toint())
+                            cute.copy(tiled_copy, tXgX[None, i, j, k_tile], tXsX[None, i, j, stage])
 
-        copy_fn.stage_bytes = stage_bytes
         return copy_fn
 
     @cute.jit
@@ -452,9 +418,8 @@ class AmpereGemm:
         transpose: bool,
         tidx: Int32,
     ) -> Callable:
-        """`copy_block(offset, k_block)`: ldmatrix (LDSM.T when `transpose`) of k16 block `k_block` of the stage of
-        `sX` `offset` bytes in (`copy_block.stage_bytes` a stage) into the MMA fragment `tCrX`, by raw address;
-        `make_tiled_copy` is `cute.make_tiled_copy_A` or `_B`."""
+        """`copy_block(stage, k_block)`: ldmatrix (LDSM.T when `transpose`) of k16 block `k_block` of stage `stage` of
+        `sX` into the MMA fragment `tCrX`; `make_tiled_copy` is `cute.make_tiled_copy_A` or `_B`."""
         atom = cute.make_copy_atom(warp.LdMatrix8x8x16bOp(transpose, 4), sX.element_type)
         smem_tiled_copy = make_tiled_copy(atom, tiled_mma)
         thr_copy = smem_tiled_copy.get_slice(tidx)
@@ -462,24 +427,9 @@ class AmpereGemm:
         tCsX_copy_view = thr_copy.partition_S(sX)
         tCrX_copy_view = thr_copy.retile(tCrX)
 
-        # One ldmatrix.x4 per (row block, k block): this thread's stage-0 row address of each, computed once here.
-        assert cute.size(tCsX_copy_view, mode=[0]) * sX.element_type.width == 128
-        num_rows, num_k_blocks = cute.size(tCsX_copy_view, mode=[1]), cute.size(tCsX_copy_view, mode=[2])
-        stage_bytes = cute.size(sX, mode=[0]) * cute.size(sX, mode=[1]) * sX.element_type.width // 8
-        # Swizzled once at the thread's base, the rest static: each load's address is that base plus a constant.
-        tCsX_flat = copy_utils.partition_S_position_independent(thr_copy, sX)
-        base = [
-            [Int32(tCsX_flat[None, i, k, 0].iterator.toint()) for k in range(num_k_blocks)] for i in range(num_rows)
-        ]
+        def copy_block(stage, k_block):
+            cute.copy(smem_tiled_copy, tCsX_copy_view[None, None, k_block, stage], tCrX_copy_view[None, None, k_block])
 
-        def copy_block(offset, k_block):
-            for i in cutlass.range_constexpr(num_rows):
-                frag = cute.recast_tensor(tCrX_copy_view[None, i, k_block], Int32)
-                regs = copy_utils.ldmatrix_x4(base[i][k_block] + offset, transpose)
-                for r in cutlass.range_constexpr(4):
-                    frag[r] = regs[r]
-
-        copy_block.stage_bytes = stage_bytes
         return copy_block
 
     @cute.jit
