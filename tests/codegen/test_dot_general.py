@@ -202,14 +202,23 @@ def _bf16_operands(shapes):
 @pytest.mark.cuda
 @pytest.mark.parametrize("config", lumen.autotune.CudaGemmConfig.candidates(), ids=repr)
 @pytest.mark.parametrize("lhs_k, rhs_k", [(1, 0), (1, 1), (0, 0), (0, 1)])
-@pytest.mark.parametrize("m, k, n", [(256, 256, 512), (200, 72, 136)])
-def test_cuda_gemm_runs_every_candidate(config, lhs_k, rhs_k, m, k, n):
+@pytest.mark.parametrize(
+    "batch, m, k, n",
+    [(None, 256, 256, 512), (None, 200, 72, 136), (None, 256, 72, 136), (3, 128, 96, 200)],
+    ids=["aligned", "partial", "partial n and k", "batched"],
+)
+def test_cuda_gemm_runs_every_candidate(config, lhs_k, rhs_k, batch, m, k, n):
     """Forced by ``lumen.autotune.use``, each of the CUDA GEMM's autotuning candidates matches NumPy, in every
-    layout, on a shape every tile divides and one none does (partial tiles, a partial last k-tile)."""
-    shapes = ((m, k) if lhs_k == 1 else (k, m), (k, n) if rhs_k == 0 else (n, k))
+    layout: on a shape every tile divides, one none does (partial tiles, a partial last k-tile), one only m's tiles
+    divide (each dim's bounds checks apart), and batched."""
+    lead = () if batch is None else (batch,)
+    shapes = (lead + ((m, k) if lhs_k == 1 else (k, m)), lead + ((k, n) if rhs_k == 0 else (n, k)))
     (a, b), (x, y) = _bf16_operands(shapes)
-    want = (x if lhs_k == 1 else x.T) @ (y if rhs_k == 0 else y.T)
-    dims = (((lhs_k,), (rhs_k,)), ((), ()))
+    xm = x if lhs_k == 1 else np.swapaxes(x, -1, -2)
+    yk = y if rhs_k == 0 else np.swapaxes(y, -1, -2)
+    want = xm @ yk
+    b0 = ((0,), (0,)) if batch else ((), ())
+    dims = (((len(lead) + lhs_k,), (len(lead) + rhs_k,)), b0)
     with lumen.autotune.use(config):
         got = lumen.compile(lambda a, b: prims.dot_general(a, b, dims, "float32").to(dtype="bfloat16"))(a, b)
     np.testing.assert_allclose(lumen.to_numpy(got.to(dtype="float32")), want, rtol=2**-6, atol=2**-2)
@@ -271,15 +280,18 @@ def test_tuned_matmul_matches_numpy_in_every_layout(device, dtype, lhs_k, rhs_k,
 
 @pytest.mark.cuda
 @pytest.mark.parametrize("config", lumen.autotune.TritonGemmConfig.candidates(), ids=repr)
+@pytest.mark.parametrize("lhs_k, rhs_k", [(1, 0), (1, 1), (0, 0), (0, 1)])
 @pytest.mark.parametrize("m, k, n", [(256, 256, 512), (200, 72, 136)])
-def test_triton_gemm_runs_every_candidate(config, m, k, n):
-    """Forced by ``lumen.autotune.use``, each of the Triton GEMM's autotuning candidates matches NumPy, on a shape
-    every tile divides and one none does."""
-    (a, b), (x, y) = _bf16_operands(((m, k), (k, n)))
-    dims = (((1,), (0,)), ((), ()))
+def test_triton_gemm_runs_every_candidate(config, lhs_k, rhs_k, m, k, n):
+    """Forced by ``lumen.autotune.use``, each of the Triton GEMM's autotuning candidates matches NumPy, in every
+    layout, on a shape every tile divides and one none does."""
+    shapes = ((m, k) if lhs_k == 1 else (k, m), (k, n) if rhs_k == 0 else (n, k))
+    (a, b), (x, y) = _bf16_operands(shapes)
+    want = (x if lhs_k == 1 else x.T) @ (y if rhs_k == 0 else y.T)
+    dims = (((lhs_k,), (rhs_k,)), ((), ()))
     with lumen.config.compiler.patch(use_triton_backend=True), lumen.autotune.use(config):
         got = lumen.compile(lambda a, b: prims.dot_general(a, b, dims, "float32"))(a, b)
-    np.testing.assert_allclose(lumen.to_numpy(got), x @ y, rtol=1e-3, atol=1e-2)
+    np.testing.assert_allclose(lumen.to_numpy(got), want, rtol=1e-3, atol=1e-2)
 
 
 # Matmuls each Metal GEMM algorithm runs, (m, k, n, rhs_k): tiled and MPP tiles over a whole matmul, skinny few

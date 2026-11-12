@@ -102,4 +102,10 @@ crate::autotune::python::config_class! {
     fn candidates() -> Vec<Self> {
         CONFIGS.iter().copied().map(PyCudaAttentionConfig).collect()
     }
+
+    /// Whether the config runs head dims `h` (Q and K) and `hv` (V): forced on an attention it doesn't fit, the
+    /// attention keeps its untuned config.
+    fn fits(&self, h: usize, hv: usize) -> bool {
+        fits(&self.0, h, hv)
+    }
 }

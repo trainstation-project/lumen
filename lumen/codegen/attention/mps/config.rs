@@ -107,6 +107,15 @@ pub(crate) fn tunings(a: &Attention) -> Vec<Tuning> {
     tiled.chain(mpp).collect()
 }
 
+/// Whether the forward runs `tuning` on attention `a`: Metal Performance Primitives where they fit, an 8x8
+/// kernel's key block when its K/V tiles fit threadgroup memory.
+pub(crate) fn fits(a: &Attention, tuning: &Tuning) -> bool {
+    match tuning.mpp {
+        true => mpp_fits(a) && tuning.keys == 32,
+        false => key_blocks(a).contains(&tuning.keys),
+    }
+}
+
 /// Whether the forward can run on Metal Performance Primitives (`flash_attention_mpp`): half or bfloat16
 /// operands with contiguous columns, head dims of whole 16-wide fragments, whole 16-query and 32-key blocks,
 /// no dropout, and a toolchain that has them.
@@ -165,5 +174,20 @@ crate::autotune::python::config_class! {
         let mpp = [4, 8].map(|groups| Tuning { mpp: true, groups, keys: 32 });
 
         tiled.chain(mpp).map(PyMpsAttentionConfig).collect()
+    }
+
+    /// Whether an 8x8 config's key block fits head dims `h` (Q and K) and `hv` (V) of `dtype` in threadgroup
+    /// memory, or (Metal Performance Primitives) the head dims are whole 16-wide fragments: forced on an attention
+    /// it doesn't fit, the attention keeps its untuned config.
+    fn fits(&self, h: usize, hv: usize, dtype: &str) -> pyo3::PyResult<bool> {
+        let t = crate::tensor::python::parse_dtype(dtype)?.size_of();
+        // As `key_blocks`: a block whose K/V tiles (rows padded by 16 bytes) fit, or 8 keys when none does.
+        let fit = |keys: usize| keys * ((h + hv) * t + 32) <= 28 << 10;
+
+        Ok(match (self.0.mpp, self.0.keys) {
+            (true, _) => h.is_multiple_of(16) && hv.is_multiple_of(16),
+            (false, 8) => ![32, 16, 64].into_iter().any(fit),
+            (false, keys) => fit(keys),
+        })
     }
 }
