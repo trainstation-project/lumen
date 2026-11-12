@@ -1,5 +1,18 @@
 from typing import Optional
 
+class CudaAttentionConfig:
+    """A config of the CUDA backend's SM80 flash-attention forward."""
+
+    def __init__(self, tile_m: int, tile_n: int, stages: int = 1, warps: int = 4, q_in_regs: bool = False) -> None: ...
+    @staticmethod
+    def candidates() -> list[CudaAttentionConfig]:
+        """Every config the autotuner times, in its order."""
+    tile_m: int
+    tile_n: int
+    stages: int
+    warps: int
+    q_in_regs: bool
+
 class CudaGemmConfig:
     """A tile of the CUDA backend's SM80 GEMM: ``stages`` 0 for as many as fit."""
 

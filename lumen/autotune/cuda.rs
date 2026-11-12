@@ -1,8 +1,11 @@
-//! CUDA (CuTe DSL) autotuning: the Ampere GEMM's tile candidates, timed with CUDA events.
+//! CUDA (CuTe DSL) autotuning: the Ampere GEMM's tile candidates and the attention forward's configs, timed with
+//! CUDA events.
 
 use super::{Kernels, Timer};
+use crate::codegen::attention::cuda as attention;
 use crate::codegen::dot_general::cuda::{CONFIGS, Config, TUNED_MACS};
 use crate::graph::Primitive;
+use crate::graph_compiler::passes::attention::{FORWARD, of_body};
 use crate::plan::{CudaStep, Tuned};
 use crate::{Device, Tensor, TensorOptions};
 
@@ -38,6 +41,53 @@ impl Kernels for Gemms {
 
     /// The step launched with `config`.
     fn build(&mut self, _: &CudaStep, config: Config) -> Tuned {
+        Tuned::new(format!("{config:?}"), config)
+    }
+}
+
+/// Autotuning candidates for flash-attention forward steps.
+pub(crate) struct AttentionForwards;
+
+impl Kernels for AttentionForwards {
+    type Step = CudaStep;
+    type Config = attention::Config;
+
+    /// Every config that fits the head dims of a forward attention step of at least `attention::TUNED_MACS`
+    /// multiply-adds, none otherwise.
+    fn configs(&self, step: &CudaStep) -> Vec<attention::Config> {
+        let Primitive::Fusion { name, body, .. } = &step.primitive else {
+            return Vec::new();
+        };
+
+        match of_body(body).filter(|_| name == FORWARD) {
+            Some(a) => {
+                let macs = a.batch.iter().product::<usize>() * a.sq * a.sk * (a.h + a.hv);
+
+                match macs >= attention::TUNED_MACS {
+                    true => attention::configs(a.h, a.hv),
+                    false => Vec::new(),
+                }
+            }
+            None => Vec::new(),
+        }
+    }
+
+    /// Whether `step` is a forward attention (the kernel runs every one, tuned only from `TUNED_MACS` up).
+    fn handles(&self, step: &CudaStep) -> bool {
+        matches!(&step.primitive, Primitive::Fusion { name, .. } if name == FORWARD)
+    }
+
+    /// Whether forced `config` fits `step`'s head dims.
+    fn accepts(&self, step: &CudaStep, config: &attention::Config) -> bool {
+        let Primitive::Fusion { body, .. } = &step.primitive else {
+            return false;
+        };
+
+        self.handles(step) && of_body(body).is_some_and(|a| attention::fits(config, a.h, a.hv))
+    }
+
+    /// The step launched with `config`.
+    fn build(&mut self, _: &CudaStep, config: attention::Config) -> Tuned {
         Tuned::new(format!("{config:?}"), config)
     }
 }

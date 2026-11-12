@@ -50,6 +50,15 @@ pub(crate) fn set_gemm(gemm: Gemm) {
     let _ = GEMM.set(gemm);
 }
 
+/// The flash-attention forward installed from Python (`lumen.codegen.attention.cuda.launch`).
+pub(crate) static ATTENTION: OnceLock<crate::codegen::attention::cuda::Launch> = OnceLock::new();
+
+/// Installs the flash-attention forward; later calls are ignored.
+#[cfg_attr(not(feature = "python"), allow(dead_code))]
+pub(crate) fn set_attention(attention: crate::codegen::attention::cuda::Launch) {
+    let _ = ATTENTION.set(attention);
+}
+
 #[cfg(all(feature = "python", lumen_cuda_linked))]
 /// One CUDA launch: a compiled kernel, its grid and its runtime parameters in order.
 pub(crate) struct CudaLaunch<'a> {

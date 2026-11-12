@@ -734,3 +734,47 @@ def test_flash_attention_runs_every_candidate(device, config):
     want = reference(*arrays, causal=True)
     tol = TOL["bfloat16"]
     np.testing.assert_allclose(lumen.to_numpy(out.to(dtype="float32")), want, rtol=tol, atol=tol)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("dtype", ["float16", "bfloat16"])
+@pytest.mark.parametrize("case", CASES, ids=_ids(CASES))
+def test_flash_attention_on_cute(case, dtype):
+    """On the CUDA (CuTe DSL) backend, F.flash_attention is one SM80 flash-attention kernel and agrees with
+    attention in float64: grouped heads, causal with as many or fewer queries than keys, head dims not
+    multiples of 16."""
+    (b, sq, sk, n, nkv, h, hv), causal = case
+    (q, k, v), arrays = tensors("cuda", dtype, (b, sq, n, h), (b, sk, nkv, h), (b, sk, nkv, hv))
+
+    def f(q, k, v):
+        """Flash attention, causal when the case is."""
+        return F.flash_attention(q, k, v, is_causal=causal)
+
+    out = lumen.compile(f)(q, k, v)
+    assert out.dtype == dtype and list(out.shape) == [b, sq, n, hv]
+    np.testing.assert_allclose(
+        lumen.to_numpy(out.to(dtype="float32")),
+        reference(*arrays, causal=causal),
+        rtol=TOL[dtype],
+        atol=TOL[dtype],
+    )
+    assert steps(f, q, k, v, device="cuda") == ["flash_attention"]
+
+
+@pytest.mark.parametrize(
+    "config",
+    [pytest.param(c, marks=pytest.mark.cuda, id=repr(c)) for c in lumen.autotune.CudaAttentionConfig.candidates()],
+)
+def test_cute_flash_attention_runs_every_candidate(config):
+    """Forced by ``lumen.autotune.use``, each autotuning candidate of the CUDA (CuTe DSL) backend's flash attention
+    agrees with attention in float64: bfloat16, causal, with grouped heads and a query count no tile divides."""
+    (q, k, v), arrays = tensors("cuda", "bfloat16", (1, 300, 4, 64), (1, 300, 2, 64), (1, 300, 2, 64))
+    with lumen.autotune.use(config):
+        out = lumen.compile(lambda q, k, v: F.flash_attention(q, k, v, is_causal=True))(q, k, v)
+    tol = TOL["bfloat16"]
+    np.testing.assert_allclose(
+        lumen.to_numpy(out.to(dtype="float32")),
+        reference(*arrays, causal=True),
+        rtol=tol,
+        atol=tol,
+    )

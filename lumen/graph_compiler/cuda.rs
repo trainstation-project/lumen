@@ -1,10 +1,11 @@
 //! The CUDA backend, CUDA's default (`config.compiler.use_triton_backend` off): kernels in
 //! NVIDIA's CuTe DSL, generated per step (`codegen::cuda`) and launched by `runtime::kernel::cuda`. It runs elementwise fusions (any layout: broadcasts, transposes, slices and strided inputs
-//! read through index math) and plain matmuls (the Ampere GEMM, `lumen.codegen.dot_general.cuda`), and errors on
-//! graphs needing any other kernel.
+//! read through index math), plain matmuls (the Ampere GEMM, `lumen.codegen.dot_general.cuda`) and flash-attention
+//! forwards (`lumen.codegen.attention.cuda`), and errors on graphs needing any other kernel.
 
 use super::config::CompilerConfig;
 use super::passes::alone::{Alone, Lone};
+use super::passes::attention::FlashAttention;
 use super::passes::fusion::{Backend, fuse};
 use super::passes::simplify::Simplify;
 use super::passes::{CompilerPass, Module};
@@ -12,7 +13,7 @@ use super::pipeline::{Pass, Passes, pipeline, when};
 use super::{Options, plan_options};
 use crate::Device;
 use crate::autotune::Autotuner;
-use crate::autotune::cuda::{Events, Gemms};
+use crate::autotune::cuda::{AttentionForwards, Events, Gemms};
 use crate::codegen::utils::cuda::cute_type;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::plan::{CpuPlan, CudaPlan};
@@ -117,7 +118,7 @@ fn backend(m: &CudaModule<'_>) -> Backend {
 }
 
 /// A graph being compiled for the CUDA backend.
-struct CudaModule<'a> {
+pub(crate) struct CudaModule<'a> {
     graph: Graph,
     options: &'a Options,
 }
@@ -174,9 +175,14 @@ impl CompilerPass<CudaModule<'_>> for Fusion {
     }
 }
 
-/// The CUDA backend's passes: it runs elementwise kernels and plain GEMMs only.
+/// The CUDA backend's passes: it runs elementwise kernels, plain GEMMs and flash-attention forwards.
 impl Passes for CudaModule<'_> {
     const NAME: &'static str = "cuda";
+
+    /// With `fuse` and `flash_attention`.
+    fn flash_attention(config: &CompilerConfig) -> Pass<Self> {
+        when(config.fuse && config.flash_attention, FlashAttention)
+    }
 
     /// Always, as on Triton and MPS: a matmul's narrowing cast folds into the GEMM, whose epilogue writes the
     /// narrow dtype instead of a float32 product a second kernel rounds, and operand transposes fold into its
@@ -196,9 +202,9 @@ impl Passes for CudaModule<'_> {
     }
 }
 
-/// Compiles `graph` for the CUDA backend on `device`: fuses its elementwise work and plans it, every
-/// runtime scalar a 0-d device input, and autotunes its GEMM tiles when enabled; errors on an op it has no
-/// kernel for.
+/// Compiles `graph` for the CUDA backend on `device`: fuses its attentions and elementwise work and plans it,
+/// every runtime scalar a 0-d device input, and autotunes its GEMM tiles and attention configs when enabled;
+/// errors on an op it has no kernel for.
 pub(crate) fn compile(
     graph: &Graph,
     device: Device,
@@ -237,6 +243,7 @@ pub(crate) fn compile(
         };
 
         tuner.tune(&mut Gemms, &mut plan)?;
+        tuner.tune(&mut AttentionForwards, &mut plan)?;
     }
 
     Ok(plan)

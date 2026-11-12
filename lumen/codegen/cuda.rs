@@ -8,6 +8,7 @@ use crate::codegen::elementwise::cuda::Layouts;
 use crate::codegen::utils::cuda::Cuda;
 use crate::graph::{Graph, Primitive, TensorType};
 use crate::graph_compiler::Options;
+use crate::graph_compiler::passes::attention::FORWARD;
 use crate::plan::{CpuPlan, CudaPlan, CudaStep, Step as _, StepBase};
 
 /// The kernel `step` runs as for tensors laid out as `layouts`, generated once per layout and kept in the
@@ -68,9 +69,14 @@ pub(crate) fn codegen(plan: CpuPlan, _: &Options) -> Result<CudaPlan, String> {
     for step in plan.steps() {
         let outputs = std::iter::once(&step.output).chain(&step.extra_outputs);
 
-        // A matmul runs on the GEMM, compiled at its first launch for its operands' majors.
+        // A matmul runs on the GEMM and a flash attention on the attention forward, each compiled at its first
+        // launch for its operands' layouts.
+        let attention =
+            matches!(&step.primitive, Primitive::Fusion { name, .. } if name == FORWARD);
+
         if outputs.clone().all(|(_, ty)| ty.numel() == 0)
             || matches!(step.primitive, Primitive::DotGeneral { .. })
+            || attention
         {
             continue;
         }

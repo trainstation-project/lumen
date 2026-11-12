@@ -1,6 +1,7 @@
 //! Flash attention forward: matching attention in traced graphs and the rewrite replacing each with a
 //! `flash_attention` fusion.
 
+mod cuda;
 #[cfg(lumen_mps_linked)]
 mod mps;
 pub(super) mod tpu;
@@ -152,19 +153,25 @@ pub(crate) struct Epilogues {
     pub(crate) transposed: bool,
 }
 
-/// Replaces each forward attention, with its elementwise epilogue when `epilogues` allows, by a fusion
-/// kernel named by `kernel`. `scalars` are values passed by value, which the fusion can't read.
+/// Whether a backend's kernel runs an attention matched in a graph.
+pub(crate) type Supports = fn(&Graph, &Attention) -> bool;
+
+/// Replaces each forward attention the backend `supports`, with its elementwise epilogue when `epilogues`
+/// allows, by a fusion kernel named by `kernel`. `scalars` are values passed by value, which the fusion can't
+/// read.
 pub(crate) fn fuse(
     graph: &Graph,
     epilogues: Option<Epilogues>,
     scalars: &[Var],
     runtime_offsets: bool,
+    supports: Supports,
     mut kernel: impl FnMut(&Graph) -> String,
 ) -> Graph {
     let m = Matcher::new(graph);
 
     let found: Vec<Fused> = attentions(graph, runtime_offsets)
         .into_iter()
+        .filter(|a| supports(graph, a))
         // A runtime causal offset must be a buffer the kernel can read.
         .filter(|a| a.offset.is_none_or(|v| !scalars.contains(&v)))
         .map(|a| {
@@ -745,6 +752,10 @@ pub(crate) trait Attentions: Module {
     fn runtime_offsets(&self) -> bool {
         true
     }
+    /// Which matched attentions the backend's kernel runs: by default every one.
+    fn supports(&self) -> Supports {
+        |_, _| true
+    }
 }
 
 /// Compiler pass running [`fuse`].
@@ -760,9 +771,16 @@ impl<M: Attentions> CompilerPass<M> for FlashAttention {
     fn apply(&mut self, m: &mut M) -> Result<(), String> {
         let epilogues = m.contraction_epilogues().then(|| m.epilogues());
         let (graph, scalars) = (m.graph().clone(), m.scalars());
-        let runtime_offsets = m.runtime_offsets();
+        let (runtime_offsets, supports) = (m.runtime_offsets(), m.supports());
 
-        *m.graph_mut() = fuse(&graph, epilogues, &scalars, runtime_offsets, |_| m.kernel());
+        *m.graph_mut() = fuse(
+            &graph,
+            epilogues,
+            &scalars,
+            runtime_offsets,
+            supports,
+            |_| m.kernel(),
+        );
 
         Ok(())
     }
