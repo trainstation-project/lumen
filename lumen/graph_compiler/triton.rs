@@ -275,9 +275,10 @@ pub(crate) fn compile(
     plan.interleaved = interleaved;
     let mut plan = crate::codegen::triton::codegen(plan, options)?;
 
-    if options.config.autotune {
+    if options.config.autotune || crate::autotune::forcing() {
         let tuner = Autotuner {
             timer: Events { device },
+            autotune: options.config.autotune,
         };
 
         tuner.tune(&mut Gemms, &mut plan)?;

@@ -183,6 +183,12 @@ pub fn config() -> CompilerConfig {
     config.clone().unwrap_or_default()
 }
 
+/// Bumps the version without changing the config: something else compiled plans depend on changed (a config
+/// forced in place of autotuning, `autotune::forced`).
+pub fn touch() {
+    VERSION.fetch_add(1, Ordering::Release);
+}
+
 /// Applies `change` to the config and bumps the version.
 pub fn update(change: impl FnOnce(&mut CompilerConfig)) {
     let mut config = CONFIG.write().unwrap_or_else(PoisonError::into_inner);

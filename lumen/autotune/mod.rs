@@ -1,9 +1,14 @@
 //! Backend-independent kernel autotuning: benchmarks candidate configs of each plan step and keeps the fastest.
 
 pub(crate) mod cuda;
+pub(crate) mod forced;
 #[cfg(lumen_mps_linked)]
 pub(crate) mod mps;
+#[cfg(feature = "python")]
+pub(crate) mod python;
 pub(crate) mod triton;
+
+pub(crate) use forced::forcing;
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex, PoisonError};
@@ -19,10 +24,21 @@ pub(crate) trait Kernels {
     /// The backend's plan steps.
     type Step;
     /// Backend-specific tuning parameters of one candidate.
-    type Config;
+    type Config: Clone + 'static;
 
     /// Candidate configs for `step`; empty when the step isn't tuned.
     fn configs(&self, step: &Self::Step) -> Vec<Self::Config>;
+    /// Whether `step` runs on this family's kernels, so a forced config applies to it: by default, whether it
+    /// has candidates (a family whose candidates depend on the step's size overrides it).
+    fn handles(&self, step: &Self::Step) -> bool {
+        !self.configs(step).is_empty()
+    }
+    /// Whether forced `config` can run `step` (a step it can't run keeps its untuned kernel): by default, whether
+    /// this family handles `step`.
+    fn accepts(&self, step: &Self::Step, config: &Self::Config) -> bool {
+        let _ = config;
+        self.handles(step)
+    }
     /// Builds the kernel for `step` under `config`.
     fn build(&mut self, step: &Self::Step, config: Self::Config) -> Tuned;
     /// Compiles every candidate built so far, before any is timed.
@@ -88,6 +104,8 @@ fn warm_up<T: Timer>(timer: &T, buffers: &T::Buffers, step: &T::Step) -> Result<
 /// Picks the fastest config for every tunable step of a plan, timing with `timer`.
 pub(crate) struct Autotuner<T> {
     pub timer: T,
+    /// Whether to time candidates; without it, only forced configs (`forced`) are applied.
+    pub autotune: bool,
 }
 
 /// Untimed runs of a candidate before it is timed.
@@ -146,6 +164,22 @@ impl<T: Timer> Autotuner<T> {
         kernels: &mut K,
         plan: &mut DevicePlan<T::Step>,
     ) -> Result<(), String> {
+        // A config forced for this family: every step it handles (and can run) is built with it, untimed.
+        if let Some(config) = forced::forced::<K::Config>() {
+            for i in 0..plan.steps().len() {
+                if kernels.accepts(&plan.steps()[i], &config) {
+                    let tuned = kernels.build(&plan.steps()[i], config.clone());
+                    plan.steps_mut()[i].tuned = Some(tuned);
+                }
+            }
+
+            return kernels.compile();
+        }
+
+        if !self.autotune {
+            return Ok(());
+        }
+
         let mut same: HashMap<String, usize> = HashMap::new();
         let mut jobs: Vec<(Vec<usize>, Vec<Tuned>)> = Vec::new();
 

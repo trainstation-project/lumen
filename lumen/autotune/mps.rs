@@ -67,6 +67,15 @@ impl Kernels for Elementwise<'_> {
         }
     }
 
+    /// Whether `step` is a fusion lowered to the elementwise kernel, of any size (tuned only at mid sizes).
+    fn handles(&self, step: &MpsStep) -> bool {
+        let Primitive::Fusion { body, .. } = &step.primitive else {
+            return false;
+        };
+
+        tunable(step).is_some() && !crate::codegen::mps::tunings_of(body).is_empty()
+    }
+
     /// Generates the fusion's kernel under `tuning` and an encoder that launches it.
     fn build(&mut self, step: &MpsStep, tuning: Tuning) -> Tuned {
         let Primitive::Fusion { body, .. } = &step.primitive else {
@@ -321,6 +330,22 @@ impl Kernels for Gemms {
             .collect()
     }
 
+    /// Whether `step` is a matmul fusion run by the generated GEMM kernels, of any size (tuned only when large or
+    /// skinny).
+    fn handles(&self, step: &MpsStep) -> bool {
+        matmul_of(step).is_some() && tiled_gemm(step)
+    }
+
+    /// Whether `config` can run `step`: a GEMV config only a matrix-vector product.
+    fn accepts(&self, step: &MpsStep, config: &GemmConfig) -> bool {
+        let Primitive::Fusion { body, .. } = &step.primitive else {
+            return false;
+        };
+
+        self.handles(step)
+            && (config.algorithm != gemm::Algorithm::Gemv || gemm::gemv_config(body).is_some())
+    }
+
     /// Generates the GEMM variant for `config` and an encoder that launches it.
     fn build(&mut self, step: &MpsStep, config: GemmConfig) -> Tuned {
         let Primitive::Fusion { body, .. } = &step.primitive else {
@@ -389,6 +414,19 @@ impl Kernels for Attentions {
             Some(a) => crate::codegen::attention::mps::tunings(&a),
             None => Vec::new(),
         }
+    }
+
+    /// Whether `step` is an attention forward run by the flash-attention kernel (not the decode one), of any
+    /// size (tuned only from a million query-key pairs a head).
+    fn handles(&self, step: &MpsStep) -> bool {
+        let Primitive::Fusion { body, .. } = &step.primitive else {
+            return false;
+        };
+
+        let strides = crate::graph_compiler::mps::attention_strides(step, body);
+
+        crate::graph_compiler::passes::attention::of_body_strided(body, &strides)
+            .is_some_and(|a| !crate::codegen::attention::mps::decodes(&a))
     }
 
     /// Generates the forward for `tuning` and an encoder launching it.

@@ -31,6 +31,11 @@ impl Kernels for Gemms {
         }
     }
 
+    /// Whether `step` is a matmul (the GEMM runs every one, tuned only from `TUNED_MACS` up).
+    fn handles(&self, step: &CudaStep) -> bool {
+        matches!(step.primitive, Primitive::DotGeneral { .. })
+    }
+
     /// The step launched with `config`.
     fn build(&mut self, _: &CudaStep, config: Config) -> Tuned {
         Tuned::new(format!("{config:?}"), config)

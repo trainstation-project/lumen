@@ -7,6 +7,7 @@ import pytest
 from helpers import CUDA, MPS, TPU
 
 import lumen
+import lumen.autotune
 import lumen.functional as F
 from lumen import prims
 
@@ -592,3 +593,29 @@ def test_integers_round_once_to_bfloat16(device, dtype, triton_on_cuda):
     assert expected.astype(np.float32)[0] == (1 << 24) + (1 << 17)
     if info.bits == 64:
         assert expected.astype(np.float32)[-1] == -float((1 << 62) + (1 << 55))
+
+
+# The Metal elementwise kernel's config class, in a build with Metal.
+MPS_ELEMENTWISE = lumen.autotune.MpsElementwiseConfig
+
+
+@pytest.mark.parametrize(
+    "device, config",
+    [pytest.param("cuda", c, marks=pytest.mark.cuda, id=repr(c)) for c in lumen.autotune.TritonLoopConfig.candidates()]
+    + [
+        pytest.param("mps", c, marks=pytest.mark.mps, id=repr(c))
+        for c in (MPS_ELEMENTWISE.candidates(itemsize=4) if MPS_ELEMENTWISE else [])
+    ],
+)
+def test_elementwise_fusion_runs_every_candidate(device, config):
+    """Forced by ``lumen.autotune.use``, each autotuning candidate of a backend's elementwise kernel (Triton's loop
+    kernel on CUDA, Metal's elementwise kernel on MPS) computes a float32 fusion as NumPy does."""
+    rng = np.random.default_rng(0)
+    x, y = (rng.standard_normal((300, 257)).astype(np.float32) for _ in range(2))
+    try:
+        a, b = (tensor(v, device=device) for v in (x, y))
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    with lumen.config.compiler.patch(use_triton_backend=device == "cuda"), lumen.autotune.use(config):
+        got = lumen.compile(lambda a, b: F.exp(a) * b + 1.0)(a, b)
+    np.testing.assert_allclose(lumen.to_numpy(got), np.exp(x) * y + 1.0, rtol=1e-5, atol=1e-5)

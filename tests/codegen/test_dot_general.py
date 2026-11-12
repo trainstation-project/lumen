@@ -5,6 +5,7 @@ import pytest
 from helpers import CUDA, MPS, TPU, floats, placed
 
 import lumen
+import lumen.autotune
 import lumen.functional as F
 from lumen import prims
 from lumen.profiler import ProfilerActivity, profile
@@ -186,6 +187,61 @@ def test_cuda_gemm_autotunes_its_tile(m, k, n, capfd):
     np.testing.assert_allclose(lumen.to_numpy(got), x @ y, rtol=1e-3, atol=1e-2)
 
 
+def _bf16_operands(shapes):
+    """bfloat16 CUDA operands of `shapes`, standard normal, and their float64 copies (skips without CUDA)."""
+    rng = np.random.default_rng(0)
+    try:
+        tensors = [
+            lumen.from_numpy(rng.standard_normal(s).astype(np.float32)).to("cuda").to(dtype="bfloat16") for s in shapes
+        ]
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    return tensors, [lumen.to_numpy(t.to(dtype="float32")).astype(np.float64) for t in tensors]
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("config", lumen.autotune.CudaGemmConfig.candidates(), ids=repr)
+@pytest.mark.parametrize("lhs_k, rhs_k", [(1, 0), (1, 1), (0, 0), (0, 1)])
+@pytest.mark.parametrize("m, k, n", [(256, 256, 512), (200, 72, 136)])
+def test_cuda_gemm_runs_every_candidate(config, lhs_k, rhs_k, m, k, n):
+    """Forced by ``lumen.autotune.use``, each of the CUDA GEMM's autotuning candidates matches NumPy, in every
+    layout, on a shape every tile divides and one none does (partial tiles, a partial last k-tile)."""
+    shapes = ((m, k) if lhs_k == 1 else (k, m), (k, n) if rhs_k == 0 else (n, k))
+    (a, b), (x, y) = _bf16_operands(shapes)
+    want = (x if lhs_k == 1 else x.T) @ (y if rhs_k == 0 else y.T)
+    dims = (((lhs_k,), (rhs_k,)), ((), ()))
+    with lumen.autotune.use(config):
+        got = lumen.compile(lambda a, b: prims.dot_general(a, b, dims, "float32").to(dtype="bfloat16"))(a, b)
+    np.testing.assert_allclose(lumen.to_numpy(got.to(dtype="float32")), want, rtol=2**-6, atol=2**-2)
+
+
+@pytest.mark.cuda
+def test_cuda_gemm_runs_a_forced_config(capfd):
+    """A ``lumen.autotune.use`` config is what the GEMM runs: one too big for shared memory (128 x 256 x 64 at 5
+    stages) fails to compile inside the block and the program runs again once it exits; and with autotuning on,
+    a forced config's matmul is not timed."""
+    (a, b), (x, y) = _bf16_operands(((1024, 1024), (1024, 1024)))
+    dims = (((1,), (0,)), ((), ()))
+
+    def f(a, b):
+        """float32 matmul."""
+        return prims.dot_general(a, b, dims, "float32")
+
+    with lumen.autotune.use(lumen.autotune.CudaGemmConfig(128, 256, 64, 8, stages=5)):
+        with pytest.raises(Exception):
+            lumen.compile(f)(a, b)
+    np.testing.assert_allclose(lumen.to_numpy(lumen.compile(f)(a, b)), x @ y, rtol=1e-3, atol=1e-2)
+
+    capfd.readouterr()
+    with (
+        lumen.config.compiler.patch(autotune=True),
+        lumen.autotune.use(lumen.autotune.CudaGemmConfig(128, 128, 32, 4)),
+    ):
+        got = lumen.compile(f)(a, b)
+    assert "autotuning" not in capfd.readouterr().err
+    np.testing.assert_allclose(lumen.to_numpy(got), x @ y, rtol=1e-3, atol=1e-2)
+
+
 @pytest.mark.parametrize("device", [MPS, CUDA])
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
 @pytest.mark.parametrize("lhs_k, rhs_k", [(1, 0), (1, 1), (0, 0), (0, 1)])
@@ -211,3 +267,51 @@ def test_tuned_matmul_matches_numpy_in_every_layout(device, dtype, lhs_k, rhs_k,
     got = lumen.compile(lambda a, b: prims.dot_general(a, b, dims, "float32").to(dtype=dtype))(a, b)
     rtol = 1e-4 if dtype == "float32" else 2**-6
     np.testing.assert_allclose(lumen.to_numpy(got.to(dtype="float32")), want, rtol=rtol, atol=rtol * 16)
+
+
+@pytest.mark.cuda
+@pytest.mark.parametrize("config", lumen.autotune.TritonGemmConfig.candidates(), ids=repr)
+@pytest.mark.parametrize("m, k, n", [(256, 256, 512), (200, 72, 136)])
+def test_triton_gemm_runs_every_candidate(config, m, k, n):
+    """Forced by ``lumen.autotune.use``, each of the Triton GEMM's autotuning candidates matches NumPy, on a shape
+    every tile divides and one none does."""
+    (a, b), (x, y) = _bf16_operands(((m, k), (k, n)))
+    dims = (((1,), (0,)), ((), ()))
+    with lumen.config.compiler.patch(use_triton_backend=True), lumen.autotune.use(config):
+        got = lumen.compile(lambda a, b: prims.dot_general(a, b, dims, "float32"))(a, b)
+    np.testing.assert_allclose(lumen.to_numpy(got), x @ y, rtol=1e-3, atol=1e-2)
+
+
+# Matmuls each Metal GEMM algorithm runs, (m, k, n, rhs_k): tiled and MPP tiles over a whole matmul, skinny few
+# output rows, GEMV a vector times a matrix contiguous along K (B as (n, k)) or a matrix times a column.
+MPS_GEMM_SHAPES = {
+    "tiled": [(256, 256, 512, 0)],
+    "mpp": [(256, 256, 512, 0)],
+    "skinny": [(8, 4096, 1024, 0)],
+    "gemv": [(1, 512, 1024, 1), (1024, 512, 1, 0)],
+}
+
+
+# The Metal GEMM's candidates, in a build with Metal.
+MPS_GEMM_CANDIDATES = lumen.autotune.MpsGemmConfig.candidates() if lumen.autotune.MpsGemmConfig else []
+
+
+@pytest.mark.mps
+@pytest.mark.parametrize("config", MPS_GEMM_CANDIDATES, ids=repr)
+def test_mps_gemm_runs_every_candidate(config):
+    """Forced by ``lumen.autotune.use``, each of the Metal GEMM's autotuning candidates matches NumPy on the bfloat16
+    matmuls its algorithm runs (``MPS_GEMM_SHAPES``)."""
+    rng = np.random.default_rng(0)
+    for m, k, n, rhs_k in MPS_GEMM_SHAPES[config.algorithm]:
+        try:
+            a, b = (
+                lumen.from_numpy(rng.standard_normal(s).astype(np.float32)).to("mps").to(dtype="bfloat16")
+                for s in ((m, k), (k, n) if rhs_k == 0 else (n, k))
+            )
+        except RuntimeError as e:
+            pytest.skip(str(e))
+        x, y = (lumen.to_numpy(t.to(dtype="float32")).astype(np.float64) for t in (a, b))
+        dims = (((1,), (rhs_k,)), ((), ()))
+        with lumen.autotune.use(config):
+            got = lumen.compile(lambda a, b: prims.dot_general(a, b, dims, "float32"))(a, b)
+        np.testing.assert_allclose(lumen.to_numpy(got), x @ (y if rhs_k == 0 else y.T), rtol=1e-3, atol=1e-2)

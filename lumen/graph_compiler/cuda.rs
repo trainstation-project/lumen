@@ -230,9 +230,10 @@ pub(crate) fn compile(
     let plan = plan_options(&fused, options, config, &Vec::new(), Vec::new());
     let mut plan = crate::codegen::cuda::codegen(CpuPlan::compile_with(&fused, &plan), options)?;
 
-    if config.autotune {
+    if config.autotune || crate::autotune::forcing() {
         let tuner = Autotuner {
             timer: Events { device },
+            autotune: config.autotune,
         };
 
         tuner.tune(&mut Gemms, &mut plan)?;
