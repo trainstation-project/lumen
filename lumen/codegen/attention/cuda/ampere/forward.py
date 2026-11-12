@@ -65,9 +65,11 @@ def gemm(
     smem_thr_copy_A: cute.TiledCopy,
     smem_thr_copy_B: cute.TiledCopy,
     A_in_regs: cutlass.Constexpr[bool] = False,
+    hook_fn: Optional[Callable] = None,
 ) -> None:
     """acc += A B over the k blocks of shared-memory tiles `tCsA` and `tCsB`, loading each k block into registers
-    (`tCrA`, `tCrB`) with ldmatrix one block ahead of its MMA; with `A_in_regs`, A is already in `tCrA`."""
+    (`tCrA`, `tCrB`) with ldmatrix one block ahead of its MMA; with `A_in_regs`, A is already in `tCrA`. `hook_fn`,
+    when given, runs after the first k block's MMA (the backward issues its next tile's loads there)."""
     tCrA_copy_view = smem_thr_copy_A.retile(tCrA)
     tCrB_copy_view = smem_thr_copy_B.retile(tCrB)
 
@@ -93,6 +95,9 @@ def gemm(
             )
 
         cute.gemm(tiled_mma, acc, tCrA[None, None, k], tCrB[None, None, k], acc)
+
+        if const_expr(k == 0 and hook_fn is not None):
+            hook_fn()
 
 
 @cute.jit
@@ -231,7 +236,7 @@ class Softmax(ParamsBase):
             acc_O_mn[r, None].store(acc_O_mn[r, None].load() * row_scale[r])
 
 
-class AmpereAttention:
+class AmpereAttentionForward:
     """The FlashAttention-2 forward on SM80: one CTA per `tile_m` query rows of a head, streaming K/V blocks through
     shared memory with an online softmax."""
 

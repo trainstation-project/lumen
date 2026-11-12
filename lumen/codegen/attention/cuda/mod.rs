@@ -1,5 +1,5 @@
 //! The CUDA (CuTe DSL) flash-attention forward: which matched attentions its kernel runs, its configs, and each
-//! fusion's operands as the kernel takes them. The kernel and its compiler are Python (`ampere.py`, `launch.py`);
+//! fusion's operands as the kernel takes them. The kernel and its compiler are Python (`ampere/`, `launch.py`);
 //! Rust launches it (`runtime::kernel::cuda::ATTENTION`).
 
 mod config;

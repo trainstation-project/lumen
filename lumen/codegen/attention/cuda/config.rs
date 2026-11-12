@@ -1,7 +1,7 @@
 //! CUDA (CuTe DSL) flash-attention autotuning candidates and the config it launches with untuned.
 
-/// CTA tile, pipeline stages, warps and Q placement of one Ampere attention forward (`ampere.py`'s
-/// `AmpereAttention`) candidate.
+/// CTA tile, pipeline stages, warps and Q placement of one Ampere attention forward (`ampere/forward.py`'s
+/// `AmpereAttentionForward`) candidate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Config {
     /// Query rows per CTA.
