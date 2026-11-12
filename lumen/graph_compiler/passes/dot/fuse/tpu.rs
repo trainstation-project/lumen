@@ -4,7 +4,7 @@ use crate::codegen::utils::tpu::LANES;
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
 use crate::graph_compiler::device::{DeviceModule, Tpu};
 use crate::graph_compiler::passes::CompilerPass;
-use crate::graph_compiler::passes::dot::fuse::FuseDotsDevice;
+use crate::graph_compiler::passes::DevicePass;
 use crate::graph_compiler::passes::fusion::tpu::slot_writes;
 use crate::graph_compiler::passes::place_concats::in_place_concats;
 use crate::graph_compiler::pipeline::Pass;
@@ -517,10 +517,9 @@ impl CompilerPass<DeviceModule<'_, Tpu>> for FuseDots {
     }
 }
 
-/// TPU's answers to the pass.
-impl FuseDotsDevice for Tpu {
-    /// Always.
-    fn fuse_dots<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
+/// Always.
+impl DevicePass<Tpu> for FuseDots {
+    fn pass<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Tpu>> {
         Box::new(FuseDots)
     }
 }

@@ -12,11 +12,7 @@ mod triton;
 
 use crate::DType;
 use crate::graph::{Graph, Node, Primitive, Var};
-use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::device::DeviceModule;
-use crate::graph_compiler::passes::identity::Identity;
 use crate::graph_compiler::passes::{CompilerPass, Module};
-use crate::graph_compiler::pipeline::Pass;
 
 /// How an operand is rebuilt without its factor: the original value, or an op of the rebuilt value and an
 /// original operand; each op carries the index of the node it rebuilds, whose scope and source lines it
@@ -433,14 +429,5 @@ impl<M: Module> CompilerPass<M> for LinearReordering {
 
         *m.graph_mut() = out.prune().0;
         Ok(())
-    }
-}
-
-/// What each device runs for this pass (each device's in its own file here); a device it doesn't run on runs the
-/// identity pass.
-pub(crate) trait LinearReorderingDevice: Sized + 'static {
-    /// Moves a factor of a matmul's operand to its output.
-    fn linear_reordering<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
-        Box::new(Identity)
     }
 }

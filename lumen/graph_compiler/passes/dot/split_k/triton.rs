@@ -5,7 +5,7 @@ use super::{Rules, split_k};
 use crate::codegen::dot_general::triton::{CONFIGS, UNTUNED};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::{DeviceModule, Triton};
-use crate::graph_compiler::passes::dot::split_k::SplitKDevice;
+use crate::graph_compiler::passes::DevicePass;
 use crate::graph_compiler::passes::{CompilerPass, Module};
 use crate::graph_compiler::pipeline::{Pass, when};
 
@@ -38,10 +38,9 @@ impl<M: Module> CompilerPass<M> for SplitK {
     }
 }
 
-/// Triton's answers to the pass.
-impl SplitKDevice for Triton {
-    /// With `split_k`.
-    fn split_k<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
+/// With `split_k`.
+impl DevicePass<Triton> for super::SplitK {
+    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, Triton>> {
         when(config.split_k, SplitK)
     }
 }

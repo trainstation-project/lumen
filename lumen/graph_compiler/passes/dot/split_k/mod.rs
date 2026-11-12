@@ -2,10 +2,6 @@
 //! over K chunks summed over the chunks.
 
 use crate::graph::{Graph, Primitive, TensorType, Var};
-use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::device::DeviceModule;
-use crate::graph_compiler::passes::identity::Identity;
-use crate::graph_compiler::pipeline::Pass;
 
 #[cfg(lumen_mps_linked)]
 pub(crate) mod mps;
@@ -174,11 +170,5 @@ pub(crate) fn divides(mut s: usize, k: usize) -> Option<usize> {
     (s >= 2).then_some(s)
 }
 
-/// What each device runs for this pass (each device's in its own file here); a device it doesn't run on runs the
-/// identity pass.
-pub(crate) trait SplitKDevice: Sized + 'static {
-    /// Splits long-K matmuls with too few output tiles.
-    fn split_k<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
-        Box::new(Identity)
-    }
-}
+/// The split-K pass's slot (each device runs its own `SplitK`).
+pub(crate) struct SplitK;

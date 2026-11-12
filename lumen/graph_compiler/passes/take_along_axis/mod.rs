@@ -5,11 +5,7 @@ mod mps;
 mod triton;
 
 use crate::graph::{Graph, Primitive, Var};
-use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::device::DeviceModule;
-use crate::graph_compiler::passes::identity::Identity;
 use crate::graph_compiler::passes::{CompilerPass, Module};
-use crate::graph_compiler::pipeline::Pass;
 use crate::{DType, Scalar};
 
 /// Compiler pass running [`take_along_axis`].
@@ -115,14 +111,5 @@ impl<M: Module> CompilerPass<M> for TakeAlongAxis {
 
         *m.graph_mut() = out;
         Ok(())
-    }
-}
-
-/// What each device runs for this pass (each device's in its own file here); a device it doesn't run on runs the
-/// identity pass.
-pub(crate) trait TakeAlongAxisDevice: Sized + 'static {
-    /// Lowers `take_along_axis` to a flat `gather`.
-    fn take_along_axis<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
-        Box::new(Identity)
     }
 }

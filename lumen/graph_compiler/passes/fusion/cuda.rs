@@ -1,21 +1,13 @@
 //! What CUDA (CuTe DSL) runs for this pass.
 
-use super::FusionDevice;
 use crate::codegen::utils::cuda::cute_type;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::{Cuda, DeviceModule};
 use crate::graph_compiler::passes::CompilerPass;
+use crate::graph_compiler::passes::DevicePass;
 use crate::graph_compiler::passes::fusion::{Backend, fuse};
 use crate::graph_compiler::pipeline::{Pass, when};
-
-/// CUDA (CuTe DSL)'s answers to the pass.
-impl FusionDevice for Cuda {
-    /// With `fuse`.
-    fn fusion<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
-        when(config.fuse, Fusion)
-    }
-}
 
 /// Name of an elementwise fusion.
 pub(crate) const ELEMENTWISE: &str = "elementwise";
@@ -90,5 +82,12 @@ impl CompilerPass<DeviceModule<'_, Cuda>> for Fusion {
         let backend = backend(m);
         m.graph = fuse(&m.graph, &[], &[], &backend, |_, _| ELEMENTWISE.into());
         Ok(())
+    }
+}
+
+/// With `fuse`.
+impl DevicePass<Cuda> for super::Fusion {
+    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, Cuda>> {
+        when(config.fuse, Fusion)
     }
 }

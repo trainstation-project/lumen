@@ -8,8 +8,8 @@ use crate::codegen::kinds::gemm_dot;
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
 use crate::graph_compiler::device::{DeviceModule, Triton};
 use crate::graph_compiler::passes::CompilerPass;
+use crate::graph_compiler::passes::DevicePass;
 use crate::graph_compiler::passes::diamonds::tile_reductions;
-use crate::graph_compiler::passes::dot::rows::DotRowsDevice;
 use crate::graph_compiler::pipeline::{Pass, when};
 use crate::graph_compiler::{CompilerConfig, elementwise};
 
@@ -466,12 +466,11 @@ impl CompilerPass<DeviceModule<'_, Triton>> for WideRows {
     }
 }
 
-/// Triton's answers to the pass.
-impl DotRowsDevice for Triton {
-    /// With `fuse`, `normalization_diamonds` and `linear_reordering` (as on MPS): rows too wide for one GEMM
-    /// tile get the GEMM feeding them writing their reductions' partials too. Without the reordering the row
-    /// kernel reads the rows back anyway, so the partials save nothing.
-    fn wide_rows<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
+/// With `fuse`, `normalization_diamonds` and `linear_reordering` (as on MPS): rows too wide for one GEMM
+/// tile get the GEMM feeding them writing their reductions' partials too. Without the reordering the row
+/// kernel reads the rows back anyway, so the partials save nothing.
+impl DevicePass<Triton> for WideRows {
+    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, Triton>> {
         when(
             config.fuse && config.normalization_diamonds && config.linear_reordering,
             WideRows,

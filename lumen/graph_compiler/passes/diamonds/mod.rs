@@ -8,11 +8,8 @@ mod tpu;
 mod triton;
 
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
-use crate::graph_compiler::device::DeviceModule;
-use crate::graph_compiler::passes::identity::Identity;
 use crate::graph_compiler::passes::{CompilerPass, Module};
-use crate::graph_compiler::pipeline::Pass;
-use crate::graph_compiler::{CompilerConfig, constant, elementwise};
+use crate::graph_compiler::{constant, elementwise};
 use std::collections::HashMap;
 
 /// Whether the backend can put a node in a row kernel.
@@ -1572,18 +1569,4 @@ pub(crate) fn tile_reductions(body: &Graph, reductions: &[&Node]) -> Option<Vec<
     }
 
     Some(first)
-}
-
-/// What each device runs for this pass (each device's in its own file here); a device it doesn't run on runs the
-/// identity pass.
-pub(crate) trait DiamondsDevice: Sized + 'static {
-    /// Fuses normalization rows into `row` fusions.
-    fn fused_diamonds<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
-        Box::new(Identity)
-    }
-
-    /// Finds normalization rows for fusion.
-    fn diamonds<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
-        Box::new(Identity)
-    }
 }

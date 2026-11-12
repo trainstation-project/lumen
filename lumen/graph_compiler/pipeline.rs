@@ -6,7 +6,7 @@ use crate::graph::Graph;
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::{Cpu, DeviceModule};
 use crate::graph_compiler::passes::identity::Identity;
-use crate::graph_compiler::passes::{CompilerPass, Module};
+use crate::graph_compiler::passes::{CompilerPass, DevicePass, Module};
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -111,89 +111,44 @@ pub(crate) fn when<M>(on: bool, pass: impl CompilerPass<M> + 'static) -> Pass<M>
     }
 }
 
-/// Device `D`'s version of a pass, picked by method resolution: through `(&Pick::<D>::new()).pass(config)`, written
-/// for a concrete `D`, the impl on `Pick<D>` (taken when `D` implements the pass's device trait) wins over the one on
-/// `&Pick<D>` (the identity pass), so a device implements only the passes it runs.
-pub(crate) struct Pick<D>(PhantomData<D>);
+/// Device `D`'s version of pass `P`, picked by method resolution: through `(&Pick::<P, D>::new()).pass(config)`,
+/// written for a concrete `D`, the impl on `Pick<P, D>` (taken when `P: DevicePass<D>`) wins over the one on
+/// `&Pick<P, D>` (the identity pass), so a device implements only the passes it runs.
+pub(crate) struct Pick<P, D>(PhantomData<(P, D)>);
 
-impl<D> Pick<D> {
-    /// The picker for device `D`.
+impl<P, D> Pick<P, D> {
+    /// The picker of pass `P` for device `D`.
     pub(crate) fn new() -> Self {
         Pick(PhantomData)
     }
 }
 
-/// For each slot of the pass list, a module `slot` with trait `Slot`: implemented on `Pick<D>` as device `D`'s pass
-/// when `D` implements the slot's device trait, and on `&Pick<D>` as the identity pass.
-macro_rules! slots {
-    ($($slot:ident: $device:path),* $(,)?) => {
-        $(
-            #[doc = concat!("The `", stringify!($slot), "` slot of the pass list.")]
-            pub(crate) mod $slot {
-                use super::{CompilerConfig, DeviceModule, Identity, Pass, Pick};
-                use crate::graph_compiler::passes::*;
-
-                /// A device's pass for this slot.
-                pub(crate) trait Slot<'a, D> {
-                    /// The pass under `config`.
-                    fn pass(&self, config: &CompilerConfig) -> Pass<DeviceModule<'a, D>>;
-                }
-
-                impl<'a, D: $device> Slot<'a, D> for Pick<D> {
-                    /// The device's own pass.
-                    fn pass(&self, config: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
-                        D::$slot(config)
-                    }
-                }
-
-                impl<'a, D> Slot<'a, D> for &Pick<D> {
-                    /// The identity pass: the device doesn't implement this one.
-                    fn pass(&self, _: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
-                        Box::new(Identity)
-                    }
-                }
-            }
-        )*
-    };
+/// A device's version of a pass.
+pub(crate) trait Picked<'a, D> {
+    /// The pass under `config`.
+    fn pass(&self, config: &CompilerConfig) -> Pass<DeviceModule<'a, D>>;
 }
 
-slots! {
-    unsupported: unsupported::UnsupportedDevice,
-    take_along_axis: take_along_axis::TakeAlongAxisDevice,
-    chunked_cross_entropy: chunked_cross_entropy::ChunkedCrossEntropyDevice,
-    merge_dots_backward: merge_dots::MergeDotsDevice,
-    merge_dots: merge_dots::MergeDotsDevice,
-    flash_attention: attention::AttentionDevice,
-    flash_attention_backward: attention::AttentionDevice,
-    attention_layouts: attention::AttentionDevice,
-    linear_cross_entropy: linear_cross_entropy::LinearCrossEntropyDevice,
-    fold_dot_reshapes: dot::fold_reshapes::FoldDotReshapesDevice,
-    dot_strength: dot::strength::DotStrengthDevice,
-    merge_dots_late: merge_dots::MergeDotsDevice,
-    neural_engine: ane::NeuralEngineDevice,
-    linear_reordering: linear_reordering::LinearReorderingDevice,
-    split_k: dot::split_k::SplitKDevice,
-    canonicalize_dots: dot::canonicalize::CanonicalizeDotsDevice,
-    fused_diamonds: diamonds::DiamondsDevice,
-    dot_rows: dot::rows::DotRowsDevice,
-    updates: updates::UpdatesDevice,
-    diamonds: diamonds::DiamondsDevice,
-    fuse_dots: dot::fuse::FuseDotsDevice,
-    place_concats: place_concats::PlaceConcatsDevice,
-    fusion: fusion::FusionDevice,
-    wide_rows: dot::rows::DotRowsDevice,
-    place_views: place_views::PlaceViewsDevice,
-    alone: alone::AloneDevice,
-    concats: place_concats::PlaceConcatsDevice,
-    horizontal_fusion: horizontal::HorizontalFusionDevice,
+impl<'a, P: DevicePass<D>, D> Picked<'a, D> for Pick<P, D> {
+    /// The device's own version.
+    fn pass(&self, config: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
+        P::pass(config)
+    }
 }
 
-/// Concrete device `$device`'s pass for slot `$slot` under `$config`: its own when it implements the slot's device
-/// trait, else the identity pass.
+impl<'a, P, D> Picked<'a, D> for &Pick<P, D> {
+    /// The identity pass: the device doesn't run this one.
+    fn pass(&self, _: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
+        Box::new(Identity)
+    }
+}
+
+/// Concrete device `$device`'s version of pass `$pass` under `$config`: its own when the pass implements
+/// `DevicePass<$device>`, else the identity pass.
 macro_rules! pick {
-    ($device:ty, $slot:ident, $config:expr) => {{
-        use $crate::graph_compiler::pipeline::$slot::Slot as _;
-        (&$crate::graph_compiler::pipeline::Pick::<$device>::new()).pass($config)
+    ($device:ty, $pass:ty, $config:expr) => {{
+        use $crate::graph_compiler::pipeline::Picked as _;
+        (&$crate::graph_compiler::pipeline::Pick::<$pass, $device>::new()).pass($config)
     }};
 }
 
@@ -210,123 +165,143 @@ macro_rules! pipeline {
         pipeline
             .push($crate::graph_compiler::pipeline::pick!(
                 $device,
-                unsupported,
+                $crate::graph_compiler::passes::unsupported::Unsupported,
                 config
             ))
             .push($crate::graph_compiler::pipeline::pick!(
                 $device,
-                take_along_axis,
+                $crate::graph_compiler::passes::take_along_axis::TakeAlongAxis,
                 config
             ))
             .push($crate::graph_compiler::pipeline::pick!(
                 $device,
-                chunked_cross_entropy,
+                $crate::graph_compiler::passes::chunked_cross_entropy::ChunkedCrossEntropy,
                 config
             ))
             .push($crate::graph_compiler::pipeline::pick!(
                 $device,
-                merge_dots_backward,
-                config
-            ))
-            .push($crate::graph_compiler::pipeline::pick!(
-                $device, merge_dots, config
-            ))
-            .push($crate::graph_compiler::pipeline::pick!(
-                $device,
-                flash_attention,
+                $crate::graph_compiler::passes::merge_dots::MergeDotsBackward,
                 config
             ))
             .push($crate::graph_compiler::pipeline::pick!(
                 $device,
-                flash_attention_backward,
+                $crate::graph_compiler::passes::merge_dots::MergeDots,
                 config
             ))
             .push($crate::graph_compiler::pipeline::pick!(
                 $device,
-                attention_layouts,
+                $crate::graph_compiler::passes::attention::FlashAttention,
                 config
             ))
             .push($crate::graph_compiler::pipeline::pick!(
                 $device,
-                linear_cross_entropy,
+                $crate::graph_compiler::passes::attention::FlashAttentionBackward,
                 config
             ))
             .push($crate::graph_compiler::pipeline::pick!(
                 $device,
-                fold_dot_reshapes,
+                $crate::graph_compiler::passes::attention::tpu::AttentionLayouts,
+                config
+            ))
+            .push($crate::graph_compiler::pipeline::pick!(
+                $device,
+                $crate::graph_compiler::passes::linear_cross_entropy::LinearCrossEntropy,
+                config
+            ))
+            .push($crate::graph_compiler::pipeline::pick!(
+                $device,
+                $crate::graph_compiler::passes::dot::fold_reshapes::FoldDotReshapes,
                 config
             ))
             .add(Simplify { matched: true })
             .push($crate::graph_compiler::pipeline::pick!(
                 $device,
-                dot_strength,
+                $crate::graph_compiler::passes::dot::strength::DotStrength,
                 config
             ))
             .push($crate::graph_compiler::pipeline::pick!(
                 $device,
-                merge_dots_late,
+                $crate::graph_compiler::passes::merge_dots::MergeDotsLate,
                 config
             ))
             .push($crate::graph_compiler::pipeline::pick!(
                 $device,
-                neural_engine,
+                $crate::graph_compiler::passes::ane::NeuralEngine,
                 config
             ))
             .push($crate::graph_compiler::pipeline::pick!(
                 $device,
-                linear_reordering,
-                config
-            ))
-            .push($crate::graph_compiler::pipeline::pick!(
-                $device, split_k, config
-            ))
-            .push($crate::graph_compiler::pipeline::pick!(
-                $device,
-                canonicalize_dots,
+                $crate::graph_compiler::passes::linear_reordering::LinearReordering,
                 config
             ))
             .push($crate::graph_compiler::pipeline::pick!(
                 $device,
-                fused_diamonds,
+                $crate::graph_compiler::passes::dot::split_k::SplitK,
                 config
             ))
             .push($crate::graph_compiler::pipeline::pick!(
-                $device, dot_rows, config
-            ))
-            .push($crate::graph_compiler::pipeline::pick!(
-                $device, updates, config
-            ))
-            .push($crate::graph_compiler::pipeline::pick!(
-                $device, diamonds, config
-            ))
-            .push($crate::graph_compiler::pipeline::pick!(
-                $device, fuse_dots, config
-            ))
-            .push($crate::graph_compiler::pipeline::pick!(
                 $device,
-                place_concats,
+                $crate::graph_compiler::passes::dot::canonicalize::CanonicalizeDots,
                 config
             ))
             .push($crate::graph_compiler::pipeline::pick!(
-                $device, fusion, config
-            ))
-            .push($crate::graph_compiler::pipeline::pick!(
-                $device, wide_rows, config
-            ))
-            .push($crate::graph_compiler::pipeline::pick!(
                 $device,
-                place_views,
+                $crate::graph_compiler::passes::diamonds::FusedDiamonds,
                 config
             ))
             .push($crate::graph_compiler::pipeline::pick!(
-                $device, alone, config
-            ))
-            .push($crate::graph_compiler::pipeline::pick!(
-                $device, concats, config
+                $device,
+                $crate::graph_compiler::passes::dot::rows::tpu::DotRows,
+                config
             ))
             .push($crate::graph_compiler::pipeline::pick!(
                 $device,
-                horizontal_fusion,
+                $crate::graph_compiler::passes::updates::Updates,
+                config
+            ))
+            .push($crate::graph_compiler::pipeline::pick!(
+                $device,
+                $crate::graph_compiler::passes::diamonds::Diamonds,
+                config
+            ))
+            .push($crate::graph_compiler::pipeline::pick!(
+                $device,
+                $crate::graph_compiler::passes::dot::fuse::tpu::FuseDots,
+                config
+            ))
+            .push($crate::graph_compiler::pipeline::pick!(
+                $device,
+                $crate::graph_compiler::passes::place_concats::PlaceConcats,
+                config
+            ))
+            .push($crate::graph_compiler::pipeline::pick!(
+                $device,
+                $crate::graph_compiler::passes::fusion::Fusion,
+                config
+            ))
+            .push($crate::graph_compiler::pipeline::pick!(
+                $device,
+                $crate::graph_compiler::passes::dot::rows::triton::WideRows,
+                config
+            ))
+            .push($crate::graph_compiler::pipeline::pick!(
+                $device,
+                $crate::graph_compiler::passes::place_views::PlaceViews,
+                config
+            ))
+            .push($crate::graph_compiler::pipeline::pick!(
+                $device,
+                $crate::graph_compiler::passes::alone::Alone,
+                config
+            ))
+            .push($crate::graph_compiler::pipeline::pick!(
+                $device,
+                $crate::graph_compiler::passes::place_concats::Concats,
+                config
+            ))
+            .push($crate::graph_compiler::pipeline::pick!(
+                $device,
+                $crate::graph_compiler::passes::horizontal::HorizontalFusion,
                 config
             ));
 

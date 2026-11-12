@@ -7,11 +7,7 @@ mod triton;
 
 use crate::DType;
 use crate::graph::{Graph, Primitive, Var};
-use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::device::DeviceModule;
-use crate::graph_compiler::passes::identity::Identity;
 use crate::graph_compiler::passes::{CompilerPass, Module};
-use crate::graph_compiler::pipeline::Pass;
 
 /// `reduce_sum(v * m)` over `m`'s contracting dims, with `v` laid out and broadcast onto `m`'s shape;
 /// the result is in dot output order (batch dims, then free dims).
@@ -202,14 +198,5 @@ impl<M: Module> CompilerPass<M> for DotStrength {
 
         *m.graph_mut() = out;
         Ok(())
-    }
-}
-
-/// What each device runs for this pass (each device's in its own file here); a device it doesn't run on runs the
-/// identity pass.
-pub(crate) trait DotStrengthDevice: Sized + 'static {
-    /// Turns dots between vectors into elementwise multiplies and reduce-sums.
-    fn dot_strength<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
-        Box::new(Identity)
     }
 }

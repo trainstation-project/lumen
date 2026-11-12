@@ -7,11 +7,7 @@ mod mps;
 mod triton;
 
 use crate::graph::{Graph, Node, Primitive, Var};
-use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::device::DeviceModule;
-use crate::graph_compiler::passes::identity::Identity;
 use crate::graph_compiler::passes::{CompilerPass, Module};
-use crate::graph_compiler::pipeline::Pass;
 
 /// What a backend tells the `Alone` pass: which lone nodes need a generated kernel, which inputs its
 /// kernels take by value, and the name of each kernel.
@@ -142,13 +138,4 @@ pub(crate) fn wrapped(
     let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
     out.set_outputs(&outputs).expect("values of the graph");
     out
-}
-
-/// What each device runs for this pass (each device's in its own file here); a device it doesn't run on runs the
-/// identity pass.
-pub(crate) trait AloneDevice: Sized + 'static {
-    /// Wraps the nodes left outside any fusion that need a kernel into single-node fusions.
-    fn alone<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
-        Box::new(Identity)
-    }
 }

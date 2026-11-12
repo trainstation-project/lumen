@@ -1,20 +1,12 @@
 //! What Triton runs for this pass.
 
-use super::AloneDevice;
 use crate::graph::{Graph, Node, Primitive};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::{DeviceModule, Triton};
+use crate::graph_compiler::passes::DevicePass;
 use crate::graph_compiler::passes::alone::{Alone, Lone};
 use crate::graph_compiler::passes::fusion::triton::{fusible, named};
 use crate::graph_compiler::pipeline::Pass;
-
-/// Triton's answers to the pass.
-impl AloneDevice for Triton {
-    /// Always.
-    fn alone<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
-        Box::new(Alone)
-    }
-}
 
 impl Lone for DeviceModule<'_, Triton> {
     /// Whether lone `n` is one a Triton loop kernel computes (Triton has no other kernel for it): every
@@ -38,5 +30,12 @@ impl Lone for DeviceModule<'_, Triton> {
     /// Names the kernel by the body's kind.
     fn kernel(&mut self, body: &Graph, _: &[bool]) -> String {
         named(body)
+    }
+}
+
+/// Always.
+impl DevicePass<Triton> for Alone {
+    fn pass<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Triton>> {
+        Box::new(Alone)
     }
 }

@@ -1,16 +1,15 @@
 //! What TPU runs for this pass.
 
-use super::HorizontalFusionDevice;
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::{DeviceModule, Tpu};
+use crate::graph_compiler::passes::DevicePass;
 use crate::graph_compiler::passes::fusion::tpu as fusion;
 use crate::graph_compiler::passes::horizontal::{Grouping, HorizontalFusion};
 use crate::graph_compiler::pipeline::{Pass, when};
 
-/// TPU's answers to the pass.
-impl HorizontalFusionDevice for Tpu {
-    /// With `horizontal_fusion`.
-    fn horizontal_fusion<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
+/// With `horizontal_fusion`.
+impl DevicePass<Tpu> for HorizontalFusion {
+    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, Tpu>> {
         let horizontal = HorizontalFusion {
             candidate: fusion::horizontal_candidate,
             grouping: Grouping::Shape,

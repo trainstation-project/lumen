@@ -1,21 +1,11 @@
 //! What TPU runs for this pass.
 
-use super::CanonicalizeDotsDevice;
 use crate::graph::{Primitive, TensorType};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::{DeviceModule, Tpu};
+use crate::graph_compiler::passes::DevicePass;
 use crate::graph_compiler::passes::dot::canonicalize::CanonicalizeDots;
 use crate::graph_compiler::pipeline::Pass;
-
-/// TPU's answers to the pass.
-impl CanonicalizeDotsDevice for Tpu {
-    /// Always: matmul operands the TPU kernel can't read as laid out are transposed into its form first.
-    fn canonicalize_dots<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
-        Box::new(CanonicalizeDots {
-            readable: reads_as_laid_out,
-        })
-    }
-}
 
 /// Whether the TPU matmul kernel reads operand `k` of `dot` over `operands` as laid out: its batch dimensions
 /// lead it, and the lhs is batch, free dimensions, then one contracting one (or batch, contracting, free), the
@@ -43,5 +33,14 @@ fn reads_as_laid_out(dot: &Primitive, operands: [&TensorType; 2], k: usize) -> b
             leads(lhs_batch) && rank >= nb + 2 && (last || transposed)
         }
         _ => leads(rhs_batch) && rank == nb + 2 && rhs_contracting.len() == 1,
+    }
+}
+
+/// Always: matmul operands the TPU kernel can't read as laid out are transposed into its form first.
+impl DevicePass<Tpu> for CanonicalizeDots {
+    fn pass<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Tpu>> {
+        Box::new(CanonicalizeDots {
+            readable: reads_as_laid_out,
+        })
     }
 }

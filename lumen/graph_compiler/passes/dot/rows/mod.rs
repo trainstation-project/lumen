@@ -4,10 +4,7 @@
 //! it is read again.
 
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
-use crate::graph_compiler::device::DeviceModule;
-use crate::graph_compiler::passes::identity::Identity;
-use crate::graph_compiler::pipeline::Pass;
-use crate::graph_compiler::{CompilerConfig, elementwise};
+use crate::graph_compiler::elementwise;
 
 pub(crate) mod tpu;
 pub(crate) mod triton;
@@ -303,18 +300,4 @@ pub(crate) fn dot_rows(
     let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
     out.set_outputs(&outputs).expect("values of the graph");
     out
-}
-
-/// What each device runs for this pass (each device's in its own file here); a device it doesn't run on runs the
-/// identity pass.
-pub(crate) trait DotRowsDevice: Sized + 'static {
-    /// Fuses a matmul into the `row` fusion reading its whole output rows.
-    fn dot_rows<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
-        Box::new(Identity)
-    }
-
-    /// Splits rows too wide for one GEMM tile.
-    fn wide_rows<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
-        Box::new(Identity)
-    }
 }

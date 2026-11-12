@@ -3,11 +3,7 @@
 mod tpu;
 
 use crate::graph::{Graph, Primitive, Var};
-use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::device::DeviceModule;
-use crate::graph_compiler::passes::identity::Identity;
 use crate::graph_compiler::passes::{CompilerPass, Module};
-use crate::graph_compiler::pipeline::Pass;
 
 /// Compiler pass running [`fold_dot_reshapes`].
 pub(crate) struct FoldDotReshapes;
@@ -100,14 +96,5 @@ impl<M: Module> CompilerPass<M> for FoldDotReshapes {
 
         *m.graph_mut() = out;
         Ok(())
-    }
-}
-
-/// What each device runs for this pass (each device's in its own file here); a device it doesn't run on runs the
-/// identity pass.
-pub(crate) trait FoldDotReshapesDevice: Sized + 'static {
-    /// Folds a reshape flattening leading dims into a 2-D dot's lhs.
-    fn fold_dot_reshapes<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
-        Box::new(Identity)
     }
 }

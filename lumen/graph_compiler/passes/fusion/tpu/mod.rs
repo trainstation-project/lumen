@@ -6,7 +6,7 @@ use crate::graph::{Graph, Node, Primitive};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::{DeviceModule, Tpu};
 use crate::graph_compiler::passes::CompilerPass;
-use crate::graph_compiler::passes::fusion::FusionDevice;
+use crate::graph_compiler::passes::DevicePass;
 use crate::graph_compiler::pipeline::Pass;
 mod emit;
 mod groups;
@@ -73,10 +73,9 @@ pub(crate) fn slot_writes(graph: &Graph, concat: &Node, k: usize, producer: &Nod
         && writes
 }
 
-/// TPU's answers to the pass.
-impl FusionDevice for Tpu {
-    /// Always.
-    fn fusion<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
+/// Always.
+impl DevicePass<Tpu> for super::Fusion {
+    fn pass<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Tpu>> {
         Box::new(Fusion)
     }
 }

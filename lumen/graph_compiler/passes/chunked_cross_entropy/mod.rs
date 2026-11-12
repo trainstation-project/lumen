@@ -7,11 +7,7 @@ mod triton;
 
 use super::linear_cross_entropy::{Found, matched, uses};
 use crate::graph::{Graph, Node, Primitive, Var};
-use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::device::DeviceModule;
-use crate::graph_compiler::passes::identity::Identity;
 use crate::graph_compiler::passes::{CompilerPass, Module};
-use crate::graph_compiler::pipeline::Pass;
 
 /// Rewrites each matched cross entropy whose logits are also computed in row chunks, until none is left.
 fn chunked_cross_entropy(graph: &Graph) -> Graph {
@@ -312,14 +308,5 @@ impl<M: Module> CompilerPass<M> for ChunkedCrossEntropy {
     fn apply(&mut self, m: &mut M) -> Result<(), String> {
         *m.graph_mut() = chunked_cross_entropy(m.graph());
         Ok(())
-    }
-}
-
-/// What each device runs for this pass (each device's in its own file here); a device it doesn't run on runs the
-/// identity pass.
-pub(crate) trait ChunkedCrossEntropyDevice: Sized + 'static {
-    /// Computes a cross entropy over logits the graph already computes chunk by chunk, per chunk.
-    fn chunked_cross_entropy<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
-        Box::new(Identity)
     }
 }

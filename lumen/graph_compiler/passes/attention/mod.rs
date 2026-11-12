@@ -10,10 +10,7 @@ mod triton;
 
 use crate::DType;
 use crate::graph::{Graph, Node, Primitive, Var};
-use crate::graph_compiler::device::DeviceModule;
-use crate::graph_compiler::passes::identity::Identity;
-use crate::graph_compiler::pipeline::Pass;
-use crate::graph_compiler::{CompilerConfig, constant};
+use crate::graph_compiler::constant;
 use crate::tensor::contiguous_strides;
 use std::collections::HashMap;
 
@@ -958,23 +955,4 @@ fn reshaped(
     }
 
     Some(out)
-}
-
-/// What each device runs for this pass (each device's in its own file here); a device it doesn't run on runs the
-/// identity pass.
-pub(crate) trait AttentionDevice: Sized + 'static {
-    /// Replaces each forward attention with a `flash_attention` fusion.
-    fn flash_attention<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
-        Box::new(Identity)
-    }
-
-    /// Replaces attention's gradients with `flash_attention_backward` fusions.
-    fn flash_attention_backward<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
-        Box::new(Identity)
-    }
-
-    /// Folds output layouts into the attention fusions, for the device's attention kernels.
-    fn attention_layouts<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
-        Box::new(Identity)
-    }
 }

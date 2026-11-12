@@ -4,9 +4,8 @@
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::{DeviceModule, Tpu};
-use crate::graph_compiler::passes::attention::{
-    AttentionDevice, FlashAttention, FlashAttentionBackward,
-};
+use crate::graph_compiler::passes::DevicePass;
+use crate::graph_compiler::passes::attention::{FlashAttention, FlashAttentionBackward};
 use crate::graph_compiler::passes::{CompilerPass, attention};
 use crate::graph_compiler::pipeline::{Pass, when};
 
@@ -367,20 +366,23 @@ impl CompilerPass<DeviceModule<'_, Tpu>> for AttentionLayouts {
     }
 }
 
-/// TPU's answers to the pass.
-impl AttentionDevice for Tpu {
-    /// With `flash_attention`.
-    fn flash_attention<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
+/// With `flash_attention`.
+impl DevicePass<Tpu> for FlashAttention {
+    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, Tpu>> {
         when(config.flash_attention, FlashAttention)
     }
+}
 
-    /// With `flash_attention`.
-    fn flash_attention_backward<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
+/// With `flash_attention`.
+impl DevicePass<Tpu> for FlashAttentionBackward {
+    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, Tpu>> {
         when(config.flash_attention, FlashAttentionBackward)
     }
+}
 
-    /// With `flash_attention`.
-    fn attention_layouts<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
+/// With `flash_attention`.
+impl DevicePass<Tpu> for AttentionLayouts {
+    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, Tpu>> {
         when(config.flash_attention, AttentionLayouts)
     }
 }

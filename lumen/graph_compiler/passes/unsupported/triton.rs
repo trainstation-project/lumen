@@ -1,19 +1,12 @@
 //! What Triton runs for this pass.
 
-use super::{Unsupported, UnsupportedDevice};
+use super::Unsupported;
 use crate::DType;
 use crate::graph::Graph;
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::{DeviceModule, Triton};
+use crate::graph_compiler::passes::DevicePass;
 use crate::graph_compiler::pipeline::Pass;
-
-/// Triton's answers to the pass.
-impl UnsupportedDevice for Triton {
-    /// Always: rejects half-precision transcendentals, which Triton's libdevice lacks.
-    fn unsupported<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
-        Box::new(Unsupported { check: unsupported })
-    }
-}
 
 /// Rejects graphs with half-precision transcendentals, which Triton's libdevice lacks.
 fn unsupported(graph: &Graph) -> Result<(), String> {
@@ -30,4 +23,11 @@ fn unsupported(graph: &Graph) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Always: rejects graphs with an op the device has no kernel for.
+impl DevicePass<Triton> for Unsupported {
+    fn pass<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Triton>> {
+        Box::new(Unsupported { check: unsupported })
+    }
 }

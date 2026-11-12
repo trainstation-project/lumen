@@ -8,11 +8,7 @@ mod triton;
 
 use crate::DType;
 use crate::graph::{Graph, Node, Primitive, UPDATES, Var, intern};
-use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::device::DeviceModule;
-use crate::graph_compiler::passes::identity::Identity;
 use crate::graph_compiler::passes::{CompilerPass, Module};
-use crate::graph_compiler::pipeline::Pass;
 use crate::tensor::scalar::Scalar;
 
 /// Whether `v` is made by a scalar `i32` integer fill, i.e. a compile-time start index.
@@ -260,13 +256,4 @@ pub(crate) fn overlaps(
             (s.clone(), later)
         })
         .collect()
-}
-
-/// What each device runs for this pass (each device's in its own file here); a device it doesn't run on runs the
-/// identity pass.
-pub(crate) trait UpdatesDevice: Sized + 'static {
-    /// Fuses chains of constant-offset `dynamic_update_slice`s into one `updates` fusion.
-    fn updates<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
-        Box::new(Identity)
-    }
 }

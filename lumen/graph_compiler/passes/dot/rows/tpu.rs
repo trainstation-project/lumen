@@ -7,7 +7,7 @@ use crate::graph::Graph;
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::{DeviceModule, Tpu};
 use crate::graph_compiler::passes::CompilerPass;
-use crate::graph_compiler::passes::dot::rows::DotRowsDevice;
+use crate::graph_compiler::passes::DevicePass;
 use crate::graph_compiler::pipeline::{Pass, when};
 
 /// Whether the TPU row kernel reads input `at` of row body `body` as full rows.
@@ -34,10 +34,9 @@ impl CompilerPass<DeviceModule<'_, Tpu>> for DotRows {
     }
 }
 
-/// TPU's answers to the pass.
-impl DotRowsDevice for Tpu {
-    /// With `normalization_diamonds`.
-    fn dot_rows<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
+/// With `normalization_diamonds`.
+impl DevicePass<Tpu> for DotRows {
+    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, Tpu>> {
         when(config.normalization_diamonds, DotRows)
     }
 }

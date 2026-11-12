@@ -5,11 +5,7 @@ mod triton;
 
 use crate::codegen::layout::{MAX_HEROES, transpose_tiling};
 use crate::graph::{Graph, Node, Primitive, Scope, Var, intern};
-use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::device::DeviceModule;
-use crate::graph_compiler::passes::identity::Identity;
 use crate::graph_compiler::passes::{CompilerPass, Module};
-use crate::graph_compiler::pipeline::Pass;
 use std::collections::HashMap;
 
 /// Most nodes in one horizontal group.
@@ -565,14 +561,5 @@ impl<M: Module> CompilerPass<M> for HorizontalFusion {
 
         *m.graph_mut() = fuse(m.graph(), &[], &mut target);
         Ok(())
-    }
-}
-
-/// What each device runs for this pass (each device's in its own file here); a device it doesn't run on runs the
-/// identity pass.
-pub(crate) trait HorizontalFusionDevice: Sized + 'static {
-    /// Merges independent kernels of one kind into one launch.
-    fn horizontal_fusion<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
-        Box::new(Identity)
     }
 }

@@ -31,7 +31,7 @@ pub(crate) mod take_along_axis;
 pub(crate) mod unsupported;
 pub(crate) mod updates;
 
-use super::{CompilerConfig, Options};
+use super::{CompilerConfig, Options, device, pipeline};
 use crate::graph::Graph;
 
 /// A unit of compilation that passes read and rewrite: a graph with its options and device config.
@@ -42,6 +42,13 @@ pub(crate) trait Module {
 
     /// Compiler config of the module's target device.
     fn config(&self) -> &CompilerConfig;
+}
+
+/// A pass device `D` runs: implemented by the pass (its slot's type) for each device that runs it, as that device's
+/// version of the pass; a device without an impl runs the identity pass (`pipeline::pick!`).
+pub(crate) trait DevicePass<D> {
+    /// Device `D`'s version of the pass under `config`.
+    fn pass<'a>(config: &CompilerConfig) -> pipeline::Pass<device::DeviceModule<'a, D>>;
 }
 
 /// A graph transformation run by a [`Pipeline`].

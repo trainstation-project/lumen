@@ -1,19 +1,12 @@
 //! What MPS runs for this pass.
 
-use super::{Unsupported, UnsupportedDevice};
+use super::Unsupported;
 use crate::DType;
 use crate::graph::{Graph, Primitive, TensorType};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::{DeviceModule, Mps};
+use crate::graph_compiler::passes::DevicePass;
 use crate::graph_compiler::pipeline::Pass;
-
-/// MPS's answers to the pass.
-impl UnsupportedDevice for Mps {
-    /// Always: rejects bfloat16 transcendentals, mixed-dtype dots and dtypes Metal lacks.
-    fn unsupported<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
-        Box::new(Unsupported { check: unsupported })
-    }
-}
 
 /// Rejects graphs with ops MPS has no kernel for: bfloat16 transcendentals and mixed-dtype dots.
 fn unsupported(graph: &Graph) -> Result<(), String> {
@@ -63,4 +56,11 @@ fn unsupported(graph: &Graph) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Always: rejects graphs with an op the device has no kernel for.
+impl DevicePass<Mps> for Unsupported {
+    fn pass<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Mps>> {
+        Box::new(Unsupported { check: unsupported })
+    }
 }

@@ -6,9 +6,10 @@ use crate::codegen::mps::{Kernel, request, writes_views};
 use crate::graph::{Node, Primitive};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::{DeviceModule, Mps};
+use crate::graph_compiler::passes::DevicePass;
 use crate::graph_compiler::passes::alone::wrapped;
 use crate::graph_compiler::passes::fusion::mps as fusion;
-use crate::graph_compiler::passes::place_concats::{PlaceConcats, PlaceConcatsDevice, Slots};
+use crate::graph_compiler::passes::place_concats::{PlaceConcats, Slots};
 use crate::graph_compiler::passes::{CompilerPass, attention};
 use crate::graph_compiler::pipeline::{Pass, when};
 use std::collections::HashMap;
@@ -109,19 +110,6 @@ pub(crate) fn slot_worth(producer: &Node) -> bool {
     matches!(pending(producer), Some(Kernel::AttentionBackward))
 }
 
-/// MPS's answers to the pass.
-impl PlaceConcatsDevice for Mps {
-    /// With `fuse`.
-    fn place_concats<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
-        when(config.fuse, PlaceConcats)
-    }
-
-    /// Always.
-    fn concats<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
-        Box::new(Concats)
-    }
-}
-
 impl Slots for DeviceModule<'_, Mps> {
     /// Before fusion: what `concats::slot_writes` accepts, fusible nodes counting as kernels.
     fn writes(&self, concat: &Node, k: usize, producer: &Node, index: usize) -> bool {
@@ -131,5 +119,19 @@ impl Slots for DeviceModule<'_, Mps> {
     /// The attention backward kernel's operands (`concats::slot_worth`).
     fn worth(&self, _: &Node, _: usize, producer: &Node, _: usize) -> bool {
         slot_worth(producer)
+    }
+}
+
+/// With `fuse`.
+impl DevicePass<Mps> for PlaceConcats {
+    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, Mps>> {
+        when(config.fuse, PlaceConcats)
+    }
+}
+
+/// Always.
+impl DevicePass<Mps> for super::Concats {
+    fn pass<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Mps>> {
+        Box::new(Concats)
     }
 }

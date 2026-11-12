@@ -7,11 +7,7 @@ mod tpu;
 
 use crate::graph::primitive::free_dims;
 use crate::graph::{Graph, Primitive, TensorType, Var};
-use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::device::DeviceModule;
-use crate::graph_compiler::passes::identity::Identity;
 use crate::graph_compiler::passes::{CompilerPass, Module};
-use crate::graph_compiler::pipeline::Pass;
 
 /// Whether a backend's matmul kernels read operand `k` (0 the lhs, 1 the rhs) of `dot` over `operands`
 /// as laid out, contiguously.
@@ -145,14 +141,5 @@ impl<M: Module> CompilerPass<M> for CanonicalizeDots {
 
         *m.graph_mut() = out;
         Ok(())
-    }
-}
-
-/// What each device runs for this pass (each device's in its own file here); a device it doesn't run on runs the
-/// identity pass.
-pub(crate) trait CanonicalizeDotsDevice: Sized + 'static {
-    /// Transposes dot operands the device's matmul kernels can't read as laid out.
-    fn canonicalize_dots<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
-        Box::new(Identity)
     }
 }

@@ -5,11 +5,7 @@
 pub(crate) mod cuda;
 
 use crate::graph::{Graph, Node, Primitive, Var};
-use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::diamonds::Row;
-use crate::graph_compiler::passes::identity::Identity;
-use crate::graph_compiler::pipeline::Pass;
 pub(crate) use crate::graph_compiler::{constant, elementwise, label};
 
 mod analysis;
@@ -103,11 +99,5 @@ pub(crate) fn fuse(
     )
 }
 
-/// What each device runs for this pass (each device's in its own file here); a device it doesn't run on runs the
-/// identity pass.
-pub(crate) trait FusionDevice: Sized + 'static {
-    /// Fuses the graph into kernels.
-    fn fusion<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
-        Box::new(Identity)
-    }
-}
+/// The fusion pass's slot (each device runs its own `Fusion`).
+pub(crate) struct Fusion;

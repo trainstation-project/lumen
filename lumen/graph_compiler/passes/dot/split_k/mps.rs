@@ -6,7 +6,7 @@ use crate::codegen::dot_general::mps::{float_groups, gemv, skinny_rows};
 use crate::graph::Graph;
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::{DeviceModule, Mps};
-use crate::graph_compiler::passes::dot::split_k::SplitKDevice;
+use crate::graph_compiler::passes::DevicePass;
 use crate::graph_compiler::passes::{CompilerPass, Module};
 use crate::graph_compiler::pipeline::{Pass, when};
 
@@ -61,10 +61,9 @@ impl<M: Module> CompilerPass<M> for SplitK {
     }
 }
 
-/// MPS's answers to the pass.
-impl SplitKDevice for Mps {
-    /// With `split_k`.
-    fn split_k<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
+/// With `split_k`.
+impl DevicePass<Mps> for super::SplitK {
+    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, Mps>> {
         when(config.split_k, SplitK)
     }
 }

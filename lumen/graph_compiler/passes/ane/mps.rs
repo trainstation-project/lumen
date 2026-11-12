@@ -1,11 +1,12 @@
 //! Offloads float16 GEMM regions that read fixed weights to the Apple Neural Engine through Core ML,
 //! and runs those programs on a host thread synchronized with the Metal command stream by shared events.
 
-use super::{NeuralEngineDevice, mil};
+use super::mil;
 use crate::graph::{FUSION_SEPARATOR, Graph, NEURAL_ENGINE, Primitive, TensorType, Var, intern};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::{DeviceModule, Mps};
 use crate::graph_compiler::passes::CompilerPass;
+use crate::graph_compiler::passes::DevicePass;
 use crate::graph_compiler::pipeline::{Pass, when};
 use crate::plan::StepBase;
 use crate::tensor::contiguous_strides;
@@ -879,10 +880,9 @@ impl<'a> CompilerPass<DeviceModule<'a, Mps>> for NeuralEngine {
     }
 }
 
-/// MPS's answers to the pass.
-impl NeuralEngineDevice for Mps {
-    /// With `neural_engine`.
-    fn neural_engine<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
+/// With `neural_engine`.
+impl DevicePass<Mps> for super::NeuralEngine {
+    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, Mps>> {
         when(config.neural_engine, NeuralEngine)
     }
 }

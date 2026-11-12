@@ -1,21 +1,13 @@
 //! What MPS runs for this pass.
 
-use super::AloneDevice;
 use crate::DType;
 use crate::codegen::mps::{Kernel, request};
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::{DeviceModule, Mps};
+use crate::graph_compiler::passes::DevicePass;
 use crate::graph_compiler::passes::alone::{Alone, Lone};
 use crate::graph_compiler::pipeline::Pass;
-
-/// MPS's answers to the pass.
-impl AloneDevice for Mps {
-    /// Always.
-    fn alone<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
-        Box::new(Alone)
-    }
-}
 
 impl Lone for DeviceModule<'_, Mps> {
     /// Whether `n` needs its own kernel: a float GEMM, a copying concatenation, a gather, a layout op that
@@ -52,5 +44,12 @@ impl Lone for DeviceModule<'_, Mps> {
     /// Requests a fusion kernel, returning its pending name; codegen reads its by-value inputs off the plan.
     fn kernel(&mut self, _: &Graph, _: &[bool]) -> String {
         request(Kernel::Fusion)
+    }
+}
+
+/// Always.
+impl DevicePass<Mps> for Alone {
+    fn pass<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Mps>> {
+        Box::new(Alone)
     }
 }

@@ -6,11 +6,7 @@ mod triton;
 
 use crate::codegen::kinds::gemm_dot;
 use crate::graph::{Graph, Primitive, TensorType, Var};
-use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::device::DeviceModule;
-use crate::graph_compiler::passes::identity::Identity;
 use crate::graph_compiler::passes::{CompilerPass, Module};
-use crate::graph_compiler::pipeline::Pass;
 use crate::tensor::contiguous_strides;
 
 /// Whether a dot (`Primitive`, its two operands' types) reads operand `k` laid out with `strides`.
@@ -109,14 +105,5 @@ impl<M: Module> CompilerPass<M> for PlaceViews {
     fn apply(&mut self, m: &mut M) -> Result<(), String> {
         place_views(m.graph_mut(), self.reads);
         Ok(())
-    }
-}
-
-/// What each device runs for this pass (each device's in its own file here); a device it doesn't run on runs the
-/// identity pass.
-pub(crate) trait PlaceViewsDevice: Sized + 'static {
-    /// Turns slices read only by GEMMs into strided views.
-    fn place_views<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Self>> {
-        Box::new(Identity)
     }
 }
