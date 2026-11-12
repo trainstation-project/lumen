@@ -2,6 +2,8 @@
 //! templated kernel, generated with its tensors' layouts at launch).
 
 use crate::DType;
+use crate::autotune::Autotuner;
+use crate::autotune::triton::{Events, Gemms, Loops, Tiles};
 use crate::codegen::kinds::{gemm_dot, reduction_root};
 use crate::codegen::layout::{TILE, transpose_tiling};
 use crate::codegen::reduction::ReductionCodegen;
@@ -11,9 +13,10 @@ use crate::codegen::scan::triton::Scan;
 use crate::codegen::scatter_add::triton::launch::Scatter;
 use crate::codegen::utils::triton as codegen;
 use crate::graph::{Primitive, UPDATES};
-use crate::graph_compiler::Options;
+use crate::graph_compiler::device::{Device, DeviceModule, Triton};
 use crate::graph_compiler::passes::horizontal::segments;
-use crate::plan::{Buffer, CpuPlan, Step as _, StepBase, TritonPlan, TritonStep};
+use crate::graph_compiler::{Options, plan_options, positions};
+use crate::plan::{Buffer, CpuPlan, Plan, Step as _, StepBase, TritonPlan, TritonStep};
 
 /// A generated Triton loop kernel for one plan step.
 #[derive(Debug, Clone)]
@@ -341,4 +344,45 @@ fn scan(step: &StepBase) -> Result<Scan, String> {
 
     codegen::Triton::scan(&step.inputs[0].1, axis, reverse, accum_dtype)
         .map_err(|e| format!("{}: {e}", step.label))
+}
+
+/// Triton rejects half-precision transcendentals; it plans the passed graph, generates its loop kernels and
+/// autotunes GEMM and loop configs when enabled.
+impl Device for Triton {
+    const NAME: &'static str = "triton";
+
+    /// Plans `module`'s graph with its packed blocks, generates its kernels and autotunes them.
+    fn lower(
+        module: DeviceModule<'_, Self>,
+        device: crate::Device,
+    ) -> Result<Box<dyn Plan>, String> {
+        let DeviceModule {
+            graph: fused,
+            options,
+            packed,
+            interleaved,
+            ..
+        } = module;
+
+        let config = &options.config;
+        let scalars = positions(&options.scalars);
+        let plan = plan_options(&fused, options, config, &packed, scalars);
+        let mut plan = CpuPlan::compile_with(&fused, &plan);
+        plan.packed = packed;
+        plan.interleaved = interleaved;
+        let mut plan = crate::codegen::triton::codegen(plan, options)?;
+
+        if config.autotune || crate::autotune::forcing() {
+            let tuner = Autotuner {
+                timer: Events { device },
+                autotune: config.autotune,
+            };
+
+            tuner.tune(&mut Gemms, &mut plan)?;
+            tuner.tune(&mut Tiles, &mut plan)?;
+            tuner.tune(&mut Loops, &mut plan)?;
+        }
+
+        Ok(Box::new(plan))
+    }
 }

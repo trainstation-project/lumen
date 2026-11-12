@@ -4,6 +4,16 @@
 //! answers to that pass in their `mps`, `tpu` and `triton` files. `tpu` and `triton` here hold what those
 //! backends do with the fusions after matching: TPU's layout folding and Triton's kernel launches.
 
+#[cfg(lumen_mps_linked)]
+mod mps;
+mod triton;
+
+use crate::DType;
+use crate::graph::{Graph, Node, Primitive, Var};
+use crate::graph_compiler::constant;
+use crate::tensor::contiguous_strides;
+use std::collections::HashMap;
+
 mod backward;
 mod forward;
 pub(crate) mod tpu;
@@ -20,18 +30,11 @@ pub(crate) use forward::{
     Attention, Attentions, Epilogues, FlashAttention, of_body, of_body_strided,
 };
 
-use std::collections::HashMap;
-
 /// Name of a forward flash-attention fusion.
 pub(crate) const FORWARD: &str = "flash_attention";
 
 /// Name of a backward flash-attention fusion.
 pub(crate) const BACKWARD: &str = "flash_attention_backward";
-
-use crate::DType;
-use crate::graph::{Graph, Node, Primitive, Var};
-use crate::graph_compiler::constant;
-use crate::tensor::contiguous_strides;
 
 /// How a kernel reads (or writes) a `[batch.., row, col]` operand as a strided view of `base`.
 #[derive(Debug, Clone, PartialEq)]

@@ -1,11 +1,11 @@
 //! How TPU fuses forward attention: its answers to the forward `FlashAttention` pass.
 
 use crate::graph::{Graph, Var};
+use crate::graph_compiler::device::{DeviceModule, Tpu};
 use crate::graph_compiler::passes::attention::{self, Attentions};
-use crate::graph_compiler::tpu::TpuModule;
 
 /// Flash-attention matching for TPU: scalar epilogue leaves, no extra scalars, static offsets.
-impl Attentions for TpuModule<'_> {
+impl Attentions for DeviceModule<'_, Tpu> {
     /// Whether attention may absorb elementwise epilogues.
     fn contraction_epilogues(&self) -> bool {
         self.options.config.contraction_epilogues

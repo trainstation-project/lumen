@@ -1,11 +1,11 @@
 //! How TPU fuses attention's backward: its answers to the `FlashAttentionBackward` pass.
 
 use crate::graph::{Graph, Node, Primitive, Var};
+use crate::graph_compiler::device::{DeviceModule, Tpu};
 use crate::graph_compiler::passes::attention::{self, AttentionBackwards, Backward};
-use crate::graph_compiler::tpu::TpuModule;
 
 /// Each attention backward runs as a dK/dV kernel and a dQ kernel.
-impl AttentionBackwards for TpuModule<'_> {
+impl AttentionBackwards for DeviceModule<'_, Tpu> {
     /// None: the TPU backward runs dK/dV and dQ as separate kernels.
     fn together(&self) -> impl Fn(&Backward) -> bool + 'static {
         |_| false

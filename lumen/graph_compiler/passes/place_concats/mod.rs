@@ -2,11 +2,14 @@
 //! them, so the concatenate copies nothing. `mps` holds MPS's slot rules and its pass, after fusion, copying
 //! the concatenations fusion left unable to be written in place.
 
-#[cfg(lumen_mps_linked)]
-pub(crate) mod mps;
+mod tpu;
+mod triton;
 
 use crate::graph::{Graph, Node, Primitive};
 use crate::graph_compiler::passes::{CompilerPass, Module};
+
+#[cfg(lumen_mps_linked)]
+pub(crate) mod mps;
 
 /// A module whose backend's kernels may write a concatenation's operands into their slots. Operand `k` of
 /// `concat` is made by `producer`, the fusion itself when the operand is its output `index`.
@@ -113,3 +116,6 @@ impl<M: Slots> CompilerPass<M> for PlaceConcats {
         Ok(())
     }
 }
+
+/// The slot copying the concatenations fusion left unable to be written in place (MPS's `mps::Concats`).
+pub(crate) struct Concats;

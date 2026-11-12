@@ -1,14 +1,13 @@
 //! How Triton fuses forward attention: its answers to the forward `FlashAttention` pass.
 
 use crate::graph::Var;
-use crate::graph_compiler::passes::attention::Attentions;
-use crate::graph_compiler::passes::attention::FORWARD;
+use crate::graph_compiler::device::{DeviceModule, Triton};
+use crate::graph_compiler::passes::attention::{Attentions, FORWARD};
 use crate::graph_compiler::positions;
-use crate::graph_compiler::triton::TritonModule;
 
 /// Flash-attention matching for Triton, as on MPS: elementwise epilogues reading any leaf, runtime causal
 /// offsets (decode).
-impl Attentions for TritonModule<'_> {
+impl Attentions for DeviceModule<'_, Triton> {
     /// Elementwise epilogues are fused into the forward kernel's output store.
     fn contraction_epilogues(&self) -> bool {
         true

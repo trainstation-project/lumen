@@ -3,11 +3,11 @@
 //! elementwise op may sit between them (a residual added to the product), its value written too where
 //! it is read again.
 
-pub(crate) mod tpu;
-pub(crate) mod triton;
-
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
 use crate::graph_compiler::elementwise;
+
+pub(crate) mod tpu;
+pub(crate) mod triton;
 
 /// Whether a row fusion's body reads its input `at` as whole rows, so a matmul can feed it.
 pub(crate) type Joins = fn(&Graph, usize) -> bool;
