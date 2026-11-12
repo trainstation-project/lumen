@@ -7,6 +7,7 @@ use super::{unsupported, viewed};
 use crate::codegen::dot_general::cuda::Config;
 use crate::codegen::elementwise::cuda::Layouts;
 use crate::graph::Primitive;
+use crate::graph_compiler::passes::attention::FORWARD;
 use crate::plan::run::Buffers;
 use crate::plan::{Step, StepBase};
 use crate::runtime::kernel::cuda::{GEMM, LAUNCH};
@@ -56,8 +57,8 @@ impl Step for CudaStep {
 }
 
 impl CudaStep {
-    /// Runs the step on the given tensors: a matmul through the GEMM (with its tuned tile, if autotuned), or an
-    /// elementwise fusion or an output's copy (a reshape) through the kernel generated for the tensors' layouts (kept in
+    /// Runs the step on the given tensors: a matmul through the GEMM (with its tuned tile, if autotuned), a flash
+    /// attention through the attention forward (with its tuned config, if autotuned), or an elementwise fusion or an output's copy (a reshape) through the kernel generated for the tensors' layouts (kept in
     /// the step's memo), launched by Python.
     pub(crate) fn run_raw(
         &self,
@@ -95,6 +96,12 @@ impl CudaStep {
             };
 
             return gemm(&a, &b, out, step.launch::<Config>());
+        }
+
+        if let Primitive::Fusion { name, .. } = &step.primitive
+            && name == FORWARD
+        {
+            return crate::codegen::attention::cuda::run(step, inputs, out, outs, step.launch());
         }
 
         let launch = LAUNCH.get().ok_or(

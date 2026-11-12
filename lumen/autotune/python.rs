@@ -7,6 +7,7 @@ use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
 
 use super::forced::{self, Forced};
+use crate::codegen::attention::cuda::PyCudaAttentionConfig;
 #[cfg(lumen_mps_linked)]
 use crate::codegen::attention::mps::PyMpsAttentionConfig;
 use crate::codegen::attention::triton::PyTritonAttentionConfig;
@@ -89,6 +90,7 @@ fn forced_of(config: &Bound<'_, PyAny>) -> PyResult<Forced> {
     }
 
     try_class!(
+        PyCudaAttentionConfig,
         PyCudaGemmConfig,
         PyTritonGemmConfig,
         PyTritonAttentionConfig,
@@ -129,6 +131,7 @@ fn _pop() {
 /// Adds the config classes (the Metal kernels' in a build with Metal) and the block's entry and exit to
 /// `lumen.autotune._C`.
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<PyCudaAttentionConfig>()?;
     m.add_class::<PyCudaGemmConfig>()?;
     m.add_class::<PyTritonGemmConfig>()?;
     m.add_class::<PyTritonAttentionConfig>()?;

@@ -934,6 +934,109 @@ fn cuda_gemm(
     Err("dot_general: CUDA kernels launch only where lumen links CUDA".into())
 }
 
+/// Runs flash-attention forward `forward` on `tensors` (its operands' tensors) with `config` on lumen's stream, as the
+/// GEMM runs: `lumen.codegen.attention.cuda.launch.compile` compiles the kernel once for the operands' exact layouts,
+/// the score ops, the causal diagonal and the config, and every launch is a `cuLaunchKernel` from here, passing each
+/// operand as its address (its tensor's plus its offset).
+#[cfg_attr(not(lumen_cuda_linked), allow(unused_variables))]
+fn cuda_attention(
+    forward: &crate::codegen::attention::cuda::Forward,
+    tensors: &[crate::Tensor],
+    config: &crate::codegen::attention::cuda::Config,
+) -> Result<(), String> {
+    current(&tensors[0]);
+    crate::profiler::launched::launched("flash_attention", || None);
+
+    #[cfg(lumen_cuda_linked)]
+    {
+        use crate::graph_compiler::passes::attention::Score;
+        use crate::runtime::kernel::cuda::driver::{self, PARAM_BYTES, Value};
+
+        let Device::Cuda(device) = tensors[0].device() else {
+            return Err("flash_attention: the CUDA kernel ran on a host tensor".into());
+        };
+
+        let dtype = dtype_name(forward.dtype);
+        let layouts: Vec<(Vec<usize>, Vec<usize>)> = forward
+            .operands
+            .iter()
+            .map(|o| (o.shape.clone(), o.strides.clone()))
+            .collect();
+
+        let scores: Vec<(&str, f64, &str)> = forward
+            .scores
+            .iter()
+            .map(|s| match *s {
+                Score::Round(d) => ("round", 0.0, dtype_name(d)),
+                Score::Mul(c, d) => ("mul", c, dtype_name(d)),
+            })
+            .collect();
+
+        let tile = (
+            config.tile_m,
+            config.tile_n,
+            config.stages,
+            config.warps,
+            config.q_in_regs,
+        );
+        let (heads_per_kv, causal) = (forward.heads_per_kv, forward.causal);
+
+        let key = format!(
+            "flash_attention|cuda:{device}|{dtype}|{layouts:?}|{heads_per_kv}|{causal:?}|{scores:?}|{tile:?}"
+        );
+
+        let kernel = driver::compiled(&key, || {
+            Python::attach(|py| {
+                let (function, warps, shared, plain, types) = py
+                    .import("lumen.codegen.attention.cuda.launch")?
+                    .getattr("compile")?
+                    .call1((
+                        dtype,
+                        layouts.clone(),
+                        heads_per_kv,
+                        causal,
+                        scores.clone(),
+                        tile,
+                    ))?
+                    .extract()?;
+
+                Ok(driver::Compiled {
+                    function,
+                    warps,
+                    shared,
+                    plain,
+                    types,
+                })
+            })
+            .map_err(|e: PyErr| e.to_string())
+        })?;
+
+        // Compiled for these exact layouts, the kernel takes each operand as its first element's address.
+        let values: Vec<Value> = forward
+            .operands
+            .iter()
+            .zip(tensors)
+            .map(|(o, t)| {
+                let mut raw = [0u8; PARAM_BYTES];
+                let at = t.data_ptr() as u64 + (o.offset * t.dtype().size_of()) as u64;
+                raw[..8].copy_from_slice(&at.to_le_bytes());
+                Value::Struct(raw, 8)
+            })
+            .collect();
+
+        let [outer, heads, sq] = forward.grid;
+
+        Cuda::launch(CudaLaunch {
+            kernel: &kernel,
+            grid: [sq.div_ceil(config.tile_m), heads, outer],
+            values: &values,
+        })
+    }
+
+    #[cfg(not(lumen_cuda_linked))]
+    Err("flash_attention: CUDA kernels launch only where lumen links CUDA".into())
+}
+
 /// Matrix `t` (rank 2, or 3 with a leading batch dim) as the CUDA GEMM's kernel takes it: the name (of `names`, its
 /// rows' and columns') of its contiguous dim, and the struct CuTe passes a tensor by: its address, its extents as
 /// int32 padded to 8 bytes, then its strides but the contiguous one's as int64, each in the kernel's mode order,
@@ -1197,6 +1300,7 @@ fn tuned(
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     crate::runtime::kernel::cuda::set_launch(cuda_launch);
     crate::runtime::kernel::cuda::set_gemm(cuda_gemm);
+    crate::runtime::kernel::cuda::set_attention(cuda_attention);
     crate::codegen::dot_general::triton::launch::set_gemm(triton_gemm);
     crate::runtime::kernel::triton::set_loop(triton_loop);
     crate::codegen::attention::triton::launch::set_attention(triton_attention);

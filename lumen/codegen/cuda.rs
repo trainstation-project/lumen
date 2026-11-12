@@ -2,12 +2,13 @@
 //! gives the step's tensors and kept in the step's memo; tensors laid out otherwise get theirs at launch.
 
 use crate::autotune::Autotuner;
-use crate::autotune::cuda::{Events, Gemms};
+use crate::autotune::cuda::{AttentionForwards, Events, Gemms};
 use crate::codegen::elementwise::ElementwiseCodegen;
 use crate::codegen::elementwise::cuda::Layouts;
 use crate::codegen::utils::cuda::Cuda;
 use crate::graph::{Graph, Node, Primitive, TensorType};
 use crate::graph_compiler::device::{Device, DeviceModule};
+use crate::graph_compiler::passes::attention::FORWARD;
 use crate::graph_compiler::{Options, plan_options};
 use crate::plan::{CpuPlan, CudaPlan, CudaStep, Plan, Step as _, StepBase};
 use std::sync::Arc;
@@ -70,9 +71,14 @@ pub(crate) fn codegen(plan: CpuPlan, _: &Options) -> Result<CudaPlan, String> {
     for step in plan.steps() {
         let outputs = std::iter::once(&step.output).chain(&step.extra_outputs);
 
-        // A matmul runs on the GEMM, compiled at its first launch for its operands' majors.
+        // A matmul runs on the GEMM and a flash attention on the attention forward, each compiled at its first
+        // launch for its operands' layouts.
+        let attention =
+            matches!(&step.primitive, Primitive::Fusion { name, .. } if name == FORWARD);
+
         if outputs.clone().all(|(_, ty)| ty.numel() == 0)
             || matches!(step.primitive, Primitive::DotGeneral { .. })
+            || attention
         {
             continue;
         }
@@ -156,7 +162,7 @@ fn matmul(graph: &Graph, node: &Node) -> bool {
 }
 
 /// The CUDA backend plans its fused graph, every runtime scalar a 0-d device input, and autotunes its GEMM tiles
-/// when enabled; it errors on an op it has no kernel for.
+/// and attention configs when enabled; it errors on an op it has no kernel for.
 impl Device for Cuda {
     const NAME: &'static str = "cuda";
 
@@ -194,6 +200,7 @@ impl Device for Cuda {
             };
 
             tuner.tune(&mut Gemms, &mut plan)?;
+            tuner.tune(&mut AttentionForwards, &mut plan)?;
         }
 
         Ok(Box::new(plan))

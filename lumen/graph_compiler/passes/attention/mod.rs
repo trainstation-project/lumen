@@ -4,6 +4,7 @@
 //! answers to that pass in their `mps`, `tpu` and `triton` files. `tpu` and `triton` here hold what those
 //! backends do with the fusions after matching: TPU's layout folding and Triton's kernel launches.
 
+mod cuda;
 #[cfg(lumen_mps_linked)]
 mod mps;
 mod triton;

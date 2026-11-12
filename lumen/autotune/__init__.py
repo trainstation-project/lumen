@@ -7,7 +7,15 @@ from collections.abc import Iterator
 from typing import Union
 
 from lumen.autotune import _C
-from lumen.autotune._C import CudaGemmConfig, TritonAttentionConfig, TritonGemmConfig, TritonLoopConfig, _pop, _push
+from lumen.autotune._C import (
+    CudaAttentionConfig,
+    CudaGemmConfig,
+    TritonAttentionConfig,
+    TritonGemmConfig,
+    TritonLoopConfig,
+    _pop,
+    _push,
+)
 
 # The Metal kernels' configs, in a build with Metal (None in one without).
 MpsAttentionConfig = getattr(_C, "MpsAttentionConfig", None)
@@ -15,6 +23,7 @@ MpsElementwiseConfig = getattr(_C, "MpsElementwiseConfig", None)
 MpsGemmConfig = getattr(_C, "MpsGemmConfig", None)
 
 __all__ = [
+    "CudaAttentionConfig",
     "CudaGemmConfig",
     "MpsAttentionConfig",
     "MpsElementwiseConfig",
@@ -25,7 +34,9 @@ __all__ = [
     "use",
 ]
 
-KernelConfig = Union[CudaGemmConfig, TritonAttentionConfig, TritonGemmConfig, TritonLoopConfig, object]
+KernelConfig = Union[
+    CudaAttentionConfig, CudaGemmConfig, TritonAttentionConfig, TritonGemmConfig, TritonLoopConfig, object
+]
 
 
 @contextlib.contextmanager
