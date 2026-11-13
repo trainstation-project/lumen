@@ -725,13 +725,21 @@ def test_flash_attention_training_has_no_precision_warning():
         for c in (lumen.autotune.MpsAttentionConfig.candidates() if lumen.autotune.MpsAttentionConfig else [])
     ],
 )
-def test_flash_attention_runs_every_candidate(device, config):
+@pytest.mark.parametrize("causal", [False, True], ids=["", "causal"])
+@pytest.mark.parametrize("h", [64, 128])
+def test_flash_attention_runs_every_candidate(device, config, h, causal):
     """Forced by ``lumen.autotune.use``, each autotuning candidate of a backend's flash attention (Triton's on CUDA,
-    Metal's on MPS) agrees with attention in float64: bfloat16, causal, with grouped heads."""
-    (q, k, v), arrays = tensors(device, "bfloat16", (1, 256, 4, 64), (1, 256, 2, 64), (1, 256, 2, 64))
+    Metal's on MPS) agrees with attention in float64: bfloat16, causal or not, with grouped heads and fewer queries
+    than keys, neither a multiple of a tile (Metal Performance Primitives: whole blocks). A Metal config whose tiles
+    don't fit head dim `h` is skipped (forced, it leaves the attention its untuned kernel)."""
+    if device == "mps" and not config.fits(h, h, "bfloat16"):
+        pytest.skip(f"{config!r} doesn't fit head dim {h} in threadgroup memory")
+    # Metal Performance Primitives take whole 16-query and 32-key blocks: elsewhere they'd leave the untuned kernel.
+    sq, sk = (256, 512) if device == "mps" and config.mpp else (200, 333)
+    (q, k, v), arrays = tensors(device, "bfloat16", (1, sq, 4, h), (1, sk, 2, h), (1, sk, 2, h))
     with lumen.config.compiler.patch(use_triton_backend=device == "cuda"), lumen.autotune.use(config):
-        out = lumen.compile(lambda q, k, v: F.flash_attention(q, k, v, is_causal=True))(q, k, v)
-    want = reference(*arrays, causal=True)
+        out = lumen.compile(lambda q, k, v: F.flash_attention(q, k, v, is_causal=causal))(q, k, v)
+    want = reference(*arrays, causal=causal)
     tol = TOL["bfloat16"]
     np.testing.assert_allclose(lumen.to_numpy(out.to(dtype="float32")), want, rtol=tol, atol=tol)
 
@@ -765,16 +773,22 @@ def test_flash_attention_on_cute(case, dtype):
     "config",
     [pytest.param(c, marks=pytest.mark.cuda, id=repr(c)) for c in lumen.autotune.CudaAttentionConfig.candidates()],
 )
-def test_cute_flash_attention_runs_every_candidate(config):
+@pytest.mark.parametrize("dtype", ["bfloat16", "float16"])
+@pytest.mark.parametrize("causal", [False, True], ids=["", "causal"])
+@pytest.mark.parametrize("h", [64, 128, 256])
+def test_cute_flash_attention_runs_every_candidate(config, h, causal, dtype):
     """Forced by ``lumen.autotune.use``, each autotuning candidate of the CUDA (CuTe DSL) backend's flash attention
-    agrees with attention in float64: bfloat16, causal, with grouped heads and a query count no tile divides."""
-    (q, k, v), arrays = tensors("cuda", "bfloat16", (1, 300, 4, 64), (1, 300, 2, 64), (1, 300, 2, 64))
+    that fits head dim `h` agrees with attention in float64: causal or not, with grouped heads and fewer queries than
+    keys, neither a multiple of a tile."""
+    if not config.fits(h, h):
+        pytest.skip(f"{config!r} doesn't fit head dim {h} in shared memory")
+    (q, k, v), arrays = tensors("cuda", dtype, (1, 200, 4, h), (1, 333, 2, h), (1, 333, 2, h))
     with lumen.autotune.use(config):
-        out = lumen.compile(lambda q, k, v: F.flash_attention(q, k, v, is_causal=True))(q, k, v)
-    tol = TOL["bfloat16"]
+        out = lumen.compile(lambda q, k, v: F.flash_attention(q, k, v, is_causal=causal))(q, k, v)
+    tol = TOL[dtype]
     np.testing.assert_allclose(
         lumen.to_numpy(out.to(dtype="float32")),
-        reference(*arrays, causal=True),
+        reference(*arrays, causal=causal),
         rtol=tol,
         atol=tol,
     )

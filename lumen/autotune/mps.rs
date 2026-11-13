@@ -428,6 +428,20 @@ impl Kernels for Attentions {
             .is_some_and(|a| !crate::codegen::attention::mps::decodes(&a))
     }
 
+    /// Whether forced `tuning` runs `step`'s attention (it fits threadgroup memory, see `attention::mps::fits`).
+    fn accepts(&self, step: &MpsStep, tuning: &Self::Config) -> bool {
+        let Primitive::Fusion { body, .. } = &step.primitive else {
+            return false;
+        };
+
+        let strides = crate::runtime::kernel::mps::encode::attention_strides(step, body);
+
+        crate::graph_compiler::passes::attention::of_body_strided(body, &strides).is_some_and(|a| {
+            !crate::codegen::attention::mps::decodes(&a)
+                && crate::codegen::attention::mps::fits(&a, tuning)
+        })
+    }
+
     /// Generates the forward for `tuning` and an encoder launching it.
     fn build(&mut self, step: &MpsStep, tuning: Self::Config) -> Tuned {
         let Primitive::Fusion { body, .. } = &step.primitive else {

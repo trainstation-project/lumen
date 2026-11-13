@@ -1,7 +1,7 @@
 //! CUDA (CuTe DSL) flash-attention autotuning candidates and the config it launches with untuned.
 
-/// CTA tile, pipeline stages, warps and Q placement of one Ampere attention forward (`ampere.py`'s
-/// `AmpereAttention`) candidate.
+/// CTA tile, pipeline stages, warps and Q placement of one Ampere attention forward (`ampere/forward.py`'s
+/// `AmpereAttentionForward`) candidate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Config {
     /// Query rows per CTA.
@@ -101,5 +101,11 @@ crate::autotune::python::config_class! {
     #[staticmethod]
     fn candidates() -> Vec<Self> {
         CONFIGS.iter().copied().map(PyCudaAttentionConfig).collect()
+    }
+
+    /// Whether the config runs head dims `h` (Q and K) and `hv` (V): forced on an attention it doesn't fit, the
+    /// attention keeps its untuned config.
+    fn fits(&self, h: usize, hv: usize) -> bool {
+        fits(&self.0, h, hv)
     }
 }

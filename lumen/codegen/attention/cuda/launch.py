@@ -1,7 +1,8 @@
-"""Compiles lumen's flash-attention forward fusions on CUDA through the Ampere kernel (`ampere.AmpereAttention`) for
-Rust to launch, as the CUDA GEMM compiles (`lumen.codegen.dot_general.cuda.launch`): once per operand layout, score
-ops, causal diagonal and config, against fake tensors of those exact shapes and strides, so each tensor parameter is
-its address alone and every launch is a plain ``cuLaunchKernel`` from Rust (`cuda_attention`)."""
+"""Compiles lumen's flash-attention forward fusions on CUDA through the Ampere kernel
+(`ampere.forward.AmpereAttentionForward`) for Rust to launch, as the CUDA GEMM compiles
+(`lumen.codegen.dot_general.cuda.launch`): once per operand layout, score ops, causal diagonal and config, against
+fake tensors of those exact shapes and strides, so each tensor parameter is its address alone and every launch is a
+plain ``cuLaunchKernel`` from Rust (`cuda_attention`)."""
 
 import struct
 
@@ -9,7 +10,7 @@ import cuda.bindings.driver as cuda
 import cutlass
 import cutlass.cute as cute
 
-from lumen.codegen.attention.cuda.ampere import AmpereAttention
+from lumen.codegen.attention.cuda.ampere.forward import AmpereAttentionForward
 from lumen.codegen.utils.cuda import check, modules
 
 # The CuTe type of each dtype the kernel reads or writes, by lumen's name for it.
@@ -54,7 +55,7 @@ def compile(dtype, layouts, heads_per_kv, causal, scores, config):
         ("round", DTYPES[d]) if kind == "round" else ("mul", rounded(c, d), DTYPES[d]) for kind, c, d in scores
     )
 
-    attention = AmpereAttention(
+    attention = AmpereAttentionForward(
         DTYPES[dtype],
         h,
         hv,

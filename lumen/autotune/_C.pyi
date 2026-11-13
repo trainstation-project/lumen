@@ -7,6 +7,9 @@ class CudaAttentionConfig:
     @staticmethod
     def candidates() -> list[CudaAttentionConfig]:
         """Every config the autotuner times, in its order."""
+
+    def fits(self, h: int, hv: int) -> bool:
+        """Whether the config runs head dims ``h`` (Q and K) and ``hv`` (V)."""
     tile_m: int
     tile_n: int
     stages: int
@@ -97,6 +100,9 @@ class MpsAttentionConfig:
     @staticmethod
     def candidates() -> list[MpsAttentionConfig]:
         """Every config the autotuner can time."""
+
+    def fits(self, h: int, hv: int, dtype: str) -> bool:
+        """Whether the config runs head dims ``h`` (Q and K) and ``hv`` (V) of ``dtype``."""
     mpp: bool
     groups: int
     keys: int
