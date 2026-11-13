@@ -45,7 +45,7 @@ pub(crate) struct Emitter<'a> {
     /// consecutive indices read far apart.
     pub(crate) scattered: bool,
     /// Counter for fresh local names.
-    locals: usize,
+    pub(crate) locals: usize,
 }
 
 impl<'a> Emitter<'a> {

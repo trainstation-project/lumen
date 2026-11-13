@@ -5,26 +5,18 @@ D (m, n), or batched (l, m, k), (l, k, n) and (l, m, n). The kernel's runtime pa
 struct of its address, its extents (int32) and its non-unit strides (int64), which Rust packs (`cuda_gemm`) and passes
 to a plain ``cuLaunchKernel``, with no Python per matmul."""
 
+import builtins
+
 import cuda.bindings.driver as cuda
 import cutlass
 import cutlass.cute as cute
+from cutlass.cute.runtime import make_ptr
 
 from lumen.codegen.dot_general.cuda.ampere import AmpereGemm
-from lumen.codegen.utils.cuda import check, modules
+from lumen.codegen.utils.cuda import VECTOR_BYTES, check, compiled_cubin, modules
 
 # The CuTe type of each dtype a GEMM reads or writes, by lumen's name for it.
 DTYPES = {"float16": cutlass.Float16, "bfloat16": cutlass.BFloat16, "float32": cutlass.Float32}
-
-
-def _fake(dtype, rows, columns, batch, contiguous):
-    """A fake (`batch`, `rows`, `columns`) tensor of CuTe type `dtype`, or (`rows`, `columns`) when `batch` is None,
-    to compile against: dimension `contiguous` of (rows, columns) has stride 1, every other stride is a symbolic
-    multiple of 16 bytes, and it starts 16-byte aligned."""
-    shape = (rows, columns) if batch is None else (batch, rows, columns)
-    contiguous += len(shape) - 2
-    vector = 128 // dtype.width
-    stride = tuple(1 if i == contiguous else cute.sym_int64(divisibility=vector) for i in range(len(shape)))
-    return cute.runtime.make_fake_tensor(dtype, shape, stride=stride, assumed_align=16)
 
 
 def tensor_bytes(rank):
