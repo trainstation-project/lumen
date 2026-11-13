@@ -1,7 +1,6 @@
 # Copyright (c) 2025-2026, Tri Dao.
 
 from dataclasses import dataclass
-from typing import Optional
 
 import cutlass.cute as cute
 from cutlass import Boolean, Int32, const_expr
@@ -141,7 +140,7 @@ class _PipelineIndexPhaseMixin:
         self,
         index: Int32,
         phase: Int32,
-        try_acquire_token: Optional[Boolean] = None,
+        try_acquire_token: Boolean | None = None,
         *,
         loc=None,
         ip=None,
@@ -159,7 +158,7 @@ class _PipelineIndexPhaseMixin:
         self,
         index: Int32,
         phase: Int32,
-        try_wait_token: Optional[Boolean] = None,
+        try_wait_token: Boolean | None = None,
         *,
         loc=None,
         ip=None,
@@ -286,7 +285,7 @@ class PipelineCpAsync(_PipelineIndexPhaseMixin, PipelineCpAsyncOg):
     @staticmethod
     def create(
         *args,
-        barrier_storage: Optional[cute.Pointer] = None,
+        barrier_storage: cute.Pointer | None = None,
         elect_one_release: bool = False,
         syncwarp_before_release: bool = True,
         **kwargs,
@@ -339,7 +338,7 @@ class PipelineTmaAsync(_PipelineIndexPhaseMixin, PipelineTmaAsyncOg):
     def producer_acquire(
         self,
         state: PipelineState,
-        try_acquire_token: Optional[Boolean] = None,
+        try_acquire_token: Boolean | None = None,
         extra_tx_count: int = 0,
         *,
         loc=None,
@@ -418,7 +417,7 @@ class PipelineStasAsync(PipelineAsyncOg):
         num_stages: int,
         num_warps: int,
         cluster_n: int,
-        barrier_storage: Optional[Pointer] = None,
+        barrier_storage: Pointer | None = None,
         defer_sync: bool = False,
     ) -> "PipelineStasAsync":
         """Allocates num_stages (full, empty) barrier pairs, from the reserved smem
@@ -455,7 +454,7 @@ class PipelineStasAsync(PipelineAsyncOg):
     def producer_acquire(
         self,
         state: PipelineState,
-        try_acquire_token: Optional[Boolean] = None,
+        try_acquire_token: Boolean | None = None,
         *,
         loc=None,
         ip=None,
@@ -476,7 +475,7 @@ class PipelineStasAsync(PipelineAsyncOg):
     def consumer_wait(
         self,
         state: PipelineState,
-        try_wait_token: Optional[Boolean] = None,
+        try_wait_token: Boolean | None = None,
         *,
         loc=None,
         ip=None,
@@ -547,8 +546,8 @@ class PipelineTmaUmma(_PipelineIndexPhaseMixin, PipelineTmaUmmaOg):
     def producer_acquire(
         self,
         state: PipelineState,
-        try_acquire_token: Optional[Boolean] = None,
-        is_tma_warp: Optional[Boolean] = True,
+        try_acquire_token: Boolean | None = None,
+        is_tma_warp: Boolean | None = True,
         extra_tx_count: int = 0,
         *,
         loc=None,
@@ -713,8 +712,8 @@ class PipelineTmaCpAsync(_PipelineIndexPhaseMixin, PipelineTmaAsyncOg):
     def producer_acquire(
         self,
         state: PipelineState,
-        try_acquire_token: Optional[Boolean] = None,
-        is_tma_warp: Optional[Boolean] = True,
+        try_acquire_token: Boolean | None = None,
+        is_tma_warp: Boolean | None = True,
         *,
         loc=None,
         ip=None,
@@ -757,8 +756,8 @@ class PipelineTmaCpAsyncUmma(PipelineTmaUmmaOg):
     def producer_acquire(
         self,
         state: PipelineState,
-        try_acquire_token: Optional[Boolean] = None,
-        is_tma_warp: Optional[Boolean] = True,
+        try_acquire_token: Boolean | None = None,
+        is_tma_warp: Boolean | None = True,
         *,
         loc=None,
         ip=None,

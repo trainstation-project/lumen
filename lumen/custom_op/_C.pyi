@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Optional, Sequence, final
+from typing import Any, Sequence, final
 
 from lumen.device._C import DeviceLike
 from lumen.tensor._C import Scalar, Tensor
@@ -10,7 +10,7 @@ class MetalKernel:
     """A Metal kernel of your own, for a custom op to launch into lumen's
     MPS stream."""
 
-    def __new__(cls, source: str, name: Optional[str] = None) -> MetalKernel: ...
+    def __new__(cls, source: str, name: str | None = None) -> MetalKernel: ...
     @property
     def name(self) -> str: ...
     def launch(
@@ -18,8 +18,8 @@ class MetalKernel:
         tensors: Sequence[Tensor],
         args: Sequence[Any] = (),
         *,
-        grid: Optional[Sequence[int]] = None,
-        threadgroups: Optional[Sequence[int]] = None,
+        grid: Sequence[int] | None = None,
+        threadgroups: Sequence[int] | None = None,
     ) -> None: ...
 
 def _register_kernel(name: str, device: DeviceLike, kernel: Any) -> None: ...

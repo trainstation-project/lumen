@@ -5,7 +5,7 @@ import os
 import re
 from dataclasses import dataclass, fields
 from functools import lru_cache
-from typing import Tuple, get_origin
+from typing import get_origin
 
 import cuda.bindings.driver as cuda
 
@@ -74,7 +74,7 @@ def get_device_multiprocessor_count(device_id: int = 0) -> int:
 @lru_cache
 def get_max_active_clusters(
     cluster_size: int,
-    device_capacity: Tuple[int, int] | None = None,
+    device_capacity: tuple[int, int] | None = None,
     device_id: int = 0,
 ) -> int:
     if device_capacity is None:
@@ -86,7 +86,7 @@ def get_max_active_clusters(
     return cutlass.utils.HardwareInfo(device_id).get_max_active_clusters(cluster_size=cluster_size)
 
 
-def _parse_arch_str(arch_str: str) -> Tuple[int, int]:
+def _parse_arch_str(arch_str: str) -> tuple[int, int]:
     """Parse arch string (e.g. 'sm_90', 'sm90', '90', 'sm_100a') to (major, minor) tuple."""
     match = re.match(r"^(?:sm_?)?(\d+)(\d)([af]?)$", arch_str.strip(), re.IGNORECASE)
     if not match:
@@ -95,7 +95,7 @@ def _parse_arch_str(arch_str: str) -> Tuple[int, int]:
     return int(major), int(minor)
 
 
-def _device_capability(device: int = 0) -> Tuple[int, int]:
+def _device_capability(device: int = 0) -> tuple[int, int]:
     """(major, minor) compute capability of CUDA device `device`, read from the driver (lumen: instead of torch)."""
 
     def checked(result):
@@ -114,7 +114,7 @@ def _device_capability(device: int = 0) -> Tuple[int, int]:
 
 
 @lru_cache
-def get_device_capacity(device: int | None = None) -> Tuple[int, int]:
+def get_device_capacity(device: int | None = None) -> tuple[int, int]:
     """Return (major, minor) device capability of CUDA device `device` (the first when None).
 
     Override with QUACK_ARCH (e.g. 'sm_90' or '90') for CPU-only compilation
@@ -127,7 +127,7 @@ def get_device_capacity(device: int | None = None) -> Tuple[int, int]:
 
 
 @lru_cache
-def get_compile_target_capacity() -> Tuple[int, int]:
+def get_compile_target_capacity() -> tuple[int, int]:
     """Return (major, minor) of the ptxas COMPILE TARGET, not the dispatch arch.
 
     ``get_device_capacity`` answers "which kernel class / configs get traced"

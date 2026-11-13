@@ -25,7 +25,7 @@ read the protected data through the TMA proxy rather than generic loads.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Optional, Union
+from typing import Literal
 
 import cutlass.cute as cute
 from cutlass import Int32, Int64, const_expr
@@ -125,7 +125,7 @@ class Semaphore:
 
     lock_ptr: cute.Pointer
     thread_idx: int | Int32
-    sync: Union[Literal["none", "warp", "cta"], object] = "none"
+    sync: Literal["none", "warp", "cta"] | object = "none"
 
     def _sync(self) -> None:
         if isinstance(self.sync, str):
@@ -139,7 +139,7 @@ class Semaphore:
     def wait_eq(
         self,
         val: int | Int32,
-        flag_offset: Optional[int | Int32 | Int64] = None,
+        flag_offset: int | Int32 | Int64 | None = None,
         skip_zero: bool = False,
     ) -> None:
         flag_offset = 0 if flag_offset is None else flag_offset
@@ -148,12 +148,12 @@ class Semaphore:
         # every group thread must reach the sync regardless of the flag value.
         self._sync()
 
-    def release_store(self, val: int | Int32, flag_offset: Optional[int | Int32 | Int64] = None) -> None:
+    def release_store(self, val: int | Int32, flag_offset: int | Int32 | Int64 | None = None) -> None:
         flag_offset = 0 if flag_offset is None else flag_offset
         self._sync()
         release_store(self.lock_ptr, self.thread_idx, flag_offset, val)
 
-    def release_add(self, val: int | Int32 = 1, flag_offset: Optional[int | Int32 | Int64] = None) -> None:
+    def release_add(self, val: int | Int32 = 1, flag_offset: int | Int32 | Int64 | None = None) -> None:
         flag_offset = 0 if flag_offset is None else flag_offset
         self._sync()
         release_add(self.lock_ptr, self.thread_idx, flag_offset, val)

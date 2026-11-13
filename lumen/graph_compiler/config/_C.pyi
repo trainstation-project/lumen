@@ -1,4 +1,4 @@
-from typing import Any, Optional
+from typing import Any
 
 from lumen.config import Patch
 
@@ -8,9 +8,9 @@ class CompilerConfig:
 
     merge_dots: bool = True
     flash_attention: bool = True
-    fused_linear_cross_entropy_chunk_size: Optional[int] = None
+    fused_linear_cross_entropy_chunk_size: int | None = None
     memory_limit: int = 0
-    dump_to: Optional[str] = None
+    dump_to: str | None = None
     preserve_precision: bool = False
     use_triton_backend: bool = False
     fuse: bool = True

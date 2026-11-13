@@ -1,4 +1,4 @@
-from typing import Any, Optional, Sequence
+from typing import Any, Sequence
 
 from lumen.device._C import DeviceLike
 from lumen.graph._C import Graph
@@ -11,10 +11,10 @@ class Plan:
     def __init__(
         self,
         graph: Graph,
-        device: Optional[DeviceLike] = None,
+        device: DeviceLike | None = None,
         fuse: bool = True,
         donate: Sequence[int] = (),
-        parameters: Optional[Sequence[int]] = None,
+        parameters: Sequence[int] | None = None,
         packable: Sequence[int] = (),
         scalars: Sequence[int] = (),
         donate_into: Sequence[tuple[int, int]] = (),
@@ -75,6 +75,6 @@ class Plan:
         of each line of the traced program it computes (a fusion's
         members')."""
 
-    def run(self, inputs: Sequence[Tensor], device: Optional[DeviceLike] = None) -> list[Tensor]:
+    def run(self, inputs: Sequence[Tensor], device: DeviceLike | None = None) -> list[Tensor]:
         """Run on ``device`` (where the inputs must be), or else the inputs'
         device (the CPU without inputs)."""

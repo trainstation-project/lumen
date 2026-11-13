@@ -1,7 +1,7 @@
 # Copyright (c) 2025-2026, QuACK team.
 
 from functools import partial
-from typing import Any, Callable, Optional, Sequence, Tuple, Type
+from typing import Any, Callable, Sequence
 
 import cutlass
 import cutlass.cute as cute
@@ -48,8 +48,8 @@ _TCGEN05_TMEM_STORE_OPS = (
 
 def tmem_store_atom_from_load_atom(
     copy_atom_t2r: Any,
-    src_dtype: Type[cutlass.Numeric],
-    dst_dtype: Type[cutlass.Numeric],
+    src_dtype: type[cutlass.Numeric],
+    dst_dtype: type[cutlass.Numeric],
 ) -> cute.CopyAtom:
     """Return the matching tcgen05 R2T store atom for a selected T2R load atom.
 
@@ -120,7 +120,7 @@ def cvt_copy(
     src: cute.Tensor,
     dst: cute.Tensor,
     *,
-    pred: Optional[cute.Tensor] = None,
+    pred: cute.Tensor | None = None,
     retile: bool = False,
     loc=None,
     ip=None,
@@ -298,7 +298,7 @@ def load_t2r(
 
 @dsl_user_op
 def get_copy_atom(
-    dtype: Type[cutlass.Numeric], num_copy_elems: int, is_async: bool = False, *, loc=None, ip=None
+    dtype: type[cutlass.Numeric], num_copy_elems: int, is_async: bool = False, *, loc=None, ip=None
 ) -> cute.CopyAtom:
     num_copy_bits = const_expr(min(128, num_copy_elems * dtype.width))
     copy_op = cpasync.CopyG2SOp() if is_async else cute.nvgpu.CopyUniversalOp()
@@ -310,7 +310,7 @@ def copy(
     src: cute.Tensor,
     dst: cute.Tensor,
     *,
-    pred: Optional[cute.Tensor] = None,
+    pred: cute.Tensor | None = None,
     is_async: bool = False,
     loc=None,
     ip=None,
@@ -322,7 +322,7 @@ def copy(
 
 
 def tiled_copy_1d(
-    dtype: Type[cutlass.Numeric], num_threads: int, num_copy_elems: int = 1, is_async: bool = False
+    dtype: type[cutlass.Numeric], num_threads: int, num_copy_elems: int = 1, is_async: bool = False
 ) -> cute.TiledCopy:
     num_copy_bits = num_copy_elems * dtype.width
     copy_op = cpasync.CopyG2SOp() if is_async else cute.nvgpu.CopyUniversalOp()
@@ -339,7 +339,7 @@ def vectorized_thread_partition(
     num_copy_elems: int = 1,
     *,
     is_source: bool,
-) -> Tuple[cute.ThrCopy, cute.Tensor]:
+) -> tuple[cute.ThrCopy, cute.Tensor]:
     """Partition a flat tensor into adjacent per-thread vectors.
 
     At a fixed vector iteration, thread ``t`` owns
@@ -352,7 +352,7 @@ def vectorized_thread_partition(
 
 
 def tiled_copy_2d(
-    dtype: Type[cutlass.Numeric],
+    dtype: type[cutlass.Numeric],
     threads_per_row: int,
     num_threads: int,
     num_copy_elems: int = 1,
@@ -543,7 +543,7 @@ def partition_S_position_independent(thr_copy: cute.ThrCopy, tensor: cute.Tensor
 @dsl_user_op
 def sm90_get_smem_load_op(
     layout_c: cutlass.utils.LayoutEnum,
-    elem_ty_c: Type[cutlass.Numeric],
+    elem_ty_c: type[cutlass.Numeric],
     *,
     loc=None,
     ip=None,
@@ -556,7 +556,7 @@ def sm90_get_smem_load_op(
     layout_c : LayoutEnum
         The layout enum of the output tensor D.
 
-    elem_ty_c : Type[Numeric]
+    elem_ty_c : type[Numeric]
         The element type for output tensor D.
 
     Returns:
@@ -574,9 +574,9 @@ def sm90_get_smem_load_op(
 
 
 def get_smem_store_atom(
-    element_type: Type[cute.Numeric],
+    element_type: type[cute.Numeric],
     transpose: bool = False,
-    major_mode_size: Optional[int] = None,
+    major_mode_size: int | None = None,
 ) -> cute.CopyAtom:
     arch = cutlass.base_dsl.BaseDSL._get_dsl().get_arch_enum()
     if const_expr(arch < Arch.sm_90 or element_type.width != 16):
@@ -596,9 +596,9 @@ def get_smem_store_atom(
 
 
 def get_smem_load_atom(
-    element_type: Type[cute.Numeric],
+    element_type: type[cute.Numeric],
     transpose: bool = False,
-    major_mode_size: Optional[int] = None,
+    major_mode_size: int | None = None,
 ) -> cute.CopyAtom:
     arch = cutlass.base_dsl.BaseDSL._get_dsl().get_arch_enum()
     if const_expr(arch < Arch.sm_90 or element_type.width != 16):
@@ -623,8 +623,8 @@ def get_smem_store_C(
     tidx: Int32,
     transpose: bool = False,
     position_independent=False,
-    major_mode_size: Optional[int] = None,
-) -> Tuple[Callable, cute.TiledCopy, cute.Tensor]:
+    major_mode_size: int | None = None,
+) -> tuple[Callable, cute.TiledCopy, cute.Tensor]:
     dtype = sC.element_type
     if const_expr(isinstance(tiled_mma, cute.TiledCopy)):
         tiled_copy_t2r = tiled_mma
@@ -640,7 +640,7 @@ def get_smem_store_C(
     else:
         tRS_sC = partition_D_position_independent(thr_copy, sC)
 
-    def copy_fn(src: cute.Tensor, dst_idx: Optional[Int32] = None, fence=False, **new_kwargs):
+    def copy_fn(src: cute.Tensor, dst_idx: Int32 | None = None, fence=False, **new_kwargs):
         dst_tensor = tRS_sC if const_expr(dst_idx is None) else tRS_sC[..., dst_idx]
         cvt_copy(tiled_copy, src, dst_tensor, retile=True, **new_kwargs)
         if const_expr(fence):
@@ -655,7 +655,7 @@ def get_smem_load_C(
     tidx: Int32,
     transpose: bool = False,
     position_independent=False,
-) -> Tuple[Callable, cute.TiledCopy, cute.Tensor]:
+) -> tuple[Callable, cute.TiledCopy, cute.Tensor]:
     dtype = sC.element_type
     copy_atom = get_smem_load_atom(dtype, transpose)
     tiled_copy = cute.make_tiled_copy_C(copy_atom, tiled_mma)
@@ -668,7 +668,7 @@ def get_smem_load_C(
     thr_copy_RS = cute.make_tiled_copy_C(copy_atom_RS, tiled_mma).get_slice(tidx)
     tRS_shape = thr_copy_RS.partition_S(cute.make_identity_tensor(sC.shape[:2])).shape
 
-    def copy_fn(src_idx: Optional[Int32] = None, **new_kwargs):
+    def copy_fn(src_idx: Int32 | None = None, **new_kwargs):
         src_tensor = tSR_sC if const_expr(src_idx is None) else tSR_sC[None, None, None, src_idx]
         return load_s2r_retile(tiled_copy, src_tensor, dst_shape=tRS_shape, **new_kwargs)
 
@@ -695,11 +695,11 @@ def epilog_smem_copy_atom(tiled_mma: cute.TiledMma, epi_tile: cute.Shape, transp
 def get_smem_store_epi(
     tiled_mma: cute.TiledMma,
     epi_tile: cute.Shape,
-    sC: Optional[cute.Tensor],
+    sC: cute.Tensor | None,
     tidx: Int32,
     transpose: bool = False,
     position_independent=False,
-) -> Tuple[Callable, cute.TiledCopy, cute.Tensor, cute.Tensor]:
+) -> tuple[Callable, cute.TiledCopy, cute.Tensor, cute.Tensor]:
     dtype = sC.element_type if const_expr(sC is not None) else cutlass.Float16
     copy_atom = get_smem_store_atom(dtype, transpose)
     tiled_copy_C_atom = epilog_smem_copy_atom(tiled_mma, epi_tile)
@@ -724,7 +724,7 @@ def get_smem_store_epi(
 
 def get_smem_store_A(
     tiled_mma: cute.TiledMma, sA: cute.Tensor, tidx: Int32, position_independent=False
-) -> Tuple[Callable, cute.TiledCopy, cute.Tensor]:
+) -> tuple[Callable, cute.TiledCopy, cute.Tensor]:
     dtype = sA.element_type
     transpose = tiled_mma.op.a_major_mode == cute.nvgpu.OperandMajorMode.MN
     copy_atom = get_smem_store_atom(dtype, transpose)
@@ -747,7 +747,7 @@ def get_smem_load_A(
     tidx: Int32,
     with_dst_tensor: bool = False,
     position_independent=False,
-) -> Tuple[Callable, cute.TiledCopy, cute.Tensor]:
+) -> tuple[Callable, cute.TiledCopy, cute.Tensor]:
     dtype = sA.element_type
     transpose = tiled_mma.op.a_major_mode == cute.nvgpu.OperandMajorMode.MN
     copy_atom = get_smem_load_atom(dtype, transpose)
@@ -785,8 +785,8 @@ def _cpasync_reduction_kind_name(reduction_kind: Any) -> str:
 
 def _cpasync_bulk_reduce_args(
     reduction_kind: Any,
-    dtype: Type[cutlass.Numeric],
-) -> Tuple[prims.CpReduceOp, prims.CpReduceType, bool]:
+    dtype: type[cutlass.Numeric],
+) -> tuple[prims.CpReduceOp, prims.CpReduceType, bool]:
     """Map (kind, dtype) to cp.reduce.async.bulk (op, type, noftz), enforcing the
     PTX-ISA legality rules (fp is add-only except f16/bf16 min/max; bitwise ops
     take b32/b64; inc/dec are u32-only)."""
@@ -826,8 +826,8 @@ def cpasync_bulk_s2g(
     gmem_ptr: cute.Pointer,
     store_bytes: int | Int32,
     *,
-    reduction_kind: Optional[Any] = None,
-    dtype: Optional[Type[cutlass.Numeric]] = None,
+    reduction_kind: Any | None = None,
+    dtype: type[cutlass.Numeric] | None = None,
     loc=None,
     ip=None,
 ):
@@ -1007,7 +1007,7 @@ def cpasync_bulk_get_copy_fn(
     src_tensor: cute.Tensor,
     dst_tensor: cute.Tensor,
     single_stage: bool = False,
-    reduction_kind: Optional[cute.nvgpu.cpasync.ReductionKind] = None,
+    reduction_kind: cute.nvgpu.cpasync.ReductionKind | None = None,
     **kwargs,
 ) -> Callable:
     src_is_smem = const_expr(
@@ -1187,7 +1187,7 @@ def tma_get_block_copy_fn(
     atom: cute.CopyAtom,
     src_tensor: cute.Tensor,
     dst_tensor: cute.Tensor,
-    tma_multicast: Optional[dict] = None,
+    tma_multicast: dict | None = None,
     single_stage: bool = False,
     *,
     loc=None,
@@ -1303,7 +1303,7 @@ def tmem_reg_frag(
     tiled_copy: cute.TiledCopy,
     partitioned: cute.Tensor,
     num_extra_modes: int = 0,
-    dtype: Optional[Type[cutlass.Numeric]] = None,
+    dtype: type[cutlass.Numeric] | None = None,
     *,
     loc=None,
     ip=None,
@@ -1340,7 +1340,7 @@ def r2s_partition_from_t2r(
     tidx: Int32,
     transpose: bool = False,
     position_independent=False,
-) -> Tuple[cute.TiledCopy, cute.Tensor, cute.Tensor]:
+) -> tuple[cute.TiledCopy, cute.Tensor, cute.Tensor]:
     """SMEM-store (r2s) side chained off a tmem-load tiled copy: the r2s copy
     inherits the t2r copy's per-thread value ownership via make_tiled_copy_D,
     so the loaded fragment can be stored (post-conversion) without a shuffle.
@@ -1374,10 +1374,10 @@ def s2r_partition_from_t2r(
     s: cute.Tensor,
     tidx: Int32,
     r_layout: cute.Layout,
-    copy_atom: Optional[cute.CopyAtom] = None,
+    copy_atom: cute.CopyAtom | None = None,
     transpose: bool = False,
     position_independent=False,
-) -> Tuple[cute.TiledCopy, cute.Tensor, cute.Tensor, cute.Tensor]:
+) -> tuple[cute.TiledCopy, cute.Tensor, cute.Tensor, cute.Tensor]:
     """SMEM-load (s2r) counterpart of `r2s_partition_from_t2r` (ldmatrix vs
     stmatrix), for reading an epilogue input that was TMA-staged into an
     epi-tile SMEM buffer (e.g. C in gemm, z in ssd) into registers
@@ -1419,7 +1419,7 @@ def tma_producer_copy_fn(copy: Callable, pipeline: cutlass.pipeline.PipelineAsyn
     return copy_fn
 
 
-def chain_tma_producer_copy_fns(copy_fns: Sequence[Optional[Callable]]):
+def chain_tma_producer_copy_fns(copy_fns: Sequence[Callable | None]):
     if not any(fn is not None for fn in copy_fns):
         return None
 
@@ -1547,7 +1547,7 @@ def gather_k_get_copy_fn(
         None, (tidx % threads_per_col, None), None
     ]  # ((8, 1), 2, K)
 
-    def prefetch_from_gmem_fn(src_idx, pred: bool = False) -> Tuple[cute.Tensor, cute.Tensor]:
+    def prefetch_from_gmem_fn(src_idx, pred: bool = False) -> tuple[cute.Tensor, cute.Tensor]:
         # Prefetch mAIdx early, even before smem is free
         tApA_k = None
         if const_expr(pred):
@@ -1570,7 +1570,7 @@ def gather_k_get_copy_fn(
 
     def prefetch_from_smem_fn(
         a_prefetch_pipeline, src_idx, dst_idx, a_prefetch_consumer_state, pred: bool = False
-    ) -> Tuple[cute.Tensor, cute.Tensor]:
+    ) -> tuple[cute.Tensor, cute.Tensor]:
         tApA_k = None
         if const_expr(pred):
             tApA_k = cute.make_rmem_tensor(cols_per_thread, Boolean)
@@ -1586,7 +1586,7 @@ def gather_k_get_copy_fn(
         a_prefetch_pipeline.consumer_release(a_prefetch_consumer_state)
         return k_idx, tApA_k
 
-    def copy_fn(src_idx, dst_idx, k_idx_tApA_k: Tuple[cute.Tensor, cute.Tensor], pred: bool = False):
+    def copy_fn(src_idx, dst_idx, k_idx_tApA_k: tuple[cute.Tensor, cute.Tensor], pred: bool = False):
         k_idx, tApA_k = k_idx_tApA_k
         tApA_k_pred = None
         if const_expr(pred):
@@ -1655,7 +1655,7 @@ def gather_k_get_tma_copy_fn(
     warp_idx: Int32,
     num_warps: int,
     num_cta: int = 1,
-) -> Tuple[Callable, Callable]:
+) -> tuple[Callable, Callable]:
     """Build a copy function for TMA gather4 in K dimension (M-major A).
 
     Each gather4 instruction loads 4 K-columns × tile_M contiguous M-elements.
@@ -1718,7 +1718,7 @@ def gather_k_get_tma_copy_fn(
 def store(
     ptr: cute.Pointer,
     val,
-    pred: Optional[Boolean] = None,
+    pred: Boolean | None = None,
     cop: cutlass.Constexpr = None,
     *,
     loc=None,
@@ -1744,7 +1744,7 @@ def store_v2(
     ptr: cute.Pointer,
     v0,
     v1,
-    pred: Optional[Boolean] = None,
+    pred: Boolean | None = None,
     cop: cutlass.Constexpr = None,
     *,
     loc=None,
@@ -1772,7 +1772,7 @@ def store_v4(
     v1,
     v2,
     v3,
-    pred: Optional[Boolean] = None,
+    pred: Boolean | None = None,
     cop: cutlass.Constexpr = None,
     *,
     loc=None,
