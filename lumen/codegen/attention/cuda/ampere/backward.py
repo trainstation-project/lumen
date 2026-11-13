@@ -56,22 +56,22 @@ class AmpereAttentionBackward:
         causal_shift: Optional[int] = None,
         scores: tuple = (),
         ds_scale: float = 1.0,
-        tile_m: int = 64,
-        tile_n: int = 64,
+        tile_m: Optional[int] = None,
+        tile_n: Optional[int] = None,
         stages_q: Optional[int] = None,
         stages_do: Optional[int] = None,
-        num_threads: int = 128,
-        atom_layout_m_sdp: int = 4,
-        atom_layout_n_dkv: int = 4,
-        atom_layout_m_dq: int = 4,
+        num_threads: Optional[int] = None,
+        atom_layout_m_sdp: Optional[int] = None,
+        atom_layout_n_dkv: Optional[int] = None,
+        atom_layout_m_dq: Optional[int] = None,
     ):
         """The backward for float16 or bfloat16 `dtype` Q, K, V, dO, dK and dV with `head_dim` (Q and K) and
         `head_dim_v` (V, default `head_dim`), multiples of 8, causal or not (key `k` seen by query `q` when `k <= q +
         causal_shift`, by default `seqlen_k - seqlen_q`), the traced score ops `scores` (as the forward's: `("round",
         dtype)` or `("mul", c, dtype)`) with `ds_scale` their scale (dK and dQ scale by it). Each CTA of `num_threads`
         threads takes `tile_n` keys and `tile_m` queries at a time; the warps are laid out `atom_layout_*` along the
-        rows of S and dP, of dK and dV, and of dQ. Q and dO run `stages_q` and `stages_do` deep, by default 2 up to
-        head dim 64 and 1 above, as FlashAttention runs it."""
+        rows of S and dP, of dK and dV, and of dQ; Q and dO run `stages_q` and `stages_do` deep. A config left out is
+        FlashAttention-2's for the head dim (`default_config`)."""
         self.dtype = dtype
         # Head dims padded to a multiple of 32 (FlashAttention's: dQ, dK and dV accumulate in 32-wide register
         # layouts).
@@ -85,16 +85,59 @@ class AmpereAttentionBackward:
         self.causal_shift = causal_shift
         self.scores = tuple(scores)
         self.ds_scale = ds_scale
-        self.tile_m = tile_m
-        self.tile_n = tile_n
-        stages = 2 if max(head_dim, head_dim_v) <= 64 else 1
-        self.stages_q = stages_q if stages_q is not None else stages
-        self.stages_do = stages_do if stages_do is not None else stages
+        given = dict(
+            tile_m=tile_m,
+            tile_n=tile_n,
+            stages_q=stages_q,
+            stages_do=stages_do,
+            num_threads=num_threads,
+            atom_layout_m_sdp=atom_layout_m_sdp,
+            atom_layout_n_dkv=atom_layout_n_dkv,
+            atom_layout_m_dq=atom_layout_m_dq,
+        )
+        config = {
+            **self.default_config(max(self.tile_hdim, self.tile_hdimv)),
+            **{k: v for k, v in given.items() if v is not None},
+        }
+        self.tile_m = config["tile_m"]
+        self.tile_n = config["tile_n"]
+        self.stages_q = config["stages_q"]
+        self.stages_do = config["stages_do"]
         assert self.stages_q >= self.stages_do, "Q is loaded at least as far ahead as dO"
-        self.num_threads = num_threads
-        self.atom_layout_m_sdp = atom_layout_m_sdp
-        self.atom_layout_n_dkv = atom_layout_n_dkv
-        self.atom_layout_m_dq = atom_layout_m_dq
+        self.num_threads = config["num_threads"]
+        self.atom_layout_m_sdp = config["atom_layout_m_sdp"]
+        self.atom_layout_n_dkv = config["atom_layout_n_dkv"]
+        self.atom_layout_m_dq = config["atom_layout_m_dq"]
+
+    @staticmethod
+    def default_config(head_dim: int) -> dict:
+        """FlashAttention-2's SM80 backward config for padded head dim `head_dim` (a multiple of 32) on a GPU of 144
+        KB or more of shared memory (`run_mha_bwd_hdim*` in `csrc/flash_attn/src/flash_bwd_launch_template.h`, its
+        head dims bucketed as there): 8 warps, Q double- and dO single-buffered; 128 x 128 tiles and warp layouts
+        4/4/4 up to head dim 64, 64 x 128 and 2/4/4 up to 96, 64 x 128 and 2/4/2 up to 128, 64 x 64 and 4/2/2 above
+        (4/4/4 where 64 doesn't divide the head dim; Q single-buffered above 192, where two stages don't fit an A100).
+        """
+        if head_dim <= 64:
+            tiles = (128, 128, 4, 4, 4)
+        elif head_dim <= 96:
+            tiles = (64, 128, 2, 4, 4)
+        elif head_dim <= 128:
+            tiles = (64, 128, 2, 4, 2)
+        else:
+            tiles = (64, 64, 4, 2, 2) if head_dim % 64 == 0 else (64, 64, 4, 4, 4)
+
+        tile_m, tile_n, sdp, dkv, dq = tiles
+
+        return dict(
+            tile_m=tile_m,
+            tile_n=tile_n,
+            stages_q=1 if head_dim > 192 else 2,
+            stages_do=1,
+            num_threads=256,
+            atom_layout_m_sdp=sdp,
+            atom_layout_n_dkv=dkv,
+            atom_layout_m_dq=dq,
+        )
 
     def shift(self, seqlen_q, seqlen_k):
         """The causal diagonal's shift: key `k` is seen by query `q` when `k <= q + shift`."""
