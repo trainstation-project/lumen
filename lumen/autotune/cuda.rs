@@ -4,6 +4,7 @@
 use super::{Kernels, Timer};
 use crate::codegen::attention::cuda as attention;
 use crate::codegen::dot_general::cuda::{CONFIGS, Config, TUNED_MACS};
+use crate::codegen::kinds::gemm_dot;
 use crate::graph::Primitive;
 use crate::graph_compiler::passes::attention::{FORWARD, of_body};
 use crate::plan::{CudaStep, Tuned};
@@ -16,7 +17,7 @@ impl Kernels for Gemms {
     type Step = CudaStep;
     type Config = Config;
 
-    /// Every GEMM tile for a matmul step of at least `TUNED_MACS` multiply-adds, none otherwise.
+    /// Every GEMM tile for a matmul step (or GEMM fusion) of at least `TUNED_MACS` multiply-adds, none otherwise.
     fn configs(&self, step: &CudaStep) -> Vec<Config> {
         let Primitive::DotGeneral {
             lhs_contracting, ..

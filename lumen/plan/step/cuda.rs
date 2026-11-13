@@ -40,11 +40,11 @@ impl Step for CudaStep {
         traced(self.label, &out, || self.run_raw(&inputs, &out, &outs))
     }
 
-    /// Errors unless `device` is a CUDA device and no step reads an operand through a view.
+    /// Errors unless `device` is a CUDA device.
     fn check(steps: &[Self], device: Device) -> Result<(), String> {
         let runs = |d| matches!(d, Device::Cuda(_));
 
-        match unsupported(steps, device, runs, "CUDA").or_else(|| viewed(steps)) {
+        match unsupported(steps, device, runs, "CUDA") {
             Some(e) => Err(e),
             None => Ok(()),
         }
@@ -57,9 +57,10 @@ impl Step for CudaStep {
 }
 
 impl CudaStep {
-    /// Runs the step on the given tensors: a matmul through the GEMM (with its tuned tile, if autotuned), a flash
-    /// attention through the attention forward (with its tuned config, if autotuned), or an elementwise fusion or an output's copy (a reshape) through the kernel generated for the tensors' layouts (kept in
-    /// the step's memo), launched by Python.
+    /// Runs the step on the given tensors: a matmul, or a GEMM fusion with its epilogue, through the GEMM (with its
+    /// tuned tile, if autotuned), a flash attention through the attention forward (with its tuned config, if
+    /// autotuned), or an elementwise fusion or an output's copy (a reshape) through the kernel generated for the
+    /// tensors' layouts (kept in the step's memo), launched by Python.
     pub(crate) fn run_raw(
         &self,
         inputs: &[Tensor],
