@@ -1136,7 +1136,7 @@ fn preserve_precision_drops_forward_round_trips() {
 }
 
 /// Each device's default pass list is the passes it implements (picked over the identity pass), in the one order:
-/// the CPU only simplifies, CuTe fuses attention and elementwise work, Triton and TPU run their own versions.
+/// the CPU only simplifies, CuTe merges dots and fuses attention, elementwise work and GEMM epilogues, Triton and TPU run their own versions.
 #[test]
 fn devices_run_the_passes_they_implement() {
     use super::device::{Cpu, Cuda, Tpu, Triton};
@@ -1147,7 +1147,14 @@ fn devices_run_the_passes_they_implement() {
     assert_eq!(pipeline!(Cpu, &config).names(), ["simplify"]);
     assert_eq!(
         pipeline!(Cuda, &config).names(),
-        ["flash_attention", "simplify", "fusion", "alone"]
+        [
+            "merge_dots_backward",
+            "merge_dots",
+            "flash_attention",
+            "simplify",
+            "fusion",
+            "alone"
+        ]
     );
 
     assert_eq!(
