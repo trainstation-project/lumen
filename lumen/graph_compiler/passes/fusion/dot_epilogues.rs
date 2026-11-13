@@ -55,7 +55,11 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], backend: &Backend) -> Do
             && node.inputs.iter().all(|&v| float(v))
             && float(node.output);
 
-        if !backend.contraction_epilogues || !live[i] || !dot {
+        if !backend.contraction_epilogues
+            || !live[i]
+            || !dot
+            || !(backend.dot_epilogue)(graph, node)
+        {
             continue;
         }
 

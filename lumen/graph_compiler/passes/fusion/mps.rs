@@ -81,6 +81,7 @@ fn backend(config: &CompilerConfig) -> Backend {
         multi_output_fusion: config.multi_output_fusion,
         reduction_epilogues: config.reduction_epilogues,
         contraction_epilogues: config.contraction_epilogues,
+        dot_epilogue: |_, _| true,
         expansion: |graph, dot, concat| {
             crate::codegen::regions::expansion(graph, dot, concat).is_some()
         },

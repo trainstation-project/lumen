@@ -35,6 +35,8 @@ pub(crate) struct Backend {
     pub reduction_epilogues: bool,
     /// Whether elementwise work after a GEMM runs in its epilogue, and a GEMM in the row kernel reading it.
     pub contraction_epilogues: bool,
+    /// Whether a dot's GEMM runs an epilogue after it (the dot with the graph it is in).
+    pub dot_epilogue: fn(&Graph, &Node) -> bool,
     /// Whether a GEMM's epilogue can expand its output through `concat` (written into its slot).
     pub expansion: fn(&Graph, &Node, &Node) -> bool,
     /// Whether a fusion body of a GEMM and the normalization row reading it runs as one kernel.
