@@ -212,8 +212,7 @@ class Softmax(ParamsBase):
     @cute.jit
     def finalize(self) -> cute.Tensor:
         """Returns each row's factor to normalize the output by (1 / its sum), and turns `row_sum` into the row's
-        natural log-sum-exp of the scaled scores. A row with no unmasked column (sum 0) gets NaN outputs and LSE -inf,
-        as its traced softmax (0 / 0) does."""
+        natural log-sum-exp of the scaled scores (-inf for a row with no unmasked column, whose output stays 0)."""
         row_sum = self.row_sum
         row_max = self.row_max
         scale_log2 = self.scale_log2
@@ -222,8 +221,14 @@ class Softmax(ParamsBase):
         for r in cutlass.range(cute.size(row_sum), unroll_full=True):
             row_sum[r] = warp_reduce(row_sum[r], operator.add, threads_in_group=4)
 
-            row_scale[r] = cute.arch.rcp_approx(row_sum[r])
-            row_sum[r] = (row_max[r] * scale_log2 + cute.math.log2(row_sum[r], fastmath=True)) * math.log(2.0)
+            # A row whose sum is zero or NaN keeps its output (zero) unscaled.
+            is_zero_or_nan = row_sum[r] == 0.0 or row_sum[r] != row_sum[r]
+            row_scale[r] = cute.arch.rcp_approx(row_sum[r] if not is_zero_or_nan else 1.0)
+            row_sum[r] = (
+                (row_max[r] * scale_log2 + cute.math.log2(row_sum[r], fastmath=True)) * math.log(2.0)
+                if not is_zero_or_nan
+                else -Float32.inf
+            )
 
         return row_scale
 

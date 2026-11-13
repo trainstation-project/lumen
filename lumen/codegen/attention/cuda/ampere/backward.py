@@ -1,15 +1,17 @@
-"""lumen's Ampere attention backward (FlashAttention-2): dQ, dK and dV of O = softmax(scores(Q K^T)) V from dO, each
-query row's log-sum-exp and delta = rowsum(dO * O), with warp-level tensor-core MMA (mma.sync), ldmatrix and cp.async.
+"""lumen's Ampere attention backward (FlashAttention-2): dQ, dK and dV of O = softmax(scores(Q K^T)) V from O, dO and
+each query row's log-sum-exp, with warp-level tensor-core MMA (mma.sync), ldmatrix and cp.async.
 
 Ported from FlashAttention's CuTe DSL SM80 backward (https://github.com/Dao-AILab/flash-attention, commit f63c472c,
-BSD-3-Clause): `FlashAttentionBackwardSm80` in `flash_attn/cute/flash_bwd.py`, with the SM120 config FlashAttention
-runs it with (64 x 64 tiles, 4 warps). One CTA per K/V block of a head computes its dK and dV over the query blocks
-that see it and adds each block's dQ into a float32 dQ. lumen's attention supplies the LSE (natural log) and delta
-itself, so FlashAttention's preprocess kernel isn't needed, and dQ is added at its own coordinates, so neither is its
-postprocess: the LSE and delta are read per row (rows past the queries see LSE +inf, so P = 0), the traced score ops
-are applied to the scores and dS is scaled by `ds_scale` as traced. Kept: causal masking (bottom-right aligned by
-default, any shift), lengths that aren't tile multiples, head dims to 256. Dropped: grouped-query heads, score mods,
-local windows, variable lengths, deterministic mode, swapped-operand MMAs and the tile scheduler.
+BSD-3-Clause), the same three kernels: `FlashAttentionBackwardPreprocess` (`flash_bwd_preprocess.py`: dPsum = rowsum(dO
+* O), the LSE in log2 units and a zeroed float32 dQ accumulator, each padded to whole query tiles),
+`FlashAttentionBackwardSm80` (`flash_bwd.py`: one CTA per K/V block of a head computes its dK and dV over the query
+blocks that see it and adds each block's dQ atomically into the accumulator, in register order) and the SM80 path of
+`FlashAttentionBackwardPostprocess` (`flash_bwd_postprocess.py`: the accumulator, scaled, into dQ). The main kernel
+runs with the SM120 config FlashAttention runs it with (64 x 64 tiles, 4 warps) unless given another. lumen's traced
+score ops are applied to the scores (their scale `ds_scale` scales dK and dQ, as FlashAttention's softmax scale does)
+and the causal diagonal may be shifted; tiles of rows past the sequences are zeroed in shared memory once, so a P of 0
+there can't meet uninitialized NaNs. Dropped: grouped-query heads, score mods, local windows, variable lengths,
+deterministic mode, swapped-operand MMAs, PDL and the tile scheduler.
 """
 
 import math
@@ -64,12 +66,12 @@ class AmpereAttentionBackward:
         atom_layout_m_dq: int = 4,
     ):
         """The backward for float16 or bfloat16 `dtype` Q, K, V, dO, dK and dV with `head_dim` (Q and K) and
-        `head_dim_v` (V, default `head_dim`), multiples of 8, causal or not (key `k` seen by query `q` when
-        `k <= q + causal_shift`, by default `seqlen_k - seqlen_q`), the traced score ops `scores` (as the forward's:
-        `("round", dtype)` or `("mul", c, dtype)`) and dS scaled by `ds_scale`. Each CTA of `num_threads` threads
-        takes `tile_n` keys and `tile_m` queries at a time; the warps are laid out `atom_layout_*` along the rows of
-        S and dP, of dK and dV, and of dQ. Q and dO run `stages_q` and `stages_do` deep, by default 2 up to head dim
-        64 and 1 above, as FlashAttention runs it."""
+        `head_dim_v` (V, default `head_dim`), multiples of 8, causal or not (key `k` seen by query `q` when `k <= q +
+        causal_shift`, by default `seqlen_k - seqlen_q`), the traced score ops `scores` (as the forward's: `("round",
+        dtype)` or `("mul", c, dtype)`) with `ds_scale` their scale (dK and dQ scale by it). Each CTA of `num_threads`
+        threads takes `tile_n` keys and `tile_m` queries at a time; the warps are laid out `atom_layout_*` along the
+        rows of S and dP, of dK and dV, and of dQ. Q and dO run `stages_q` and `stages_do` deep, by default 2 up to
+        head dim 64 and 1 above, as FlashAttention runs it."""
         self.dtype = dtype
         # Head dims padded to a multiple of 32 (FlashAttention's: dQ, dK and dV accumulate in 32-wide register
         # layouts).
@@ -103,9 +105,9 @@ class AmpereAttentionBackward:
     apply_mask = AmpereAttentionForward.apply_mask
 
     def _setup_attributes(self):
-        """Sets the shared-memory layouts (Q and dO staged, K, V, P and dS one tile each, the LSE and delta a column
-        per stage) and the global-memory tiled copies: cp.async 128-bit loads of Q, K, V and dO and 128-bit stores of
-        dK and dV."""
+        """Sets the shared-memory layouts (Q and dO staged, K, V, P and dS one tile each, the LSE and dPsum a column
+        per stage) and the global-memory tiled copies: cp.async 128-bit loads of Q, K, V, dO, the LSE and dPsum,
+        128-bit stores of dK and dV, and the dQ accumulator's one-float atomics."""
         sQ_layout_atom = smem_layout_atom(self.dtype, self.tile_hdim)
         sV_layout_atom = smem_layout_atom(self.dtype, self.tile_hdimv)
         self.sQ_layout = cute.tile_to_shape(sQ_layout_atom, (self.tile_m, self.tile_hdim, self.stages_q), (0, 1, 2))
@@ -146,6 +148,19 @@ class AmpereAttentionBackward:
         self.gmem_tiled_copy_VdO = cute.make_tiled_copy_tv(atom_async_copy, tVdO_layout, vQKVdO_layout)
         self.gmem_tiled_copy_dK = cute.make_tiled_copy_tv(atom_universal_copy, tQK_layout, vQKVdO_layout)
         self.gmem_tiled_copy_dV = cute.make_tiled_copy_tv(atom_universal_copy, tVdO_layout, vQKVdO_layout)
+        # The padded LSE and dPsum load 16 bytes a thread; dQ is added one float32 a thread, in register order.
+        self.gmem_tiled_copy_LSE = cute.make_tiled_copy_tv(
+            cute.make_copy_atom(
+                cpasync.CopyG2SOp(cache_mode=cpasync.LoadCacheMode.GLOBAL), Float32, num_bits_per_copy=128
+            ),
+            cute.make_layout(self.num_threads),
+            cute.make_layout(128 // Float32.width),
+        )
+        self.gmem_tiled_copy_dQaccum = cute.make_tiled_copy_tv(
+            cute.make_copy_atom(cute.nvgpu.CopyUniversalOp(), Float32, num_bits_per_copy=Float32.width),
+            cute.make_layout(self.num_threads),
+            cute.make_layout(1),
+        )
 
     def _get_tiled_mma(self):
         """The m16n8k16 MMAs of S = Q K^T and dP = dO V^T, of dV = P^T dO and dK = dS^T Q, and of dQ = dS K, each with
@@ -195,22 +210,22 @@ class AmpereAttentionBackward:
         mK: cute.Tensor,
         mV: cute.Tensor,
         mdO: cute.Tensor,
-        mLSE: cute.Tensor,
-        mDelta: cute.Tensor,
-        mdQ: cute.Tensor,
+        mLSElog2: cute.Tensor,
+        mdPsum: cute.Tensor,
+        mdQaccum: cute.Tensor,
         mdK: cute.Tensor,
         mdV: cute.Tensor,
         stream: cuda.CUstream,
     ):
         """Launches the backward on `stream`: Q (batch, seqlen_q, heads, head_dim), K (batch, seqlen_k, heads,
-        head_dim), V (batch, seqlen_k, heads, head_dim_v) and dO (batch, seqlen_q, heads, head_dim_v); float32 LSE
-        and delta (batch, heads, seqlen_q); it adds into float32 dQ (batch, seqlen_q, heads, head_dim), zeroed by
-        the caller, and writes dK and dV (as K and V). Each tensor's last dimension is contiguous."""
+        head_dim), V (batch, seqlen_k, heads, head_dim_v) and dO (batch, seqlen_q, heads, head_dim_v); the
+        preprocess's float32 LSE (log2) and dPsum (batch, heads, seqlen_q padded to tile_m); it adds into its float32
+        dQ accumulator (batch, heads, padded seqlen_q * head_dim padded to 32) and writes dK and dV (as K and V)."""
         if const_expr(not (mQ.element_type == mK.element_type == mV.element_type == mdO.element_type == self.dtype)):
             raise TypeError("Q, K, V and dO must all be of the kernel's dtype")
 
-        if const_expr(not (mLSE.element_type == mDelta.element_type == mdQ.element_type == Float32)):
-            raise TypeError("the LSE, delta and dQ must be float32")
+        if const_expr(not (mLSElog2.element_type == mdPsum.element_type == mdQaccum.element_type == Float32)):
+            raise TypeError("the LSE, dPsum and dQ accumulator must be float32")
 
         self._setup_attributes()
         SharedStorage = self._get_shared_storage_cls()
@@ -223,9 +238,9 @@ class AmpereAttentionBackward:
             mK,
             mV,
             mdO,
-            mLSE,
-            mDelta,
-            mdQ,
+            mLSElog2,
+            mdPsum,
+            mdQaccum,
             mdK,
             mdV,
             self.sQ_layout,
@@ -239,6 +254,8 @@ class AmpereAttentionBackward:
             self.gmem_tiled_copy_VdO,
             self.gmem_tiled_copy_dK,
             self.gmem_tiled_copy_dV,
+            self.gmem_tiled_copy_LSE,
+            self.gmem_tiled_copy_dQaccum,
             tiled_mma_sdp,
             tiled_mma_dkv,
             tiled_mma_dq,
@@ -252,9 +269,9 @@ class AmpereAttentionBackward:
         mK: cute.Tensor,
         mV: cute.Tensor,
         mdO: cute.Tensor,
-        mLSE: cute.Tensor,
-        mDelta: cute.Tensor,
-        mdQ: cute.Tensor,
+        mLSElog2: cute.Tensor,
+        mdPsum: cute.Tensor,
+        mdQaccum: cute.Tensor,
         mdK: cute.Tensor,
         mdV: cute.Tensor,
         sQ_layout: cute.ComposedLayout,
@@ -268,13 +285,15 @@ class AmpereAttentionBackward:
         gmem_tiled_copy_VdO: cute.TiledCopy,
         gmem_tiled_copy_dK: cute.TiledCopy,
         gmem_tiled_copy_dV: cute.TiledCopy,
+        gmem_tiled_copy_LSE: cute.TiledCopy,
+        gmem_tiled_copy_dQaccum: cute.TiledCopy,
         tiled_mma_sdp: cute.TiledMma,
         tiled_mma_dkv: cute.TiledMma,
         tiled_mma_dq: cute.TiledMma,
         SharedStorage: cutlass.Constexpr,
     ):
         """One CTA: keys `n_block` of one head and batch (the block index), over every query block that sees them:
-        dV += P^T dO, dK += dS^T Q, and dQ += dS K added into the float32 dQ; then dK and dV are stored."""
+        dV += P^T dO, dK += dS^T Q, and dQ += dS K added into the dQ accumulator; then dK and dV are stored."""
         tidx, _, _ = cute.arch.thread_idx()
         n_block, head_idx, batch_idx = cute.arch.block_idx()
         seqlen_q = mQ.shape[1]
@@ -290,9 +309,6 @@ class AmpereAttentionBackward:
 
         mQ_cur = mQ[batch_idx, None, head_idx, None]
         mdO_cur = mdO[batch_idx, None, head_idx, None]
-        mLSE_cur = mLSE[batch_idx, head_idx, None]
-        mDelta_cur = mDelta[batch_idx, head_idx, None]
-        mdQ_cur = mdQ[batch_idx, None, head_idx, None]
         mK_cur = mK[batch_idx, None, head_idx, None]
         mV_cur = mV[batch_idx, None, head_idx, None]
         # (tile_m, head_dim, m_block), (tile_n, head_dim) and so on.
@@ -300,6 +316,9 @@ class AmpereAttentionBackward:
         gK = cute.local_tile(mK_cur, (self.tile_n, self.tile_hdim), (n_block, 0))
         gV = cute.local_tile(mV_cur, (self.tile_n, self.tile_hdimv), (n_block, 0))
         gdO = cute.local_tile(mdO_cur, (self.tile_m, self.tile_hdimv), (None, 0))
+        gLSE = cute.local_tile(mLSElog2[batch_idx, head_idx, None], (self.tile_m,), (None,))
+        gdPsum = cute.local_tile(mdPsum[batch_idx, head_idx, None], (self.tile_m,), (None,))
+        gdQaccum = cute.local_tile(mdQaccum[batch_idx, head_idx, None], (self.tile_m * self.tile_hdim,), (None,))
 
         smem = cutlass.utils.SmemAllocator()
         storage = smem.allocate(SharedStorage)
@@ -326,6 +345,14 @@ class AmpereAttentionBackward:
         tVsV = gmem_thr_copy_VdO.partition_D(sV)
         tdOgdO = gmem_thr_copy_VdO.partition_S(gdO)
         tdOsdO = gmem_thr_copy_VdO.partition_D(sdO)
+        gmem_thr_copy_lse = gmem_tiled_copy_LSE.get_slice(tidx)
+        gmem_thr_copy_dQaccum = gmem_tiled_copy_dQaccum.get_slice(tidx)
+        tLSEgLSE = gmem_thr_copy_lse.partition_S(gLSE)
+        tLSEsLSE = gmem_thr_copy_lse.partition_D(sLSE)
+        tLSEgdPsum = gmem_thr_copy_lse.partition_S(gdPsum)
+        tLSEsdPsum = gmem_thr_copy_lse.partition_D(sdPsum)
+        tdQgdQaccum = gmem_thr_copy_dQaccum.partition_S(gdQaccum)
+        tLSEcLSE = gmem_thr_copy_lse.partition_S(cute.make_identity_tensor((self.tile_m,)))
 
         # Rows past the sequences and padded head-dim columns are never loaded: zeroed once, they stay finite, so a
         # P of 0 there keeps dK, dV and dQ clean.
@@ -436,11 +463,10 @@ class AmpereAttentionBackward:
             self.check_hdim_oob,
             self.is_even_m_smem_q,
             self.stages_q,
-            mLSE_cur,
-            sLSE,
-            Float32.inf,
-            LOG2_E,
-            tidx,
+            gmem_tiled_copy_LSE,
+            tLSEgLSE,
+            tLSEsLSE,
+            tLSEcLSE,
             seqlen=seqlen_q,
         )
         load_dO_dPsum = partial(
@@ -454,18 +480,18 @@ class AmpereAttentionBackward:
             self.check_hdim_v_oob,
             self.is_even_m_smem_do,
             self.stages_do,
-            mDelta_cur,
-            sdPsum,
-            0.0,
-            1.0,
-            tidx,
+            gmem_tiled_copy_LSE,
+            tLSEgdPsum,
+            tLSEsdPsum,
+            tLSEcLSE,
             seqlen=seqlen_q,
         )
         compute_one_m_block = partial(
             self.compute_one_m_block,
             mma_params=mma_params,
             smem_copy_params=smem_copy_params,
-            mdQ_cur=mdQ_cur,
+            gmem_thr_copy_dQaccum=gmem_thr_copy_dQaccum,
+            tdQgdQaccum=tdQgdQaccum,
             load_Q_LSE=load_Q_LSE,
             load_dO_dPsum=load_dO_dPsum,
             m_block_max=m_block_max,
@@ -529,6 +555,9 @@ class AmpereAttentionBackward:
                 smem_pipe_write_q = self.advance_pipeline(smem_pipe_write_q, self.stages_q)
                 smem_pipe_write_do = self.advance_pipeline(smem_pipe_write_do, self.stages_do)
 
+        # dK carries the score ops' scale (the postprocess scales dQ).
+        acc_dK.store(acc_dK.load() * Float32(self.ds_scale))
+
         # Epilogue, staging dK and dV in K's and V's shared memory.
         sdK = cute.make_tensor(sK.iterator, sK_layout)
         sdV = cute.make_tensor(sV.iterator, sV_layout)
@@ -561,7 +590,8 @@ class AmpereAttentionBackward:
         smem_pipe_write_do: Int32,
         mma_params: SimpleNamespace,
         smem_copy_params: SimpleNamespace,
-        mdQ_cur: cute.Tensor,
+        gmem_thr_copy_dQaccum: cute.TiledCopy,
+        tdQgdQaccum: cute.Tensor,
         load_Q_LSE: Callable,
         load_dO_dPsum: Callable,
         m_block_max: Int32,
@@ -570,8 +600,9 @@ class AmpereAttentionBackward:
         d_head: Int32,
         n_block: Int32,
     ):
-        """One query block `m_block`: S = Q K^T (score ops, mask), P = exp(S - LSE), dP = dO V^T, dS = P (dP - delta)
-        ds_scale; dV += P^T dO, dK += dS^T Q, and dQ = dS K added into dQ; meanwhile the next Q and dO stages load."""
+        """One query block `m_block`: S = Q K^T (score ops, mask), P = exp(S - LSE), dP = dO V^T, dS = P (dP - dPsum);
+        dV += P^T dO, dK += dS^T Q, and dQ = dS K added into the dQ accumulator; meanwhile the next Q and dO stages
+        load."""
         stage_q = smem_pipe_read_q if const_expr(self.stages_q > 1) else 0
         stage_do = smem_pipe_read_do if const_expr(self.stages_do > 1) else 0
 
@@ -591,7 +622,8 @@ class AmpereAttentionBackward:
 
             cute.arch.cp_async_commit_group()
 
-        # S = Q K^T, the traced score ops, the mask, then P = exp(S - LSE) (the LSE stored in log2 units).
+        # S = Q K^T, the traced score ops, the mask, then P = exp(S - LSE) (the LSE in log2 units, from the
+        # preprocess).
         acc_shape_SdP = mma_params.thr_mma_sdp.partition_shape_C((self.tile_m, self.tile_n))
         acc_S = cute.make_rmem_tensor(acc_shape_SdP, Float32)
         acc_S.fill(0.0)
@@ -625,7 +657,7 @@ class AmpereAttentionBackward:
         for r in cutlass.range(cute.size(acc_S_mn, mode=[0]), unroll_full=True):
             acc_S_mn[r, None].store(cute.math.exp2(acc_S_mn[r, None].load() * LOG2_E - tLSErLSE[r], fastmath=True))
 
-        # dP = dO V^T, then dS = P (dP - delta) ds_scale.
+        # dP = dO V^T, then dS = P (dP - dPsum); the score ops' scale goes on dK and dQ.
         acc_dP = cute.make_rmem_tensor(acc_shape_SdP, Float32)
         acc_dP.fill(0.0)
         cute.arch.cp_async_wait_group(1 if const_expr(self.stages_do > 1) else 0)
@@ -646,9 +678,7 @@ class AmpereAttentionBackward:
         acc_dP_mn = layout_utils.reshape_acc_to_mn(acc_dP)
 
         for r in cutlass.range(cute.size(acc_dP_mn, mode=[0]), unroll_full=True):
-            acc_dP_mn[r, None].store(
-                acc_S_mn[r, None].load() * (acc_dP_mn[r, None].load() - tLSErdPsum[r]) * Float32(self.ds_scale)
-            )
+            acc_dP_mn[r, None].store(acc_S_mn[r, None].load() * (acc_dP_mn[r, None].load() - tLSErdPsum[r]))
 
         # P and dS in the input dtype, through shared memory for the dV, dK and dQ MMAs.
         rP = cute.make_fragment_like(acc_S, self.dtype)
@@ -679,7 +709,8 @@ class AmpereAttentionBackward:
         cute.arch.barrier()
 
         def dQ_mma(hook_fn):
-            """dQ = dS K for this query block, added into dQ at its rows and columns (those inside the tensor)."""
+            """dQ = dS K for this query block, added into its tile of the dQ accumulator in register order (the
+            postprocess reads it back the same way)."""
             acc_dQ = cute.make_rmem_tensor(
                 mma_params.thr_mma_dq.partition_shape_C((self.tile_m, self.tile_hdim)), Float32
             )
@@ -695,17 +726,11 @@ class AmpereAttentionBackward:
                 smem_copy_params.smem_thr_copy_Kt,
                 hook_fn=hook_fn,
             )
-            gdQ = cute.local_tile(mdQ_cur, (self.tile_m, self.tile_hdim), (m_block, 0))
-            cdQ = cute.make_identity_tensor((self.tile_m, self.tile_hdim))
-            tdQgdQ = mma_params.thr_mma_dq.partition_C(gdQ)
-            tdQcdQ = mma_params.thr_mma_dq.partition_C(cdQ)
-            rows = seqlen_q - m_block * self.tile_m
+            acc_dQ_atomic = gmem_thr_copy_dQaccum.retile(acc_dQ)
+            tdQgdQaccum_atomic = tdQgdQaccum[None, None, m_block]
 
-            for i in cutlass.range(cute.size(acc_dQ), unroll_full=True):
-                row, col = tdQcdQ[i]
-
-                if row < rows and col < d_head:
-                    atomic_add_fp32(acc_dQ[i], elem_pointer(tdQgdQ, i))
+            for i in cutlass.range(cute.size(acc_dQ_atomic), unroll_full=True):
+                atomic_add_fp32(acc_dQ_atomic[i], elem_pointer(tdQgdQaccum_atomic, i))
 
         # With one Q stage, dK goes first so the next Q block can start loading.
         if const_expr(self.stages_q > 1):
@@ -862,18 +887,16 @@ class AmpereAttentionBackward:
         check_hdim_oob: cutlass.Constexpr,
         is_even: cutlass.Constexpr,
         stages: cutlass.Constexpr,
-        mRow: cute.Tensor,
-        sRow: cute.Tensor,
-        fill: cutlass.Constexpr,
-        scale: cutlass.Constexpr,
-        tidx: Int32,
+        gmem_tiled_copy_LSE: cute.TiledCopy,
+        tLSEgX: cute.Tensor,
+        tLSEsX: cute.Tensor,
+        tLSEcLSE: cute.Tensor,
         block: Int32,
         smem_pipe_write: Int32,
         seqlen: Int32,
     ):
-        """Starts loading Q (or dO) block `block` into stage `smem_pipe_write`, skipping rows past `seqlen`, and
-        stores its rows' LSE (or delta) times `scale` beside it, `fill` past `seqlen` or for -inf (+inf for the LSE:
-        P = 0)."""
+        """Starts loading Q (or dO) block `block` into stage `smem_pipe_write`, skipping rows past `seqlen`, and its
+        rows' LSE (or dPsum) beside it, the whole tile (the preprocess padded them to whole tiles)."""
         stage = smem_pipe_write if const_expr(stages > 1) else 0
 
         for m in cutlass.range_constexpr(cute.size(tXsX.shape[1])):
@@ -887,19 +910,302 @@ class AmpereAttentionBackward:
 
                 cute.copy(gmem_tiled_copy, tXgX[None, m, None, block], tXsX[None, m, None, stage], pred=predicate)
 
-        # One thread a row: the row's value, or `fill` past the sequence.
-        for r in cutlass.range_constexpr(cute.ceil_div(self.tile_m, self.num_threads)):
-            row = tidx + r * self.num_threads
+        for m in cutlass.range_constexpr(cute.size(tLSEsX.shape[1])):
+            if tLSEcLSE[0, m][0] < self.tile_m:
+                cute.copy(gmem_tiled_copy_LSE, tLSEgX[None, m, block], tLSEsX[None, m, stage])
 
-            if row < self.tile_m:
-                at = block * self.tile_m + row
-                value = Float32(fill)
 
-                if at < seqlen:
-                    value = mRow[at] * Float32(scale)
+class AmpereAttentionBackwardPreprocess:
+    """FlashAttention's backward preprocess on SM80: per query tile of a head, dPsum = rowsum(dO * O), the LSE in log2
+    units, and its tile of the dQ accumulator zeroed, each padded to whole tiles."""
 
-                # A query that sees no key has LSE -inf: as +inf its P is 0 (rather than NaN), as on Triton.
-                if value == -Float32.inf:
-                    value = Float32(fill)
+    def __init__(self, dtype: Type[cutlass.Numeric], head_dim: int, head_dim_v: int, tile_m: int, num_threads: int):
+        """The preprocess for float16 or bfloat16 `dtype` O and dO of head dim `head_dim_v`, and a dQ accumulator of
+        `head_dim` (both padded to 32, as the main kernel's), `tile_m` query rows (the main kernel's) a CTA of
+        `num_threads` (at least `tile_m`) threads."""
+        self.dtype = dtype
+        self.tile_m = tile_m
+        self.tile_hdim = int(math.ceil(head_dim / 32) * 32)
+        self.tile_hdimv = int(math.ceil(head_dim_v / 32) * 32)
+        self.check_hdim_v_oob = head_dim_v != self.tile_hdimv
+        self.num_threads = num_threads
+        assert num_threads >= tile_m, "a thread a row of the LSE"
 
-                sRow[row, stage] = value
+    def _setup_attributes(self):
+        """The O and dO loads (128-bit vectors, a power of 2 threads a row so the row sums stay in a warp) and the dQ
+        accumulator's 128-bit zeroing stores."""
+        gmem_k_block_size = (
+            128
+            if self.tile_hdimv % 128 == 0
+            else (64 if self.tile_hdimv % 64 == 0 else (32 if self.tile_hdimv % 32 == 0 else 16))
+        )
+        num_copy_elems = 128 // self.dtype.width
+        threads_per_row = gmem_k_block_size // num_copy_elems
+        self.gmem_tiled_copy_O = copy_utils.tiled_copy_2d(
+            self.dtype, threads_per_row, self.num_threads, num_copy_elems
+        )
+        num_copy_elems_dQaccum = 128 // Float32.width
+        assert (self.tile_m * self.tile_hdim // num_copy_elems_dQaccum) % self.num_threads == 0
+        self.gmem_tiled_copy_dQaccum = copy_utils.tiled_copy_1d(Float32, self.num_threads, num_copy_elems_dQaccum)
+
+    @cute.jit
+    def __call__(
+        self,
+        mO: cute.Tensor,
+        mdO: cute.Tensor,
+        mLSE: cute.Tensor,
+        mdPsum: cute.Tensor,
+        mLSElog2: cute.Tensor,
+        mdQaccum: cute.Tensor,
+        stream: cuda.CUstream,
+    ):
+        """Launches the preprocess on `stream`: O and dO (batch, seqlen_q, heads, head_dim_v), the forward's float32
+        LSE (batch, heads, seqlen_q); writes float32 dPsum and LSE log2 (batch, heads, seqlen_q padded to tile_m) and
+        zeroes the float32 dQ accumulator (batch, heads, padded seqlen_q * padded head_dim)."""
+        self._setup_attributes()
+        grid_dim = (cute.ceil_div(cute.size(mO.shape[1]), self.tile_m), cute.size(mO.shape[2]), cute.size(mO.shape[0]))
+        self.kernel(
+            mO, mdO, mLSE, mdPsum, mLSElog2, mdQaccum, self.gmem_tiled_copy_O, self.gmem_tiled_copy_dQaccum
+        ).launch(grid=grid_dim, block=[self.num_threads, 1, 1], stream=stream)
+
+    @cute.kernel
+    def kernel(
+        self,
+        mO: cute.Tensor,
+        mdO: cute.Tensor,
+        mLSE: cute.Tensor,
+        mdPsum: cute.Tensor,
+        mLSElog2: cute.Tensor,
+        mdQaccum: cute.Tensor,
+        gmem_tiled_copy_O: cute.TiledCopy,
+        gmem_tiled_copy_dQaccum: cute.TiledCopy,
+    ):
+        """One CTA: query tile `m_block` of one head and batch: its rows' dPsum (0 past the queries), LSE log2 (+inf
+        past the queries, 0 for a row that sees no key, so P is 0) and dQ accumulator tile (0)."""
+        tidx, _, _ = cute.arch.thread_idx()
+        m_block, head_idx, batch_idx = cute.arch.block_idx()
+        seqlen_q = mO.shape[1]
+        seqlen_limit = seqlen_q - m_block * self.tile_m
+        headdim_v = mO.shape[3]
+
+        gLSE = cute.local_tile(mLSE[batch_idx, head_idx, None], (self.tile_m,), (m_block,))
+        gLSElog2 = cute.local_tile(mLSElog2[batch_idx, head_idx, None], (self.tile_m,), (m_block,))
+        lse = Float32.inf
+
+        if tidx < seqlen_limit and tidx < self.tile_m:
+            lse = gLSE[tidx]
+
+        blk_shape = (self.tile_m, self.tile_hdimv)
+        gO = cute.local_tile(mO[batch_idx, None, head_idx, None], blk_shape, (m_block, 0))
+        gdO = cute.local_tile(mdO[batch_idx, None, head_idx, None], blk_shape, (m_block, 0))
+        gmem_thr_copy_O = gmem_tiled_copy_O.get_slice(tidx)
+        tOgO = gmem_thr_copy_O.partition_S(gO)
+        tOgdO = gmem_thr_copy_O.partition_S(gdO)
+        cO = cute.make_identity_tensor(blk_shape)
+        tOcO = gmem_thr_copy_O.partition_S(cO)
+        t0OcO = gmem_thr_copy_O.get_slice(0).partition_S(cO)
+        tOpO = copy_utils.predicate_k(tOcO, limit=headdim_v) if const_expr(self.check_hdim_v_oob) else None
+        tOrO = cute.make_rmem_tensor_like(tOgO)
+        tOrdO = cute.make_rmem_tensor_like(tOgdO)
+
+        if const_expr(self.check_hdim_v_oob):
+            tOrO.fill(0.0)
+            tOrdO.fill(0.0)
+
+        for m in cutlass.range(cute.size(tOrO.shape[1]), unroll_full=True):
+            # Thread 0's (compile-time) row coordinates, against a limit shifted by this thread's.
+            if t0OcO[0, m, 0][0] < seqlen_limit - tOcO[0][0]:
+                tOpO_cur = tOpO[None, m, None] if const_expr(tOpO is not None) else None
+                copy_utils.copy(tOgO[None, m, None], tOrO[None, m, None], pred=tOpO_cur)
+                copy_utils.copy(tOgdO[None, m, None], tOrdO[None, m, None], pred=tOpO_cur)
+
+        # Each thread's part of each row's sum over the head dim, then across the threads sharing the row.
+        pdpsum = (tOrO.load().to(Float32) * tOrdO.load().to(Float32)).reduce(
+            cute.ReductionOp.ADD, init_val=0.0, reduction_profile=(0, None, 1)
+        )
+        threads_per_row = gmem_tiled_copy_O.layout_src_tv_tiled[0].shape[0]
+        PdP_sum = cute.make_rmem_tensor(cute.size(tOrO, mode=[1]), Float32)
+        PdP_sum.store(pdpsum)
+
+        for m in cutlass.range_constexpr(cute.size(PdP_sum)):
+            PdP_sum[m] = warp_reduce_width(PdP_sum[m], threads_per_row)
+
+        # The thread holding each row's column 0 writes its dPsum, 0 past the queries.
+        gPdPsum = cute.local_tile(mdPsum[batch_idx, head_idx, None], (self.tile_m,), (m_block,))
+
+        if tOcO[0, 0, 0][1] == 0:
+            for m in cutlass.range(cute.size(PdP_sum), unroll_full=True):
+                row = tOcO[0, m, 0][0]
+                value = Float32(0.0)
+
+                if row < seqlen_limit:
+                    value = PdP_sum[m]
+
+                gPdPsum[row] = value
+
+        # This tile of the dQ accumulator starts at 0.
+        gdQaccum = cute.local_tile(mdQaccum[batch_idx, head_idx, None], (self.tile_m * self.tile_hdim,), (m_block,))
+        tdQgdQaccum = gmem_tiled_copy_dQaccum.get_slice(tidx).partition_S(gdQaccum)
+        zero = cute.make_rmem_tensor_like(tdQgdQaccum)
+        zero.fill(0.0)
+        cute.copy(gmem_tiled_copy_dQaccum, zero, tdQgdQaccum)
+
+        # The LSE in log2 units: a row that sees no key (-inf) becomes 0, so its masked scores give P = 0.
+        lse_log2 = lse * LOG2_E if lse != -Float32.inf else Float32(0.0)
+
+        if tidx < self.tile_m:
+            gLSElog2[tidx] = lse_log2
+
+
+@cute.jit
+def warp_reduce_width(val: Float32, width: cutlass.Constexpr[int]) -> Float32:
+    """The sum of `val` over each aligned group of `width` lanes (a butterfly), every lane getting it."""
+    for i in cutlass.range_constexpr(int(math.log2(width))):
+        val = val + cute.arch.shuffle_sync_bfly(val, offset=1 << i)
+
+    return val
+
+
+class AmpereAttentionBackwardPostprocess:
+    """FlashAttention's backward postprocess on SM80: per query tile of a head, its dQ accumulator tile (in the main
+    kernel's register order) scaled into dQ in the input dtype, through shared memory for 16-byte stores."""
+
+    def __init__(
+        self, dtype: Type[cutlass.Numeric], head_dim: int, tile_m: int, num_threads: int, atom_layout_m_dq: int
+    ):
+        """The postprocess writing float16 or bfloat16 `dtype` dQ of `head_dim`, `tile_m` query rows a CTA of
+        `num_threads` threads with dQ's warp layout `atom_layout_m_dq`: all three the main kernel's, whose register
+        order the accumulator holds."""
+        self.dtype = dtype
+        self.tile_m = tile_m
+        self.tile_hdim = int(math.ceil(head_dim / 32) * 32)
+        self.num_threads = num_threads
+        self.atom_layout_m_dq = atom_layout_m_dq
+
+    def _setup_attributes(self):
+        """The dQ MMA (only its accumulator layout is used), the accumulator's loads (16-byte cp.async into shared
+        memory, then one float a thread, as the main kernel added them), dQ's shared layout and its 16-byte stores."""
+        warps = self.num_threads // 32
+        layout = (self.atom_layout_m_dq, warps // self.atom_layout_m_dq, 1)
+        self.tiled_mma = cute.make_tiled_mma(
+            warp.MmaF16BF16Op(self.dtype, Float32, (16, 8, 16)),
+            layout,
+            permutation_mnk=(layout[0] * 16, layout[1] * 16, 16),
+        )
+        async_copy_elems_accum = 128 // Float32.width
+        assert (self.tile_m * self.tile_hdim // async_copy_elems_accum) % self.num_threads == 0
+        self.g2s_tiled_copy_dQaccum = cute.make_tiled_copy_tv(
+            cute.make_copy_atom(
+                cpasync.CopyG2SOp(cache_mode=cpasync.LoadCacheMode.GLOBAL), Float32, num_bits_per_copy=128
+            ),
+            cute.make_layout(self.num_threads),
+            cute.make_layout(async_copy_elems_accum),
+        )
+        self.s2r_tiled_copy_dQaccum = copy_utils.tiled_copy_1d(Float32, self.num_threads, 1)
+        self.sdQaccum_layout = cute.make_layout(self.tile_m * self.tile_hdim)
+        self.sdQ_layout = cute.tile_to_shape(
+            smem_layout_atom(self.dtype, self.tiled_mma.get_tile_size(1)), (self.tile_m, self.tile_hdim), (0, 1)
+        )
+        num_copy_elems = 128 // self.dtype.width
+        threads_per_row = math.gcd(128, self.tile_hdim) // num_copy_elems
+        self.gmem_tiled_copy_dQ = copy_utils.tiled_copy_2d(
+            self.dtype, threads_per_row, self.num_threads, num_copy_elems
+        )
+
+    @cute.jit
+    def __call__(self, mdQaccum: cute.Tensor, mdQ: cute.Tensor, scale: Float32, stream: cuda.CUstream):
+        """Launches the postprocess on `stream`: the float32 dQ accumulator (batch, heads, padded seqlen_q * padded
+        head_dim) times `scale` into dQ (batch, seqlen_q, heads, head_dim)."""
+        self._setup_attributes()
+        smem_size = max(
+            cute.size_in_bytes(Float32, self.sdQaccum_layout), cute.size_in_bytes(self.dtype, self.sdQ_layout)
+        )
+        grid_dim = (
+            cute.ceil_div(cute.size(mdQ.shape[1]), self.tile_m),
+            cute.size(mdQ.shape[2]),
+            cute.size(mdQ.shape[0]),
+        )
+        self.kernel(
+            mdQaccum,
+            mdQ,
+            scale,
+            self.tiled_mma,
+            self.sdQaccum_layout,
+            self.sdQ_layout,
+            self.g2s_tiled_copy_dQaccum,
+            self.s2r_tiled_copy_dQaccum,
+            self.gmem_tiled_copy_dQ,
+        ).launch(grid=grid_dim, block=[self.num_threads, 1, 1], smem=smem_size, stream=stream)
+
+    @cute.kernel
+    def kernel(
+        self,
+        mdQaccum: cute.Tensor,
+        mdQ: cute.Tensor,
+        scale: Float32,
+        tiled_mma: cute.TiledMma,
+        sdQaccum_layout: cute.Layout,
+        sdQ_layout: cute.ComposedLayout,
+        g2s_tiled_copy_dQaccum: cute.TiledCopy,
+        s2r_tiled_copy_dQaccum: cute.TiledCopy,
+        gmem_tiled_copy_dQ: cute.TiledCopy,
+    ):
+        """One CTA: query tile `m_block` of one head and batch: its accumulator tile into shared memory, back into
+        registers in the dQ MMA's accumulator layout, scaled and rounded, through shared memory into dQ's rows (those
+        before seqlen_q)."""
+        smem = cutlass.utils.SmemAllocator()
+        sdQaccum = smem.allocate_tensor(Float32, sdQaccum_layout, byte_alignment=1024)
+        sdQ = cute.make_tensor(cute.recast_ptr(sdQaccum.iterator, dtype=self.dtype), sdQ_layout)
+        tidx, _, _ = cute.arch.thread_idx()
+        m_block, head_idx, batch_idx = cute.arch.block_idx()
+        seqlen_q = mdQ.shape[1]
+        head_dim = mdQ.shape[3]
+
+        gdQaccum = cute.local_tile(mdQaccum[batch_idx, head_idx, None], (self.tile_m * self.tile_hdim,), (m_block,))
+        gdQ = cute.local_tile(mdQ[batch_idx, None, head_idx, None], (self.tile_m, self.tile_hdim), (m_block, 0))
+
+        # The accumulator tile into shared memory.
+        g2s_thr_copy_dQaccum = g2s_tiled_copy_dQaccum.get_slice(tidx)
+        cute.copy(
+            g2s_tiled_copy_dQaccum,
+            g2s_thr_copy_dQaccum.partition_S(gdQaccum),
+            g2s_thr_copy_dQaccum.partition_D(sdQaccum),
+        )
+        cute.arch.cp_async_commit_group()
+        cute.arch.cp_async_wait_group(0)
+        cute.arch.barrier()
+
+        # Back into the dQ MMA's accumulator layout (the order the main kernel added it in), scaled and rounded.
+        tdQsdQaccum = s2r_tiled_copy_dQaccum.get_slice(tidx).partition_S(sdQaccum)
+        acc = cute.make_rmem_tensor(tiled_mma.partition_shape_C((self.tile_m, self.tile_hdim)), Float32)
+        assert cute.size(acc) == cute.size(tdQsdQaccum)
+        cute.autovec_copy(tdQsdQaccum, cute.make_tensor(acc.iterator, cute.make_layout(tdQsdQaccum.shape)))
+        rdQ = cute.make_fragment_like(acc, self.dtype)
+        rdQ.store((acc.load() * scale).to(self.dtype))
+
+        # Every thread has read the accumulator before dQ overwrites the same shared memory.
+        cute.arch.barrier()
+        copy_atom_r2s_dQ = copy_utils.get_smem_store_atom(self.dtype)
+        thr_copy_r2s_dQ = cute.make_tiled_copy_C(copy_atom_r2s_dQ, tiled_mma).get_slice(tidx)
+        cute.copy(thr_copy_r2s_dQ, thr_copy_r2s_dQ.retile(rdQ), thr_copy_r2s_dQ.partition_D(sdQ))
+
+        # Every thread's dQ is in shared memory before it is read back for 16-byte stores.
+        cute.arch.barrier()
+        gmem_thr_copy_dQ = gmem_tiled_copy_dQ.get_slice(tidx)
+        tdQgdQ = gmem_thr_copy_dQ.partition_S(gdQ)
+        tdQsdQ = gmem_thr_copy_dQ.partition_D(sdQ)
+        tdQrdQ = cute.make_fragment_like(tdQsdQ, self.dtype)
+        cute.autovec_copy(tdQsdQ, tdQrdQ)
+
+        cdQ = cute.make_identity_tensor((self.tile_m, self.tile_hdim))
+        tdQcdQ = gmem_thr_copy_dQ.partition_S(cdQ)
+        tdQpdQ = copy_utils.predicate_k(tdQcdQ, limit=head_dim)
+
+        for rest_m in cutlass.range(cute.size(tdQrdQ.shape[1]), unroll_full=True):
+            if tdQcdQ[0, rest_m, 0][0] < seqlen_q - m_block * self.tile_m:
+                cute.copy(
+                    gmem_tiled_copy_dQ,
+                    tdQrdQ[None, rest_m, None],
+                    tdQgdQ[None, rest_m, None],
+                    pred=tdQpdQ[None, rest_m, None],
+                )
