@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional, Union, final
+from typing import final
 
 from lumen.device._C import device
 from lumen.tensor._C import Tensor
@@ -10,7 +10,7 @@ class Stream:
     """A device's stream, modeled on ``torch.Stream``: the queue its ops
     submit work to without waiting."""
 
-    def __new__(cls, device: Optional[Union[str, device]] = None, *, stream_id: int = 0) -> "Stream": ...
+    def __new__(cls, device: str | device | None = None, *, stream_id: int = 0) -> "Stream": ...
     @property
     def device(self) -> device: ...
     @property
@@ -29,7 +29,7 @@ class Event:
     ``enable_timing``, ``elapsed_time(end)`` is the device time between two
     events in milliseconds."""
 
-    def __new__(cls, device: Optional[Union[str, device]] = None, *, enable_timing: bool = False) -> "Event": ...
+    def __new__(cls, device: str | device | None = None, *, enable_timing: bool = False) -> "Event": ...
     @property
     def device(self) -> device: ...
     @property
@@ -47,7 +47,7 @@ class CudaGraph:
     and ``replay()`` launches it all again. Memory taken while
     capturing stays the graph's until it is dropped."""
 
-    def __new__(cls, device: Optional[Union[str, device]] = None) -> "CudaGraph": ...
+    def __new__(cls, device: str | device | None = None) -> "CudaGraph": ...
     @property
     def stream(self) -> int: ...
     def end(self) -> None: ...

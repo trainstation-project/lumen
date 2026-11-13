@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Iterator
-from typing import Union
 
 from lumen.autotune import _C
 from lumen.autotune._C import (
@@ -34,9 +33,9 @@ __all__ = [
     "use",
 ]
 
-KernelConfig = Union[
-    CudaAttentionConfig, CudaGemmConfig, TritonAttentionConfig, TritonGemmConfig, TritonLoopConfig, object
-]
+KernelConfig = (
+    CudaAttentionConfig | CudaGemmConfig | TritonAttentionConfig | TritonGemmConfig | TritonLoopConfig | object
+)
 
 
 @contextlib.contextmanager

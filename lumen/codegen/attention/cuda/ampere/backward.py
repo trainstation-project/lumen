@@ -17,7 +17,7 @@ deterministic mode, swapped-operand MMAs, PDL and the tile scheduler.
 import math
 from functools import partial
 from types import SimpleNamespace
-from typing import Callable, Optional, Type
+from typing import Callable
 
 import cuda.bindings.driver as cuda
 import cutlass
@@ -49,21 +49,21 @@ class AmpereAttentionBackward:
 
     def __init__(
         self,
-        dtype: Type[cutlass.Numeric],
+        dtype: type[cutlass.Numeric],
         head_dim: int,
-        head_dim_v: Optional[int] = None,
+        head_dim_v: int | None = None,
         is_causal: bool = False,
-        causal_shift: Optional[int] = None,
+        causal_shift: int | None = None,
         scores: tuple = (),
         ds_scale: float = 1.0,
-        tile_m: Optional[int] = None,
-        tile_n: Optional[int] = None,
-        stages_q: Optional[int] = None,
-        stages_do: Optional[int] = None,
-        num_threads: Optional[int] = None,
-        atom_layout_m_sdp: Optional[int] = None,
-        atom_layout_n_dkv: Optional[int] = None,
-        atom_layout_m_dq: Optional[int] = None,
+        tile_m: int | None = None,
+        tile_n: int | None = None,
+        stages_q: int | None = None,
+        stages_do: int | None = None,
+        num_threads: int | None = None,
+        atom_layout_m_sdp: int | None = None,
+        atom_layout_n_dkv: int | None = None,
+        atom_layout_m_dq: int | None = None,
     ):
         """The backward for float16 or bfloat16 `dtype` Q, K, V, dO, dK and dV with `head_dim` (Q and K) and
         `head_dim_v` (V, default `head_dim`), multiples of 8, causal or not (key `k` seen by query `q` when `k <= q +
@@ -962,7 +962,7 @@ class AmpereAttentionBackwardPreprocess:
     """FlashAttention's backward preprocess on SM80: per query tile of a head, dPsum = rowsum(dO * O), the LSE in log2
     units, and its tile of the dQ accumulator zeroed, each padded to whole tiles."""
 
-    def __init__(self, dtype: Type[cutlass.Numeric], head_dim: int, head_dim_v: int, tile_m: int, num_threads: int):
+    def __init__(self, dtype: type[cutlass.Numeric], head_dim: int, head_dim_v: int, tile_m: int, num_threads: int):
         """The preprocess for float16 or bfloat16 `dtype` O and dO of head dim `head_dim_v`, and a dQ accumulator of
         `head_dim` (both padded to 32, as the main kernel's), `tile_m` query rows (the main kernel's) a CTA of
         `num_threads` (at least `tile_m`) threads."""
@@ -1114,7 +1114,7 @@ class AmpereAttentionBackwardPostprocess:
     kernel's register order) scaled into dQ in the input dtype, through shared memory for 16-byte stores."""
 
     def __init__(
-        self, dtype: Type[cutlass.Numeric], head_dim: int, tile_m: int, num_threads: int, atom_layout_m_dq: int
+        self, dtype: type[cutlass.Numeric], head_dim: int, tile_m: int, num_threads: int, atom_layout_m_dq: int
     ):
         """The postprocess writing float16 or bfloat16 `dtype` dQ of `head_dim`, `tile_m` query rows a CTA of
         `num_threads` threads with dQ's warp layout `atom_layout_m_dq`: all three the main kernel's, whose register

@@ -1,5 +1,3 @@
-from typing import Optional
-
 class CudaAttentionConfig:
     """A config of the CUDA backend's SM80 flash-attention forward."""
 
@@ -36,7 +34,7 @@ class TritonGemmConfig:
         self, block_m: int, block_n: int, block_k: int, stages: int, warps: int, group_m: int = 8
     ) -> None: ...
     @staticmethod
-    def candidates(row: Optional[int] = None) -> list[TritonGemmConfig]:
+    def candidates(row: int | None = None) -> list[TritonGemmConfig]:
         """Every config the autotuner times for a plain GEMM, or for one with a row epilogue over rows ``row``
         wide."""
     block_m: int
@@ -63,7 +61,7 @@ class TritonLoopConfig:
 
     def __init__(self, block_size: int, warps: int) -> None: ...
     @staticmethod
-    def candidates(lanes: Optional[int] = None) -> list[TritonLoopConfig]:
+    def candidates(lanes: int | None = None) -> list[TritonLoopConfig]:
         """Every config the autotuner times, or those it times for a kernel of ``lanes``."""
     block_size: int
     warps: int
@@ -82,7 +80,7 @@ class MpsGemmConfig:
         algorithm: str = "tiled",
     ) -> None: ...
     @staticmethod
-    def candidates(algorithm: Optional[str] = None) -> list[MpsGemmConfig]:
+    def candidates(algorithm: str | None = None) -> list[MpsGemmConfig]:
         """Every config the autotuner can time, or those of ``algorithm``."""
     bm: int
     bn: int

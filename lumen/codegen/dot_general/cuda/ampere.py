@@ -11,7 +11,7 @@ mma.sync and the epilogue's copies, with no warp specialization.
 from __future__ import annotations
 
 import math
-from typing import Callable, Type
+from typing import Callable
 
 import cuda.bindings.driver as cuda
 import cutlass
@@ -34,8 +34,8 @@ from lumen.kernels.cuda.tile_scheduler import (
 class AmpereGemm:
     def __init__(
         self,
-        accum_dtype: Type[cutlass.Numeric],
-        a_dtype: Type[cutlass.Numeric],
+        accum_dtype: type[cutlass.Numeric],
+        a_dtype: type[cutlass.Numeric],
         tile_shape_mnk: tuple[int, int] | tuple[int, int, int],
         is_persistent: bool = False,
         use_pdl: bool = False,
@@ -514,9 +514,9 @@ class AmpereGemm:
         cls,
         cta_tile_shape_mnk: tuple[int, int, int],
         epi_tile: tuple[int, int],
-        a_dtype: Type[cutlass.Numeric],
-        b_dtype: Type[cutlass.Numeric],
-        d_dtype: Type[cutlass.Numeric],
+        a_dtype: type[cutlass.Numeric],
+        b_dtype: type[cutlass.Numeric],
+        d_dtype: type[cutlass.Numeric],
         smem_capacity: int,
         occupancy: int,
         ab_stage: int | None = None,
@@ -542,7 +542,7 @@ class AmpereGemm:
 
     def _make_smem_layout(
         self,
-        dtype: Type[cutlass.Numeric],
+        dtype: type[cutlass.Numeric],
         layout: LayoutEnum,
         shape: tuple[int, int],
         stage: int,

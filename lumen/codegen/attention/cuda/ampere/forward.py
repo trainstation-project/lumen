@@ -16,7 +16,7 @@ import operator
 from dataclasses import dataclass
 from functools import partial
 from types import SimpleNamespace
-from typing import Callable, Optional, Type
+from typing import Callable
 
 import cuda.bindings.driver as cuda
 import cutlass
@@ -32,7 +32,7 @@ from lumen.kernels.cuda.reduce import warp_reduce
 LOG2_E = math.log2(math.e)
 
 
-def smem_layout_atom(dtype: Type[cutlass.Numeric], k_dim: int) -> cute.ComposedLayout:
+def smem_layout_atom(dtype: type[cutlass.Numeric], k_dim: int) -> cute.ComposedLayout:
     """The swizzled shared-memory layout atom of a `dtype` tile whose rows hold `k_dim` elements: rows of the widest
     of 128, 64, 32 or 16 bytes dividing a row, swizzled so ldmatrix reads them without bank conflicts."""
     dtype_byte = dtype.width // 8
@@ -65,7 +65,7 @@ def gemm(
     smem_thr_copy_A: cute.TiledCopy,
     smem_thr_copy_B: cute.TiledCopy,
     A_in_regs: cutlass.Constexpr[bool] = False,
-    hook_fn: Optional[Callable] = None,
+    hook_fn: Callable | None = None,
 ) -> None:
     """acc += A B over the k blocks of shared-memory tiles `tCsA` and `tCsB`, loading each k block into registers
     (`tCrA`, `tCrB`) with ldmatrix one block ahead of its MMA; with `A_in_regs`, A is already in `tCrA`. `hook_fn`,
@@ -125,7 +125,7 @@ def gemm_rs(
 
 
 @cute.jit
-def fmax_reduce(x: cute.TensorSSA, init_val: Optional[Float32] = None) -> Float32:
+def fmax_reduce(x: cute.TensorSSA, init_val: Float32 | None = None) -> Float32:
     """The max of `x` (and `init_val`, when given), over four independent chains for instruction-level parallelism."""
     res = cute.make_rmem_tensor(x.shape, Float32)
     res.store(x)
@@ -247,13 +247,13 @@ class AmpereAttentionForward:
 
     def __init__(
         self,
-        dtype: Type[cutlass.Numeric],
+        dtype: type[cutlass.Numeric],
         head_dim: int,
-        head_dim_v: Optional[int] = None,
+        head_dim_v: int | None = None,
         qhead_per_kvhead: int = 1,
         is_causal: bool = False,
-        softmax_scale: Optional[float] = None,
-        causal_shift: Optional[int] = None,
+        softmax_scale: float | None = None,
+        causal_shift: int | None = None,
         scores: tuple = (),
         tile_m: int = 128,
         tile_n: int = 128,
@@ -414,7 +414,7 @@ class AmpereAttentionForward:
         softmax: Softmax,
         load_K: Callable,
         load_V: Callable,
-        mask_fn: Optional[Callable] = None,
+        mask_fn: Callable | None = None,
         is_first_n_block: cutlass.Constexpr = False,
         check_inf: cutlass.Constexpr = True,
     ):
@@ -596,7 +596,7 @@ class AmpereAttentionForward:
         acc_O: cute.Tensor,
         lse: cute.Tensor,
         mO: cute.Tensor,
-        mLSE: Optional[cute.Tensor],
+        mLSE: cute.Tensor | None,
         sO: cute.Tensor,
         seqlen_q: Int32,
         gmem_tiled_copy_O: cute.TiledCopy,
@@ -814,7 +814,7 @@ class AmpereAttentionForward:
         mK: cute.Tensor,
         mV: cute.Tensor,
         mO: cute.Tensor,
-        mLSE: Optional[cute.Tensor],
+        mLSE: cute.Tensor | None,
         sQ_layout: cute.ComposedLayout,
         sK_layout: cute.ComposedLayout,
         sV_layout: cute.ComposedLayout,
@@ -1101,7 +1101,7 @@ class AmpereAttentionForward:
         mK: cute.Tensor,
         mV: cute.Tensor,
         mO: cute.Tensor,
-        mLSE: Optional[cute.Tensor],
+        mLSE: cute.Tensor | None,
         stream: cuda.CUstream,
     ):
         """Launches the forward on `stream`: Q (batch, seqlen_q, heads, head_dim), K (batch, seqlen_k, kv_heads,

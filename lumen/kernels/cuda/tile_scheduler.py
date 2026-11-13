@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import NamedTuple, Optional, Tuple
+from typing import NamedTuple
 
 import cutlass
 import cutlass.cute as cute
@@ -53,7 +53,7 @@ CLC_DRAIN_MAX_CANCELS = 256
 @cute.jit
 def cluster_idx_from_block_idx(
     cluster_shape_mnk: cutlass.Constexpr[cute.Shape], *, loc=None, ip=None
-) -> Tuple[Int32, Int32, Int32]:
+) -> tuple[Int32, Int32, Int32]:
     """blockIdx // cluster_shape with the cluster shape as a compile-time constant.
     cute.arch.cluster_idx() divides by the *runtime* cluster dims from special
     registers, which lowers to an I2F/FMUL/F2I float-reciprocal chain per component;
@@ -215,9 +215,9 @@ class TileSchedulerOptions(NamedTuple):
     max_active_clusters: Int32
     raster_order: cutlass.Constexpr[RasterOrderOption] = RasterOrderOption.Heuristic
     max_swizzle_size: Int32 = Int32(8)
-    tile_count_semaphore: Optional[cute.Pointer] = None
-    batch_idx_permute: Optional[cute.Tensor] = None
-    ag: Optional[AgSchedulerArguments] = None
+    tile_count_semaphore: cute.Pointer | None = None
+    batch_idx_permute: cute.Tensor | None = None
+    ag: AgSchedulerArguments | None = None
 
 
 @dataclass
@@ -226,13 +226,13 @@ class TileSchedulerArguments:
     raster_order: cutlass.Constexpr[RasterOrderOption]
     group_size: Int32
     cluster_shape_mnk: cutlass.Constexpr[cute.Shape]
-    tile_count_semaphore: Optional[cute.Pointer] = None
-    batch_idx_permute: Optional[cute.Tensor] = None
+    tile_count_semaphore: cute.Pointer | None = None
+    batch_idx_permute: cute.Tensor | None = None
     persistence_mode: cutlass.Constexpr[PersistenceMode] = PersistenceMode.NONE
     # Split-K: the L (z) dimension of the work-id space is multiplied by num_split_k, with the
     # split index as the fastest-varying component. problem_shape_ntile_mnl[2] stays the true L.
     num_split_k: cutlass.Constexpr[int] = 1
-    ag: Optional[AgSchedulerArguments] = None
+    ag: AgSchedulerArguments | None = None
 
 
 class TileScheduler:
@@ -250,12 +250,12 @@ class TileScheduler:
         group_size_fdd: FastDivmod
         group_size_tail_fdd: FastDivmod
         num_clusters_in_group_fdd: FastDivmod
-        tile_count_semaphore: Optional[cute.Pointer]
-        batch_idx_permute: Optional[cute.Tensor]
+        tile_count_semaphore: cute.Pointer | None
+        batch_idx_permute: cute.Tensor | None
         cluster_shape_mnk: cutlass.Constexpr[cute.Shape]
         persistence_mode: cutlass.Constexpr[PersistenceMode]
         num_split_k: cutlass.Constexpr[int] = 1
-        ag: Optional[AgParams] = None
+        ag: AgParams | None = None
 
         @staticmethod
         @cute.jit
@@ -339,10 +339,10 @@ class TileScheduler:
         cur_batch_end: Int32,
         cur_num_clusters_m: Int32,
         phantom_retire: Int32,
-        sched_smem: Optional[cute.Tensor],
-        scheduler_pipeline: Optional[cutlass.pipeline.PipelineAsync],
+        sched_smem: cute.Tensor | None,
+        scheduler_pipeline: cutlass.pipeline.PipelineAsync | None,
         pipeline_state: PipelineStateWAdvance,
-        throttle_barrier: Optional[cutlass.pipeline.NamedBarrier],
+        throttle_barrier: cutlass.pipeline.NamedBarrier | None,
         params: Params,
         *,
         loc=None,
@@ -385,8 +385,8 @@ class TileScheduler:
     @staticmethod
     @cute.jit
     def _cluster_idx_to_work_idx_batch(
-        params: Params, cluster_idx: Tuple[Int32, Int32, Int32], *, loc=None, ip=None
-    ) -> Tuple[Int32, Optional[Int32]]:
+        params: Params, cluster_idx: tuple[Int32, Int32, Int32], *, loc=None, ip=None
+    ) -> tuple[Int32, Int32 | None]:
         if const_expr(params.persistence_mode in [PersistenceMode.NONE, PersistenceMode.CLC]):
             current_work_idx = Int32(cluster_idx[0])
             batch_idx = Int32(cluster_idx[2])
@@ -401,10 +401,10 @@ class TileScheduler:
     def create(
         cls,
         params: Params,
-        sched_smem: Optional[cute.Tensor] = None,
-        scheduler_pipeline: Optional[cutlass.pipeline.PipelineAsync] = None,
+        sched_smem: cute.Tensor | None = None,
+        scheduler_pipeline: cutlass.pipeline.PipelineAsync | None = None,
         is_scheduler_warp: bool | Boolean = False,
-        throttle_barrier: Optional[cutlass.pipeline.NamedBarrier] = None,
+        throttle_barrier: cutlass.pipeline.NamedBarrier | None = None,
         *,
         loc=None,
         ip=None,
@@ -444,7 +444,7 @@ class TileScheduler:
         *,
         loc=None,
         ip=None,
-    ) -> Tuple[Int32, Int32, Int32]:
+    ) -> tuple[Int32, Int32, Int32]:
         if const_expr(params.persistence_mode in [PersistenceMode.NONE, PersistenceMode.CLC]):
             return (
                 params.cluster_shape_mnk[0] * cute.size(params.problem_shape_ncluster_mnl[:2]),
@@ -469,7 +469,7 @@ class TileScheduler:
             )
 
     @cute.jit
-    def _swizzle_cta(self, cluster_id_in_problem: Int32, *, loc=None, ip=None) -> Tuple[Int32, Int32]:
+    def _swizzle_cta(self, cluster_id_in_problem: Int32, *, loc=None, ip=None) -> tuple[Int32, Int32]:
         # CTA Swizzle to promote L2 data reuse
         params = self.params
         group_id, id_in_group = divmod(cluster_id_in_problem, params.num_clusters_in_group_fdd)
@@ -500,7 +500,7 @@ class TileScheduler:
     @cute.jit
     def _cluster_id_to_cta_id(
         self, cid_m: Int32, cid_n: Int32, *, block_zero_only: bool = False, loc=None, ip=None
-    ) -> Tuple[Int32, Int32]:
+    ) -> tuple[Int32, Int32]:
         if const_expr(block_zero_only or cute.size(self.params.cluster_shape_mnk, loc=loc, ip=ip) == 1):
             bidx_in_cluster = (Int32(0), Int32(0))
         else:
@@ -514,8 +514,8 @@ class TileScheduler:
     def _delinearize_work_idx(
         self,
         work_idx: Int32,
-        bidz: Optional[Int32] = None,
-        is_valid: Optional[Boolean] = None,
+        bidz: Int32 | None = None,
+        is_valid: Boolean | None = None,
         *,
         block_zero_only: bool = False,
         loc=None,
@@ -595,8 +595,8 @@ class TileScheduler:
 
     @cute.jit
     def get_split_k_tile_range(
-        self, k_tile_total: Int32, split_idx: Optional[Int32], *, loc=None, ip=None
-    ) -> Tuple[Int32, Int32]:
+        self, k_tile_total: Int32, split_idx: Int32 | None, *, loc=None, ip=None
+    ) -> tuple[Int32, Int32]:
         """K-tile subrange [start, start + cnt) owned by split_idx.
 
         The scheduler is the sole owner of the K-dim work decomposition: every warp
@@ -617,7 +617,7 @@ class TileScheduler:
         return k_tile_start, k_tile_cnt
 
     @cute.jit
-    def get_combined_batch_idx(self, batch_idx: Int32, split_idx: Optional[Int32], *, loc=None, ip=None) -> Int32:
+    def get_combined_batch_idx(self, batch_idx: Int32, split_idx: Int32 | None, *, loc=None, ip=None) -> Int32:
         """Inverse of the work-tile (l, split) decode: the combined l * num_split_k +
         split index. Staged split-K uses it as the partials-workspace batch coordinate."""
         if const_expr(self.params.num_split_k == 1):
@@ -998,7 +998,7 @@ class TileScheduler:
 
 
 @cute.jit
-def triangular_idx_to_coord(idx: Int32) -> Tuple[Int32, Int32]:
+def triangular_idx_to_coord(idx: Int32) -> tuple[Int32, Int32]:
     """
     Convert a triangular index to 2D coordinates.
     This is used to convert the linear index to 2D coordinates for triangular matrices.
@@ -1021,7 +1021,7 @@ class TriangularTileScheduler(TileScheduler):
         group_size_tail_fdd: FastDivmod
         group_size_mul_group_size_fdd: FastDivmod
         group_size_tail_mul_group_size_fdd: FastDivmod
-        tile_count_semaphore: Optional[cute.Pointer]
+        tile_count_semaphore: cute.Pointer | None
         cluster_shape_mnk: cutlass.Constexpr[cute.Shape]
         persistence_mode: cutlass.Constexpr[PersistenceMode]
         num_split_k: cutlass.Constexpr[int] = 1
@@ -1072,7 +1072,7 @@ class TriangularTileScheduler(TileScheduler):
         *,
         loc=None,
         ip=None,
-    ) -> Tuple[Int32, Int32, Int32]:
+    ) -> tuple[Int32, Int32, Int32]:
         clusters = (params.num_clusters_per_problem_fdd.divisor, 1)
         num_ctas_mnl = (
             clusters[0] * params.cluster_shape_mnk[0],
@@ -1095,7 +1095,7 @@ class TriangularTileScheduler(TileScheduler):
             )
 
     @cute.jit
-    def _swizzle_cta(self, cluster_id_in_problem: Int32, *, loc=None, ip=None) -> Tuple[Int32, Int32]:
+    def _swizzle_cta(self, cluster_id_in_problem: Int32, *, loc=None, ip=None) -> tuple[Int32, Int32]:
         # CTA Swizzle to promote L2 data reuse
         params = self.params
         group_size = params.group_size_fdd.divisor
@@ -1131,8 +1131,8 @@ class TriangularTileScheduler(TileScheduler):
     def _delinearize_work_idx(
         self,
         work_idx: Int32,
-        bidz: Optional[Int32] = None,
-        is_valid: Optional[Boolean] = None,
+        bidz: Int32 | None = None,
+        is_valid: Boolean | None = None,
         *,
         block_zero_only: bool = False,
         loc=None,
@@ -1174,7 +1174,7 @@ class VarlenMTileSchedulerArguments:
     group_size: Int32
     tile_shape_mn: cutlass.Constexpr[cute.Shape]
     cluster_shape_mnk: cutlass.Constexpr[cute.Shape]
-    tile_count_semaphore: Optional[cute.Pointer] = None
+    tile_count_semaphore: cute.Pointer | None = None
     persistence_mode: cutlass.Constexpr[PersistenceMode] = PersistenceMode.NONE
     num_split_k: cutlass.Constexpr[int] = 1
 
@@ -1189,11 +1189,11 @@ class VarlenMTileScheduler(TileScheduler):
         cu_seqlens_m: cute.Tensor
         raster_order: cutlass.Constexpr[RasterOrder]
         group_size: Int32
-        group_size_fdd: Optional[FastDivmod]
-        group_size_tail_fdd: Optional[FastDivmod]
+        group_size_fdd: FastDivmod | None
+        group_size_tail_fdd: FastDivmod | None
         num_clusters_in_group_fdd: FastDivmod
         tile_shape_mn: cutlass.Constexpr[cute.Shape]
-        tile_count_semaphore: Optional[cute.Pointer]
+        tile_count_semaphore: cute.Pointer | None
         cluster_shape_mnk: cutlass.Constexpr[cute.Shape]
         persistence_mode: cutlass.Constexpr[PersistenceMode]
         num_split_k: cutlass.Constexpr[int] = 1
@@ -1249,8 +1249,8 @@ class VarlenMTileScheduler(TileScheduler):
     @staticmethod
     @cute.jit
     def _cluster_idx_to_work_idx_batch(
-        params: Params, cluster_idx: Tuple[Int32, Int32, Int32], *, loc=None, ip=None
-    ) -> Tuple[Int32, Optional[Int32]]:
+        params: Params, cluster_idx: tuple[Int32, Int32, Int32], *, loc=None, ip=None
+    ) -> tuple[Int32, Int32 | None]:
         if const_expr(params.persistence_mode in [PersistenceMode.NONE, PersistenceMode.CLC]):
             current_work_idx = Int32(cluster_idx[0])
         else:
@@ -1266,7 +1266,7 @@ class VarlenMTileScheduler(TileScheduler):
         *,
         loc=None,
         ip=None,
-    ) -> Tuple[Int32, Int32, Int32]:
+    ) -> tuple[Int32, Int32, Int32]:
         block_size = params.tile_shape_mn[0] * params.cluster_shape_mnk[0]
         num_batch = params.problem_shape_ncluster_mnl[2]
         # Tight upper bound on sum(ceil(len_i / block)) given only (total_m, L):
@@ -1292,7 +1292,7 @@ class VarlenMTileScheduler(TileScheduler):
     @cute.jit
     def _swizzle_cta(
         self, cluster_id_in_problem: Int32, num_clusters_m: Int32, *, loc=None, ip=None
-    ) -> Tuple[Int32, Int32]:
+    ) -> tuple[Int32, Int32]:
         params = self.params
         # CTA Swizzle to promote L2 data reuse
         if const_expr(params.num_clusters_in_group_fdd is not None):
@@ -1343,8 +1343,8 @@ class VarlenMTileScheduler(TileScheduler):
     def _delinearize_work_idx(
         self,
         work_idx: Int32,
-        bidz: Optional[Int32] = None,  # not used
-        is_valid_: Optional[Boolean] = None,
+        bidz: Int32 | None = None,  # not used
+        is_valid_: Boolean | None = None,
         *,
         block_zero_only: bool = False,
         loc=None,

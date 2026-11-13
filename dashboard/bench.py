@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from typing import Callable, NamedTuple, Optional
+from typing import Callable, NamedTuple
 
 import numpy as np
 
@@ -79,11 +79,11 @@ class Op(NamedTuple):
     kind: str
     formula: str
     lumen: Callable
-    torch: Optional[Callable]
+    torch: Callable | None
     inputs: Callable
     dtypes: tuple = FLOATS
     sizes: tuple = SIZES
-    flops: Optional[Callable] = None
+    flops: Callable | None = None
     sized: bool = False
     flags: tuple = ()
 
