@@ -2,6 +2,7 @@
 
 use crate::codegen::dot_general::cuda::epilogue;
 use crate::codegen::kinds::gemm_dot;
+use crate::codegen::regions::expansion;
 use crate::codegen::utils::cuda::cute_type;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
@@ -60,7 +61,7 @@ pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
 
 /// The shared fusion's view of the CUDA backend: elementwise loops and GEMM epilogues (no reductions or rows yet),
 /// any number of tensors, a fusion writing the values others read too, a GEMM epilogue at most 4 values besides its
-/// last (`codegen::dot_general::cuda::epilogue` says which matmuls run one).
+/// last (`codegen::dot_general::cuda::epilogue` says which matmuls run one), its result an expansion as on Triton.
 fn backend(m: &DeviceModule<'_, Cuda>) -> Backend {
     let config = &m.options.config;
 
@@ -72,7 +73,7 @@ fn backend(m: &DeviceModule<'_, Cuda>) -> Backend {
         reduction_epilogues: false,
         contraction_epilogues: config.contraction_epilogues,
         dot_epilogue: epilogue,
-        expansion: |_, _, _| false,
+        expansion: |graph, dot, concat| expansion(graph, dot, concat).is_some(),
         row_dot: |_| false,
     }
 }

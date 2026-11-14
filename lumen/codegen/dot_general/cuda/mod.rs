@@ -12,7 +12,7 @@ use crate::codegen::dot_general::GemmCodegen;
 use crate::codegen::elementwise::cuda::Layouts;
 use crate::codegen::emitter::Emit;
 use crate::codegen::emitter::cuda::Emitter;
-use crate::codegen::regions::{Region, gemm_regions};
+use crate::codegen::regions::{Region, gemm_expanded, gemm_regions};
 use crate::codegen::store::triton::gather_index;
 use crate::codegen::utils::cuda::{Cuda, cute_type, unsigned};
 use crate::graph::{Graph, Node, Primitive, Var};
@@ -121,7 +121,8 @@ impl GemmCodegen for Cuda {
     /// `ins` (its inputs) and `outs` (its outputs) at their `layouts`. Without regions, its outputs are the
     /// product's shape: each read or written where the product is moves by one vector when `aligned` (every tensor
     /// 16-byte aligned). With regions, each vector lies in one; each of its member tuples' values computes the
-    /// outputs reading the region at their own index. The module also names each tensor's CuTe type and span
+    /// outputs reading the region at their own index. An expansion (the product's shape twice, concatenated) stores
+    /// its two halves' values into their slots of it. The module also names each tensor's CuTe type and span
     /// (`TYPES`, `SPANS`, its inputs first: `INPUTS`) and the product's elements a vector (`VECTOR`).
     fn gemm(
         body: &Graph,
@@ -162,6 +163,36 @@ impl GemmCodegen for Cuda {
 
                 for (k, &v) in outputs.iter().enumerate() {
                     let ty = body.type_of(v);
+
+                    // An expansion (as on Triton) stores its two dot-shaped operands into their slots of the
+                    // concatenation, `width` elements apart in runs of `width`.
+                    if let (0, Some((parts, _))) = (k, gemm_expanded(body, dot)) {
+                        let concat = body.nodes().iter().find(|n| n.output == v);
+
+                        let Some(Primitive::Concatenate { dimension, .. }) =
+                            concat.map(|n| &n.primitive)
+                        else {
+                            unreachable!("an expansion's concatenation")
+                        };
+
+                        let width: usize = shape[(*dimension).min(rank)..].iter().product();
+
+                        writeln!(
+                            stores,
+                            "        jx0 = (j // {width}) * {} + j % {width}\n        jx1 = jx0 + {width}",
+                            2 * width
+                        )
+                        .unwrap();
+
+                        for (part, jx) in parts.into_iter().zip(["jx0", "jx1"]) {
+                            let value = stored(emitter.value(part, "j".into()), ty.dtype);
+                            let at = gather_index(jx, &ty.shape, &layouts.outputs[k]);
+                            writeln!(stores, "        out{k}[{at}] = {value}").unwrap();
+                        }
+
+                        continue;
+                    }
+
                     let value = stored(emitter.value(v, "j".into()), ty.dtype);
 
                     match gather_index("j", &ty.shape, &layouts.outputs[k]).as_str() {
