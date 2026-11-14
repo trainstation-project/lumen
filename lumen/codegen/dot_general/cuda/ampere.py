@@ -11,6 +11,7 @@ mma.sync and the epilogue's copies, with no warp specialization.
 from __future__ import annotations
 
 import math
+import types
 from typing import Callable
 
 import cuda.bindings.driver as cuda
@@ -46,6 +47,9 @@ class AmpereGemm:
         aligned_n: bool = False,
         aligned_k: bool = False,
         ab_stage: int | None = None,
+        epilogue: types.ModuleType | None = None,
+        epilogue_aligned: bool = False,
+        d_dtype: type[cutlass.Numeric] | None = None,
     ):
         """The GEMM for `a_dtype` operands accumulating in `accum_dtype`, one CTA per (M, N) tile of `tile_shape_mnk`
         (K defaulting to four MMA instructions), with `NUM_WARPS` warps (4, or 8 for the widest tiles) and
@@ -53,7 +57,10 @@ class AmpereGemm:
         multiple of the tile's: no bounds checks on A's rows (and D's), B's rows (and D's columns), or a partial last
         k-tile, each set independently so only a dimension that needs them is checked.
         `ab_stage` fixes the A/B pipeline stages (as many as fit otherwise); unless `occupancy` is given, it runs as
-        many CTAs per SM as fit them, at most the default."""
+        many CTAs per SM as fit them, at most the default. With `epilogue` (a generated module: `EPILOGUE` and its
+        tensors' `TYPES`, `SPANS` and `INPUTS`, see `codegen/dot_general/cuda`) it writes no D: each thread hands its
+        vectors of the product, rounded to `d_dtype`, to `EPILOGUE`, which computes and stores the fusion's outputs,
+        moving its tensors by vectors when `epilogue_aligned` (every one 16-byte aligned)."""
         if arch not in (80, 86, 87, 89):
             raise ValueError(f"SM80-family GEMM supports arch in {self._supported_archs}, got {arch}")
 
@@ -62,6 +69,9 @@ class AmpereGemm:
         self.aligned_n = aligned_n
         self.aligned_k = aligned_k
         self.fixed_ab_stage = ab_stage
+        self.epilogue_module = epilogue
+        self.epilogue_aligned = epilogue_aligned
+        self.fused_d_dtype = d_dtype
         self.accum_dtype = accum_dtype
         self.is_persistent = is_persistent
         self.use_pdl = use_pdl
@@ -315,20 +325,28 @@ class AmpereGemm:
         self,
         tiled_mma: cute.TiledMma,
         acc: cute.Tensor,
-        mD_mn: cute.Tensor,
+        mD_mn: cute.Tensor | None,
+        ins: list,
+        outs: list,
+        shape_mn: cute.Shape,
         sD: cute.Tensor,
         tile_coord_mnkl: cute.Coord,
         tidx: Int32,
     ):
         """Stores the tile's accumulator `acc` to D one epilogue subtile at a time: registers -> `sD` (converted to
-        D's dtype), then `sD` -> gmem in 16-byte vectors along D's contiguous dimension."""
+        D's dtype), then `sD` -> gmem in 16-byte vectors along D's contiguous dimension; with a fused epilogue, `sD`
+        -> the generated `EPILOGUE` (of `shape_mn`'s product), writing the fusion's outputs `outs` from it and its
+        inputs `ins`, instead."""
         # No stmatrix before SM90: each thread stores its C fragment of a subtile straight into `sD`, partitioned by
         # the tiled MMA as the accumulator is (MMA, MMA_M / EPI_M, MMA_N / EPI_N, STAGE).
         tCsD = tiled_mma.get_slice(tidx).partition_C(sD)
         # (MMA, MMA_M / EPI_M, MMA_N / EPI_N, (EPI_M, EPI_N)), and one subtile's fragment in D's dtype
         tRS_rAcc = self.epi_retile_acc(acc)
         tRS_rD = cute.make_rmem_tensor(tRS_rAcc[None, None, None, 0].shape, self.d_dtype)
-        copy_D = self.epilog_gmem_copy_fn(mD_mn, sD, tile_coord_mnkl, tidx)
+        if const_expr(self.epilogue_module is None):
+            copy_D = self.epilog_gmem_copy_fn(mD_mn, sD, tile_coord_mnkl, tidx)
+        else:
+            copy_D = self.epilog_fused_fn(ins, outs, sD, shape_mn, tile_coord_mnkl, tidx)
 
         epi_tile_shape = cute.zipped_divide(cute.make_layout(self.cta_tile_shape_mnk[:2]), self.epi_tile).shape[1]
         epi_tile_layout = cute.make_ordered_layout(
@@ -485,6 +503,68 @@ class AmpereGemm:
 
         return copy_fn
 
+    @cute.jit
+    def epilog_fused_fn(
+        self,
+        ins: list,
+        outs: list,
+        sD: cute.Tensor,
+        shape_mn: cute.Shape,
+        tile_coord_mnkl: cute.Coord,
+        tidx: Int32,
+    ) -> Callable:
+        """`apply(src_idx, dst_idx)`: each of the thread's 16-byte vectors (along n) of stage `src_idx` of `sD`, epilogue
+        subtile `dst_idx` (epi_m, epi_n) of the product's tile `tile_coord_mnkl` (of `shape_mn`), handed to the
+        generated `EPILOGUE` with its (batch, m, n) to compute and store the fusion's outputs in `ins` and `outs`,
+        skipping vectors outside the product as `epilog_gmem_copy_fn` does (a vector is wholly inside or outside)."""
+        tile_mn = self.cta_tile_shape_mnk[:2]
+        cD = cute.local_tile(cute.make_identity_tensor(shape_mn), tile_mn, (tile_coord_mnkl[0], tile_coord_mnkl[1]))
+        # (epi_M, epi_N, EPI_M, EPI_N)
+        cD_epi = cute.flat_divide(cD, self.epi_tile)
+
+        vec = 128 // self.d_dtype.width
+        threads_per_row = math.gcd(self.epi_tile[1] // vec, self.NUM_THREADS)
+        tiled_copy = copy_utils.tiled_copy_2d(self.d_dtype, threads_per_row, self.NUM_THREADS, vec)
+        thr_copy = tiled_copy.get_slice(tidx)
+        # (CPY, CPY_R, CPY_C, STAGE) and (CPY, CPY_R, CPY_C, EPI_M, EPI_N)
+        tDsD = thr_copy.partition_S(sD)
+        tDcD = thr_copy.partition_S(cD_epi)
+        acc = cute.make_rmem_tensor((vec,), self.d_dtype)
+        batch = tile_coord_mnkl[3]
+
+        def apply(src_idx, dst_idx):
+            for i in cutlass.range_constexpr(cute.size(tDsD, mode=[1])):
+                for j in cutlass.range_constexpr(cute.size(tDsD, mode=[2])):
+                    coord = tDcD[0, i, j, dst_idx[0], dst_idx[1]]
+                    vector = tDsD[None, i, j, src_idx]
+                    if const_expr(self.aligned_m and self.aligned_n):
+                        self.epilogue_vector(vector, acc, ins, outs, batch, coord)
+                    elif const_expr(self.aligned_m):
+                        if coord[1] < shape_mn[1]:
+                            self.epilogue_vector(vector, acc, ins, outs, batch, coord)
+                    elif const_expr(self.aligned_n):
+                        if coord[0] < shape_mn[0]:
+                            self.epilogue_vector(vector, acc, ins, outs, batch, coord)
+                    elif cute.elem_less(coord, shape_mn):
+                        self.epilogue_vector(vector, acc, ins, outs, batch, coord)
+
+        return apply
+
+    @cute.jit
+    def epilogue_vector(
+        self,
+        vector: cute.Tensor,
+        acc: cute.Tensor,
+        ins: list,
+        outs: list,
+        batch: Int32,
+        coord: cute.Coord,
+    ):
+        """The generated `EPILOGUE` on the product's vector `vector` in shared memory, copied into registers `acc`, at
+        `coord` (m, n) of batch `batch`, reading `ins` and writing `outs`."""
+        cute.autovec_copy(vector, acc)
+        self.epilogue_module.EPILOGUE(ins, outs, acc, batch, coord[0], coord[1], self.epilogue_aligned)
+
     def epi_retile_acc(self, acc: cute.Tensor) -> cute.Tensor:
         """The accumulator (MMA, MMA_M, MMA_N) split by epilogue subtile, (MMA, MMA_M / EPI_M, MMA_N / EPI_N,
         (EPI_M, EPI_N)): each subtile's slice is the tiled MMA's C fragment of an epi_tile (QuACK's SM90 version
@@ -601,14 +681,14 @@ class AmpereGemm:
             return layout_utils.select(t, [1, 2, 0])
         return layout_utils.expand(t, 2, 1)
 
-    def _scheduler_params(self, mA: cute.Tensor, mB: cute.Tensor, mD: cute.Tensor) -> TileScheduler.Params:
-        """The tile scheduler's parameters for A (m, k, l), B (n, k, l) and D (m, n, l): one CTA per tile, grouped by 8
-        along the heuristic's raster order."""
+    def _scheduler_params(self, mA: cute.Tensor, mB: cute.Tensor) -> TileScheduler.Params:
+        """The tile scheduler's parameters for A (m, k, l) and B (n, k, l): one CTA per tile of D (m, n, l), grouped by
+        8 along the heuristic's raster order."""
         tile_sched_args = TileSchedulerArguments(
             problem_shape_ntile_mnl=(
                 cute.ceil_div(cute.size(mA, mode=[0]), self.cta_tile_shape_mnk[0]),
                 cute.ceil_div(cute.size(mB, mode=[0]), self.cta_tile_shape_mnk[1]),
-                mD.shape[2],
+                mA.shape[2],
             ),
             raster_order=RasterOrderOption.Heuristic,
             group_size=Int32(8),
@@ -625,7 +705,9 @@ class AmpereGemm:
         tiled_mma: cute.TiledMma,
         mA_mkl: cute.Tensor,
         mB_nkl: cute.Tensor,
-        mD_mnl: cute.Tensor,
+        mD_mnl: cute.Tensor | None,
+        ins: list,
+        outs: list,
         tiled_copy_A: cute.TiledCopy,
         tiled_copy_B: cute.TiledCopy,
         a_smem_layout: cute.ComposedLayout,
@@ -634,9 +716,22 @@ class AmpereGemm:
         TileSchedulerCls: cutlass.Constexpr[Callable],
     ):
         """One CTA's GEMM: per scheduled (m, n, batch) tile, the A/B mainloop into a float32 accumulator, then the
-        epilogue storing it to D. Its runtime parameters are the three tensors alone (the rest is static), so Rust
+        epilogue storing it to D, or with a fused epilogue computing the fusion's outputs `outs` from it and its inputs
+        `ins` (pointers). Its runtime parameters are the tensors and pointers alone (the rest is static), so Rust
         launches it with a plain `cuLaunchKernel`; the scheduler's parameters are built here from their shapes."""
         tidx, _, _ = cute.arch.thread_idx()
+
+        # A fused epilogue's tensors, each a flat view of the elements it spans, retyped (pointers keep only their
+        # storage type).
+        if const_expr(self.epilogue_module is not None):
+            module = self.epilogue_module
+            flat = [
+                cute.make_tensor(cute.recast_ptr(p, dtype=dtype), cute.make_layout(span))
+                for p, dtype, span in zip(list(ins) + list(outs), module.TYPES, module.SPANS)
+            ]
+            ins, outs = flat[: module.INPUTS], flat[module.INPUTS :]
+
+        shape_mn = (cute.size(mA_mkl, mode=[0]), cute.size(mB_nkl, mode=[0]))
 
         smem = cutlass.utils.SmemAllocator()
         storage = smem.allocate(self.shared_storage)
@@ -667,7 +762,7 @@ class AmpereGemm:
         if const_expr(self.use_pdl):
             prims.griddepcontrol(prims.GridDepAction.WAIT)
 
-        tile_scheduler = TileSchedulerCls.create(self._scheduler_params(mA_mkl, mB_nkl, mD_mnl))
+        tile_scheduler = TileSchedulerCls.create(self._scheduler_params(mA_mkl, mB_nkl))
         work_tile = tile_scheduler.initial_work_tile_info()
 
         while work_tile.is_valid_tile:
@@ -698,7 +793,8 @@ class AmpereGemm:
             acc.fill(0.0)
             self.mma(tiled_mma, acc, k_tile_cnt, copy_A, copy_B, copy_block_A, copy_block_B, tCrA, tCrB)
 
-            self.epilogue(tiled_mma, acc, mD_mnl[None, None, batch_idx], sD, tile_coord_mnkl, tidx)
+            mD_mn = mD_mnl[None, None, batch_idx] if const_expr(mD_mnl is not None) else None
+            self.epilogue(tiled_mma, acc, mD_mn, ins, outs, shape_mn, sD, tile_coord_mnkl, tidx)
 
             tile_scheduler.advance_to_next_work()
             work_tile = tile_scheduler.get_current_work()
@@ -708,24 +804,34 @@ class AmpereGemm:
         self,
         mA: cute.Tensor,
         mB: cute.Tensor,
-        mD: cute.Tensor,
+        mD: cute.Tensor | None,
+        ins: list,
+        outs: list,
         stream: cuda.CUstream,
     ) -> None:
         """Writes `mA @ mB` into `mD`, crossing as the caller holds them: A (l, m, k), B (l, k, n) and D (l, m, n), or
-        unbatched (m, k), (k, n) and (m, n), each with any one dimension contiguous. lumen only compiles through this
-        (`launch.compile`) and launches the kernel from Rust."""
+        unbatched (m, k), (k, n) and (m, n), each with any one dimension contiguous; or, with a fused epilogue (`mD`
+        None), the fusion's outputs at pointers `outs`, computed from the product and its inputs at pointers `ins`.
+        lumen only compiles through this (`launch.compile`) and launches the kernel from Rust."""
         # Tensors arrive batch-first: rotate (l, x, y) -> (x, y, l) at trace time, a trivial batch appended to rank-2
         # operands, and B relabelled from the caller's (k, n) to the kernel's (n, k) (QuACK's b_transposed).
-        mA, mB, mD = [self._batch_last(t) for t in (mA, mB, mD)]
+        mA, mB = [self._batch_last(t) for t in (mA, mB)]
         mB = layout_utils.select(mB, [1, 0, 2])
 
         self.a_dtype = mA.element_type
         self.b_dtype = mB.element_type
-        self.d_dtype = mD.element_type
 
         self.a_layout = LayoutEnum.from_tensor(mA)
         self.b_layout = LayoutEnum.from_tensor(mB)
-        self.d_layout = LayoutEnum.from_tensor(mD)
+
+        # A fused epilogue's product is staged in shared memory row-major, so its vectors run along n.
+        if const_expr(mD is None):
+            self.d_dtype = self.fused_d_dtype
+            self.d_layout = LayoutEnum.ROW_MAJOR
+        else:
+            mD = self._batch_last(mD)
+            self.d_dtype = mD.element_type
+            self.d_layout = LayoutEnum.from_tensor(mD)
 
         if const_expr(self.a_dtype != self.b_dtype):
             raise TypeError(f"Type mismatch: {self.a_dtype} != {self.b_dtype}")
@@ -738,7 +844,7 @@ class AmpereGemm:
         tiled_copy_A = self._make_gmem_tiled_copy_AB(self.a_dtype, self.a_layout, self.cta_tile_shape_mnk[0])
         tiled_copy_B = self._make_gmem_tiled_copy_AB(self.b_dtype, self.b_layout, self.cta_tile_shape_mnk[1])
 
-        grid = TileScheduler.get_grid_shape(self._scheduler_params(mA, mB, mD), Int32(0))
+        grid = TileScheduler.get_grid_shape(self._scheduler_params(mA, mB), Int32(0))
 
         @cute.struct
         class SharedStorage:
@@ -765,6 +871,8 @@ class AmpereGemm:
             mA,
             mB,
             mD,
+            ins,
+            outs,
             tiled_copy_A,
             tiled_copy_B,
             self.a_smem_layout_staged,

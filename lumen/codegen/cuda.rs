@@ -3,18 +3,21 @@
 
 use crate::autotune::Autotuner;
 use crate::autotune::cuda::{AttentionForwards, Events, Gemms};
+use crate::codegen::dot_general::GemmCodegen;
+use crate::codegen::dot_general::cuda::matmul;
 use crate::codegen::elementwise::ElementwiseCodegen;
 use crate::codegen::elementwise::cuda::Layouts;
+use crate::codegen::kinds::gemm_dot;
 use crate::codegen::utils::cuda::Cuda;
-use crate::graph::{Graph, Node, Primitive, TensorType};
+use crate::graph::{Graph, Primitive, TensorType};
 use crate::graph_compiler::device::{Device, DeviceModule};
 use crate::graph_compiler::passes::attention::FORWARD;
 use crate::graph_compiler::{Options, plan_options};
 use crate::plan::{CpuPlan, CudaPlan, CudaStep, Plan, Step as _, StepBase};
 use std::sync::Arc;
 
-/// The kernel `step` runs as for tensors laid out as `layouts`, generated once per layout and kept in the
-/// step's memo.
+/// The kernel `step` runs as for tensors laid out as `layouts` (a GEMM fusion's epilogue), generated once per layout
+/// and kept in the step's memo.
 pub(crate) fn generated(
     step: &StepBase,
     layouts: Layouts,
@@ -33,8 +36,13 @@ pub(crate) fn generated(
         });
 
     step.memo.get(key, || {
+        let by_value = vec![false; layouts.inputs.len()];
+
         let body = match &step.primitive {
-            Primitive::Fusion { body, .. } => body.clone(),
+            Primitive::Fusion { body, .. } => match gemm_dot(body) {
+                Some(dot) => return Cuda::gemm(body, dot, &by_value, &layouts),
+                None => body.clone(),
+            },
             Primitive::Reshape { new_sizes } => copy_body(&step.inputs[0].1, new_sizes),
             p => {
                 return Err(format!(
@@ -44,7 +52,6 @@ pub(crate) fn generated(
             }
         };
 
-        let by_value = vec![false; layouts.inputs.len()];
         Cuda::elementwise(&body, &by_value, &Default::default(), &layouts)
     })
 }
@@ -121,46 +128,6 @@ fn copy_body(x: &TensorType, shape: &[usize]) -> Graph {
     body
 }
 
-/// Whether `node` is a matmul the GEMM runs: float16 or bfloat16 operands of rank 2, or 3 with a leading batch dim,
-/// contracting one dim each, accumulated in float32 and written as float16, bfloat16 or float32, every extent a
-/// multiple of 8 (its tiles move 16-byte vectors along whichever dim is contiguous).
-fn matmul(graph: &Graph, node: &Node) -> bool {
-    use crate::DType::{BF16, F16, F32};
-
-    let Primitive::DotGeneral {
-        lhs_contracting,
-        rhs_contracting,
-        lhs_batch,
-        rhs_batch,
-        accum_dtype,
-        ..
-    } = &node.primitive
-    else {
-        return false;
-    };
-
-    let (lhs, rhs) = (graph.type_of(node.inputs[0]), graph.type_of(node.inputs[1]));
-    let out = graph.type_of(node.output);
-    let rank = lhs.shape.len();
-
-    let batched = match rank {
-        2 => lhs_batch.is_empty() && rhs_batch.is_empty(),
-        3 => *lhs_batch == [0] && *rhs_batch == [0],
-        _ => false,
-    };
-
-    let contracting = matches!((lhs_contracting.as_slice(), rhs_contracting.as_slice()), ([l], [r]) if *l >= rank - 2 && *r >= rank - 2);
-    let typed = lhs.dtype == rhs.dtype && matches!(lhs.dtype, F16 | BF16) && *accum_dtype == F32;
-    let extents = lhs.shape[rank - 2..].iter().chain(&rhs.shape[rank - 2..]);
-
-    batched
-        && contracting
-        && rhs.shape.len() == rank
-        && typed
-        && matches!(out.dtype, F16 | BF16 | F32)
-        && extents.into_iter().all(|&d| d > 0 && d % 8 == 0)
-}
-
 /// The CUDA backend plans its fused graph, every runtime scalar a 0-d device input, and autotunes its GEMM tiles
 /// and attention configs when enabled; it errors on an op it has no kernel for.
 impl Device for Cuda {
@@ -171,7 +138,13 @@ impl Device for Cuda {
         module: DeviceModule<'_, Self>,
         device: crate::Device,
     ) -> Result<Box<dyn Plan>, String> {
-        let (fused, options) = (module.graph, module.options);
+        let DeviceModule {
+            graph: fused,
+            options,
+            packed,
+            interleaved,
+            ..
+        } = module;
 
         if let Some(node) = fused.nodes().iter().find(|n| {
             !matches!(
@@ -189,9 +162,11 @@ impl Device for Cuda {
         }
 
         let config = &options.config;
-        let plan = plan_options(&fused, options, config, &Vec::new(), Vec::new());
-        let mut plan =
-            crate::codegen::cuda::codegen(CpuPlan::compile_with(&fused, &plan), options)?;
+        let plan = plan_options(&fused, options, config, &packed, Vec::new());
+        let mut plan = CpuPlan::compile_with(&fused, &plan);
+        plan.packed = packed;
+        plan.interleaved = interleaved;
+        let mut plan = crate::codegen::cuda::codegen(plan, options)?;
 
         if config.autotune || crate::autotune::forcing() {
             let tuner = Autotuner {

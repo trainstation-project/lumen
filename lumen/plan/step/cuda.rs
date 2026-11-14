@@ -3,14 +3,15 @@
 use std::ops::{Deref, DerefMut};
 
 use super::triton::traced;
-use super::{unsupported, viewed};
+use super::unsupported;
 use crate::codegen::dot_general::cuda::Config;
 use crate::codegen::elementwise::cuda::Layouts;
+use crate::codegen::kinds::gemm_dot;
 use crate::graph::Primitive;
 use crate::graph_compiler::passes::attention::FORWARD;
 use crate::plan::run::Buffers;
 use crate::plan::{Step, StepBase};
-use crate::runtime::kernel::cuda::{GEMM, LAUNCH};
+use crate::runtime::kernel::cuda::{GEMM, LAUNCH, Output};
 use crate::{Device, Tensor};
 
 /// A step of a CUDA (CuTe DSL) kernel, generated for its tensors' layouts and kept in its memo.
@@ -69,34 +70,85 @@ impl CudaStep {
     ) -> Result<(), String> {
         let step = &self.0;
 
-        // A matmul runs on the GEMM, A as (.., m, k) and B as (.., k, n) whichever of their dims contract.
-        if let Primitive::DotGeneral {
-            lhs_contracting,
-            rhs_contracting,
-            ..
-        } = &step.primitive
+        // A GEMM fusion's matmul, and the body it runs in.
+        let fused = match &step.primitive {
+            Primitive::Fusion { body, .. } => gemm_dot(body).map(|dot| (body, dot)),
+            _ => None,
+        };
+
+        // A matmul runs on the GEMM, A as (.., m, k) and B as (.., k, n) whichever of their dims contract; a GEMM
+        // fusion's epilogue, generated for its tensors' layouts, writes its outputs from the product.
+        let operands = match (&step.primitive, fused) {
+            (Primitive::DotGeneral { .. }, _) => Some((&step.primitive, [0, 1])),
+            (_, Some((body, dot))) => {
+                let position = |v| {
+                    body.inputs()
+                        .iter()
+                        .position(|&i| i == v)
+                        .expect("an input")
+                };
+                Some((
+                    &dot.primitive,
+                    [position(dot.inputs[0]), position(dot.inputs[1])],
+                ))
+            }
+            _ => None,
+        };
+
+        if let Some((
+            Primitive::DotGeneral {
+                lhs_contracting,
+                rhs_contracting,
+                ..
+            },
+            [lhs, rhs],
+        )) = operands
         {
             let gemm = GEMM.get().ok_or(
                 "the CUDA backend's GEMM runs from Python (lumen.codegen.dot_general.cuda): none is installed",
             )?;
 
-            if out.numel() == 0 {
+            let outputs: Vec<Tensor> = std::iter::once(out).chain(outs).cloned().collect();
+
+            if outputs.iter().all(|t| t.numel() == 0) {
                 return Ok(());
             }
 
-            let rank = inputs[0].ndim();
+            let rank = inputs[lhs].ndim();
 
             let a = match lhs_contracting[0] == rank - 1 {
-                true => inputs[0].clone(),
-                false => inputs[0].transpose(rank - 2, rank - 1),
+                true => inputs[lhs].clone(),
+                false => inputs[lhs].transpose(rank - 2, rank - 1),
             };
 
             let b = match rhs_contracting[0] == rank - 2 {
-                true => inputs[1].clone(),
-                false => inputs[1].transpose(rank - 2, rank - 1),
+                true => inputs[rhs].clone(),
+                false => inputs[rhs].transpose(rank - 2, rank - 1),
             };
 
-            return gemm(&a, &b, out, step.launch::<Config>());
+            let Some((body, dot)) = fused else {
+                return gemm(&a, &b, Output::Product(out), step.launch::<Config>());
+            };
+
+            let tensors: Vec<Tensor> = inputs.iter().chain(&outputs).map(Tensor::flat).collect();
+            let (ins, outs) = tensors.split_at(inputs.len());
+
+            let layouts = Layouts {
+                inputs: inputs.iter().map(|t| t.strides().to_vec()).collect(),
+                outputs: outputs.iter().map(|t| t.strides().to_vec()).collect(),
+                spans: tensors.iter().map(Tensor::numel).collect(),
+            };
+
+            let code = crate::codegen::cuda::generated(step, layouts)?;
+
+            let output = Output::Epilogue {
+                code: code.as_ref(),
+                dtype: body.type_of(dot.output).dtype,
+                inputs: ins,
+                outputs: outs,
+            };
+
+            return gemm(&a, &b, output, step.launch::<Config>());
         }
 
         if let Primitive::Fusion { name, .. } = &step.primitive
