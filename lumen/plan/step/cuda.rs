@@ -70,9 +70,11 @@ impl CudaStep {
     ) -> Result<(), String> {
         let step = &self.0;
 
-        // A GEMM fusion's matmul, and the body it runs in.
+        // A GEMM fusion's matmul, and the body it runs in (a flash attention's dots run on the attention forward).
         let fused = match &step.primitive {
-            Primitive::Fusion { body, .. } => gemm_dot(body).map(|dot| (body, dot)),
+            Primitive::Fusion { name, body, .. } if name != FORWARD => {
+                gemm_dot(body).map(|dot| (body, dot))
+            }
             _ => None,
         };
 

@@ -37,11 +37,11 @@ impl Kernels for Gemms {
 }
 
 /// The multiply-adds of the matmul `step` runs on the GEMM: a matmul step's, or a GEMM fusion's; `None` for any other
-/// step.
+/// step (a flash attention's dots run on the attention forward).
 fn macs(step: &CudaStep) -> Option<usize> {
     let (dot, lhs, product) = match &step.primitive {
         p @ Primitive::DotGeneral { .. } => (p, &step.inputs[0].1, step.output.1.numel()),
-        Primitive::Fusion { body, .. } => {
+        Primitive::Fusion { name, body, .. } if name != FORWARD => {
             let dot = gemm_dot(body)?;
             (
                 &dot.primitive,
