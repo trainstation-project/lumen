@@ -599,10 +599,7 @@ pub(crate) fn primitive_dict<'py>(py: Python<'py>, p: &Primitive) -> PyResult<Bo
             fusion.set_item("body", body.to_string())?;
 
             #[cfg(lumen_mps_linked)]
-            fusion.set_item(
-                "source",
-                crate::runtime::kernel::mps::encode::fusion_source(name),
-            )?;
+            fusion.set_item("source", crate::runtime::kernel::mps::fusion_source(name))?;
 
             #[cfg(not(lumen_mps_linked))]
             fusion.set_item("source", py.None())?;
