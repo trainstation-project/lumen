@@ -1,6 +1,7 @@
 //! Triton GEMMs: operand prologues, the output epilogue, and fused elementwise epilogues that consume
 //! column regions of the GEMM output.
 
+mod autotune;
 mod config;
 pub(crate) mod cross_entropy;
 pub(crate) mod launch;

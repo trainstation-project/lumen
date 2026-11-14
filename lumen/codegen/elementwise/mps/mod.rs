@@ -1,8 +1,10 @@
 //! Metal elementwise kernels: every output of an elementwise fusion, by a generated body functor the
 //! fixed `elementwise` loop (`kernel.metal`) runs.
 
+mod autotune;
 mod config;
 
+pub(crate) use autotune::Tunable;
 pub(crate) use config::*;
 
 use std::collections::HashMap;

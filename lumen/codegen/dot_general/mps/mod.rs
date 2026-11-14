@@ -1,5 +1,6 @@
 //! Metal `dot_general` kernels: picking the tile, collapsing operands into batched matmul form and launching.
 
+pub(crate) mod autotune;
 mod codegen;
 mod config;
 mod gemv;

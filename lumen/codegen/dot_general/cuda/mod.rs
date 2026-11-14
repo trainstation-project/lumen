@@ -1,6 +1,7 @@
 //! The CUDA (CuTe DSL) GEMM: which matmuls it runs, its launch configs, and the epilogue it runs fused after one. The
 //! kernel and its launcher are Python (`ampere.py`, `launch.py`).
 
+mod autotune;
 mod config;
 pub(crate) use config::*;
 

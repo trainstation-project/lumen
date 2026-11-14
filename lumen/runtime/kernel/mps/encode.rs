@@ -113,6 +113,14 @@ fn compile_with(prelude: &str, sources: BTreeMap<String, String>) -> Result<(), 
 /// Every compiled kernel source by name.
 pub(crate) static SOURCES: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
 
+/// Takes `sources`, keeping only kernels not already compiled.
+pub(crate) fn uncompiled(sources: &mut BTreeMap<String, String>) -> BTreeMap<String, String> {
+    let mut sources = std::mem::take(sources);
+    let compiled = SOURCES.lock().unwrap_or_else(PoisonError::into_inner);
+    sources.retain(|name, _| !compiled.contains_key(name));
+    sources
+}
+
 /// Whether this Metal toolchain supports Metal Performance Primitives, probed once: a kernel defined only
 /// under `LUMEN_MPP`, compiling (and logging) no error either way.
 pub(crate) fn mpp_available() -> bool {

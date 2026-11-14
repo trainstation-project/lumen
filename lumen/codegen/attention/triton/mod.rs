@@ -2,6 +2,7 @@
 //! by `Triton`'s `AttentionCodegen` for them to call: loads and stores of an operand tile through its matched
 //! layout, and the traced score ops.
 
+mod autotune;
 mod config;
 pub(crate) mod launch;
 

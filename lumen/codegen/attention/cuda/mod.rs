@@ -2,6 +2,7 @@
 //! fusion's operands as the kernel takes them. The kernel and its compiler are Python (`ampere/`, `launch.py`);
 //! Rust launches it (`runtime::kernel::cuda::ATTENTION`).
 
+mod autotune;
 mod config;
 pub(crate) use config::*;
 
