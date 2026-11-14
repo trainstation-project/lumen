@@ -6,7 +6,7 @@
 
 use crate::autotune::Kernels;
 use crate::codegen::elementwise::ElementwiseTuning;
-use crate::codegen::triton::{Kernel, Template};
+use crate::codegen::triton::Template;
 use crate::codegen::utils::triton::Triton;
 use crate::graph_compiler::CompilerConfig;
 use crate::plan::{TritonStep, Tuned};
@@ -106,18 +106,13 @@ crate::autotune::python::config_class! {
 /// Autotuning candidates for loop kernels, the ones codegen kept on the steps.
 pub(crate) struct Loops;
 
-/// The loop kernel codegen kept on `step`, if it has one.
-fn loop_kernel(step: &TritonStep) -> Option<&Kernel> {
-    step.kernel.as_ref()
-}
-
 impl Kernels for Loops {
     type Step = TritonStep;
     type Config = LoopConfig;
 
     /// Loop configs whose block covers the kernel's lanes and splits; none for a scatter-add.
     fn configs(&self, step: &TritonStep) -> Vec<LoopConfig> {
-        let Some(kernel) = loop_kernel(step) else {
+        let Some(kernel) = step.kernel.as_ref() else {
             return Vec::new();
         };
 

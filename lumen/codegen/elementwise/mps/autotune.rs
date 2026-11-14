@@ -159,11 +159,6 @@ pub(crate) struct Tunable {
     pub views: HashMap<usize, (usize, Vec<usize>)>,
 }
 
-/// What a tunable elementwise fusion `step` keeps as its kernel, or `None` for any other step.
-fn tunable(step: &MpsStep) -> Option<&Tunable> {
-    step.kernel.as_ref()
-}
-
 /// Tuning backend for elementwise fusions: those whose step keeps a `Tunable` as its kernel.
 pub(crate) struct Elementwise {
     config: CompilerConfig,
@@ -181,7 +176,7 @@ impl Kernels for Elementwise {
             return Vec::new();
         };
 
-        match tunable(step).is_some() && TUNED_ELEMENTS.contains(&step.output.1.numel()) {
+        match step.kernel.as_ref().is_some() && TUNED_ELEMENTS.contains(&step.output.1.numel()) {
             true => crate::codegen::mps::tunings_of(body),
             false => Vec::new(),
         }
@@ -193,7 +188,7 @@ impl Kernels for Elementwise {
             return false;
         };
 
-        tunable(step).is_some() && !crate::codegen::mps::tunings_of(body).is_empty()
+        step.kernel.as_ref().is_some() && !crate::codegen::mps::tunings_of(body).is_empty()
     }
 
     /// Generates the fusion's kernel under `tuning` and an encoder that launches it.
@@ -202,7 +197,7 @@ impl Kernels for Elementwise {
             unreachable!("a fusion")
         };
 
-        let t = tunable(step).expect("a tunable fusion");
+        let t = step.kernel.as_ref().expect("a tunable fusion");
 
         // Codegen generated this body's kernel under another tuning, so it generates under this one too.
         let (kernel, source) =

@@ -26,36 +26,67 @@ pub struct Config {
     pub q_in_regs: bool,
 }
 
-/// Builds an attention config.
-const fn config(
-    tile_m: usize,
-    tile_n: usize,
-    stages: usize,
-    warps: usize,
-    q_in_regs: bool,
-) -> Config {
-    Config {
-        tile_m,
-        tile_n,
-        stages,
-        warps,
-        q_in_regs,
-    }
-}
-
 /// Candidates the autotuner benchmarks: on an A100 (bf16, batch 4 x 16 heads x 4096), the fastest few at each head
 /// dim, causal or not, of a sweep over 64- and 128-row tiles, 32- to 128-key blocks, 1 or 2 stages, 4 or 8 warps
 /// and Q in registers or not: 128 x 128 x 2 stages at head dim 64 (1.23x torch's FlashAttention-2), 64 x 64 with Q
 /// in registers at 128 (1.11x; 1.05x causal).
 pub(crate) const CONFIGS: [Config; 8] = [
-    config(128, 128, 2, 4, false),
-    config(128, 128, 1, 4, false),
-    config(128, 64, 1, 4, false),
-    config(128, 64, 2, 4, true),
-    config(64, 128, 1, 4, false),
-    config(64, 64, 1, 4, false),
-    config(64, 64, 1, 4, true),
-    config(64, 64, 2, 4, true),
+    Config {
+        tile_m: 128,
+        tile_n: 128,
+        stages: 2,
+        warps: 4,
+        q_in_regs: false,
+    },
+    Config {
+        tile_m: 128,
+        tile_n: 128,
+        stages: 1,
+        warps: 4,
+        q_in_regs: false,
+    },
+    Config {
+        tile_m: 128,
+        tile_n: 64,
+        stages: 1,
+        warps: 4,
+        q_in_regs: false,
+    },
+    Config {
+        tile_m: 128,
+        tile_n: 64,
+        stages: 2,
+        warps: 4,
+        q_in_regs: true,
+    },
+    Config {
+        tile_m: 64,
+        tile_n: 128,
+        stages: 1,
+        warps: 4,
+        q_in_regs: false,
+    },
+    Config {
+        tile_m: 64,
+        tile_n: 64,
+        stages: 1,
+        warps: 4,
+        q_in_regs: false,
+    },
+    Config {
+        tile_m: 64,
+        tile_n: 64,
+        stages: 1,
+        warps: 4,
+        q_in_regs: true,
+    },
+    Config {
+        tile_m: 64,
+        tile_n: 64,
+        stages: 2,
+        warps: 4,
+        q_in_regs: true,
+    },
 ];
 
 /// Fewest multiply-adds (both products) an attention is autotuned at: below, it takes tens of microseconds whatever

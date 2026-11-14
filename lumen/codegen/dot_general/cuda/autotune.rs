@@ -27,23 +27,6 @@ pub struct Config {
     pub stages: usize,
 }
 
-/// Builds a GEMM config.
-const fn config(
-    tile_m: usize,
-    tile_n: usize,
-    tile_k: usize,
-    warps: usize,
-    stages: usize,
-) -> Config {
-    Config {
-        tile_m,
-        tile_n,
-        tile_k,
-        warps,
-        stages,
-    }
-}
-
 /// GEMM candidates the autotuner benchmarks, largest tiles first, each with 3 to 5 stages where they fit (a 64-deep
 /// k-tile's A/B stage is twice a 32-deep one's), and the 32-deep ones also with as many as fit (6 to 9, the stages
 /// they ran with before stages were tuned). On an H100 (bf16) 128 x 256 of 64 x 64 warp tiles leads from 4096³
@@ -51,30 +34,174 @@ const fn config(
 /// leave SMs idle; on an A100 128 x 128 x 64 at 1000 x 4096 x 1000, where 64 CTAs leave SMs idle (80 vs 86 us for
 /// 128 x 128 x 32).
 pub(crate) const CONFIGS: [Config; 24] = [
-    config(128, 256, 32, 8, 3),
-    config(128, 256, 32, 8, 4),
-    config(128, 256, 32, 8, 5),
-    config(128, 256, 32, 8, 0),
-    config(128, 256, 64, 8, 3),
-    config(128, 128, 32, 4, 3),
-    config(128, 128, 32, 4, 4),
-    config(128, 128, 32, 4, 5),
-    config(128, 128, 64, 4, 3),
-    config(128, 128, 64, 4, 4),
-    config(128, 64, 32, 4, 3),
-    config(128, 64, 32, 4, 4),
-    config(128, 64, 32, 4, 5),
-    config(128, 64, 32, 4, 0),
-    config(64, 128, 32, 4, 3),
-    config(64, 128, 32, 4, 4),
-    config(64, 128, 32, 4, 5),
-    config(64, 128, 32, 4, 0),
-    config(64, 64, 32, 4, 3),
-    config(64, 64, 32, 4, 4),
-    config(64, 64, 32, 4, 5),
-    config(64, 64, 32, 4, 0),
-    config(64, 64, 64, 4, 3),
-    config(64, 64, 64, 4, 4),
+    Config {
+        tile_m: 128,
+        tile_n: 256,
+        tile_k: 32,
+        warps: 8,
+        stages: 3,
+    },
+    Config {
+        tile_m: 128,
+        tile_n: 256,
+        tile_k: 32,
+        warps: 8,
+        stages: 4,
+    },
+    Config {
+        tile_m: 128,
+        tile_n: 256,
+        tile_k: 32,
+        warps: 8,
+        stages: 5,
+    },
+    Config {
+        tile_m: 128,
+        tile_n: 256,
+        tile_k: 32,
+        warps: 8,
+        stages: 0,
+    },
+    Config {
+        tile_m: 128,
+        tile_n: 256,
+        tile_k: 64,
+        warps: 8,
+        stages: 3,
+    },
+    Config {
+        tile_m: 128,
+        tile_n: 128,
+        tile_k: 32,
+        warps: 4,
+        stages: 3,
+    },
+    Config {
+        tile_m: 128,
+        tile_n: 128,
+        tile_k: 32,
+        warps: 4,
+        stages: 4,
+    },
+    Config {
+        tile_m: 128,
+        tile_n: 128,
+        tile_k: 32,
+        warps: 4,
+        stages: 5,
+    },
+    Config {
+        tile_m: 128,
+        tile_n: 128,
+        tile_k: 64,
+        warps: 4,
+        stages: 3,
+    },
+    Config {
+        tile_m: 128,
+        tile_n: 128,
+        tile_k: 64,
+        warps: 4,
+        stages: 4,
+    },
+    Config {
+        tile_m: 128,
+        tile_n: 64,
+        tile_k: 32,
+        warps: 4,
+        stages: 3,
+    },
+    Config {
+        tile_m: 128,
+        tile_n: 64,
+        tile_k: 32,
+        warps: 4,
+        stages: 4,
+    },
+    Config {
+        tile_m: 128,
+        tile_n: 64,
+        tile_k: 32,
+        warps: 4,
+        stages: 5,
+    },
+    Config {
+        tile_m: 128,
+        tile_n: 64,
+        tile_k: 32,
+        warps: 4,
+        stages: 0,
+    },
+    Config {
+        tile_m: 64,
+        tile_n: 128,
+        tile_k: 32,
+        warps: 4,
+        stages: 3,
+    },
+    Config {
+        tile_m: 64,
+        tile_n: 128,
+        tile_k: 32,
+        warps: 4,
+        stages: 4,
+    },
+    Config {
+        tile_m: 64,
+        tile_n: 128,
+        tile_k: 32,
+        warps: 4,
+        stages: 5,
+    },
+    Config {
+        tile_m: 64,
+        tile_n: 128,
+        tile_k: 32,
+        warps: 4,
+        stages: 0,
+    },
+    Config {
+        tile_m: 64,
+        tile_n: 64,
+        tile_k: 32,
+        warps: 4,
+        stages: 3,
+    },
+    Config {
+        tile_m: 64,
+        tile_n: 64,
+        tile_k: 32,
+        warps: 4,
+        stages: 4,
+    },
+    Config {
+        tile_m: 64,
+        tile_n: 64,
+        tile_k: 32,
+        warps: 4,
+        stages: 5,
+    },
+    Config {
+        tile_m: 64,
+        tile_n: 64,
+        tile_k: 32,
+        warps: 4,
+        stages: 0,
+    },
+    Config {
+        tile_m: 64,
+        tile_n: 64,
+        tile_k: 64,
+        warps: 4,
+        stages: 3,
+    },
+    Config {
+        tile_m: 64,
+        tile_n: 64,
+        tile_k: 64,
+        warps: 4,
+        stages: 4,
+    },
 ];
 
 /// Fewest multiply-adds a matmul is autotuned at (1024³): below, the GEMM takes tens of microseconds whatever its
@@ -82,10 +209,22 @@ pub(crate) const CONFIGS: [Config; 24] = [
 pub(crate) const TUNED_MACS: usize = 1 << 30;
 
 /// The untuned tile for outputs it fills the GPU with: 128 x 256, 8 warps, as many stages as fit.
-const WIDE: Config = config(128, 256, 32, 8, 0);
+const WIDE: Config = Config {
+    tile_m: 128,
+    tile_n: 256,
+    tile_k: 32,
+    warps: 8,
+    stages: 0,
+};
 
 /// The untuned tile otherwise: 128 x 128, 4 warps, two CTAs an SM.
-const NARROW: Config = config(128, 128, 32, 4, 0);
+const NARROW: Config = Config {
+    tile_m: 128,
+    tile_n: 128,
+    tile_k: 32,
+    warps: 4,
+    stages: 0,
+};
 
 /// The config used untuned for a `batch` x (`m`, `n`) output on a GPU of `sms` SMs: the wide tile once its CTAs
 /// alone make a wave, else the narrow one so smaller outputs still spread over every SM.

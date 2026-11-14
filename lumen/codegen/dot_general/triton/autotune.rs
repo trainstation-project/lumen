@@ -29,33 +29,64 @@ pub struct Config {
     pub warps: usize,
 }
 
-/// Builds a GEMM config with the default `group_m` of 8.
-const fn config(
-    block_m: usize,
-    block_n: usize,
-    block_k: usize,
-    stages: usize,
-    warps: usize,
-) -> Config {
-    Config {
-        block_m,
-        block_n,
-        block_k,
-        group_m: 8,
-        stages,
-        warps,
-    }
-}
-
 /// GEMM candidates the autotuner benchmarks, largest tiles first.
 pub(crate) const CONFIGS: [Config; 7] = [
-    config(128, 256, 64, 3, 8),
-    config(64, 256, 32, 4, 4),
-    config(128, 128, 32, 4, 4),
-    config(128, 64, 32, 4, 4),
-    config(64, 128, 32, 4, 4),
-    config(128, 32, 32, 4, 4),
-    config(64, 32, 32, 5, 2),
+    Config {
+        block_m: 128,
+        block_n: 256,
+        block_k: 64,
+        group_m: 8,
+        stages: 3,
+        warps: 8,
+    },
+    Config {
+        block_m: 64,
+        block_n: 256,
+        block_k: 32,
+        group_m: 8,
+        stages: 4,
+        warps: 4,
+    },
+    Config {
+        block_m: 128,
+        block_n: 128,
+        block_k: 32,
+        group_m: 8,
+        stages: 4,
+        warps: 4,
+    },
+    Config {
+        block_m: 128,
+        block_n: 64,
+        block_k: 32,
+        group_m: 8,
+        stages: 4,
+        warps: 4,
+    },
+    Config {
+        block_m: 64,
+        block_n: 128,
+        block_k: 32,
+        group_m: 8,
+        stages: 4,
+        warps: 4,
+    },
+    Config {
+        block_m: 128,
+        block_n: 32,
+        block_k: 32,
+        group_m: 8,
+        stages: 4,
+        warps: 4,
+    },
+    Config {
+        block_m: 64,
+        block_n: 32,
+        block_k: 32,
+        group_m: 8,
+        stages: 5,
+        warps: 2,
+    },
 ];
 
 /// Index into `CONFIGS` used when autotuning is off.
