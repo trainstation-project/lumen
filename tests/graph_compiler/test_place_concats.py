@@ -2,7 +2,7 @@
 
 import numpy as np
 import pytest
-from helpers import CUDA, MPS, rand
+from helpers import MPS, TRITON_CUDA, rand
 
 import lumen
 import lumen.functional as F
@@ -18,7 +18,7 @@ def _loops(a, b):
     return F.cat([F.exp(a), b.t() * 2.0], 0)
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
 @pytest.mark.parametrize(
     "f, shapes, steps",
     [

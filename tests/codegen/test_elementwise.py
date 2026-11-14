@@ -4,7 +4,7 @@ import math
 
 import numpy as np
 import pytest
-from helpers import CUDA, MPS, TPU
+from helpers import CPU, MPS, TPU, TRITON_CUDA
 
 import lumen
 import lumen.autotune
@@ -232,7 +232,7 @@ def on(device, f, *arrays, dtype=None):
 ROUNDING = {"mps": 4e-7, "cuda": 1e-6}
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
 @pytest.mark.parametrize("name, prim, ref, values", UNARY, ids=[u[0] for u in UNARY])
 def test_float_functions_agree_with_the_cpu(device, name, prim, ref, values, triton_on_cuda):
     """Each float function in float32 on MPS and on CUDA (a generated
@@ -242,7 +242,7 @@ def test_float_functions_agree_with_the_cpu(device, name, prim, ref, values, tri
     np.testing.assert_allclose(got, expected, rtol=ROUNDING[device], atol=0)
 
 
-@pytest.mark.parametrize("device", [CUDA])
+@pytest.mark.parametrize("device", [TRITON_CUDA])
 @pytest.mark.parametrize("name, prim, ref, values", UNARY, ids=[u[0] for u in UNARY])
 def test_float64_functions_agree_with_the_cpu(device, name, prim, ref, values, triton_on_cuda):
     """Each float function in float64 on CUDA (libdevice's double
@@ -251,7 +251,7 @@ def test_float64_functions_agree_with_the_cpu(device, name, prim, ref, values, t
     np.testing.assert_allclose(got, expected, rtol=1e-14, atol=0)
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
 def test_float_functions_with_parameters_agree_with_the_cpu(device, triton_on_cuda):
     """erf_inv, is_finite, reduce_precision and the binary float functions
     (min, pow of negative bases too, rem, nextafter) on MPS and CUDA: the
@@ -277,7 +277,7 @@ def test_float_functions_with_parameters_agree_with_the_cpu(device, triton_on_cu
         np.testing.assert_allclose(got, expected, rtol=rtol, atol=0)
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
 def test_exact_bfloat16_functions_agree_with_the_cpu(device, triton_on_cuda):
     """The functions whose value is exact in its dtype run in bfloat16 on
     MPS and CUDA, bit for bit the CPU's; bfloat16 sin and exp have no
@@ -297,7 +297,7 @@ def test_exact_bfloat16_functions_agree_with_the_cpu(device, triton_on_cuda):
             on(device, f, a, dtype=dtype)
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
 @pytest.mark.parametrize("exponent", ["int64", "uint32", "uint64"])
 def test_pow_keeps_wide_integer_exponents(device, exponent, triton_on_cuda):
     """A float raised to an integer exponent too wide for int32 is the CPU's,
@@ -310,7 +310,7 @@ def test_pow_keeps_wide_integer_exponents(device, exponent, triton_on_cuda):
         np.testing.assert_array_equal(got, expected)
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
 @pytest.mark.parametrize("exponent", ["int32", "int64"])
 def test_pow_of_integer_exponents_past_float(device, exponent, triton_on_cuda):
     """A float raised to an integer exponent float32 can't hold (over 2^24),
@@ -327,7 +327,7 @@ def test_pow_of_integer_exponents_past_float(device, exponent, triton_on_cuda):
     np.testing.assert_allclose(got, expected, rtol=4 * 2.0**-23)
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
 @pytest.mark.parametrize("dtype", ["int32", "uint32", "int8", "uint8", "int64"])
 def test_integer_functions_agree_with_the_cpu(device, dtype, triton_on_cuda):
     """not, population_count, clz, abs, sign, min, rem (by 0 and -1 too),
@@ -554,7 +554,7 @@ def test_narrow_dtypes_through_numpy(dtype):
 
 
 @pytest.mark.parametrize("shape", [[8, 128], [2, 16, 256], [1000], []])
-@pytest.mark.parametrize("device", ["cpu", MPS, CUDA, TPU])
+@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA, TPU])
 def test_elementwise_primitives_agree_with_numpy(device, shape, triton_on_cuda):
     """add, mul, exp, sin (not on MPS) and less-than on each device match numpy for several shapes, scalars included."""
     rng = np.random.default_rng(0)
@@ -574,7 +574,7 @@ def test_elementwise_primitives_agree_with_numpy(device, shape, triton_on_cuda):
     np.testing.assert_array_equal(host(lumen.compile(lambda x, y: x < y)(x, y)), a < b)
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
 @pytest.mark.parametrize("dtype", ["int32", "uint32", "int64"])
 def test_integers_round_once_to_bfloat16(device, dtype, triton_on_cuda):
     """An integer cast to bfloat16 is rounded once, the CPU's: not to

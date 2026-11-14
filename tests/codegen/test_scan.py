@@ -2,13 +2,13 @@
 
 import numpy as np
 import pytest
-from helpers import CUDA, MPS, TPU
+from helpers import CPU, MPS, TPU, TRITON_CUDA
 
 import lumen
 import lumen.functional as F
 from lumen import prims
 
-DEVICES = ["cpu", MPS, CUDA, TPU]
+DEVICES = [CPU, MPS, TRITON_CUDA, TPU]
 
 
 @pytest.fixture(autouse=True)
@@ -102,7 +102,7 @@ def test_cumsum_gradient(device):
     )
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
 def test_cumsum_is_deterministic(device):
     """Every scan adds in a fixed order (on MPS split ones too; on Triton a
     chunked scan with a carried sum; no atomics): the same bits each run."""

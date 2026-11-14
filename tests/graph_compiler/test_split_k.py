@@ -2,7 +2,7 @@
 
 import numpy as np
 import pytest
-from helpers import CUDA, MPS
+from helpers import MPS, TRITON_CUDA
 
 import lumen
 import lumen.functional as F
@@ -21,7 +21,7 @@ def _placed(device, dtype, *arrays):
         pytest.skip(str(e))
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
 def test_split_k_agrees(device, dtype, triton_on_cuda):
     """With ``split_k`` (the default) a matmul launching few tiles and of a
@@ -58,7 +58,7 @@ def test_split_k_agrees(device, dtype, triton_on_cuda):
     np.testing.assert_allclose(got, want, atol=2e-2 * np.abs(want).max())
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
 def test_split_k_then_silu(device, dtype, triton_on_cuda):
     """SiLU after a matmul of few output tiles and a long contraction: not

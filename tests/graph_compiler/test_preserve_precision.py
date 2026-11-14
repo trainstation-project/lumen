@@ -3,7 +3,7 @@ forward reads it, the narrower dtype kept for the gradients' reads."""
 
 import numpy as np
 import pytest
-from helpers import CUDA, MPS, TPU, rand
+from helpers import CPU, MPS, TPU, TRITON_CUDA, rand
 
 import lumen
 import lumen.functional as F
@@ -14,7 +14,7 @@ def _bf16(a):
     return lumen.to_numpy(lumen.from_numpy(a).to(dtype="bfloat16").to(dtype="float32"))
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS, CUDA, TPU])
+@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA, TPU])
 def test_a_forward_round_trip_is_dropped(device, triton_on_cuda):
     """``x.bfloat16().float() * 3`` of a float32 ``x``: with
     ``preserve_precision`` the forward reads ``x`` itself, so the result is
@@ -38,7 +38,7 @@ def test_a_forward_round_trip_is_dropped(device, triton_on_cuda):
     np.testing.assert_array_equal(kept, x * np.float32(3))
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS, CUDA])
+@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA])
 def test_gradients_keep_the_activation_saved_in_the_narrower_dtype(device, triton_on_cuda):
     """``sum(h * h)`` of ``h = x.bfloat16().float()``, with its gradient: with
     ``preserve_precision`` the loss is computed from ``x`` unrounded

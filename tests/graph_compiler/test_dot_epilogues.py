@@ -2,7 +2,7 @@
 
 import numpy as np
 import pytest
-from helpers import CUDA, MPS, meta
+from helpers import CUDA, MPS, TRITON_CUDA, meta
 
 import lumen
 import lumen.functional as F
@@ -20,7 +20,7 @@ class _ScaledMatmul(lumen.nn.Module):
         return F.matmul(x, self.w, "float32", x.dtype) * self.s
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA, CUDA])
 @pytest.mark.parametrize(
     "f, shapes, dtype",
     [
@@ -66,8 +66,9 @@ def test_matmul_epilogues_fuse(device, f, shapes, dtype, triton_on_cuda):
     """The elementwise primitives after a matmul (a bias, a residual, an
     activation, a cast, a product with another fused value) run in its
     kernel as it writes each output (``contraction_epilogues``): one step,
-    exactly the unfused plan's result. On CUDA (Triton), one step too, the
-    CPU's within rounding; float16 math has no Triton kernel."""
+    exactly the unfused plan's result. On CUDA (Triton or the CuTe GEMM),
+    one step too, the CPU's within rounding; float16 math has no Triton
+    kernel."""
     rng = np.random.default_rng(0)
     try:
         arrays = [rng.standard_normal(s).astype(np.float32) for s in shapes]
@@ -75,7 +76,7 @@ def test_matmul_epilogues_fuse(device, f, shapes, dtype, triton_on_cuda):
     except RuntimeError as e:
         pytest.skip(str(e))
     if device == "cuda":
-        if dtype == "float16":
+        if dtype == "float16" and lumen.config.compiler.use_triton_backend:
             with pytest.raises(RuntimeError, match="convert to float32"):
                 lumen.compile(f)(*args)
             return
@@ -117,7 +118,7 @@ def _softmax_block(x, wo, r, norm, w1):
     return F.matmul(F.softmax(x * norm, dim=-1).bfloat16(), w1.t().bfloat16(), "float32", "float32")
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA, CUDA])
 @pytest.mark.parametrize("f", [_rms_block, _layer_norm_block, _softmax_block], ids=["rms", "layer", "softmax"])
 @pytest.mark.parametrize("m, d", [(1024, 64), (1000, 48), (37, 64), (512, 128), (300, 200), (1000, 1000), (256, 4096)])
 def test_matmul_epilogue_normalizes_its_rows(device, f, m, d, triton_on_cuda):
@@ -179,7 +180,7 @@ class _NormedBlock(lumen.nn.Module):
         return x + F.matmul(h, self.w1.t().bfloat16(), "float32", "float32")
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA, CUDA])
 def test_trained_matmul_epilogue_normalizes_its_rows(device, triton_on_cuda):
     """Trained, a projection's residual and RMS norm one kernel still: its
     residual stream and the rounded copy the backward reads written by it
@@ -342,7 +343,7 @@ def test_narrowing_cast_of_a_matmul_is_its_output_dtype():
         assert [t.split("[")[0] for t in dots(half, x, w)] == ["dot_general", "cast(float32 -> float16)"]
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA, CUDA])
 def test_matmul_epilogue_reads_the_rounded_output(device, triton_on_cuda):
     """A fused epilogue reads the matmul's output as its dtype rounds it
     (bf16, then cast up for a silu in float32), as traced; silu of the
@@ -364,7 +365,7 @@ def test_matmul_epilogue_reads_the_rounded_output(device, triton_on_cuda):
     assert not np.array_equal(rounded, accum)
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA, CUDA])
 def test_matmul_epilogue_takes_runtime_scalars_by_value(device, triton_on_cuda):
     """A module's float in a matmul's epilogue is a kernel argument: a new
     value runs the same kernel."""
@@ -408,7 +409,7 @@ class _Relu(lumen.nn.Module):
         return F.relu(F.matmul(x, self.w1, "float32", x.dtype))
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA, CUDA])
 def test_matmul_epilogue_reads_packed_weights_in_place(device, triton_on_cuda):
     """A weight placed side by side with another (where dots merge) is a
     strided view; a matmul with its epilogue reads it in place, as the
@@ -447,7 +448,7 @@ class _ReluMLP(lumen.nn.Module):
         return F.matmul(F.relu(F.matmul(x, self.w1, "float32", x.dtype)), self.w2, "float32", x.dtype)
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA, CUDA])
 def test_matmul_epilogue_writes_values_the_backward_reads(device, triton_on_cuda):
     """In a training step relu's backward reads x @ w1: the relu still runs
     in the matmul's kernel, which writes x @ w1 too (XLA's GELU_AUX); the
@@ -498,7 +499,7 @@ def test_matmul_epilogue_writes_values_the_backward_reads(device, triton_on_cuda
         np.testing.assert_array_equal(a, b)
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA, CUDA])
 def test_linear_reordering_keeps_the_values(device, triton_on_cuda):
     """With ``linear_reordering`` on, a factor of a matmul's operand moves
     to its output only when it comes from a reduction over rows wider than

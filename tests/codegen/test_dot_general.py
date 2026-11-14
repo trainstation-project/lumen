@@ -2,7 +2,7 @@
 
 import numpy as np
 import pytest
-from helpers import CUDA, MPS, TPU, floats, placed
+from helpers import CPU, MPS, TPU, TRITON_CUDA, floats, placed
 
 import lumen
 import lumen.autotune
@@ -11,7 +11,7 @@ from lumen import prims
 from lumen.profiler import ProfilerActivity, profile
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS, TPU, CUDA])
+@pytest.mark.parametrize("device", [CPU, MPS, TPU, TRITON_CUDA])
 @pytest.mark.parametrize(
     "lhs, rhs, dtype, transposed, output",
     [
@@ -42,7 +42,7 @@ def test_dots_agree_with_numpy(device, lhs, rhs, dtype, transposed, output, trit
     assert np.abs(floats(y) - expected).max() <= tol * np.abs(expected).max()
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS, CUDA, TPU])
+@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA, TPU])
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
 def test_a_dot_of_two_vectors_is_a_product_and_a_sum(device, dtype, triton_on_cuda):
     """``rowsum(dO * O)`` as attention's backward traces it, a dot with no
@@ -57,7 +57,7 @@ def test_a_dot_of_two_vectors_is_a_product_and_a_sum(device, dtype, triton_on_cu
     assert np.abs(floats(out) - expected).max() <= {"float32": 1e-5, "bfloat16": 1e-2}[dtype] * np.abs(expected).max()
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS, TPU, CUDA])
+@pytest.mark.parametrize("device", [CPU, MPS, TPU, TRITON_CUDA])
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
 def test_a_dot_batched_over_split_dimensions_agrees_with_numpy(device, dtype, triton_on_cuda):
     """Attention's scores written out, ``q [B, S, H, D] . k [B, S, H, D]``
@@ -251,7 +251,7 @@ def test_cuda_gemm_runs_a_forced_config(capfd):
     np.testing.assert_allclose(lumen.to_numpy(got), x @ y, rtol=1e-3, atol=1e-2)
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
 @pytest.mark.parametrize("lhs_k, rhs_k", [(1, 0), (1, 1), (0, 0), (0, 1)])
 @pytest.mark.parametrize("m, k, n", [(512, 256, 512), (300, 200, 260), (5, 4096, 1000), (1, 4096, 4096)])

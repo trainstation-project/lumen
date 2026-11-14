@@ -4,12 +4,12 @@ import re
 
 import numpy as np
 import pytest
-from helpers import CUDA, MPS, rand
+from helpers import MPS, TRITON_CUDA, rand
 
 import lumen
 import lumen.functional as F
 
-DEVICES = [MPS, CUDA]
+DEVICES = [MPS, TRITON_CUDA]
 
 # Most buffers one horizontally fused kernel binds on each device.
 MAX_BUFFERS = {"mps": 30, "cuda": 64}

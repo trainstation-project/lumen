@@ -2,15 +2,16 @@
 
 import numpy as np
 import pytest
+from helpers import CPU, MPS, TPU, TRITON_CUDA
 
 import lumen
 import lumen.functional as F
 
 DEVICES = [
-    "cpu",
-    pytest.param("mps", marks=pytest.mark.mps),
-    pytest.param("cuda", marks=pytest.mark.cuda),
-    pytest.param("tpu", marks=pytest.mark.tpu),
+    CPU,
+    MPS,
+    TRITON_CUDA,
+    TPU,
 ]
 
 

@@ -5,7 +5,7 @@ import warnings
 
 import numpy as np
 import pytest
-from helpers import CUDA, MPS
+from helpers import MPS, TRITON_CUDA
 
 import lumen
 import lumen.autotune
@@ -183,7 +183,7 @@ def test_attention_decode(device, case, dtype, triton_on_cuda):
         assert steps(f, q, k, v, pos, device=device) == ["flash_attention"]
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
 def test_attention_as_traced_without_flash_attention(device, triton_on_cuda):
     """With ``flash_attention`` off, attention runs as traced (scores in
     memory, several kernels); with it on (the default), one kernel,
@@ -214,7 +214,7 @@ def _written(q, k, v):
     return F.matmul(F.softmax(scores.float(), -1).to(dtype=q.dtype), v, "float32", q.dtype)
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
 def test_attention_written_out_is_one_kernel(device, triton_on_cuda):
     """Attention written out (``_written``) is matched too: one kernel,
     agreeing with the CPU; at a model's size too."""
@@ -231,7 +231,7 @@ def test_attention_written_out_is_one_kernel(device, triton_on_cuda):
     assert steps(_written, *big, device=device) == ["flash_attention"]
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
 def test_attention_the_kernels_cannot_take_runs_as_traced(device, triton_on_cuda):
     """A head dimension past the kernels' (256) or not a multiple of 8 runs
     as traced, still correct."""
@@ -265,7 +265,7 @@ def test_flash_attention_checks_its_operands():
         call(m(1, 4, 2, 8, dtype="int32"), m(1, 4, 2, 8, dtype="int32"), m(1, 4, 2, 8, dtype="int32"))
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
 @pytest.mark.parametrize(
     "f, sq",
     [
@@ -479,7 +479,7 @@ def test_written_attention_trains_with_flash_attention():
         assert kernel in labels, labels
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
 @pytest.mark.parametrize("scale", [1.0, 0.125], ids=["unscaled", "scaled"])
 def test_written_attention_backward_is_flash_attention(scale, device, triton_on_cuda):
     """Attention written out trains with flash attention's backward kernels
@@ -542,7 +542,7 @@ LAYOUTS = [
 ]
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
 @pytest.mark.parametrize("layouts", LAYOUTS, ids=["/".join(layout) for layout in LAYOUTS])
 def test_attention_reads_strided_operands_in_place(device, layouts, triton_on_cuda):
     """Q, K and V at any strides but a contiguous head dim (a fused
@@ -577,7 +577,7 @@ def test_attention_reads_strided_operands_in_place(device, layouts, triton_on_cu
         np.testing.assert_allclose(lumen.to_numpy(got.to("cpu")), lumen.to_numpy(want), rtol=1e-3, atol=1e-3)
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
 def test_attention_copies_operands_with_a_strided_head_dim(device, triton_on_cuda):
     """An operand whose head dim isn't contiguous (`[b, s, h, n]` data
     passed transposed) is copied first, as before: the attention the CPU's."""
@@ -589,7 +589,7 @@ def test_attention_copies_operands_with_a_strided_head_dim(device, triton_on_cud
     np.testing.assert_allclose(lumen.to_numpy(out), want, rtol=1e-4, atol=1e-4)
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
 def test_trained_attention_is_written_through_its_transpose(device, triton_on_cuda):
     """Attention written out heads first (``[b, n, s, h]``), then
     transposed back and its heads merged for the next projection, in a
@@ -657,7 +657,7 @@ def test_attention_epilogue_fuses_in_training(sq):
         np.testing.assert_array_equal(g, lumen.to_numpy(w))
 
 
-@pytest.mark.parametrize("device", [CUDA])
+@pytest.mark.parametrize("device", [TRITON_CUDA])
 @pytest.mark.parametrize("sq", [40, 1], ids=["tiled", "decode"])
 def test_attention_epilogue_fuses_in_training_on_cuda(sq, device, triton_on_cuda):
     """On CUDA too, a training step's attention runs its epilogue (a

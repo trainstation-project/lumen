@@ -5,14 +5,14 @@ import warnings
 
 import numpy as np
 import pytest
-from helpers import CUDA, MPS, TPU, meta, rand
+from helpers import CPU, CUDA, MPS, TPU, TRITON_CUDA, meta, rand
 
 import lumen
 import lumen.functional as F
 from lumen.profiler import ProfilerActivity, profile
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS, CUDA, TPU])
+@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA, CUDA, TPU])
 def test_packed_weights_are_one_matmul(device, triton_on_cuda):
     """relu(x @ w1) * (x @ w3) with w1 and w3 packed into one weight: one
     matmul, on MPS the gate its epilogue (its halves a gated pair)."""
@@ -51,7 +51,7 @@ class Gated(lumen.nn.Module):
         return F.relu(F.matmul(x, self.w1, "float32", x.dtype)) * F.matmul(x, self.w3, "float32", x.dtype)
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS, CUDA, TPU])
+@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA, CUDA, TPU])
 def test_dots_sharing_an_operand_merge(device, triton_on_cuda):
     """relu(x @ w1) * (x @ w3) with weights w1 and w3: on MPS, one matmul of
     x and a block holding w1 and w3 interleaved (XLA's DotMerger, with the
@@ -110,7 +110,7 @@ class Attention(lumen.nn.Module):
         return F.matmul(F.softmax(F.matmul(q, k.t(), "float32", x.dtype), -1), v, "float32", x.dtype)
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA, CUDA])
 def test_attention_projections_merge_into_one_matmul(device, triton_on_cuda):
     """q, k and v (x @ wq, x @ wk, x @ wv) as one matmul of x and a block
     of the three weights; the attention (one flash-attention kernel) reads
@@ -263,7 +263,7 @@ class SwiGLU(lumen.nn.Module):
         return (z, g) if gate else z
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA, CUDA])
 @pytest.mark.parametrize("mixed", [False, True], ids=["float32", "mixed precision"])
 @pytest.mark.parametrize("hidden", [256, 344], ids=["even tiles", "ragged"])
 def test_gated_pair_is_its_merged_matmul_epilogue(device, mixed, hidden, triton_on_cuda):
@@ -335,7 +335,7 @@ class GatedMLP(lumen.nn.Module):
         return F.matmul(h, self.w2.t().bfloat16(), "float32", "bfloat16")
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA, CUDA])
 @pytest.mark.parametrize("swiglu", [False, True], ids=["reglu", "swiglu"])
 def test_gated_pair_backward_merges_its_gradients_dots(device, swiglu, triton_on_cuda):
     """A gated pair's backward (``merge_dots_backward``): its input's gradient one
@@ -422,7 +422,7 @@ class _GatedMLPFunction(lumen.autograd.Function):
         return dx.bfloat16(), dwg, dwu, dwd
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA, CUDA])
 def test_hand_written_merge_dots_backward_merges_as_autodiffs(device, triton_on_cuda):
     """A gated pair's backward written by hand (a ``Function``, its
     weights' gradients ``g.t() @ x``): merged as autodiff's is, the
@@ -508,7 +508,7 @@ class ProjectedAttention(lumen.nn.Module):
         return F.matmul(F.softmax(s, dim=-1).bfloat16(), v, "float32", "float32")
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA, CUDA])
 @pytest.mark.parametrize("deterministic", [False, True], ids=["atomic", "deterministic"])
 def test_qkv_backward_merges_its_gradients_dots(device, deterministic, triton_on_cuda):
     """Attention's q, k and v projections' backward (``merge_dots_backward``, a
@@ -610,7 +610,7 @@ class _SavedNarrowMLP(lumen.autograd.Function):
         return dx.bfloat16(), dwg, dwu, dwd
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA, CUDA])
 def test_values_saved_narrower_are_written_narrower(device, triton_on_cuda):
     """Values a matmul's epilogue computes that are read outside it only
     rounded narrower (a backward's saved bfloat16 halves of a gated pair):
@@ -656,7 +656,7 @@ def test_values_saved_narrower_are_written_narrower(device, triton_on_cuda):
     assert [o[1:] for o in forward["extra_outputs"]] == [("bfloat16", [m, h])] * 2, forward["label"]
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA, CUDA])
 @pytest.mark.parametrize("module", [QKV, MixedQKV], ids=["float32", "mixed precision"])
 def test_projections_of_several_inputs_each_read_one_block(device, module, triton_on_cuda):
     """The same weights projecting two inputs (a gradient accumulation's
@@ -707,7 +707,7 @@ class GatedPair(lumen.nn.Module):
         return g * F.sigmoid(g) * u
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA, CUDA])
 def test_gated_pairs_weights_are_interleaved(device, triton_on_cuda):
     """Inference: a gated pair's two weights packed into one block
     interleaved (``plan.interleaved``, row j of each its 2j and 2j + 1), the
@@ -765,7 +765,7 @@ class GatedMLP2(lumen.nn.Module):
         return F.matmul(g * F.sigmoid(g) * u, self.w3.t(), "float32", x.dtype)
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA, CUDA])
 def test_gated_pairs_backward_is_interleaved(device, triton_on_cuda):
     """Gradients of a gated MLP: the pair's block interleaved through its
     backward too (``merge_dots``): its cotangents ``[dg | du]`` interleaved,
@@ -834,7 +834,7 @@ class Projections(lumen.nn.Module):
         return out
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA, CUDA])
 @pytest.mark.parametrize(
     "sizes, groups, mixed, interleaved, steps",
     [
@@ -952,7 +952,7 @@ def _gated_training(model, x):
     return loss
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA, CUDA])
 @pytest.mark.parametrize(
     "groups, h, interleaved",
     [
@@ -1027,7 +1027,7 @@ def test_weights_shared_on_either_side_merge_alike(device, groups, h, interleave
         assert plans[0] == plans[1]
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA, CUDA])
 @pytest.mark.parametrize(
     "make, n",
     [
@@ -1087,7 +1087,7 @@ class Returned(lumen.nn.Module):
         return (p[0] + p[1], *p[2:]) if self.summed else tuple(p)
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA, CUDA])
 @pytest.mark.parametrize("left", [False, True], ids=["x @ w.T", "w @ x"])
 @pytest.mark.parametrize(
     "n, summed, interleaved",
@@ -1130,7 +1130,7 @@ def test_returned_dots_merge(device, n, summed, interleaved, left, triton_on_cud
         np.testing.assert_allclose(merged, alone, rtol=1e-5, atol=1e-5 * np.abs(alone).max())
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA, CUDA])
 @pytest.mark.parametrize("module", [QKV, MixedQKV], ids=["float32", "mixed precision"])
 def test_trained_projections_merge_into_one_matmul(device, module, triton_on_cuda):
     """Weights a training step assigns (its optimizer's update, written over
@@ -1191,7 +1191,7 @@ class Linear(lumen.nn.Module):
         return F.matmul(x, self.w, "float32", x.dtype)
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA, CUDA])
 def test_packed_weights_are_read_in_place_elsewhere(device, triton_on_cuda):
     """A weight another function packed into a block (a strided view of it)
     is read in place by the matmuls of a function using it alone, at its

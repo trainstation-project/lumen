@@ -5,13 +5,13 @@ import tempfile
 
 import numpy as np
 import pytest
-from helpers import CUDA, MPS, TPU
+from helpers import CPU, MPS, TPU, TRITON_CUDA
 
 import lumen
 import lumen.functional as F
 from lumen import prims
 
-DEVICES = ["cpu", MPS, CUDA, TPU]
+DEVICES = [CPU, MPS, TRITON_CUDA, TPU]
 
 
 @pytest.fixture(autouse=True)
@@ -54,7 +54,7 @@ def test_gather(device, index_dtype, dtype, axis):
         np.testing.assert_array_equal(lumen.to_numpy(got.to(dtype="float32")), want)
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
 @pytest.mark.parametrize("index_dtype", [np.int32, np.int64])
 @pytest.mark.parametrize("axis", [0, 1, 2])
 def test_gather_fuses(device, index_dtype, axis):
@@ -79,7 +79,7 @@ def test_gather_fuses(device, index_dtype, axis):
         np.testing.assert_allclose(lumen.to_numpy(g.to("cpu")), lumen.to_numpy(w), rtol=1e-5, atol=1e-6)
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
 def test_gather_of_a_table_of_as_many_elements_as_rows(device):
     """A lookup in a row kernel (an embedding, its positions added, then
     normalized) whose table has as many elements as the kernel has rows
@@ -158,7 +158,7 @@ def test_gather_checks_its_operands():
         lumen.make_graph(lambda x, i, u: prims.scatter_add(x, i, u, 0))(m([4, 6]), m([3], "int64"), m([3, 5]))
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
 @pytest.mark.parametrize("width, rows, picks", [(64, 5, 300), (7, 5, 300), (7, 1, 2500)])
 @pytest.mark.parametrize("dtype", ["float32", "float16", "bfloat16", "int32", "int8"])
 @lumen.config.compiler.patch(deterministic=True)
@@ -190,7 +190,7 @@ def test_scatter_add_is_deterministic(device, dtype, width, rows, picks):
 ROUNDOFF = {"float64": 2.0**-53, "float32": 2.0**-24, "float16": 2.0**-11, "bfloat16": 2.0**-8}
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
 @pytest.mark.parametrize(
     "dtype", ["float64", "float32", "float16", "bfloat16", "int64", "uint64", "int32", "uint32", "int16", "int8"]
 )

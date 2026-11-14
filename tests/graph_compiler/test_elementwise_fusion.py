@@ -2,7 +2,7 @@
 
 import numpy as np
 import pytest
-from helpers import CUDA, MPS, TPU, floats, placed, rand
+from helpers import CPU, MPS, TPU, TRITON_CUDA, floats, placed, rand
 
 import lumen
 import lumen.functional as F
@@ -10,7 +10,7 @@ from lumen import prims
 from lumen.profiler import ProfilerActivity, profile
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
 def test_elementwise_fusions_match_the_cpu(device, dtype, triton_on_cuda):
     """Each elementwise fusion (elementwise ops, broadcasts, transposes, slices,
@@ -67,7 +67,7 @@ def agrees(device, f, arrays, tol):
         np.testing.assert_array_equal(g, e)
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
 @pytest.mark.parametrize(
     "f, shapes",
     [
@@ -97,7 +97,7 @@ def test_transposes_tiled_with_their_elementwise_ops_match_the_cpu(device, f, sh
         np.testing.assert_allclose(lumen.to_numpy(g), lumen.to_numpy(e), rtol=1e-5, atol=1e-5)
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
 @pytest.mark.parametrize("shape", [(37, 300), (300, 37), (5, 70, 9), (1, 1), (2, 0, 3)])
 def test_reductions_match_the_cpu(device, shape, triton_on_cuda):
     """Sums and maxima over any axes (rows, columns, middle, several, all;
@@ -120,7 +120,7 @@ def test_reductions_match_the_cpu(device, shape, triton_on_cuda):
         agrees(device, lambda v: prims.reduce_max(v, axes), [ints], 0)
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
 @pytest.mark.parametrize("shape, axes", [((3_000_001,), (0,)), ((7, 200_003), (1,)), ((90_001, 5), (0,))])
 def test_long_reductions_split_and_match_the_cpu(device, shape, axes, triton_on_cuda):
     """A reduction to few outputs over many elements runs in two passes,
@@ -135,7 +135,7 @@ def test_long_reductions_split_and_match_the_cpu(device, shape, axes, triton_on_
     agrees(device, lambda v: prims.reduce_sum(v, axes, "int32"), [ints], 0)
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
 def test_reductions_fuse_their_prologue_and_epilogue(device, triton_on_cuda):
     """The elementwise ops feeding a reduction and those applied to its
     result run in the reduction's kernel: one step, the CPU's value. An
@@ -155,7 +155,7 @@ def test_reductions_fuse_their_prologue_and_epilogue(device, triton_on_cuda):
         assert len(plan.steps()) == steps, [s["label"] for s in plan.steps()]
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
 def test_softmax_and_rms_norm_match_the_cpu(device, triton_on_cuda):
     """Softmax, log-softmax and RMS norm, traced as reductions and elementwise fusions,
     run as the CPU computes them."""
@@ -165,7 +165,7 @@ def test_softmax_and_rms_norm_match_the_cpu(device, triton_on_cuda):
     agrees(device, lambda v, g: F.rms_norm(v, 1000, g), [x, w], 1e-5)
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS, CUDA, TPU])
+@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA, TPU])
 @pytest.mark.parametrize("shape", [[64, 128], [2048, 2048], [3, 16, 256, 128], [8, 1024, 1000]])
 def test_sums_over_the_last_dimension(device, shape, triton_on_cuda):
     """bfloat16 summed in float32 over its last dimension."""
@@ -204,7 +204,7 @@ def test_split_reduction_converts_its_input_once():
     np.testing.assert_array_equal(lumen.to_numpy(out), np.full(4, 200_000, np.float32))
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
 def test_values_read_outside_an_elementwise_fusion_are_its_extra_outputs(device, triton_on_cuda):
     """A fusion's value that is also returned is written by the fusion reading
     it, as an extra output (``multi_output_fusion``): one step, each value

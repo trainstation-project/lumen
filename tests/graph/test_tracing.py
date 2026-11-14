@@ -6,7 +6,7 @@ import warnings
 
 import numpy as np
 import pytest
-from helpers import CUDA, MPS, TPU, rand, run
+from helpers import CPU, MPS, TPU, TRITON_CUDA, rand, run
 
 import lumen
 import lumen.functional as F
@@ -285,7 +285,7 @@ def test_tracing_and_running_on_meta_tensors():
     assert lumen.compile(lambda: lumen.arange(5), device="meta")().shape == [5]
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS, CUDA, TPU])
+@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA, TPU])
 def test_softmax_traces_to_its_primitives(device, triton_on_cuda):
     """softmax traces to its primitives (max, sub, exp, sum, div; no
     primitive of its own): over the last dimension the MPS compiler runs

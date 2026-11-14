@@ -2,7 +2,7 @@
 
 import numpy as np
 import pytest
-from helpers import CUDA, MPS
+from helpers import MPS, TRITON_CUDA
 
 import lumen
 import lumen.functional as F
@@ -176,7 +176,7 @@ def _read_early_and_late(a, w):
     return F.sum(F.matmul(e, w, "float32", "float32") * h, -1)
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
 def test_dump_to_writes_each_pass(compiler, tmp_path, device, triton_on_cuda):
     """``dump_to``: each compiled graph written before its passes and after
     each, a file each, named by its pipeline, step and pass (XLA's
@@ -208,7 +208,7 @@ def test_dump_to_writes_each_pass(compiler, tmp_path, device, triton_on_cuda):
     assert len(list(tmp_path.iterdir())) == count
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
 def test_memory_limit_recomputes(compiler, device, triton_on_cuda):
     """Under ``memory_limit``, a value read early and late is computed again
     for its late reader rather than kept alive (rematerialization): ``h``,

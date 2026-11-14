@@ -10,7 +10,7 @@ from datetime import timedelta
 
 import numpy as np
 import pytest
-from helpers import CUDA, MPS, TPU, meta
+from helpers import CPU, CUDA, MPS, TPU, TRITON_CUDA, meta
 
 import lumen
 import lumen.distributed as dist
@@ -320,7 +320,7 @@ def test_a_process_per_tpu_chip_in_one_slice():
         assert r["value"] == [[float(rank)] * 128] * 8
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS, CUDA, TPU])
+@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA, TPU])
 def test_collectives_of_one_process_are_its_values(device, triton_on_cuda):
     """In a world of one process, every collective is its operand (gathered and scattered along any dim) and
     compiles to no collective step, on any device."""
@@ -418,7 +418,7 @@ def test_a_send_runs_though_nothing_reads_it():
     assert [label for label in labels if label in ("send", "recv")] == ["send", "send", "recv", "recv"]
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS, CUDA])
+@pytest.mark.parametrize("device", [CPU, MPS, CUDA])
 def test_collectives_overlap_the_work_independent_of_them(device):
     """``lumen.distributed``'s collectives end in a ``device_wait``. The plan starts the collective as soon as
     its operand exists and waits for it just before the first op that reads the result, with the work
@@ -508,7 +508,7 @@ print(json.dumps(out))
 """
 
 
-@pytest.mark.parametrize("device", ["cpu", CUDA])
+@pytest.mark.parametrize("device", [CPU, CUDA])
 @pytest.mark.parametrize("world_size", [2, 4, 8])
 def test_collectives_across_processes_match_numpy(device, world_size, tmp_path):
     """A process per device (each GPU, or CPU processes over the store) reduces, gathers, scatters, exchanges

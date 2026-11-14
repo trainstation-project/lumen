@@ -2,13 +2,13 @@
 
 import numpy as np
 import pytest
-from helpers import CUDA, MPS, TPU
+from helpers import CPU, MPS, TPU, TRITON_CUDA
 
 import lumen
 import lumen.functional as F
 from lumen import prims
 
-DEVICES = ["cpu", MPS, CUDA, TPU]
+DEVICES = [CPU, MPS, TRITON_CUDA, TPU]
 
 
 @pytest.fixture(autouse=True)

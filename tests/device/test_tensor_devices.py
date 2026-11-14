@@ -2,7 +2,7 @@
 
 import numpy as np
 import pytest
-from helpers import CUDA, MPS, TPU
+from helpers import CPU, CUDA, MPS, TPU
 
 import lumen
 
@@ -90,7 +90,7 @@ def test_factories_on_device(device):
     assert lumen.full([2], 7, device=device).tolist() == [7, 7]
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS, CUDA, TPU])
+@pytest.mark.parametrize("device", [CPU, MPS, CUDA, TPU])
 def test_fill_and_zero_in_place(device):
     """`fill_` and `zero_` write in place through contiguous rows and strided views."""
     if device != "cpu":
