@@ -36,10 +36,26 @@ pub(crate) fn set_launch(launch: Launcher) {
     let _ = LAUNCH.set(launch);
 }
 
-/// Writes `a @ b` into `d`, tensors (m, k), (k, n) and (m, n), or batched (l, m, k), (l, k, n) and (l, m, n), each laid
-/// out as given, with the tile of `config` (the untuned one when `None`), compiling its GEMM on first use.
+/// What a GEMM writes: its product, or the outputs of the epilogue fused after it.
+#[cfg_attr(not(all(feature = "python", lumen_cuda_linked)), allow(dead_code))]
+pub enum Output<'a> {
+    /// The product, into this (m, n) or batched (l, m, n) tensor.
+    Product(&'a Tensor),
+    /// The outputs of a GEMM fusion: its generated epilogue (`codegen::dot_general::cuda`), as its module's name
+    /// and source, computes them from the product, rounded to `dtype`, reading the fusion's `inputs` and writing
+    /// its `outputs`.
+    Epilogue {
+        code: &'a (String, String),
+        dtype: crate::DType,
+        inputs: &'a [Tensor],
+        outputs: &'a [Tensor],
+    },
+}
+
+/// Writes `a @ b`, tensors (m, k) and (k, n), or batched (l, m, k) and (l, k, n), each laid out as given, to `output`,
+/// with the tile of `config` (the untuned one when `None`), compiling its GEMM on first use.
 pub type Gemm =
-    fn(a: &Tensor, b: &Tensor, d: &Tensor, config: Option<&Config>) -> Result<(), String>;
+    fn(a: &Tensor, b: &Tensor, output: Output<'_>, config: Option<&Config>) -> Result<(), String>;
 
 /// The GEMM installed from Python (`lumen.codegen.dot_general.cuda.launch`).
 pub(crate) static GEMM: OnceLock<Gemm> = OnceLock::new();

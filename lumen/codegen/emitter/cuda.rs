@@ -45,7 +45,7 @@ pub(crate) struct Emitter<'a> {
     /// consecutive indices read far apart.
     pub(crate) scattered: bool,
     /// Counter for fresh local names.
-    locals: usize,
+    pub(crate) locals: usize,
 }
 
 impl<'a> Emitter<'a> {
@@ -551,7 +551,7 @@ impl<'a> Emit<'a> for Emitter<'a> {
                         let p = self.value(node.inputs[0], idx.clone());
                         let x = self.value(node.inputs[1], idx.clone());
                         let y = self.value(node.inputs[2], idx);
-                        format!("cutlass.select_({p}, {x}, {y})")
+                        format!("{t}(cutlass.select_({p}, {x}, {y}))")
                     }
                     Unary(op) => {
                         let x = self.value(node.inputs[0], idx);

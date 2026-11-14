@@ -821,17 +821,18 @@ fn triton_attention(
     Python::attach(|py| call(py, None).map(|_| ())).map_err(|e| e.to_string())
 }
 
-/// Writes `a @ b` into `d` (the CUDA backend's matmul, tensors (m, k), (k, n) and (m, n) or batched) on lumen's
-/// stream with `config`'s tile, or untuned the one `codegen::dot_general::cuda::untuned` picks for `d`'s shape, as
+/// Writes `a @ b` (the CUDA backend's matmul, tensors (m, k) and (k, n), or batched) to `output` on lumen's stream with
+/// `config`'s tile, or untuned the one `codegen::dot_general::cuda::untuned` picks for the product's shape, as
 /// elementwise kernels launch: `lumen.codegen.dot_general.cuda.launch.compile` compiles the GEMM once for the
-/// tensors' dtypes, majors and batching, the tile, and whether the tile divides m and n, and k (each an `aligned` GEMM
-/// without those bounds checks), and every launch is a `cuLaunchKernel` from here, passing each tensor as the struct
-/// CuTe's kernel takes it (`gemm_tensor`), without Python.
+/// tensors' dtypes, majors, layouts and batching, the tile, whether the tile divides m and n, and k (each an `aligned`
+/// GEMM without those bounds checks), and a fused epilogue's module and whether its tensors are 16-byte aligned; every
+/// launch is a `cuLaunchKernel` from here, passing each operand (and the product) as its address and a fused
+/// epilogue's tensors as pointers, without Python. Its operands and product must start 16-byte aligned.
 #[cfg_attr(not(lumen_cuda_linked), allow(unused_variables))]
 fn cuda_gemm(
     a: &crate::Tensor,
     b: &crate::Tensor,
-    d: &crate::Tensor,
+    output: crate::runtime::kernel::cuda::Output<'_>,
     config: Option<&crate::codegen::dot_general::cuda::Config>,
 ) -> Result<(), String> {
     current(a);
@@ -839,16 +840,19 @@ fn cuda_gemm(
 
     #[cfg(lumen_cuda_linked)]
     {
-        use crate::runtime::kernel::cuda::driver;
+        use crate::runtime::kernel::cuda::Output;
+        use crate::runtime::kernel::cuda::driver::{self, Class, Value};
 
-        let Device::Cuda(device) = d.device() else {
+        let Device::Cuda(device) = a.device() else {
             return Err("dot_general: the CUDA GEMM ran on a host tensor".into());
         };
 
-        let (batch, [m, n]) = match d.shape() {
-            [l, m, n] => (*l, [*m, *n]),
-            [m, n] => (1, [*m, *n]),
-            _ => return Err("dot_general: the CUDA GEMM writes a rank-2 or 3 output".into()),
+        let (rank, k) = (a.shape().len(), a.shape()[a.shape().len() - 1]);
+        let (m, n) = (a.shape()[rank - 2], b.shape()[rank - 1]);
+        let batch = match rank {
+            3 => a.shape()[0],
+            2 => 1,
+            _ => return Err("dot_general: the CUDA GEMM reads rank-2 or 3 operands".into()),
         };
 
         let config = match config {
@@ -859,7 +863,7 @@ fn cuda_gemm(
             }
         };
 
-        let batched = d.shape().len() == 3;
+        let batched = rank == 3;
         let tile = (
             config.tile_m,
             config.tile_n,
@@ -867,41 +871,93 @@ fn cuda_gemm(
             config.warps,
             config.stages,
         );
-        let k = a.shape()[a.shape().len() - 1];
         let aligned_m = m % config.tile_m == 0;
         let aligned_n = n % config.tile_n == 0;
         let aligned_k = k % config.tile_k == 0;
-        let dtypes = [a, b, d].map(|t| dtype_name(t.dtype()));
-        let layouts = [a, b, d].map(|t| (t.shape().to_vec(), t.strides().to_vec()));
+
+        // The tensors the kernel takes as CuTe tensors: the operands, and the product when it writes it.
+        let product: Vec<&crate::Tensor> = match &output {
+            Output::Product(d) => vec![*d],
+            Output::Epilogue { .. } => Vec::new(),
+        };
+
+        let operands: Vec<&crate::Tensor> = [a, b].into_iter().chain(product).collect();
+
+        if let Some(t) = operands.iter().find(|t| t.data_ptr() as usize % 16 != 0) {
+            return Err(format!(
+                "dot_general: the CUDA GEMM read or wrote a tensor of shape {:?} not 16-byte aligned",
+                t.shape()
+            ));
+        }
+
+        let dtype = match &output {
+            Output::Product(d) => d.dtype(),
+            Output::Epilogue { dtype, .. } => *dtype,
+        };
+
+        let dtypes = [a.dtype(), b.dtype(), dtype].map(dtype_name);
+        let layouts: Vec<(Vec<usize>, Vec<usize>)> = operands
+            .iter()
+            .map(|t| (t.shape().to_vec(), t.strides().to_vec()))
+            .collect();
 
         // Each operand as the kernel takes it, its (rows, cols) in the kernel's mode order: A (m, k), B (n, k), D (m, n).
         let (a_major, a) = gemm_tensor(a, false, ["m", "k"])?;
         let (b_major, b) = gemm_tensor(b, true, ["k", "n"])?;
-        let (d_major, d) = gemm_tensor(d, false, ["m", "n"])?;
+
+        // A fused epilogue's tensors, its inputs then its outputs, and whether all start 16-byte aligned.
+        let (d_major, mut values, extra) = match &output {
+            Output::Product(d) => {
+                let (major, d) = gemm_tensor(d, false, ["m", "n"])?;
+                (major, vec![a, b, d], Vec::new())
+            }
+            Output::Epilogue {
+                inputs, outputs, ..
+            } => {
+                let extra: Vec<Value> = inputs.iter().chain(*outputs).map(Value::of).collect();
+                ("n", vec![a, b], extra)
+            }
+        };
+
+        let aligned = extra
+            .iter()
+            .all(|v| matches!(v.class(), Class::Pointer(_, true)));
+
+        let epilogue = match &output {
+            Output::Product(_) => None,
+            Output::Epilogue { code, .. } => Some((code.0.as_str(), code.1.as_str(), aligned)),
+        };
 
         let key = format!(
-            "gemm|cuda:{device}|{dtypes:?}|{a_major}{b_major}{d_major}|{batched}|{tile:?}|{aligned_m}{aligned_n}{aligned_k}|{layouts:?}"
+            "gemm|cuda:{device}|{dtypes:?}|{a_major}{b_major}{d_major}|{batched}|{tile:?}|{aligned_m}{aligned_n}{aligned_k}|{layouts:?}|{:?}",
+            epilogue.map(|(name, _, aligned)| (name, aligned))
         );
 
         let kernel = driver::compiled(&key, || {
             Python::attach(|py| {
+                let kwargs = PyDict::new(py);
+                kwargs.set_item("epilogue", epilogue)?;
+
                 let (function, warps, shared, plain, types) = py
                     .import("lumen.codegen.dot_general.cuda.launch")?
                     .getattr("compile")?
-                    .call1((
-                        dtypes[0],
-                        dtypes[1],
-                        dtypes[2],
-                        a_major,
-                        b_major,
-                        d_major,
-                        batched,
-                        tile,
-                        aligned_m,
-                        aligned_n,
-                        aligned_k,
-                        layouts.clone(),
-                    ))?
+                    .call(
+                        (
+                            dtypes[0],
+                            dtypes[1],
+                            dtypes[2],
+                            a_major,
+                            b_major,
+                            d_major,
+                            batched,
+                            tile,
+                            aligned_m,
+                            aligned_n,
+                            aligned_k,
+                            layouts.clone(),
+                        ),
+                        Some(&kwargs),
+                    )?
                     .extract()?;
 
                 Ok(driver::Compiled {
@@ -918,15 +974,17 @@ fn cuda_gemm(
         let tiles = m.div_ceil(config.tile_m) * n.div_ceil(config.tile_n);
 
         // Compiled for these exact shapes and strides, the kernel takes each tensor as its address alone.
-        let address = |v: driver::Value| match v {
-            driver::Value::Struct(raw, _) => driver::Value::Struct(raw, 8),
+        let address = |v: Value| match v {
+            Value::Struct(raw, _) => Value::Struct(raw, 8),
             v => v,
         };
+
+        values = values.into_iter().map(address).chain(extra).collect();
 
         Cuda::launch(CudaLaunch {
             kernel: &kernel,
             grid: [tiles, 1, batch],
-            values: &[address(a), address(b), address(d)],
+            values: &values,
         })
     }
 

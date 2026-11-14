@@ -4,12 +4,12 @@ import re
 
 import numpy as np
 import pytest
-from helpers import CUDA, MPS, rand
+from helpers import MPS, TRITON_CUDA, rand
 
 import lumen
 import lumen.functional as F
 
-DEVICES = [MPS, CUDA]
+DEVICES = [MPS, TRITON_CUDA]
 
 # Most buffers one horizontally fused kernel binds on each device.
 MAX_BUFFERS = {"mps": 30, "cuda": 64}
@@ -39,8 +39,8 @@ def _independent(a, b, c):
     return F.exp(a) * 2.0 + 1.0, (b - 1.0) * b, c.bfloat16()
 
 
-@pytest.mark.parametrize("device", DEVICES)
-def test_independent_elementwise_fusions_are_one_kernel(device, triton_on_cuda):
+@pytest.mark.parametrize("device", DEVICES, indirect=True)
+def test_independent_elementwise_fusions_are_one_kernel(device):
     """Independent elementwise fusions (and a lone cast) of as many elements are
     one step, each output what it was alone, bit for bit; with
     ``horizontal_fusion`` off, a step each."""
@@ -60,8 +60,8 @@ def test_independent_elementwise_fusions_are_one_kernel(device, triton_on_cuda):
             np.testing.assert_allclose(g, lumen.to_numpy(w.to(dtype="float32")), rtol=1e-6)
 
 
-@pytest.mark.parametrize("device", DEVICES)
-def test_fusions_of_one_chain_are_labelled_by_their_count(device, triton_on_cuda):
+@pytest.mark.parametrize("device", DEVICES, indirect=True)
+def test_fusions_of_one_chain_are_labelled_by_their_count(device):
     """Members computing the same primitives are labelled once, with how
     many there are, as merged dots are (``3x dot_general``)."""
     args = _device(device, rand(64, 32), rand(64, 32, seed=1), rand(64, 32, seed=2))
@@ -71,8 +71,8 @@ def test_fusions_of_one_chain_are_labelled_by_their_count(device, triton_on_cuda
     assert label.startswith("3x ") and " | " not in label, label
 
 
-@pytest.mark.parametrize("device", DEVICES)
-def test_fusions_of_different_record_function_calls_are_not_fused(device, triton_on_cuda):
+@pytest.mark.parametrize("device", DEVICES, indirect=True)
+def test_fusions_of_different_record_function_calls_are_not_fused(device):
     """Fusions traced in different ``record_function`` calls (two layers'
     weight casts) stay apart, so each kernel runs in its own call's range
     when profiled; the same fusions outside any range are one."""
@@ -92,8 +92,8 @@ def test_fusions_of_different_record_function_calls_are_not_fused(device, triton
     assert len(_steps(device, lambda a, b: (F.exp(a) * 2.0, F.exp(b) * 2.0), *args)) == 1
 
 
-@pytest.mark.parametrize("device", DEVICES)
-def test_different_sizes_split_the_grid(device, triton_on_cuda):
+@pytest.mark.parametrize("device", DEVICES, indirect=True)
+def test_different_sizes_split_the_grid(device):
     """Fusions of different element counts are one kernel too: each count
     runs on its own range of threads, each output what it was alone, bit for
     bit, under every elementwise tuning."""
@@ -116,8 +116,8 @@ def test_different_sizes_split_the_grid(device, triton_on_cuda):
                 np.testing.assert_array_equal(u, a)
 
 
-@pytest.mark.parametrize("device", DEVICES)
-def test_dependent_fusions_are_not_fused(device, triton_on_cuda):
+@pytest.mark.parametrize("device", DEVICES, indirect=True)
+def test_dependent_fusions_are_not_fused(device):
     """A fusion reading another's value, or one computed from it (through a
     reduction between them), is not fused with it: that would be a cycle."""
     (a,) = _device(device, rand(64, 32))
@@ -135,8 +135,8 @@ def test_dependent_fusions_are_not_fused(device, triton_on_cuda):
         np.testing.assert_allclose(lumen.to_numpy(g), lumen.to_numpy(w), rtol=1e-5)
 
 
-@pytest.mark.parametrize("device", DEVICES)
-def test_fusions_bind_at_most_a_kernels_buffers(device, triton_on_cuda):
+@pytest.mark.parametrize("device", DEVICES, indirect=True)
+def test_fusions_bind_at_most_a_kernels_buffers(device):
     """Many independent fusions are fused in groups, each kernel binding
     at most the device's buffers: 30 on MPS (Metal's 31, less the element
     count), 64 on Triton."""
@@ -162,8 +162,8 @@ class _Parameters(lumen.nn.Module):
     xs: list
 
 
-@pytest.mark.parametrize("device", DEVICES)
-def test_in_place_updates_fused(device, triton_on_cuda):
+@pytest.mark.parametrize("device", DEVICES, indirect=True)
+def test_in_place_updates_fused(device):
     """An optimizer's updates of its parameters, each written in place over
     the parameter, fused into one step: each parameter as updated alone,
     every step, the same bits each run."""

@@ -4,7 +4,7 @@ import re
 
 import numpy as np
 import pytest
-from helpers import CUDA, MPS, TPU, rand
+from helpers import CPU, MPS, TPU, TRITON_CUDA, rand
 
 import lumen
 import lumen.functional as F
@@ -12,9 +12,9 @@ from lumen import prims
 from lumen.profiler import ProfilerActivity, profile
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
-def test_autotuned_elementwise_fusions_match_untuned(device, dtype, tmp_path, triton_on_cuda):
+def test_autotuned_elementwise_fusions_match_untuned(device, dtype, tmp_path):
     """An elementwise fusion the compiler autotunes computes what the untuned
     one does, at lengths no block size divides. A Triton one's dumped source names its
     template kernel and the ``BLOCK_SIZE`` and warps it picked, then its
@@ -39,8 +39,8 @@ def test_autotuned_elementwise_fusions_match_untuned(device, dtype, tmp_path, tr
     assert re.search(r"def elementwise_[0-9a-f]+\(EXTRA, BLOCK, MASK, SEGMENT: tl.constexpr\)", source)
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
-def test_reads_strided_inputs_in_place(device, triton_on_cuda):
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
+def test_reads_strided_inputs_in_place(device):
     """A transposed or narrowed input is read where it is, not copied
     first: its step's kernel is compiled again with that input's load
     prologue through its strides, once a layout. A matmul reads transposed
@@ -85,8 +85,8 @@ def test_reads_strided_inputs_in_place(device, triton_on_cuda):
     assert lumen.to_numpy(y).tolist() == expected.tolist()
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
-def test_steps_replay_on_each_calls_buffers(device, triton_on_cuda):
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
+def test_steps_replay_on_each_calls_buffers(device):
     """An MPS plan's steps are encoded once and replayed after: each later
     call computes on its own inputs and workspace (a strided call between
     them too), as the first did."""
@@ -108,8 +108,8 @@ def test_steps_replay_on_each_calls_buffers(device, triton_on_cuda):
         np.testing.assert_allclose(lumen.to_numpy(out), np.exp(v) * 2 + 1, rtol=1e-5)
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA, TPU])
-def test_results_on_input_device(device, triton_on_cuda):
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA, TPU], indirect=True)
+def test_results_on_input_device(device):
     """A compiled program's result lands on its input's device."""
     try:
         x = lumen.tensor([[1.0, 2.0], [3.0, 4.0]], device=device)
@@ -120,9 +120,9 @@ def test_results_on_input_device(device, triton_on_cuda):
     assert lumen.to_numpy(y).tolist() == [[8.0, 11.0], [16.0, 23.0]]
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
 @pytest.mark.parametrize("dtype", ["float32", "float16", "bfloat16"])
-def test_compiled_blocks_match_cpu(device, dtype, triton_on_cuda):
+def test_compiled_blocks_match_cpu(device, dtype):
     """Compiled functions on MPS (Metal kernels) and CUDA (Triton) agree with the CPU."""
     try:
         lumen.zeros([1], device=device)
@@ -218,8 +218,8 @@ def test_compiled_init_runs_once_per_call(tmp_path):
     assert data["inputs"] == [] and data["device"] == "cpu:0"
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
-def test_compiled_init_on_device(device, tmp_path, triton_on_cuda):
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
+def test_compiled_init_on_device(device, tmp_path):
     """Input-less programs run on the device they are compiled for, and graph dumps report it."""
     try:
         lumen.zeros([1], device=device)
@@ -271,8 +271,8 @@ def test_mps_plans_put_copies_and_scratch_in_the_workspace():
     assert plan.run([x])[0].tolist() == [50_000.0] * 4
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS, CUDA, TPU])
-def test_programs_run_in_their_dtypes(device, triton_on_cuda):
+@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA, TPU], indirect=True)
+def test_programs_run_in_their_dtypes(device):
     """Every op computes in its traced dtype: bfloat16 math (exp, log, sqrt,
     tanh, logistic, softmax) has no MPS or Triton kernel and raises there (the CPU's
     reference rounds it once); a dot accumulates in
@@ -325,8 +325,8 @@ def test_programs_run_in_their_dtypes(device, triton_on_cuda):
     np.testing.assert_allclose(lumen.to_numpy(back.to(dtype="float32")), a.sum(-1), rtol=2**-8, atol=2**-8)
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
-def test_concatenate_runs_unfused(device, triton_on_cuda):
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
+def test_concatenate_runs_unfused(device):
     """With fusion off, a concatenate (alone a fusion on MPS) still runs."""
     try:
         a = lumen.from_numpy(np.arange(6, dtype=np.float32).reshape(2, 3)).to(device)
@@ -338,8 +338,8 @@ def test_concatenate_runs_unfused(device, triton_on_cuda):
     np.testing.assert_array_equal(lumen.to_numpy(out), np.concatenate([lumen.to_numpy(a), 2 * lumen.to_numpy(a)], 1))
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS, CUDA, TPU])
-def test_cpu_inside_a_compiled_function(device, triton_on_cuda):
+@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA, TPU], indirect=True)
+def test_cpu_inside_a_compiled_function(device):
     """``x.cpu()`` (and ``x.to("cpu")``, with a dtype too) inside a compiled
     function, as in PyTorch: a traced tensor has a device (the plan's, or
     ``cpu`` once on the host), and ``cpu()`` of a CPU tensor is the tensor
@@ -369,8 +369,8 @@ def test_cpu_inside_a_compiled_function(device, triton_on_cuda):
     assert added.tolist() == [1.5, 2.5] and moved.tolist() == x.tolist() == expected
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
-def test_cpu_inside_a_compiled_function_transfers(device, triton_on_cuda):
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
+def test_cpu_inside_a_compiled_function_transfers(device):
     """``.cpu()`` inside a compiled MPS function splits it into stages: the
     ops before it on the device, then its copy to the host (``to_host``:
     ``lumen::copy_d2h``, its ``lumen::wait`` inside), then the ops reading

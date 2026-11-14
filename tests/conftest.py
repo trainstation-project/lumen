@@ -40,14 +40,19 @@ TPU_GAPS = re.compile(
     r"|operands of one dtype accumulating in float32"
 )
 
+# The error of a primitive the CUDA (CuTe DSL) backend has no kernel for; failing CuTe CUDA tests hitting it skip.
+CUTE_GAPS = re.compile(r"the CUDA \(CuTe DSL\) backend has no kernel for it yet")
+
 
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
-    """Turns a TPU-parametrized test's failure into a skip when it hits a known `TPU_GAPS` message."""
+    """Turns a TPU-parametrized test's failure into a skip when it hits a known `TPU_GAPS` message, and a
+    CuTe CUDA one's (``CUDA``, not ``TRITON_CUDA``) when it hits `CUTE_GAPS`."""
     report = (yield).get_result()
-    on_tpu = getattr(item, "callspec", None) and item.callspec.params.get("device") == "tpu"
-    if on_tpu and report.when == "call" and report.failed and call.excinfo:
-        gap = TPU_GAPS.search(str(call.excinfo.value))
+    device = getattr(item, "callspec", None) and item.callspec.params.get("device")
+    gaps = TPU_GAPS if device == "tpu" else CUTE_GAPS if device == "cuda" else None
+    if gaps and report.when == "call" and report.failed and call.excinfo:
+        gap = gaps.search(str(call.excinfo.value))
         if gap:
             report.outcome = "skipped"
             report.wasxfail = str(call.excinfo.value).splitlines()[0]
@@ -109,8 +114,12 @@ def pytest_configure(config):
 
 
 @pytest.fixture
-def triton_on_cuda(device):
-    """``use_triton_backend`` on for CUDA, whose plans run with Triton: its
-    GEMM and generated kernels."""
-    with lumen.config.compiler.patch(use_triton_backend=device == "cuda"):
-        yield
+def device(request):
+    """The device a test runs on, from its device param (parametrized with
+    ``indirect=True``): ``"cuda-triton"`` (``TRITON_CUDA``) is CUDA with
+    ``use_triton_backend`` on, its plans running Triton's GEMM and generated
+    kernels; any other device runs with it off (``CUDA``: the CuTe DSL GEMM
+    and kernels)."""
+    triton = request.param == "cuda-triton"
+    with lumen.config.compiler.patch(use_triton_backend=triton):
+        yield "cuda" if triton else request.param

@@ -4,6 +4,7 @@
 use super::{Kernels, Timer};
 use crate::codegen::attention::cuda as attention;
 use crate::codegen::dot_general::cuda::{CONFIGS, Config, TUNED_MACS};
+use crate::codegen::kinds::gemm_dot;
 use crate::graph::Primitive;
 use crate::graph_compiler::passes::attention::{FORWARD, of_body};
 use crate::plan::{CudaStep, Tuned};
@@ -16,33 +17,49 @@ impl Kernels for Gemms {
     type Step = CudaStep;
     type Config = Config;
 
-    /// Every GEMM tile for a matmul step of at least `TUNED_MACS` multiply-adds, none otherwise.
+    /// Every GEMM tile for a matmul step (or GEMM fusion) of at least `TUNED_MACS` multiply-adds, none otherwise.
     fn configs(&self, step: &CudaStep) -> Vec<Config> {
-        let Primitive::DotGeneral {
-            lhs_contracting, ..
-        } = &step.primitive
-        else {
-            return Vec::new();
-        };
-
-        let k = step.inputs[0].1.shape[lhs_contracting[0]];
-        let macs = step.output.1.shape.iter().product::<usize>() * k;
-
-        match macs >= TUNED_MACS {
-            true => CONFIGS.to_vec(),
-            false => Vec::new(),
+        match macs(step) {
+            Some(macs) if macs >= TUNED_MACS => CONFIGS.to_vec(),
+            _ => Vec::new(),
         }
     }
 
-    /// Whether `step` is a matmul (the GEMM runs every one, tuned only from `TUNED_MACS` up).
+    /// Whether `step` is a matmul or a GEMM fusion (the GEMM runs every one, tuned only from `TUNED_MACS` up).
     fn handles(&self, step: &CudaStep) -> bool {
-        matches!(step.primitive, Primitive::DotGeneral { .. })
+        macs(step).is_some()
     }
 
     /// The step launched with `config`.
     fn build(&mut self, _: &CudaStep, config: Config) -> Tuned {
         Tuned::new(format!("{config:?}"), config)
     }
+}
+
+/// The multiply-adds of the matmul `step` runs on the GEMM: a matmul step's, or a GEMM fusion's; `None` for any other
+/// step (a flash attention's dots run on the attention forward).
+fn macs(step: &CudaStep) -> Option<usize> {
+    let (dot, lhs, product) = match &step.primitive {
+        p @ Primitive::DotGeneral { .. } => (p, &step.inputs[0].1, step.output.1.numel()),
+        Primitive::Fusion { name, body, .. } if name != FORWARD => {
+            let dot = gemm_dot(body)?;
+            (
+                &dot.primitive,
+                body.type_of(dot.inputs[0]),
+                body.type_of(dot.output).numel(),
+            )
+        }
+        _ => return None,
+    };
+
+    let Primitive::DotGeneral {
+        lhs_contracting, ..
+    } = dot
+    else {
+        return None;
+    };
+
+    Some(product * lhs.shape[lhs_contracting[0]])
 }
 
 /// Autotuning candidates for flash-attention forward steps.

@@ -4,7 +4,7 @@ import math
 
 import numpy as np
 import pytest
-from helpers import CUDA, MPS, TPU
+from helpers import CPU, MPS, TPU, TRITON_CUDA
 
 import lumen
 import lumen.autotune
@@ -232,9 +232,9 @@ def on(device, f, *arrays, dtype=None):
 ROUNDING = {"mps": 4e-7, "cuda": 1e-6}
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
 @pytest.mark.parametrize("name, prim, ref, values", UNARY, ids=[u[0] for u in UNARY])
-def test_float_functions_agree_with_the_cpu(device, name, prim, ref, values, triton_on_cuda):
+def test_float_functions_agree_with_the_cpu(device, name, prim, ref, values):
     """Each float function in float32 on MPS and on CUDA (a generated
     Triton kernel, libdevice's functions), infinities, NaN and signed zeros
     included: the CPU's value within a few float32 roundings."""
@@ -242,17 +242,17 @@ def test_float_functions_agree_with_the_cpu(device, name, prim, ref, values, tri
     np.testing.assert_allclose(got, expected, rtol=ROUNDING[device], atol=0)
 
 
-@pytest.mark.parametrize("device", [CUDA])
+@pytest.mark.parametrize("device", [TRITON_CUDA], indirect=True)
 @pytest.mark.parametrize("name, prim, ref, values", UNARY, ids=[u[0] for u in UNARY])
-def test_float64_functions_agree_with_the_cpu(device, name, prim, ref, values, triton_on_cuda):
+def test_float64_functions_agree_with_the_cpu(device, name, prim, ref, values):
     """Each float function in float64 on CUDA (libdevice's double
     functions): the CPU's within a few float64 roundings."""
     got, expected = on(device, prim, np.concatenate([values, SPECIALS]))
     np.testing.assert_allclose(got, expected, rtol=1e-14, atol=0)
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
-def test_float_functions_with_parameters_agree_with_the_cpu(device, triton_on_cuda):
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
+def test_float_functions_with_parameters_agree_with_the_cpu(device):
     """erf_inv, is_finite, reduce_precision and the binary float functions
     (min, pow of negative bases too, rem, nextafter) on MPS and CUDA: the
     CPU's."""
@@ -277,8 +277,8 @@ def test_float_functions_with_parameters_agree_with_the_cpu(device, triton_on_cu
         np.testing.assert_allclose(got, expected, rtol=rtol, atol=0)
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
-def test_exact_bfloat16_functions_agree_with_the_cpu(device, triton_on_cuda):
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
+def test_exact_bfloat16_functions_agree_with_the_cpu(device):
     """The functions whose value is exact in its dtype run in bfloat16 on
     MPS and CUDA, bit for bit the CPU's; bfloat16 sin and exp have no
     kernel on either, nor float16 ones on CUDA: none is run in float32."""
@@ -297,9 +297,9 @@ def test_exact_bfloat16_functions_agree_with_the_cpu(device, triton_on_cuda):
             on(device, f, a, dtype=dtype)
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
 @pytest.mark.parametrize("exponent", ["int64", "uint32", "uint64"])
-def test_pow_keeps_wide_integer_exponents(device, exponent, triton_on_cuda):
+def test_pow_keeps_wide_integer_exponents(device, exponent):
     """A float raised to an integer exponent too wide for int32 is the CPU's,
     not that of the exponent wrapped to 32 bits (float64 where the device
     has it)."""
@@ -310,9 +310,9 @@ def test_pow_keeps_wide_integer_exponents(device, exponent, triton_on_cuda):
         np.testing.assert_array_equal(got, expected)
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
 @pytest.mark.parametrize("exponent", ["int32", "int64"])
-def test_pow_of_integer_exponents_past_float(device, exponent, triton_on_cuda):
+def test_pow_of_integer_exponents_past_float(device, exponent):
     """A float raised to an integer exponent float32 can't hold (over 2^24),
     of a base near 1 (the only ones finite and nonzero there) or -1: the
     CPU's to a few ulps (2^30 + 65 rounded to float32, 2^30 + 128, is 60
@@ -327,9 +327,9 @@ def test_pow_of_integer_exponents_past_float(device, exponent, triton_on_cuda):
     np.testing.assert_allclose(got, expected, rtol=4 * 2.0**-23)
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
 @pytest.mark.parametrize("dtype", ["int32", "uint32", "int8", "uint8", "int64"])
-def test_integer_functions_agree_with_the_cpu(device, dtype, triton_on_cuda):
+def test_integer_functions_agree_with_the_cpu(device, dtype):
     """not, population_count, clz, abs, sign, min, rem (by 0 and -1 too),
     and/or/xor and the shifts (out of range too) on MPS and CUDA: the
     CPU's."""
@@ -554,8 +554,8 @@ def test_narrow_dtypes_through_numpy(dtype):
 
 
 @pytest.mark.parametrize("shape", [[8, 128], [2, 16, 256], [1000], []])
-@pytest.mark.parametrize("device", ["cpu", MPS, CUDA, TPU])
-def test_elementwise_primitives_agree_with_numpy(device, shape, triton_on_cuda):
+@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA, TPU], indirect=True)
+def test_elementwise_primitives_agree_with_numpy(device, shape):
     """add, mul, exp, sin (not on MPS) and less-than on each device match numpy for several shapes, scalars included."""
     rng = np.random.default_rng(0)
     a, b = (rng.standard_normal(shape, dtype=np.float32) for _ in range(2))
@@ -574,9 +574,9 @@ def test_elementwise_primitives_agree_with_numpy(device, shape, triton_on_cuda):
     np.testing.assert_array_equal(host(lumen.compile(lambda x, y: x < y)(x, y)), a < b)
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
 @pytest.mark.parametrize("dtype", ["int32", "uint32", "int64"])
-def test_integers_round_once_to_bfloat16(device, dtype, triton_on_cuda):
+def test_integers_round_once_to_bfloat16(device, dtype):
     """An integer cast to bfloat16 is rounded once, the CPU's: not to
     float32 first (2^24 + 2^16 + 1 is 2^24 + 2^17, not 2^24: float32 drops
     its 1, leaving a tie bfloat16 breaks to even), nor on the CPU to
@@ -601,11 +601,15 @@ MPS_ELEMENTWISE = lumen.autotune.MpsElementwiseConfig
 
 @pytest.mark.parametrize(
     "device, config",
-    [pytest.param("cuda", c, marks=pytest.mark.cuda, id=repr(c)) for c in lumen.autotune.TritonLoopConfig.candidates()]
+    [
+        pytest.param("cuda-triton", c, marks=pytest.mark.cuda, id=repr(c))
+        for c in lumen.autotune.TritonLoopConfig.candidates()
+    ]
     + [
         pytest.param("mps", c, marks=pytest.mark.mps, id=repr(c))
         for c in (MPS_ELEMENTWISE.candidates(itemsize=4) if MPS_ELEMENTWISE else [])
     ],
+    indirect=["device"],
 )
 def test_elementwise_fusion_runs_every_candidate(device, config):
     """Forced by ``lumen.autotune.use``, each autotuning candidate of a backend's elementwise kernel (Triton's loop
@@ -616,6 +620,6 @@ def test_elementwise_fusion_runs_every_candidate(device, config):
         a, b = (tensor(v, device=device) for v in (x, y))
     except RuntimeError as e:
         pytest.skip(str(e))
-    with lumen.config.compiler.patch(use_triton_backend=device == "cuda"), lumen.autotune.use(config):
+    with lumen.autotune.use(config):
         got = lumen.compile(lambda a, b: F.exp(a) * b + 1.0)(a, b)
     np.testing.assert_allclose(lumen.to_numpy(got), np.exp(x) * y + 1.0, rtol=1e-5, atol=1e-5)

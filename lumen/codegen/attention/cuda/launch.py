@@ -11,7 +11,7 @@ import cutlass
 import cutlass.cute as cute
 
 from lumen.codegen.attention.cuda.ampere.forward import AmpereAttentionForward
-from lumen.codegen.utils.cuda import check, modules
+from lumen.codegen.utils.cuda import check, compiled_cubin, modules
 
 # The CuTe type of each dtype the kernel reads or writes, by lumen's name for it.
 DTYPES = {
@@ -78,16 +78,10 @@ def compile(dtype, layouts, heads_per_kv, causal, scores, config):
     ]
     lse = tensors[4] if len(tensors) == 5 else None
 
-    compiled = cute.compile(
-        attention,
-        *tensors[:4],
-        lse,
-        cute.runtime.make_fake_stream(),
-        options="--keep-cubin",
-    )
+    compiled, cubin = compiled_cubin(attention, *tensors[:4], lse, cute.runtime.make_fake_stream())
     (entry,) = compiled.kernel_info
 
-    status, module = cuda.cuModuleLoadData(compiled.artifacts.CUBIN)
+    status, module = cuda.cuModuleLoadData(cubin)
     check(status, entry)
     modules.append(module)
     status, function = cuda.cuModuleGetFunction(module, entry.encode())

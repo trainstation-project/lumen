@@ -2,6 +2,7 @@
 
 import numpy as np
 import pytest
+from helpers import MPS, TRITON_CUDA
 
 import lumen
 from lumen import Tensor
@@ -234,10 +235,8 @@ def test_item():
         lumen.tensor([1.0, 2.0]).item()
 
 
-@pytest.mark.parametrize(
-    "device", [pytest.param("mps", marks=pytest.mark.mps), pytest.param("cuda", marks=pytest.mark.cuda)]
-)
-def test_item_cpu_and_to_numpy_read_device_results(device, triton_on_cuda):
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
+def test_item_cpu_and_to_numpy_read_device_results(device):
     """A compiled device function's results read on the host: ``item``,
     ``cpu`` (one copy to the host) and ``to_numpy`` (that copy, through
     DLPack), each the result's values."""

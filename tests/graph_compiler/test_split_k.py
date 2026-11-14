@@ -2,7 +2,7 @@
 
 import numpy as np
 import pytest
-from helpers import CUDA, MPS
+from helpers import MPS, TRITON_CUDA
 
 import lumen
 import lumen.functional as F
@@ -21,9 +21,9 @@ def _placed(device, dtype, *arrays):
         pytest.skip(str(e))
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
-def test_split_k_agrees(device, dtype, triton_on_cuda):
+def test_split_k_agrees(device, dtype):
     """With ``split_k`` (the default) a matmul launching few tiles and of a
     long contraction (a decode step's) is one dot of the chunks' partials,
     then their sum (each labelled split-K), rounded to bfloat16 once, after
@@ -58,9 +58,9 @@ def test_split_k_agrees(device, dtype, triton_on_cuda):
     np.testing.assert_allclose(got, want, atol=2e-2 * np.abs(want).max())
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
-def test_split_k_then_silu(device, dtype, triton_on_cuda):
+def test_split_k_then_silu(device, dtype):
     """SiLU after a matmul of few output tiles and a long contraction: not
     split, it is the matmul's epilogue (one kernel); split, it needs every
     chunk's products: the epilogue of the ``reduce_sum`` of the dot's

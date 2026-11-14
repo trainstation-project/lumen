@@ -1,5 +1,8 @@
 //! What CUDA (CuTe DSL) runs for this pass.
 
+use crate::codegen::dot_general::cuda::epilogue;
+use crate::codegen::kinds::gemm_dot;
+use crate::codegen::regions::expansion;
 use crate::codegen::utils::cuda::cute_type;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
@@ -11,6 +14,9 @@ use crate::graph_compiler::pipeline::{Pass, when};
 
 /// Name of an elementwise fusion.
 pub(crate) const ELEMENTWISE: &str = "elementwise";
+
+/// Name of a GEMM fusion with its epilogue.
+const DOT_GENERAL: &str = "dot_general";
 
 /// Whether `node` can be computed inside a CUDA elementwise kernel: an elementwise or layout op
 /// (or a fill, an iota or a concatenation) of dtypes CuTe has.
@@ -53,22 +59,35 @@ pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
     op && node.inputs.iter().chain([&node.output]).all(typed)
 }
 
-/// The shared fusion's view of the CUDA backend: elementwise loops only (no reductions, GEMMs or
-/// rows yet), any number of tensors, a fusion writing the values others read too.
+/// The shared fusion's view of the CUDA backend: elementwise loops and GEMM epilogues (no reductions or rows yet),
+/// any number of tensors, a fusion writing the values others read too, a GEMM epilogue at most 4 values besides its
+/// last (`codegen::dot_general::cuda::epilogue` says which matmuls run one), its result an expansion as on Triton.
 fn backend(m: &DeviceModule<'_, Cuda>) -> Backend {
+    let config = &m.options.config;
+
     Backend {
         fusible,
         max_inputs: usize::MAX,
-        max_aux: 0,
-        multi_output_fusion: m.options.config.multi_output_fusion,
+        max_aux: 4,
+        multi_output_fusion: config.multi_output_fusion,
         reduction_epilogues: false,
-        contraction_epilogues: false,
-        expansion: |_, _, _| false,
+        contraction_epilogues: config.contraction_epilogues,
+        dot_epilogue: epilogue,
+        expansion: |graph, dot, concat| expansion(graph, dot, concat).is_some(),
         row_dot: |_| false,
     }
 }
 
-/// Compiler pass fusing the graph's elementwise work into CUDA kernels.
+/// The name of a fused `body`: a GEMM with its epilogue, or an elementwise fusion.
+fn named(body: &Graph) -> String {
+    match gemm_dot(body) {
+        Some(_) => DOT_GENERAL,
+        None => ELEMENTWISE,
+    }
+    .into()
+}
+
+/// Compiler pass fusing the graph's elementwise work into CUDA kernels, and into the GEMMs it follows.
 struct Fusion;
 
 impl CompilerPass<DeviceModule<'_, Cuda>> for Fusion {
@@ -80,7 +99,7 @@ impl CompilerPass<DeviceModule<'_, Cuda>> for Fusion {
     /// Runs the shared fusion with the CUDA backend's limits.
     fn apply(&mut self, m: &mut DeviceModule<'_, Cuda>) -> Result<(), String> {
         let backend = backend(m);
-        m.graph = fuse(&m.graph, &[], &[], &backend, |_, _| ELEMENTWISE.into());
+        m.graph = fuse(&m.graph, &[], &[], &backend, |body, _| named(body));
         Ok(())
     }
 }

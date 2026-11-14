@@ -3,7 +3,7 @@ addresses, each run computing with its own values (on CUDA, a cached Triton kern
 
 import numpy as np
 import pytest
-from helpers import CUDA, MPS
+from helpers import CPU, MPS, TRITON_CUDA
 
 import lumen
 
@@ -16,9 +16,9 @@ def _device(device):
         pytest.skip(str(e))
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS, CUDA])
+@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA], indirect=True)
 @pytest.mark.parametrize("dtype", ["float32", "float16"])
-def test_float_scalars_change_between_runs(device, dtype, triton_on_cuda):
+def test_float_scalars_change_between_runs(device, dtype):
     """``x + c`` for a Python float `c` is traced once and runs with each new
     `c` (zero, negatives, a whole number, tiny and huge ones), each run adding
     its own; ints are part of the program, each value traced on its own."""
@@ -41,9 +41,9 @@ def test_float_scalars_change_between_runs(device, dtype, triton_on_cuda):
         np.testing.assert_array_equal(lumen.to_numpy(g(xt, c).to("cpu")), x + np.asarray(c, dtype))
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS, CUDA])
+@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA], indirect=True)
 @pytest.mark.parametrize("dtype", ["float32", "float16", "int8"])
-def test_tensors_at_other_addresses(device, dtype, triton_on_cuda):
+def test_tensors_at_other_addresses(device, dtype):
     """One compiled ``x * 3 + 1`` on views of a buffer at each offset from 0
     to 17 elements (16-byte aligned or not, which kernels may be specialized
     on), and on fresh buffers: each run reads its own elements."""

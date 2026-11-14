@@ -2,6 +2,7 @@
 
 import builtins
 import linecache
+import tempfile
 
 import cuda.bindings.driver as cuda
 import cutlass
@@ -31,18 +32,26 @@ def compile(name, source, dtypes, aligned, threads, step_bytes):
     align = VECTOR_BYTES if aligned else None
     types = [getattr(cutlass, d.removeprefix("cutlass.")) for d in dtypes]
     pointers = [make_ptr(t, VECTOR_BYTES, cute.AddressSpace.gmem, assumed_align=align) for t in types]
-    compiled = cute.compile(
-        scope["launch"], *pointers, 1, cuda.CUstream(0), aligned, threads, step_bytes, options="--keep-cubin"
-    )
+    compiled, cubin = compiled_cubin(scope["launch"], *pointers, 1, cuda.CUstream(0), aligned, threads, step_bytes)
     (entry,) = compiled.kernel_info
 
-    status, module = cuda.cuModuleLoadData(compiled.artifacts.CUBIN)
+    status, module = cuda.cuModuleLoadData(cubin)
     check(status, name)
     modules.append(module)
     status, function = cuda.cuModuleGetFunction(module, entry.encode())
     check(status, name)
 
     return int(function), threads // 32, 0, True, ["*"] * len(dtypes)
+
+
+def compiled_cubin(f, *args):
+    """`f` compiled by ``cute.compile`` for `args`, and its cubin's bytes. CuTe writes the cubin to a file named after
+    the kernel, and lumen's kernels share names (every GEMM's is the same), so each compile dumps into a directory of
+    its own: in a shared one, processes compiling at once read each other's cubins, half-written or of another
+    kernel."""
+    with tempfile.TemporaryDirectory() as dump:
+        compiled = cute.compile(f, *args, options=f"--dump-dir={dump} --keep-cubin")
+        return compiled, compiled.artifacts.CUBIN
 
 
 def check(status, name):

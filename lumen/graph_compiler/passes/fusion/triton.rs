@@ -82,6 +82,7 @@ fn backend(m: &DeviceModule<'_, Triton>) -> Backend {
         multi_output_fusion: config.multi_output_fusion,
         reduction_epilogues: true,
         contraction_epilogues: true,
+        dot_epilogue: |_, _| true,
         expansion: |graph, dot, concat| expansion(graph, dot, concat).is_some(),
         row_dot: dot_row_fits,
     }

@@ -4,15 +4,15 @@ import re
 
 import numpy as np
 import pytest
-from helpers import CUDA, MPS, TPU
+from helpers import CPU, MPS, TPU, TRITON_CUDA
 
 import lumen
 import lumen.functional as F
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
 @pytest.mark.parametrize("n, vocab", [(64, 16), (16, 16), (300, 1000), (128, 32000)])
-def test_cross_entropy_is_one_row_kernel(device, n, vocab, triton_on_cuda):
+def test_cross_entropy_is_one_row_kernel(device, n, vocab):
     """``F.cross_entropy`` (``reduction="none"``): each row's ``logsumexp -
     logit[label]``. On MPS one row kernel reads the logits once (an online
     max and sum, and the label's logit picked by a one-hot sum, all one
@@ -55,10 +55,10 @@ def test_cross_entropy_is_one_row_kernel(device, n, vocab, triton_on_cuda):
     np.testing.assert_allclose(grad, (np.exp(x - lse[:, None]) - hit) * c[:, None], rtol=1e-5, atol=1e-6)
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
 @pytest.mark.parametrize("rows_read", ["its own", "every row's"])
 @pytest.mark.parametrize("n, vocab", [(64, 16), (128, 32000)])
-def test_cross_entropy_gradient_reading_the_losses(device, n, vocab, rows_read, triton_on_cuda):
+def test_cross_entropy_gradient_reading_the_losses(device, n, vocab, rows_read):
     """A cross entropy whose gradient's ``g`` reads the losses. Each row's
     its own (``Σ loss²``, ``g = 2·loss``): computed once a row in its row
     kernel after the reductions, the gradient its second pass (one
@@ -101,11 +101,11 @@ def test_cross_entropy_gradient_reading_the_losses(device, n, vocab, rows_read, 
     np.testing.assert_allclose(grad, g * (np.exp(xr - lse[:, None]) - hit), rtol=1e-4, atol=1e-5)
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS, CUDA, TPU])
+@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA, TPU], indirect=True)
 @pytest.mark.parametrize(
     "n, d, vocab, dtype", [(5, 16, 7, "float32"), (300, 64, 1000, "float32"), (128, 256, 32000, "bfloat16")]
 )
-def test_linear_cross_entropy(device, n, d, vocab, dtype, triton_on_cuda):
+def test_linear_cross_entropy(device, n, d, vocab, dtype):
     """``F.cross_entropy(F.matmul(h, w.t()), t)``, the MPS compiler's linear
     cross entropy where nothing else reads the logits (not trained): one
     step of two kernels: the matmul writing each row's
@@ -152,9 +152,9 @@ def test_linear_cross_entropy(device, n, d, vocab, dtype, triton_on_cuda):
     np.testing.assert_allclose(dw, dx.T @ hr, **tol)
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
 @pytest.mark.parametrize("n, d, vocab", [(64, 32, 16), (256, 128, 32000)])
-def test_cross_entropy_of_a_matmul_is_linear_cross_entropy(device, n, d, vocab, triton_on_cuda):
+def test_cross_entropy_of_a_matmul_is_linear_cross_entropy(device, n, d, vocab):
     """``F.cross_entropy`` of a matmul's float32 logits (an LM head's, its
     weight transposed and cast), nothing else reading them: the MPS
     compiler matches it as ``linear_cross_entropy`` (its pass, as flash
@@ -194,7 +194,7 @@ def test_cross_entropy_of_a_matmul_is_linear_cross_entropy(device, n, d, vocab, 
     np.testing.assert_allclose(lumen.to_numpy(lumen.compile(both)(H, W, T)[0]), want, rtol=1e-5, atol=1e-5)
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
 @pytest.mark.parametrize("reduce", ["mean", "weighted", "squared"])
 @pytest.mark.parametrize(
     "n, d, vocab, chunk, head",
@@ -205,7 +205,7 @@ def test_cross_entropy_of_a_matmul_is_linear_cross_entropy(device, n, d, vocab, 
         (64, 32, 16, 64, "bfloat16"),
     ],
 )
-def test_chunked_linear_cross_entropy(device, n, d, vocab, chunk, reduce, head, triton_on_cuda):
+def test_chunked_linear_cross_entropy(device, n, d, vocab, chunk, reduce, head):
     """A cross entropy of a matmul's logits trained with
     ``fused_linear_cross_entropy_chunk_size`` (MPS's or CUDA's)
     (``lumen/autograd/cross_entropy.py``): its backward a chunk of rows at
@@ -301,8 +301,8 @@ def test_chunked_linear_cross_entropy(device, n, d, vocab, chunk, reduce, head, 
         np.testing.assert_allclose(g, e, rtol=2.0**-7, atol=2.0**-7 * np.abs(e).max())
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
-def test_chunked_gradients_alone_keep_no_logits(device, triton_on_cuda):
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
+def test_chunked_gradients_alone_keep_no_logits(device):
     """The gradients alone of a chunked cross entropy (its loss not
     returned, as the dashboard's backward): the forward's per-row
     log-sum-exp, all the chunks read, is one linear cross entropy (its

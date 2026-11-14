@@ -2,7 +2,7 @@
 
 import numpy as np
 import pytest
-from helpers import CUDA, MPS, TPU
+from helpers import MPS, TPU, TRITON_CUDA
 
 import lumen
 from lumen.safetensors import load, load_file, safe_open, save, save_file
@@ -69,8 +69,8 @@ def test_files_and_safe_open(tmp_path):
     assert [p.name for p in tmp_path.iterdir()] == ["model.safetensors"]
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA, TPU])
-def test_load_onto_device(tmp_path, device, triton_on_cuda):
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA, TPU], indirect=True)
+def test_load_onto_device(tmp_path, device):
     """Device tensors save, and load back onto the device with the same values."""
     try:
         on_device = {k: v.to(device) for k, v in tensors().items()}

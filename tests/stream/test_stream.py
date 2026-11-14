@@ -1,7 +1,7 @@
 """Tests of lumen streams, events and the ``wait`` primitive."""
 
 import pytest
-from helpers import CUDA, MPS, TPU
+from helpers import CPU, MPS, TPU, TRITON_CUDA
 
 import lumen
 
@@ -37,9 +37,10 @@ def test_the_stream_is_the_only_api():
 
 @pytest.mark.parametrize(
     "device",
-    ["cpu", MPS, TPU, CUDA],
+    [CPU, MPS, TPU, TRITON_CUDA],
+    indirect=True,
 )
-def test_events_time_the_work_between_them(device, triton_on_cuda):
+def test_events_time_the_work_between_them(device):
     """Two events with ``enable_timing`` around a compiled program:
     ``elapsed_time`` is the device time between them in milliseconds,
     longer for more work, and ``query`` holds once the later is done. The
@@ -110,7 +111,7 @@ def test_mps_synchronize_waits_for_queued_work():
 
 
 @pytest.mark.cuda
-@pytest.mark.parametrize("device", ["cuda", "cuda:0", lumen.device("cuda", 0)])
+@pytest.mark.parametrize("device", ["cuda", "cuda:0", lumen.device("cuda", 0)], indirect=True)
 def test_cuda_stream_forms(device):
     """A CUDA stream can be named by type, by ``type:index`` or by a device."""
     try:
@@ -233,10 +234,8 @@ def test_wait_is_an_in_place_op():
     assert wait["inputs"] == wait["outputs"] == [("float32", [])]
 
 
-@pytest.mark.parametrize(
-    "device", ["cpu", pytest.param("mps", marks=pytest.mark.mps), pytest.param("cuda", marks=pytest.mark.cuda)]
-)
-def test_wait_primitive(device, triton_on_cuda):
+@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA], indirect=True)
+def test_wait_primitive(device):
     """``prims.host_wait``: its operand's value, in place (the plan's step reads
     and writes one buffer: no memory of its own), a step of its own (the
     host waits there: no fusion across it), its cotangent passed through."""
