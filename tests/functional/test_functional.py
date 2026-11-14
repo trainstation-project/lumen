@@ -120,8 +120,8 @@ def test_indexing_and_splitting_follow_numpy():
             lumen.compile(fn)(t)
 
 
-@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA, TPU])
-def test_concatenate(device, triton_on_cuda):
+@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA, TPU], indirect=True)
+def test_concatenate(device):
     """prims.concatenate joins empty and non-empty operands along a dim and rejects mismatched shapes."""
     a, b, c = rand(2, 3, 4), rand(2, 0, 4, seed=1), rand(2, 5, 4, seed=2)
     try:
@@ -145,8 +145,8 @@ class Norm(lumen.nn.Module):
         return F.rms_norm(x, self.weight.shape, self.weight, self.eps)
 
 
-@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA, TPU])
-def test_rms_norm(device, triton_on_cuda):
+@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA, TPU], indirect=True)
+def test_rms_norm(device):
     """F.rms_norm (torch.nn.functional.rms_norm), in a module too: traced
     as primitives, which the MPS compiler recognizes, as it does an RMS norm
     written by hand, and fuses into one kernel (its reduction inside) with
@@ -188,8 +188,8 @@ def test_rms_norm(device, triton_on_cuda):
     np.testing.assert_allclose(lumen.to_numpy(step(norm, X)), expected(x, w, 1e-6), rtol=1e-5, atol=1e-6)
 
 
-@pytest.mark.parametrize("device", [CPU, MPS, TPU, TRITON_CUDA])
-def test_sqrt(device, triton_on_cuda):
+@pytest.mark.parametrize("device", [CPU, MPS, TPU, TRITON_CUDA], indirect=True)
+def test_sqrt(device):
     """sqrt is a primitive (rsqrt is not: write 1 / F.sqrt(x)); on MPS a fused
     division by a fused sqrt stays a sqrt and a division, as traced."""
     x = rand(8, 16) ** 2 + 0.1

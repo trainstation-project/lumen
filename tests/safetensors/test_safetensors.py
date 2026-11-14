@@ -69,8 +69,8 @@ def test_files_and_safe_open(tmp_path):
     assert [p.name for p in tmp_path.iterdir()] == ["model.safetensors"]
 
 
-@pytest.mark.parametrize("device", [MPS, TRITON_CUDA, TPU])
-def test_load_onto_device(tmp_path, device, triton_on_cuda):
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA, TPU], indirect=True)
+def test_load_onto_device(tmp_path, device):
     """Device tensors save, and load back onto the device with the same values."""
     try:
         on_device = {k: v.to(device) for k, v in tensors().items()}

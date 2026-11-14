@@ -11,7 +11,7 @@ from lumen import prims
 from lumen.profiler import ProfilerActivity, profile
 
 
-@pytest.mark.parametrize("device", [CPU, MPS, TPU, TRITON_CUDA])
+@pytest.mark.parametrize("device", [CPU, MPS, TPU, TRITON_CUDA], indirect=True)
 @pytest.mark.parametrize(
     "lhs, rhs, dtype, transposed, output",
     [
@@ -27,7 +27,7 @@ from lumen.profiler import ProfilerActivity, profile
         ([8, 1024], [512, 1024], "bfloat16", True, "float32"),
     ],
 )
-def test_dots_agree_with_numpy(device, lhs, rhs, dtype, transposed, output, triton_on_cuda):
+def test_dots_agree_with_numpy(device, lhs, rhs, dtype, transposed, output):
     """A dot, in float32 on the operands as placed, within its operands'
     dtype's precision of its largest output (float32's when it writes
     float32)."""
@@ -42,9 +42,9 @@ def test_dots_agree_with_numpy(device, lhs, rhs, dtype, transposed, output, trit
     assert np.abs(floats(y) - expected).max() <= tol * np.abs(expected).max()
 
 
-@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA, TPU])
+@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA, TPU], indirect=True)
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
-def test_a_dot_of_two_vectors_is_a_product_and_a_sum(device, dtype, triton_on_cuda):
+def test_a_dot_of_two_vectors_is_a_product_and_a_sum(device, dtype):
     """``rowsum(dO * O)`` as attention's backward traces it, a dot with no
     free dimensions: dot strength reduction's product and row sum, in
     float32."""
@@ -57,9 +57,9 @@ def test_a_dot_of_two_vectors_is_a_product_and_a_sum(device, dtype, triton_on_cu
     assert np.abs(floats(out) - expected).max() <= {"float32": 1e-5, "bfloat16": 1e-2}[dtype] * np.abs(expected).max()
 
 
-@pytest.mark.parametrize("device", [CPU, MPS, TPU, TRITON_CUDA])
+@pytest.mark.parametrize("device", [CPU, MPS, TPU, TRITON_CUDA], indirect=True)
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
-def test_a_dot_batched_over_split_dimensions_agrees_with_numpy(device, dtype, triton_on_cuda):
+def test_a_dot_batched_over_split_dimensions_agrees_with_numpy(device, dtype):
     """Attention's scores written out, ``q [B, S, H, D] . k [B, S, H, D]``
     batched over B and H (a sequence apart) and contracting D: the matmul
     kernels read each operand in its own layout, transposed first where they
@@ -251,11 +251,11 @@ def test_cuda_gemm_runs_a_forced_config(capfd):
     np.testing.assert_allclose(lumen.to_numpy(got), x @ y, rtol=1e-3, atol=1e-2)
 
 
-@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
 @pytest.mark.parametrize("lhs_k, rhs_k", [(1, 0), (1, 1), (0, 0), (0, 1)])
 @pytest.mark.parametrize("m, k, n", [(512, 256, 512), (300, 200, 260), (5, 4096, 1000), (1, 4096, 4096)])
-def test_tuned_matmul_matches_numpy_in_every_layout(device, dtype, lhs_k, rhs_k, m, k, n, triton_on_cuda):
+def test_tuned_matmul_matches_numpy_in_every_layout(device, dtype, lhs_k, rhs_k, m, k, n):
     """Tuned, a float matmul of 64K or more outputs, or of a few rows,
     runs on whichever candidate was fastest: lumen's simdgroup kernels,
     where Metal Performance Primitives compile ``matmul_mpp``, and for a

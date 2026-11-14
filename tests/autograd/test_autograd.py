@@ -78,9 +78,9 @@ def test_grad_agrees_with_finite_differences(name, argnum):
     np.testing.assert_allclose(g, numeric_grad(value, xs, argnum, eps), rtol=tol, atol=tol)
 
 
-@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA, TPU])
+@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA, TPU], indirect=True)
 @pytest.mark.parametrize("name", list(CASES))
-def test_torch_and_jax_styles_agree(name, device, triton_on_cuda):
+def test_torch_and_jax_styles_agree(name, device):
     """loss.backward() and .grad (torch) give exactly lumen.grad's (jax)
     gradients: the same transformation of the same program."""
     f, shapes = CASES[name]
@@ -102,9 +102,9 @@ def test_torch_and_jax_styles_agree(name, device, triton_on_cuda):
         np.testing.assert_array_equal(lumen.to_numpy(got.to("cpu")), lumen.to_numpy(want.to("cpu")))
 
 
-@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
 @pytest.mark.parametrize("name", ["matmul", "softmax", "rms_norm", "attention", "slice concatenate"])
-def test_grad_on_a_device_agrees_with_the_cpu(name, device, triton_on_cuda):
+def test_grad_on_a_device_agrees_with_the_cpu(name, device):
     """Gradients compiled for MPS and CUDA (fused, attention matched) agree
     with the CPU's."""
     f, shapes = CASES[name]
@@ -491,8 +491,8 @@ def _qkv_step(m, x):
     return loss, x.grad, [p.grad for p in m.parameters()]
 
 
-@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA, TPU])
-def test_dots_sharing_an_operand_are_differentiated_as_one(device, triton_on_cuda):
+@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA, TPU], indirect=True)
+def test_dots_sharing_an_operand_are_differentiated_as_one(device):
     """x @ wq, x @ wk, x @ wv run as one dot (merge_dots); before autodiff
     they become one node (lumen/autograd/dots.py), differentiated as that
     dot: x's gradient one dot of the cotangents side by side and the
@@ -523,8 +523,8 @@ def test_dots_sharing_an_operand_are_differentiated_as_one(device, triton_on_cud
     np.testing.assert_allclose(gx, gx_, rtol=1e-5, atol=1e-5)
 
 
-@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
-def test_merged_dots_backward_plan(device, triton_on_cuda):
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
+def test_merged_dots_backward_plan(device):
     """On MPS: the forward one dot of the packed weights; the cotangents
     written side by side by the kernel writing them (the concatenate
     fused, no copy); x's gradient one dot of the same block; the weights'
@@ -568,8 +568,8 @@ def _projections_step(m, x):
     return loss, x.grad, [p.grad for p in m.parameters()]
 
 
-@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
-def test_projections_backward_writes_cotangents_side_by_side(device, triton_on_cuda):
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
+def test_projections_backward_writes_cotangents_side_by_side(device):
     """q, k, v projections in training: the forward one dot of the packed
     weights; their cotangents side by side ([dq | dk | dv], for x's and
     the weights' dots) written by the kernel computing them, no

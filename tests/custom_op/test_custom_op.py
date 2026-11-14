@@ -58,8 +58,8 @@ def _clear_runs():
     RUNS.clear()
 
 
-@pytest.mark.parametrize("device", DEVICES)
-def test_mutated_argument_is_read_after_and_written_back(device, triton_on_cuda):
+@pytest.mark.parametrize("device", DEVICES, indirect=True)
+def test_mutated_argument_is_read_after_and_written_back(device):
     """Its mutated argument reads the new value after the call, and a
     tensor argument so mutated is written back into the caller's."""
 
@@ -88,8 +88,8 @@ def _call_line(plan):
     return written, operands
 
 
-@pytest.mark.parametrize("device", DEVICES)
-def test_mutated_value_written_in_place(device, triton_on_cuda):
+@pytest.mark.parametrize("device", DEVICES, indirect=True)
+def test_mutated_value_written_in_place(device):
     """A value nothing reads the old value of after the call is mutated in
     its own memory: no copy."""
 
@@ -104,8 +104,8 @@ def test_mutated_value_written_in_place(device, triton_on_cuda):
     assert _array(lumen.compile(f)(_tensor([0, 1, 2], device))).tolist() == [1, 4, 7]
 
 
-@pytest.mark.parametrize("device", DEVICES)
-def test_old_value_read_after_is_copied(device, triton_on_cuda):
+@pytest.mark.parametrize("device", DEVICES, indirect=True)
+def test_old_value_read_after_is_copied(device):
     """A value whose old value is read after the call (``x * 2`` computed
     again, the same value) is copied first, the copy mutated: the old value
     is kept."""
@@ -128,8 +128,8 @@ class _Weights(lumen.nn.Module):
     w: lumen.Tensor
 
 
-@pytest.mark.parametrize("device", DEVICES)
-def test_mutated_views_reach_their_bases(device, triton_on_cuda):
+@pytest.mark.parametrize("device", DEVICES, indirect=True)
+def test_mutated_views_reach_their_bases(device):
     """Mutated arguments that are views (a weight's row, a slice of a value)
     write their bases: the weight written back, the value read after; two
     calls alike both run, in order."""
@@ -150,8 +150,8 @@ def test_mutated_views_reach_their_bases(device, triton_on_cuda):
     assert _array(m.w._placed(device)).tolist() == [[20, 20], [0, 0]]
 
 
-@pytest.mark.parametrize("device", DEVICES)
-def test_weight_mutated_in_place(device, triton_on_cuda):
+@pytest.mark.parametrize("device", DEVICES, indirect=True)
+def test_weight_mutated_in_place(device):
     """A weight a custom op mutates, its old value read nowhere after, is
     mutated in its own memory (donated), not copied back."""
 
@@ -287,8 +287,8 @@ def _square_call(plan):
     return written, x, out
 
 
-@pytest.mark.parametrize("device", DEVICES)
-def test_overlappable_operand_memory_is_the_compilers_choice(device, triton_on_cuda):
+@pytest.mark.parametrize("device", DEVICES, indirect=True)
+def test_overlappable_operand_memory_is_the_compilers_choice(device):
     """``overlappable={"out": "x"}``: where out's old value is read after the
     call (no in place) and x dies there, out is written in x's memory (the
     function gets one memory for both), its old value not copied in, and

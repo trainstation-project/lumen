@@ -11,13 +11,6 @@ from lumen import prims
 DEVICES = [CPU, MPS, TRITON_CUDA, TPU]
 
 
-@pytest.fixture(autouse=True)
-def triton():
-    """CUDA's programs on the Triton backend."""
-    with lumen.config.compiler.patch(use_triton_backend=True):
-        yield
-
-
 # (shape, axis) pairs: long rows split into chunks, tall columns, strided middle axes, a negative axis and an empty tensor.
 CASES = [((4, 1000), 1), ((1, 70000), 1), ((3000, 3), 0), ((3, 50, 7), 1), ((8, 3), -1), ((5, 0, 3), 1)]
 
@@ -37,7 +30,7 @@ def _tensor(a, device, dtype):
         pytest.skip(str(e))
 
 
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", DEVICES, indirect=True)
 @pytest.mark.parametrize("dtype", ["float32", "int32", "bfloat16"])
 @pytest.mark.parametrize("shape, dim", CASES)
 def test_cumsum(device, dtype, shape, dim):
@@ -59,7 +52,7 @@ def test_cumsum(device, dtype, shape, dim):
         np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-5 * max(1.0, np.abs(want).max(initial=0)))
 
 
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", DEVICES, indirect=True)
 def test_reverse_cumsum(device):
     """``prims.cumsum(x, axis, reverse=True, ...)`` sums from the axis's end."""
     a = np.random.default_rng(1).standard_normal((3, 2000)).astype(np.float32)
@@ -83,7 +76,7 @@ def test_cumsum_types():
         lumen.make_graph(lambda x: prims.cumsum(x, 0, False, "float32"))(m("int32"))
 
 
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", DEVICES, indirect=True)
 def test_cumsum_gradient(device):
     """cumsum is linear: the gradient of ``sum(cumsum(x) * w)`` is ``w``
     summed the other way, ``cumsum(w, reverse=True)``; and a bfloat16
@@ -102,7 +95,7 @@ def test_cumsum_gradient(device):
     )
 
 
-@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
 def test_cumsum_is_deterministic(device):
     """Every scan adds in a fixed order (on MPS split ones too; on Triton a
     chunked scan with a carried sum; no atomics): the same bits each run."""

@@ -8,9 +8,9 @@ import lumen
 import lumen.functional as F
 
 
-@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
 @pytest.mark.parametrize("n", [16, 64])
-def test_short_rows_reduce_several_a_threadgroup(device, n, triton_on_cuda):
+def test_short_rows_reduce_several_a_threadgroup(device, n):
     """Rows too short for a threadgroup each (an attention head's 16, a
     row of 64) are reduced as grouped lanes, several rows a threadgroup:
     the CPU's sums, the same each run."""
@@ -42,9 +42,9 @@ class UpcastNorm(lumen.nn.Module):
         return self.weight * h.to(dtype=x.dtype)
 
 
-@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
 @pytest.mark.parametrize("n", [300, 1024, 4096])
-def test_upcast_rms_norm_is_one_kernel(device, n, triton_on_cuda):
+def test_upcast_rms_norm_is_one_kernel(device, n):
     """An RMS norm in float32 of a bfloat16 input, cast back and scaled by
     its weight, is one row kernel: the cast and the weight run in its last
     pass (an epilogue). On MPS rows of up to 8 elements a thread read x
@@ -77,8 +77,8 @@ def test_upcast_rms_norm_is_one_kernel(device, n, triton_on_cuda):
     np.testing.assert_allclose(out[device], out["cpu"], rtol=2**-7, atol=2**-7)
 
 
-@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
-def test_a_weight_cast_in_a_square_norm_is_per_column(device, triton_on_cuda):
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
+def test_a_weight_cast_in_a_square_norm_is_per_column(device):
     """An RMS norm in float32 of a bfloat16 input whose weight is cast to
     float32 too, with as many rows as columns: the cast weight has one
     element per row, but it scales each column, so it is read per column,
@@ -106,7 +106,7 @@ def _layer_norm(a, w):
     return xc / F.sqrt(F.mean(xc * xc, -1, keepdim=True) + 1e-5) * w
 
 
-@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
 @pytest.mark.parametrize(
     "f",
     [
@@ -118,7 +118,7 @@ def _layer_norm(a, w):
     ],
     ids=["rms mean", "rms sum", "rms reciprocal", "softmax written out", "layer norm"],
 )
-def test_normalizations_are_one_row_kernel(device, f, triton_on_cuda):
+def test_normalizations_are_one_row_kernel(device, f):
     """Whatever normalizes rows by reductions of them is a normalization
     diamond, or a chain of them (XLA's SoftmaxRewriterTriton), however it is
     written: one row kernel, its reductions inside, agreeing with the
@@ -146,11 +146,11 @@ NORMALIZATIONS = [
 ]
 
 
-@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
 @pytest.mark.parametrize(
     "f", NORMALIZATIONS, ids=["rms mean", "rms sum", "rms reciprocal", "softmax written out", "layer norm"]
 )
-def test_normalizations_train_in_one_row_kernel(device, f, triton_on_cuda):
+def test_normalizations_train_in_one_row_kernel(device, f):
     """Trained, a normalization's forward is still one row kernel: the
     values of a row its backward reads (an RMS norm's sqrt(mean + eps)) and
     its value before its epilogue (``y`` of ``y * w``, for w's gradient)
@@ -171,12 +171,12 @@ def test_normalizations_train_in_one_row_kernel(device, f, triton_on_cuda):
         np.testing.assert_allclose(lumen.to_numpy(g), lumen.to_numpy(e), rtol=1e-4, atol=1e-5)
 
 
-@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
 @pytest.mark.parametrize("n", [12000, 100003], ids=["whole", "chunked"])
 @pytest.mark.parametrize(
     "f", NORMALIZATIONS, ids=["rms mean", "rms sum", "rms reciprocal", "softmax written out", "layer norm"]
 )
-def test_wide_rows_are_one_row_kernel(device, n, f, triton_on_cuda):
+def test_wide_rows_are_one_row_kernel(device, n, f):
     """Rows as wide as XMA's kernels take: on CUDA one row kernel, held
     whole up to 65536 columns, walked in chunks past that (a pass a
     reduction, softmax's max and sum in one online pass); its values and
@@ -210,8 +210,8 @@ def assert_rows_not_kept(steps, shape):
             assert not read, (read, s["label"])
 
 
-@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
-def test_rms_norm_backward_recomputes_its_normalized_input(device, triton_on_cuda):
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
+def test_rms_norm_backward_recomputes_its_normalized_input(device):
     """A training step's RMS norm (its value read forward, its gradients
     taken): its forward row kernel writes its output and each row's
     ``1 / rms`` (``rms_norm``'s saved value), not ``x / rms`` (``x̂``, w's
@@ -243,8 +243,8 @@ def test_rms_norm_backward_recomputes_its_normalized_input(device, triton_on_cud
         np.testing.assert_allclose(lumen.to_numpy(g), lumen.to_numpy(e), rtol=1e-4, atol=1e-4)
 
 
-@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
-def test_wide_rms_norm_of_a_residual_kept_in_float32_fuses(device, triton_on_cuda):
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
+def test_wide_rms_norm_of_a_residual_kept_in_float32_fuses(device):
     """A projection plus a residual kept in float32, its bfloat16 rounding
     RMS-normalized over rows too wide for one GEMM tile, with
     ``linear_reordering`` on (wide rows fuse only with it): on CUDA the GEMM
@@ -274,8 +274,8 @@ def test_wide_rms_norm_of_a_residual_kept_in_float32_fuses(device, triton_on_cud
         np.testing.assert_allclose(a, b, rtol=2e-2, atol=2e-2)
 
 
-@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
-def test_residual_read_by_an_rms_norm_and_the_loss_trains(device, triton_on_cuda):
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
+def test_residual_read_by_an_rms_norm_and_the_loss_trains(device):
     """A projection plus a residual, rounded to bfloat16, read by an RMS
     norm and by the loss: the norm's row writes its partials, so the fusion
     reading its root doesn't host that root too (a row root hosted
@@ -302,7 +302,7 @@ def test_residual_read_by_an_rms_norm_and_the_loss_trains(device, triton_on_cuda
         np.testing.assert_allclose(lumen.to_numpy(a.to("cpu")), lumen.to_numpy(b), rtol=2e-2, atol=2e-2)
 
 
-@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
 @pytest.mark.parametrize(
     "f, kernels",
     [
@@ -312,7 +312,7 @@ def test_residual_read_by_an_rms_norm_and_the_loss_trains(device, triton_on_cuda
     ],
     ids=["rms norm", "layer norm", "softmax"],
 )
-def test_normalization_backwards_are_row_kernels(device, f, kernels, triton_on_cuda):
+def test_normalization_backwards_are_row_kernels(device, f, kernels):
     """A normalization's backward reduces each row and applies the result
     to the row's values, not one producer's (``dx = g·w / rms - x ·
     Σ_row(…)``): beyond a diamond, a row fusion still, one row kernel for
@@ -334,7 +334,7 @@ def test_normalization_backwards_are_row_kernels(device, f, kernels, triton_on_c
         np.testing.assert_allclose(lumen.to_numpy(g), lumen.to_numpy(e), rtol=1e-4, atol=1e-5)
 
 
-@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
 @pytest.mark.parametrize("n", [16, 64])
 @pytest.mark.parametrize(
     "f",
@@ -345,7 +345,7 @@ def test_normalization_backwards_are_row_kernels(device, f, kernels, triton_on_c
     ],
     ids=["rms norm", "layer norm", "softmax"],
 )
-def test_short_rows_are_a_simd_group_each(device, f, n, triton_on_cuda):
+def test_short_rows_are_a_simd_group_each(device, f, n):
     """Row kernels of short rows (a model's width of 64, an attention
     head's 16) reduce each row in a SIMD group, eight a threadgroup (none
     left idle), forward and backward (its weight's gradient's blocks too,
@@ -368,7 +368,7 @@ def test_short_rows_are_a_simd_group_each(device, f, n, triton_on_cuda):
         np.testing.assert_allclose(g, lumen.to_numpy(e), rtol=1e-4, atol=1e-4)
 
 
-@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
 @pytest.mark.parametrize(
     "f, sums",
     [
@@ -377,7 +377,7 @@ def test_short_rows_are_a_simd_group_each(device, f, n, triton_on_cuda):
     ],
     ids=["rms norm", "layer norm"],
 )
-def test_normalization_backwards_sum_weight_gradients_as_they_go(device, f, sums, triton_on_cuda):
+def test_normalization_backwards_sum_weight_gradients_as_they_go(device, f, sums):
     """A normalization's weight's gradient (``Σ_rows g·y``), a sum over
     rows its backward's row kernel reads the values of: that kernel adds
     them as it goes (a threadgroup or program a group of rows, each
@@ -406,9 +406,9 @@ def test_normalization_backwards_sum_weight_gradients_as_they_go(device, f, sums
         np.testing.assert_allclose(g, lumen.to_numpy(e), rtol=1e-4, atol=1e-4)
 
 
-@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA])
+@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA], indirect=True)
 @pytest.mark.parametrize("spelling", ["div", "rsqrt", "sum"])
-def test_written_out_rms_norm_is_differentiated_as_rms_norm(device, spelling, triton_on_cuda):
+def test_written_out_rms_norm_is_differentiated_as_rms_norm(device, spelling):
     """An RMS norm written out as math (``h / sqrt(mean(h * h) + eps)``,
     ``h * rsqrt(mean(h ** 2) + eps)`` or ``sum / n``), of a bfloat16 input
     widened and rounded back, times a weight, is differentiated as

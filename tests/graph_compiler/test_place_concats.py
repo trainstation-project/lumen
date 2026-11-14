@@ -18,7 +18,7 @@ def _loops(a, b):
     return F.cat([F.exp(a), b.t() * 2.0], 0)
 
 
-@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
 @pytest.mark.parametrize(
     "f, shapes, steps",
     [
@@ -35,7 +35,7 @@ def _loops(a, b):
     ],
     ids=["matmuls", "elementwise"],
 )
-def test_concatenated_operands_are_written_in_place(device, f, shapes, steps, triton_on_cuda):
+def test_concatenated_operands_are_written_in_place(device, f, shapes, steps):
     """On Triton, a concatenate whose operands are each read only there and
     produced by a kernel of their own (a matmul, an elementwise fusion) copies nothing: each
     kernel writes its operand into its slot of the result through the slot's

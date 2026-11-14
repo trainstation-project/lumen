@@ -8,7 +8,7 @@ import lumen
 CPU = pytest.param("cpu")
 MPS = pytest.param("mps", marks=pytest.mark.mps)
 CUDA = pytest.param("cuda", marks=pytest.mark.cuda)
-TRITON_CUDA = pytest.param("cuda", marks=[pytest.mark.cuda, pytest.mark.triton], id="cuda-triton")
+TRITON_CUDA = pytest.param("cuda-triton", marks=pytest.mark.cuda)
 TPU = pytest.param("tpu", marks=pytest.mark.tpu)
 
 

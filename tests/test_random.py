@@ -56,8 +56,8 @@ def _compile(fn, device):
     return lambda: [lumen.to_numpy(t).copy() for t in f(x)]
 
 
-@pytest.mark.parametrize("device", DEVICES)
-def test_draws_read_the_stream_in_order(device, triton_on_cuda):
+@pytest.mark.parametrize("device", DEVICES, indirect=True)
+def test_draws_read_the_stream_in_order(device):
     """Each draw reads the generator's next numbers: the draws of a call one
     after another, the next call's after them; ``rand`` (float32) the top
     24 bits of each, times 2**-24; ``manual_seed`` starts over."""
@@ -75,9 +75,9 @@ def test_draws_read_the_stream_in_order(device, triton_on_cuda):
     assert lumen.initial_seed() == seed
 
 
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", DEVICES, indirect=True)
 @pytest.mark.parametrize("dtype, k", [("float32", 24), ("bfloat16", 8), ("float16", 11)])
-def test_rand_is_exact_in_its_dtype(device, dtype, k, triton_on_cuda):
+def test_rand_is_exact_in_its_dtype(device, dtype, k):
     """``rand`` in ``dtype``: the top ``k`` bits (its significand's) times
     2**-k, exact, so never 1; every value a multiple of 2**-k."""
     f = _compile(lambda x: (lumen.rand([4096], dtype=dtype).float(),), device)
@@ -107,8 +107,8 @@ def test_devices_draw_the_same_numbers():
     np.testing.assert_allclose(z0, z1, rtol=1e-5, atol=1e-6)
 
 
-@pytest.mark.parametrize("device", DEVICES)
-def test_randn_is_standard_normal(device, triton_on_cuda):
+@pytest.mark.parametrize("device", DEVICES, indirect=True)
+def test_randn_is_standard_normal(device):
     """``randn``: ``sqrt(2) * erfinv(u)`` of its uniforms (``erf`` takes it
     back), mean 0 and variance 1, no infinities (``u`` never -1 or 1)."""
     n = 1 << 18
@@ -124,8 +124,8 @@ def test_randn_is_standard_normal(device, triton_on_cuda):
     np.testing.assert_allclose(erf, u, atol=2e-6)
 
 
-@pytest.mark.parametrize("device", DEVICES)
-def test_dropout(device, triton_on_cuda):
+@pytest.mark.parametrize("device", DEVICES, indirect=True)
+def test_dropout(device):
     """``F.dropout``: the dropped about ``p`` of the elements, the others
     scaled by ``1 / (1 - p)``; dropped where the draw's bits are below
     ``p * 2**32``; the input as is unless training or for ``p`` 0, zeros for
@@ -151,8 +151,8 @@ def test_dropout(device, triton_on_cuda):
     np.testing.assert_array_equal(one, np.zeros(n, np.float32))
 
 
-@pytest.mark.parametrize("device", DEVICES)
-def test_dropout_backward_recomputes_its_mask(device, triton_on_cuda):
+@pytest.mark.parametrize("device", DEVICES, indirect=True)
+def test_dropout_backward_recomputes_its_mask(device):
     """Dropout's gradient: the cotangent where the forward kept the element,
     scaled, else 0; the mask recomputed by the backward's kernel from the
     same numbers, not stored (on MPS: no workspace, the forward's and the
@@ -242,8 +242,8 @@ def test_rematerialized_dropout_draws_the_same_mask():
     np.testing.assert_array_equal(y0, y1)
 
 
-@pytest.mark.parametrize("device", DEVICES)
-def test_randint(device, triton_on_cuda):
+@pytest.mark.parametrize("device", DEVICES, indirect=True)
+def test_randint(device):
     """``randint(high, size)`` and ``randint(low, high, size)``: ``low`` plus a
     draw's bits modulo the range, in ``dtype`` (int64 by default); a range
     over 2**32 from two draws' 64 bits, the first's high."""
@@ -279,8 +279,8 @@ def test_randint_errors():
             lumen.compile(lambda x: lumen.randint(*args, **kwargs))(lumen.zeros([1]))
 
 
-@pytest.mark.parametrize("device", DEVICES)
-def test_uniform_initializes_a_weight(device, triton_on_cuda):
+@pytest.mark.parametrize("device", DEVICES, indirect=True)
+def test_uniform_initializes_a_weight(device):
     """``w.uniform_(a, b)`` in a compiled function: ``a + (b - a) * rand`` in
     the weight's dtype, written back into the weight after the call."""
 

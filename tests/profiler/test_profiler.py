@@ -198,8 +198,8 @@ def test_kernels_record_their_steps_types():
     assert all(k["inputs"] == [("float32", [4, 8])] for k in kernels)
 
 
-@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA])
-def test_steps_record_their_accumulation_dtypes(device, tmp_path, triton_on_cuda):
+@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA], indirect=True)
+def test_steps_record_their_accumulation_dtypes(device, tmp_path):
     """With record_shapes each plan step records its inputs', outputs' and
     accumulation dtypes (``accum``): a dot's and a sum's accum_dtype, a
     max's dtype, a fusion's reductions'; none for elementwise steps. Its
@@ -391,8 +391,8 @@ def test_device_transfers_are_profiled():
     assert not [e for e in events if e["kind"] == "gpu" and "d2h" in e["name"]]
 
 
-@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA, TPU])
-def test_record_function_inside_a_compiled_function(device, tmp_path, triton_on_cuda):
+@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA, TPU], indirect=True)
+def test_record_function_inside_a_compiled_function(device, tmp_path):
     """A ``record_function`` range inside a compiled function (with or as a
     decorator) holds the steps of the ops traced in it each time the plan
     runs, nested as traced, one range a call; a fused kernel is in its main
@@ -444,8 +444,8 @@ def test_record_function_inside_a_compiled_function(device, tmp_path, triton_on_
         assert sorted(spans) == ["inner", "inner", "outer", "outer"], spans
 
 
-@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA, TPU])
-def test_record_function_calls_of_one_name_are_ranges_of_their_own(device, triton_on_cuda):
+@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA, TPU], indirect=True)
+def test_record_function_calls_of_one_name_are_ranges_of_their_own(device):
     """Each call of a ``record_function`` range is its own range when the
     plan runs, as uncompiled code's, even with no step between them (two
     layers' ``layer``), and so is each call's backward: steps keep the call
@@ -475,8 +475,8 @@ def test_record_function_calls_of_one_name_are_ranges_of_their_own(device, trito
     assert set(names) == {"layer", "layer (backward)"}, names
 
 
-@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA, TPU])
-def test_record_function_holds_its_ops_gradients_as_backward(device, triton_on_cuda):
+@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA, TPU], indirect=True)
+def test_record_function_holds_its_ops_gradients_as_backward(device):
     """The gradient ops of what a ``record_function`` range traced run in
     ``name (backward)``, nested as the forward's (each range of the
     forward's scope), after the forward's ranges: the matmul's gradient in

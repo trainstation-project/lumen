@@ -11,13 +11,6 @@ from lumen import prims
 DEVICES = [CPU, MPS, TRITON_CUDA, TPU]
 
 
-@pytest.fixture(autouse=True)
-def triton():
-    """CUDA's programs on the Triton backend."""
-    with lumen.config.compiler.patch(use_triton_backend=True):
-        yield
-
-
 def _tensor(a, device, dtype=None):
     """`a` on `device` (cast to `dtype` if given), skipping the test if the device is unavailable."""
     try:
@@ -38,7 +31,7 @@ def _scalars(*indices):
     return [i.reshape(()) for i in indices]
 
 
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", DEVICES, indirect=True)
 @pytest.mark.parametrize("index_dtype", [np.int32, np.int64])
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16", "int32"])
 @pytest.mark.parametrize("starts", [(1, 4, 0), (3, 9, 0), (-2, -1, 5)], ids=["inside", "clamped", "negative"])
@@ -60,7 +53,7 @@ def test_dynamic_slices(device, index_dtype, dtype, starts):
     np.testing.assert_array_equal(lumen.to_numpy(dus.to(dtype="float32")), want)
 
 
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", DEVICES, indirect=True)
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
 @pytest.mark.parametrize(
     "shape, update, starts",
@@ -91,7 +84,7 @@ def test_dynamic_update_slices(device, dtype, shape, update, starts, in_place):
     np.testing.assert_array_equal(lumen.to_numpy(got.to(dtype="float32")), want)
 
 
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", DEVICES, indirect=True)
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
 @pytest.mark.parametrize(
     "shape, update, starts",
@@ -131,7 +124,7 @@ def test_chained_dynamic_update_slices(device, dtype, shape, update, starts, in_
     np.testing.assert_array_equal(lumen.to_numpy(got.to(dtype="float32")), want)
 
 
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", DEVICES, indirect=True)
 @pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
 @pytest.mark.parametrize("start", [3, 9, -2], ids=["inside", "clamped", "negative"])
 def test_narrow_at_tensor_start(device, dtype, start):
@@ -178,7 +171,7 @@ def test_start_indices():
         lumen.make_graph(lambda x, u: prims.dynamic_update_slice(x, u, (0, 0)))(m([4, 6]), m([2, 7]))
 
 
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", DEVICES, indirect=True)
 def test_dynamic_slice_gradients(device):
     """Linear in the operand and update: a slice's gradient is its
     cotangent in the block, zeros elsewhere; an update's, the block of the
@@ -243,7 +236,7 @@ def test_dynamic_update_slice_in_place():
     assert "in0:f32[4,6] = dynamic_update_slice in0 " in plan, plan
 
 
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", DEVICES, indirect=True)
 def test_operand_read_after_its_update(device):
     """An operand (or a reshape of it) read after its update keeps its old
     value: the update is written into a copy."""
@@ -270,7 +263,7 @@ class _Cache(lumen.nn.Module):
     k: lumen.Tensor
 
 
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", DEVICES, indirect=True)
 def test_kv_cache_is_written_in_place(device):
     """A decode step writing its token's keys into a module's cache
     (``c.k.copy_(dynamic_update_slice(c.k, k, (0, t, 0)))``): the update is

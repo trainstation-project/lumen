@@ -47,11 +47,10 @@ CUTE_GAPS = re.compile(r"the CUDA \(CuTe DSL\) backend has no kernel for it yet"
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
     """Turns a TPU-parametrized test's failure into a skip when it hits a known `TPU_GAPS` message, and a
-    CuTe CUDA one's (no ``triton`` marker) when it hits `CUTE_GAPS`."""
+    CuTe CUDA one's (``CUDA``, not ``TRITON_CUDA``) when it hits `CUTE_GAPS`."""
     report = (yield).get_result()
-    on_tpu = getattr(item, "callspec", None) and item.callspec.params.get("device") == "tpu"
-    on_cute = item.get_closest_marker("cuda") and not item.get_closest_marker("triton")
-    gaps = TPU_GAPS if on_tpu else CUTE_GAPS if on_cute else None
+    device = getattr(item, "callspec", None) and item.callspec.params.get("device")
+    gaps = TPU_GAPS if device == "tpu" else CUTE_GAPS if device == "cuda" else None
     if gaps and report.when == "call" and report.failed and call.excinfo:
         gap = gaps.search(str(call.excinfo.value))
         if gap:
@@ -115,10 +114,12 @@ def pytest_configure(config):
 
 
 @pytest.fixture
-def triton_on_cuda(device, request):
-    """``use_triton_backend`` on for a ``triton``-marked CUDA case
-    (``TRITON_CUDA``), whose plans run Triton's GEMM and generated kernels;
-    off otherwise (``CUDA``: the CuTe DSL GEMM and kernels)."""
-    triton = device == "cuda" and request.node.get_closest_marker("triton") is not None
+def device(request):
+    """The device a test runs on, from its device param (parametrized with
+    ``indirect=True``): ``"cuda-triton"`` (``TRITON_CUDA``) is CUDA with
+    ``use_triton_backend`` on, its plans running Triton's GEMM and generated
+    kernels; any other device runs with it off (``CUDA``: the CuTe DSL GEMM
+    and kernels)."""
+    triton = request.param == "cuda-triton"
     with lumen.config.compiler.patch(use_triton_backend=triton):
-        yield
+        yield "cuda" if triton else request.param

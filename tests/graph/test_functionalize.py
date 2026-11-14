@@ -15,13 +15,6 @@ DEVICES = [
 ]
 
 
-@pytest.fixture(autouse=True)
-def triton():
-    """CUDA's programs on the Triton backend."""
-    with lumen.config.compiler.patch(use_triton_backend=True):
-        yield
-
-
 def _run(f, *arrays, device="cpu"):
     """Compiles `f`, runs it on float32 copies of `arrays` on `device` and returns its outputs as lists; skips when the device is unavailable."""
     try:
@@ -146,14 +139,14 @@ CASES = {
 }
 
 
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", DEVICES, indirect=True)
 @pytest.mark.parametrize("f", list(CASES), ids=lambda f: f.__name__)
 def test_views_read_assignments(device, f):
     """Each case reads the assigned values through its views and bases."""
     assert _run(f, X, device=device) == CASES[f]
 
 
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", DEVICES, indirect=True)
 def test_arguments_assigned_are_written_back(device):
     """A tensor argument assigned (whole, or through a view) is written back
     into the caller's tensor after the call; one not assigned is left; a
@@ -189,7 +182,7 @@ class _Weights(lumen.nn.Module):
     w: lumen.Tensor
 
 
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", DEVICES, indirect=True)
 def test_weights_assigned_through_views_are_written_back(device):
     """A weight assigned through a view (a row of it) is written back; the
     next call reads it."""
@@ -208,7 +201,7 @@ def test_weights_assigned_through_views_are_written_back(device):
     assert lumen.to_numpy(out).tolist() == [[0, 0, 0], [2, 2, 2]]
 
 
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", DEVICES, indirect=True)
 def test_gradients_through_view_assignments(device):
     """Assignment through a view is differentiable: ``y = 2x``, its slice
     overwritten by ``z``: the gradient of ``sum(y * w)`` is ``2w`` for x
@@ -229,7 +222,7 @@ def test_gradients_through_view_assignments(device):
     np.testing.assert_allclose(gz, w[1:3], rtol=1e-6)
 
 
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", DEVICES, indirect=True)
 def test_weight_read_after_its_new_value(device):
     """A weight's old value read after its new value is computed: its
     memory holds the new value alone (written back after the call), never
@@ -251,7 +244,7 @@ def test_weight_read_after_its_new_value(device):
     assert lumen.to_numpy(m.w._placed(device)).tolist() == [[2] * 3] * 2
 
 
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", DEVICES, indirect=True)
 def test_weight_assigned_in_place(device):
     """A weight's new value nothing reads the old one after is written over
     the weight's memory (donated), not copied back: the memory is the
@@ -328,7 +321,7 @@ INPLACE = {
 }
 
 
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", DEVICES, indirect=True)
 @pytest.mark.parametrize("op", list(INPLACE))
 def test_inplace_ops(device, op):
     """Each in-place op assigns its tensor its out-of-place result, and a
@@ -403,7 +396,7 @@ def test_inplace_op_errors():
         trace(lambda x: x.clamp_(), m([3]))
 
 
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", DEVICES, indirect=True)
 def test_inplace_ops_on_arguments_and_weights(device):
     """``+=`` on an argument, ``[i] =`` on a weight: written back after the
     call, as ``copy_``'s."""
@@ -428,7 +421,7 @@ def test_inplace_ops_on_arguments_and_weights(device):
     assert lumen.to_numpy(m.w._placed(device)).tolist() == [[5.0] * 3, [0.0] * 3]
 
 
-@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("device", DEVICES, indirect=True)
 def test_gradients_through_inplace_ops(device):
     """In-place ops differentiate as their out-of-place ones: ``y = x * 2;
     y *= x; y[0] = z``: d sum(y)/dx = 4x but at 0 (overwritten), and dz = 1."""

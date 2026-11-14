@@ -176,8 +176,8 @@ def _read_early_and_late(a, w):
     return F.sum(F.matmul(e, w, "float32", "float32") * h, -1)
 
 
-@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
-def test_dump_to_writes_each_pass(compiler, tmp_path, device, triton_on_cuda):
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
+def test_dump_to_writes_each_pass(compiler, tmp_path, device):
     """``dump_to``: each compiled graph written before its passes and after
     each, a file each, named by its pipeline, step and pass (XLA's
     ``--xla_dump_to``); the MPS pipeline's last passes place the slices
@@ -208,8 +208,8 @@ def test_dump_to_writes_each_pass(compiler, tmp_path, device, triton_on_cuda):
     assert len(list(tmp_path.iterdir())) == count
 
 
-@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
-def test_memory_limit_recomputes(compiler, device, triton_on_cuda):
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
+def test_memory_limit_recomputes(compiler, device):
     """Under ``memory_limit``, a value read early and late is computed again
     for its late reader rather than kept alive (rematerialization): ``h``,
     alive with ``b``, ``b @ w`` and ``e`` where four values are, is

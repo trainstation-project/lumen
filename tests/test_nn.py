@@ -53,8 +53,8 @@ def test_modules_are_frozen_dataclasses_of_weights():
         m.load_state_dict({})
 
 
-@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA, TPU])
-def test_module_weights_are_placed_once_and_shared(device, triton_on_cuda):
+@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA, TPU], indirect=True)
+def test_module_weights_are_placed_once_and_shared(device):
     """A module argument's tensors are the function's weights: placed
     (zeroed) on the device when it compiles (a call on meta tensors, which
     runs nothing), filled by load_state_dict, shared by every function
@@ -101,8 +101,8 @@ class ScaledNorm(lumen.nn.Module):
         return self.weight * (x / F.sqrt(F.mean(x * x, -1, keepdim=True) + self.eps))
 
 
-@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA, TPU])
-def test_float_fields_are_runtime_scalars(device, triton_on_cuda):
+@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA, TPU], indirect=True)
+def test_float_fields_are_runtime_scalars(device):
     """A module's float field is a runtime scalar: another value runs the same
     plan (no trace, no kernel compiled), read by the kernel, not baked in; an
     RMS norm with it is still one kernel on MPS."""
@@ -215,8 +215,8 @@ class _Scalars(lumen.nn.Module):
     heads: int
 
 
-@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA])
-def test_scalar_fields_are_assigned_as_python_values(device, triton_on_cuda):
+@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA], indirect=True)
+def test_scalar_fields_are_assigned_as_python_values(device):
     """A module's float, int and bool fields are assigned as Python values,
     inside a compiled function (``s.step = s.step + 1``) and outside, and
     written back as their type. A float is a runtime scalar; an int or bool

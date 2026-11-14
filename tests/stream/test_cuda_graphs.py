@@ -9,7 +9,7 @@ import lumen.functional as F
 
 
 @pytest.fixture
-def cuda_graphs(triton_on_cuda):
+def cuda_graphs():
     """Turns ``config.compiler.cuda_graphs`` on for the test, then back as it was."""
     with lumen.config.compiler.patch(cuda_graphs=True):
         yield
@@ -20,7 +20,7 @@ def on_cpu(f, *arrays):
     return lumen.to_numpy(lumen.compile(f, device="cpu")(*[lumen.from_numpy(a) for a in arrays]))
 
 
-@pytest.mark.parametrize("device", [TRITON_CUDA])
+@pytest.mark.parametrize("device", [TRITON_CUDA], indirect=True)
 def test_cuda_graphs_replay_each_call_on_its_arguments(device, cuda_graphs):
     """A plan runs as usual on its first call, is captured on its second
     and replays from then on, each call's arguments copied in: every call
@@ -55,7 +55,7 @@ class Scaled(lumen.nn.Module):
         return F.tanh(F.matmul(x, self.w, "float32", "float32"))
 
 
-@pytest.mark.parametrize("device", [TRITON_CUDA])
+@pytest.mark.parametrize("device", [TRITON_CUDA], indirect=True)
 def test_cuda_graphs_read_weights_in_place(device, cuda_graphs):
     """A captured plan reads its weights where they were placed: one
     loaded anew (in place) is read loaded, and another module's, placed
@@ -92,7 +92,7 @@ class Counted(lumen.nn.Module):
     t: int
 
 
-@pytest.mark.parametrize("device", [TRITON_CUDA])
+@pytest.mark.parametrize("device", [TRITON_CUDA], indirect=True)
 def test_cuda_graphs_replay_runtime_scalars_and_write_back(device, cuda_graphs):
     """A step reading a runtime scalar (the count, an int seen with two
     values), writing its weight in place and counting itself, as AdamW's
@@ -121,7 +121,7 @@ def test_cuda_graphs_replay_runtime_scalars_and_write_back(device, cuda_graphs):
     assert any(compiled._graphs.values())
 
 
-@pytest.mark.parametrize("device", [TRITON_CUDA])
+@pytest.mark.parametrize("device", [TRITON_CUDA], indirect=True)
 def test_cuda_graphs_replay_under_the_profiler(device, cuda_graphs):
     """Profiled with CUDA timing, a captured plan still replays: each call
     is a ``CUDA graph`` range, and each kernel it ran is timed under the

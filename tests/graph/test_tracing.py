@@ -285,8 +285,8 @@ def test_tracing_and_running_on_meta_tensors():
     assert lumen.compile(lambda: lumen.arange(5), device="meta")().shape == [5]
 
 
-@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA, TPU])
-def test_softmax_traces_to_its_primitives(device, triton_on_cuda):
+@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA, TPU], indirect=True)
+def test_softmax_traces_to_its_primitives(device):
     """softmax traces to its primitives (max, sub, exp, sum, div; no
     primitive of its own): over the last dimension the MPS compiler runs
     them, with the scale before them, as one row kernel (a chain of

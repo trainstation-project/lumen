@@ -14,8 +14,8 @@ def _bf16(a):
     return lumen.to_numpy(lumen.from_numpy(a).to(dtype="bfloat16").to(dtype="float32"))
 
 
-@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA, TPU])
-def test_a_forward_round_trip_is_dropped(device, triton_on_cuda):
+@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA, TPU], indirect=True)
+def test_a_forward_round_trip_is_dropped(device):
     """``x.bfloat16().float() * 3`` of a float32 ``x``: with
     ``preserve_precision`` the forward reads ``x`` itself, so the result is
     ``x * 3`` exactly; off (the default), ``x`` rounded to bfloat16 first, as
@@ -38,8 +38,8 @@ def test_a_forward_round_trip_is_dropped(device, triton_on_cuda):
     np.testing.assert_array_equal(kept, x * np.float32(3))
 
 
-@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA])
-def test_gradients_keep_the_activation_saved_in_the_narrower_dtype(device, triton_on_cuda):
+@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA], indirect=True)
+def test_gradients_keep_the_activation_saved_in_the_narrower_dtype(device):
     """``sum(h * h)`` of ``h = x.bfloat16().float()``, with its gradient: with
     ``preserve_precision`` the loss is computed from ``x`` unrounded
     (``sum(x²)``), while the gradient reads ``h`` as saved for it, in

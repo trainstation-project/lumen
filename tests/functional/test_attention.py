@@ -77,14 +77,15 @@ def _ids(cases):
     "device, case",
     [("cpu", c) for c in CPU_CASES]
     + [pytest.param("mps", c, marks=pytest.mark.mps) for c in CASES]
-    + [pytest.param("cuda", c, marks=pytest.mark.cuda) for c in CASES]
+    + [pytest.param("cuda-triton", c, marks=pytest.mark.cuda) for c in CASES]
     + [pytest.param("tpu", c, marks=pytest.mark.tpu) for c in CASES],
     ids=[f"cpu-{i}" for i in _ids(CPU_CASES)]
     + [f"mps-{i}" for i in _ids(CASES)]
-    + [f"cuda-{i}" for i in _ids(CASES)]
+    + [f"cuda-triton-{i}" for i in _ids(CASES)]
     + [f"tpu-{i}" for i in _ids(CASES)],
+    indirect=["device"],
 )
-def test_flash_attention(device, case, dtype, triton_on_cuda):
+def test_flash_attention(device, case, dtype):
     """F.flash_attention agrees with attention in float64, on
     the CPU (as traced) and on MPS and CUDA (one flash-attention kernel)."""
     (b, sq, sk, n, nkv, h, hv), causal = case
@@ -157,10 +158,13 @@ DECODE_CASES = [
     "device, case",
     [("cpu", c) for c in DECODE_CASES]
     + [pytest.param("mps", c, marks=pytest.mark.mps) for c in DECODE_CASES]
-    + [pytest.param("cuda", c, marks=pytest.mark.cuda) for c in DECODE_CASES],
-    ids=[f"cpu-{c}" for c in DECODE_CASES] + [f"mps-{c}" for c in DECODE_CASES] + [f"cuda-{c}" for c in DECODE_CASES],
+    + [pytest.param("cuda-triton", c, marks=pytest.mark.cuda) for c in DECODE_CASES],
+    ids=[f"cpu-{c}" for c in DECODE_CASES]
+    + [f"mps-{c}" for c in DECODE_CASES]
+    + [f"cuda-triton-{c}" for c in DECODE_CASES],
+    indirect=["device"],
 )
-def test_attention_decode(device, case, dtype, triton_on_cuda):
+def test_attention_decode(device, case, dtype):
     """Decode attention over a KV cache agrees with causal attention over its first `start + Sq` rows,
     for several cache positions, and is one kernel on MPS and CUDA."""
     b, sq, sk, n, nkv, h = case
@@ -183,8 +187,8 @@ def test_attention_decode(device, case, dtype, triton_on_cuda):
         assert steps(f, q, k, v, pos, device=device) == ["flash_attention"]
 
 
-@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
-def test_attention_as_traced_without_flash_attention(device, triton_on_cuda):
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
+def test_attention_as_traced_without_flash_attention(device):
     """With ``flash_attention`` off, attention runs as traced (scores in
     memory, several kernels); with it on (the default), one kernel,
     agreeing to rounding."""
@@ -214,8 +218,8 @@ def _written(q, k, v):
     return F.matmul(F.softmax(scores.float(), -1).to(dtype=q.dtype), v, "float32", q.dtype)
 
 
-@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
-def test_attention_written_out_is_one_kernel(device, triton_on_cuda):
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
+def test_attention_written_out_is_one_kernel(device):
     """Attention written out (``_written``) is matched too: one kernel,
     agreeing with the CPU; at a model's size too."""
     (q, k, v), arrays = tensors(device, "bfloat16", (2, 4, 24, 16), (2, 2, 24, 16), (2, 4, 24, 16))
@@ -231,8 +235,8 @@ def test_attention_written_out_is_one_kernel(device, triton_on_cuda):
     assert steps(_written, *big, device=device) == ["flash_attention"]
 
 
-@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
-def test_attention_the_kernels_cannot_take_runs_as_traced(device, triton_on_cuda):
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
+def test_attention_the_kernels_cannot_take_runs_as_traced(device):
     """A head dimension past the kernels' (256) or not a multiple of 8 runs
     as traced, still correct."""
     for h in (512, 20):
@@ -265,7 +269,7 @@ def test_flash_attention_checks_its_operands():
         call(m(1, 4, 2, 8, dtype="int32"), m(1, 4, 2, 8, dtype="int32"), m(1, 4, 2, 8, dtype="int32"))
 
 
-@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
 @pytest.mark.parametrize(
     "f, sq",
     [
@@ -280,7 +284,7 @@ def test_flash_attention_checks_its_operands():
     ],
     ids=["residual", "scale bias cast", "decode residual"],
 )
-def test_attention_epilogues_fuse(f, sq, device, triton_on_cuda):
+def test_attention_epilogues_fuse(f, sq, device):
     """The elementwise primitives after an attention, through reshapes (a
     residual, a bias, a scale, a cast), run in its kernel as it writes each
     output (on MPS, ``contraction_epilogues``): one step, labeled with them,
@@ -371,10 +375,11 @@ def backward_kernels(h, hv, dtype, deterministic=False, device="mps"):
 @pytest.mark.parametrize(
     "device, case",
     [pytest.param("mps", c, marks=pytest.mark.mps) for c in BACKWARD_CASES]
-    + [pytest.param("cuda", c, marks=pytest.mark.cuda) for c in BACKWARD_CASES],
-    ids=[f"mps-{i}" for i in _ids(BACKWARD_CASES)] + [f"cuda-{i}" for i in _ids(BACKWARD_CASES)],
+    + [pytest.param("cuda-triton", c, marks=pytest.mark.cuda) for c in BACKWARD_CASES],
+    ids=[f"mps-{i}" for i in _ids(BACKWARD_CASES)] + [f"cuda-triton-{i}" for i in _ids(BACKWARD_CASES)],
+    indirect=["device"],
 )
-def test_attention_backward_is_flash_attention(device, case, dtype, deterministic, triton_on_cuda):
+def test_attention_backward_is_flash_attention(device, case, dtype, deterministic):
     """The gradient of F.flash_attention: the forward one flash-attention
     kernel (writing each row's log-sum-exp too), the backward one adding dQ
     atomically by its dK and dV kernel (on MPS where its blocks fit), or
@@ -479,9 +484,9 @@ def test_written_attention_trains_with_flash_attention():
         assert kernel in labels, labels
 
 
-@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
 @pytest.mark.parametrize("scale", [1.0, 0.125], ids=["unscaled", "scaled"])
-def test_written_attention_backward_is_flash_attention(scale, device, triton_on_cuda):
+def test_written_attention_backward_is_flash_attention(scale, device):
     """Attention written out trains with flash attention's backward kernels
     whether its scores are scaled or not (``* 1`` simplified away, dS
     has no scale to multiply by: 1); the gradients the CPU's."""
@@ -542,9 +547,9 @@ LAYOUTS = [
 ]
 
 
-@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
 @pytest.mark.parametrize("layouts", LAYOUTS, ids=["/".join(layout) for layout in LAYOUTS])
-def test_attention_reads_strided_operands_in_place(device, layouts, triton_on_cuda):
+def test_attention_reads_strided_operands_in_place(device, layouts):
     """Q, K and V at any strides but a contiguous head dim (a fused
     projection's heads, heads-first data transposed, padded rows at an
     offset, a window of longer sequences, or each its own) are read where they are,
@@ -577,8 +582,8 @@ def test_attention_reads_strided_operands_in_place(device, layouts, triton_on_cu
         np.testing.assert_allclose(lumen.to_numpy(got.to("cpu")), lumen.to_numpy(want), rtol=1e-3, atol=1e-3)
 
 
-@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
-def test_attention_copies_operands_with_a_strided_head_dim(device, triton_on_cuda):
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
+def test_attention_copies_operands_with_a_strided_head_dim(device):
     """An operand whose head dim isn't contiguous (`[b, s, h, n]` data
     passed transposed) is copied first, as before: the attention the CPU's."""
     b, s, n, h = 1, 24, 2, 16
@@ -589,8 +594,8 @@ def test_attention_copies_operands_with_a_strided_head_dim(device, triton_on_cud
     np.testing.assert_allclose(lumen.to_numpy(out), want, rtol=1e-4, atol=1e-4)
 
 
-@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
-def test_trained_attention_is_written_through_its_transpose(device, triton_on_cuda):
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
+def test_trained_attention_is_written_through_its_transpose(device):
     """Attention written out heads first (``[b, n, s, h]``), then
     transposed back and its heads merged for the next projection, in a
     training step: its kernel writes ``[b, s, n, h]`` directly (one
@@ -657,9 +662,9 @@ def test_attention_epilogue_fuses_in_training(sq):
         np.testing.assert_array_equal(g, lumen.to_numpy(w))
 
 
-@pytest.mark.parametrize("device", [TRITON_CUDA])
+@pytest.mark.parametrize("device", [TRITON_CUDA], indirect=True)
 @pytest.mark.parametrize("sq", [40, 1], ids=["tiled", "decode"])
-def test_attention_epilogue_fuses_in_training_on_cuda(sq, device, triton_on_cuda):
+def test_attention_epilogue_fuses_in_training_on_cuda(sq, device):
     """On CUDA too, a training step's attention runs its epilogue (a
     residual) in its kernel, which writes the attention's value for the
     backward too; the step agrees with the CPU."""
@@ -717,13 +722,14 @@ def test_flash_attention_training_has_no_precision_warning():
 @pytest.mark.parametrize(
     "device, config",
     [
-        pytest.param("cuda", c, marks=pytest.mark.cuda, id=repr(c))
+        pytest.param("cuda-triton", c, marks=pytest.mark.cuda, id=repr(c))
         for c in lumen.autotune.TritonAttentionConfig.candidates()
     ]
     + [
         pytest.param("mps", c, marks=pytest.mark.mps, id=repr(c))
         for c in (lumen.autotune.MpsAttentionConfig.candidates() if lumen.autotune.MpsAttentionConfig else [])
     ],
+    indirect=["device"],
 )
 @pytest.mark.parametrize("causal", [False, True], ids=["", "causal"])
 @pytest.mark.parametrize("h", [64, 128])
@@ -737,7 +743,7 @@ def test_flash_attention_runs_every_candidate(device, config, h, causal):
     # Metal Performance Primitives take whole 16-query and 32-key blocks: elsewhere they'd leave the untuned kernel.
     sq, sk = (256, 512) if device == "mps" and config.mpp else (200, 333)
     (q, k, v), arrays = tensors(device, "bfloat16", (1, sq, 4, h), (1, sk, 2, h), (1, sk, 2, h))
-    with lumen.config.compiler.patch(use_triton_backend=device == "cuda"), lumen.autotune.use(config):
+    with lumen.autotune.use(config):
         out = lumen.compile(lambda q, k, v: F.flash_attention(q, k, v, is_causal=causal))(q, k, v)
     want = reference(*arrays, causal=causal)
     tol = TOL["bfloat16"]
