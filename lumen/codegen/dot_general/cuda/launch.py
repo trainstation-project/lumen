@@ -6,6 +6,8 @@ struct of its address, its extents (int32) and its non-unit strides (int64), whi
 to a plain ``cuLaunchKernel``, with no Python per matmul."""
 
 import builtins
+import linecache
+import types
 
 import cuda.bindings.driver as cuda
 import cutlass

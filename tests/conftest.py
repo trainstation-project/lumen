@@ -40,14 +40,20 @@ TPU_GAPS = re.compile(
     r"|operands of one dtype accumulating in float32"
 )
 
+# The error of a primitive the CUDA (CuTe DSL) backend has no kernel for; failing CuTe CUDA tests hitting it skip.
+CUTE_GAPS = re.compile(r"the CUDA \(CuTe DSL\) backend has no kernel for it yet")
+
 
 @pytest.hookimpl(hookwrapper=True)
 def pytest_runtest_makereport(item, call):
-    """Turns a TPU-parametrized test's failure into a skip when it hits a known `TPU_GAPS` message."""
+    """Turns a TPU-parametrized test's failure into a skip when it hits a known `TPU_GAPS` message, and a
+    CuTe CUDA one's (no ``triton`` marker) when it hits `CUTE_GAPS`."""
     report = (yield).get_result()
     on_tpu = getattr(item, "callspec", None) and item.callspec.params.get("device") == "tpu"
-    if on_tpu and report.when == "call" and report.failed and call.excinfo:
-        gap = TPU_GAPS.search(str(call.excinfo.value))
+    on_cute = item.get_closest_marker("cuda") and not item.get_closest_marker("triton")
+    gaps = TPU_GAPS if on_tpu else CUTE_GAPS if on_cute else None
+    if gaps and report.when == "call" and report.failed and call.excinfo:
+        gap = gaps.search(str(call.excinfo.value))
         if gap:
             report.outcome = "skipped"
             report.wasxfail = str(call.excinfo.value).splitlines()[0]
@@ -109,8 +115,10 @@ def pytest_configure(config):
 
 
 @pytest.fixture
-def triton_on_cuda(device):
-    """``use_triton_backend`` on for CUDA, whose plans run with Triton: its
-    GEMM and generated kernels."""
-    with lumen.config.compiler.patch(use_triton_backend=device == "cuda"):
+def triton_on_cuda(device, request):
+    """``use_triton_backend`` on for a ``triton``-marked CUDA case
+    (``TRITON_CUDA``), whose plans run Triton's GEMM and generated kernels;
+    off otherwise (``CUDA``: the CuTe DSL GEMM and kernels)."""
+    triton = device == "cuda" and request.node.get_closest_marker("triton") is not None
+    with lumen.config.compiler.patch(use_triton_backend=triton):
         yield

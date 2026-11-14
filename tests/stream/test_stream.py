@@ -1,7 +1,7 @@
 """Tests of lumen streams, events and the ``wait`` primitive."""
 
 import pytest
-from helpers import CUDA, MPS, TPU
+from helpers import CPU, MPS, TPU, TRITON_CUDA
 
 import lumen
 
@@ -37,7 +37,7 @@ def test_the_stream_is_the_only_api():
 
 @pytest.mark.parametrize(
     "device",
-    ["cpu", MPS, TPU, CUDA],
+    [CPU, MPS, TPU, TRITON_CUDA],
 )
 def test_events_time_the_work_between_them(device, triton_on_cuda):
     """Two events with ``enable_timing`` around a compiled program:
@@ -233,9 +233,7 @@ def test_wait_is_an_in_place_op():
     assert wait["inputs"] == wait["outputs"] == [("float32", [])]
 
 
-@pytest.mark.parametrize(
-    "device", ["cpu", pytest.param("mps", marks=pytest.mark.mps), pytest.param("cuda", marks=pytest.mark.cuda)]
-)
+@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA])
 def test_wait_primitive(device, triton_on_cuda):
     """``prims.host_wait``: its operand's value, in place (the plan's step reads
     and writes one buffer: no memory of its own), a step of its own (the

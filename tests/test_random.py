@@ -4,12 +4,12 @@ import math
 
 import numpy as np
 import pytest
-from helpers import CUDA, MPS, TPU
+from helpers import CPU, MPS, TPU, TRITON_CUDA
 
 import lumen
 import lumen.functional as F
 
-DEVICES = ["cpu", MPS, TPU, CUDA]
+DEVICES = [CPU, MPS, TPU, TRITON_CUDA]
 
 
 def _philox(key, counter):

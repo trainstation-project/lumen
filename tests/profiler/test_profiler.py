@@ -3,7 +3,7 @@
 import json
 
 import pytest
-from helpers import CUDA
+from helpers import CPU, MPS, TPU, TRITON_CUDA
 
 import lumen
 import lumen.functional as F
@@ -198,7 +198,7 @@ def test_kernels_record_their_steps_types():
     assert all(k["inputs"] == [("float32", [4, 8])] for k in kernels)
 
 
-@pytest.mark.parametrize("device", ["cpu", "mps", CUDA])
+@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA])
 def test_steps_record_their_accumulation_dtypes(device, tmp_path, triton_on_cuda):
     """With record_shapes each plan step records its inputs', outputs' and
     accumulation dtypes (``accum``): a dot's and a sum's accum_dtype, a
@@ -391,9 +391,7 @@ def test_device_transfers_are_profiled():
     assert not [e for e in events if e["kind"] == "gpu" and "d2h" in e["name"]]
 
 
-@pytest.mark.parametrize(
-    "device", ["cpu", pytest.param("mps", marks=pytest.mark.mps), CUDA, pytest.param("tpu", marks=pytest.mark.tpu)]
-)
+@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA, TPU])
 def test_record_function_inside_a_compiled_function(device, tmp_path, triton_on_cuda):
     """A ``record_function`` range inside a compiled function (with or as a
     decorator) holds the steps of the ops traced in it each time the plan
@@ -446,9 +444,7 @@ def test_record_function_inside_a_compiled_function(device, tmp_path, triton_on_
         assert sorted(spans) == ["inner", "inner", "outer", "outer"], spans
 
 
-@pytest.mark.parametrize(
-    "device", ["cpu", pytest.param("mps", marks=pytest.mark.mps), CUDA, pytest.param("tpu", marks=pytest.mark.tpu)]
-)
+@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA, TPU])
 def test_record_function_calls_of_one_name_are_ranges_of_their_own(device, triton_on_cuda):
     """Each call of a ``record_function`` range is its own range when the
     plan runs, as uncompiled code's, even with no step between them (two
@@ -479,9 +475,7 @@ def test_record_function_calls_of_one_name_are_ranges_of_their_own(device, trito
     assert set(names) == {"layer", "layer (backward)"}, names
 
 
-@pytest.mark.parametrize(
-    "device", ["cpu", pytest.param("mps", marks=pytest.mark.mps), CUDA, pytest.param("tpu", marks=pytest.mark.tpu)]
-)
+@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA, TPU])
 def test_record_function_holds_its_ops_gradients_as_backward(device, triton_on_cuda):
     """The gradient ops of what a ``record_function`` range traced run in
     ``name (backward)``, nested as the forward's (each range of the

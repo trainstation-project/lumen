@@ -2,7 +2,7 @@
 
 import numpy as np
 import pytest
-from helpers import CUDA, MPS, meta
+from helpers import CPU, MPS, TRITON_CUDA, meta
 
 import lumen
 import lumen.functional as F
@@ -263,7 +263,7 @@ def _logits(w, ids):
     return _matmul(x, w["head"], out=lambda a: a)
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS, CUDA])
+@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA])
 def test_transformer_forward_matches_numpy(device, triton_on_cuda):
     """The logits are the NumPy model's, to bfloat16's precision (the
     matmuls' and attention's accumulation orders differ); the predictions
@@ -283,7 +283,7 @@ def test_transformer_forward_matches_numpy(device, triton_on_cuda):
     np.testing.assert_array_equal(got.argmax(-1)[clear], want.argmax(-1)[clear])
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
 @pytest.mark.parametrize("chunk", [None, 64, 8])
 def test_transformer_train_step_matches_cpu(device, chunk, triton_on_cuda):
     """One training step (``PASSES`` accumulated backward passes, then
@@ -331,7 +331,7 @@ def test_transformer_train_step_matches_cpu(device, chunk, triton_on_cuda):
             assert error <= 5e-2, (name, error)
 
 
-@pytest.mark.parametrize("device", ["cpu", MPS, CUDA])
+@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA])
 def test_transformer_optimizer_scalars_update(device, triton_on_cuda):
     """The optimizer's scalars across training steps: its step count ``t``
     (an int field, ``self.t = self.t + 1`` in the step) is written back

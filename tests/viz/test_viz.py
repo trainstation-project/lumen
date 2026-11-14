@@ -5,7 +5,7 @@ import sys
 
 import numpy as np
 import pytest
-from helpers import CUDA, MPS
+from helpers import MPS, TRITON_CUDA
 
 import lumen
 import lumen.functional as F
@@ -60,7 +60,7 @@ def test_dump_code_writes_each_kernel_in_order(tmp_path):
     assert got.tolist() == f(x, w).tolist()
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
 def test_dump_code_of_device_kernels(device, tmp_path, triton_on_cuda):
     """On MPS and CUDA, `dump_code` writes each kernel's Metal or Triton source."""
     try:
@@ -103,7 +103,7 @@ def _step_args(device):
     return [a.to(device) for a in args]
 
 
-@pytest.mark.parametrize("device", [MPS, CUDA])
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA])
 def test_every_device_kernel_dumps_its_source(device, tmp_path, triton_on_cuda):
     """A training step's kernels (an embedding's gather and its scatter-add,
     flash attention, the chunked cross entropy's update slices, matmuls,
