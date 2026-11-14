@@ -1,4 +1,15 @@
 //! CUDA (CuTe DSL) GEMM autotuning candidates and the tile it launches with untuned.
+//!
+//! Autotuning the Ampere GEMM: its tile candidates for matmul steps and GEMM fusions.
+
+use crate::autotune::Kernels;
+use crate::codegen::dot_general::GemmTuning;
+use crate::codegen::kinds::gemm_dot;
+use crate::codegen::utils::cuda::Cuda;
+use crate::graph::Primitive;
+use crate::graph_compiler::CompilerConfig;
+use crate::graph_compiler::passes::attention::FORWARD;
+use crate::plan::{CudaStep, Tuned};
 
 /// CTA tile, warps and pipeline stages of one Ampere GEMM (`ampere.py`'s `AmpereGemm`) candidate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,5 +115,67 @@ crate::autotune::python::config_class! {
     #[staticmethod]
     fn candidates() -> Vec<Self> {
         CONFIGS.iter().copied().map(PyCudaGemmConfig).collect()
+    }
+}
+
+/// Autotuning candidates for matmul steps.
+pub(crate) struct Gemms;
+
+impl Kernels for Gemms {
+    type Step = CudaStep;
+    type Config = Config;
+
+    /// Every GEMM tile for a matmul step (or GEMM fusion) of at least `TUNED_MACS` multiply-adds, none otherwise.
+    fn configs(&self, step: &CudaStep) -> Vec<Config> {
+        match macs(step) {
+            Some(macs) if macs >= TUNED_MACS => CONFIGS.to_vec(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Whether `step` is a matmul or a GEMM fusion (the GEMM runs every one, tuned only from `TUNED_MACS` up).
+    fn handles(&self, step: &CudaStep) -> bool {
+        macs(step).is_some()
+    }
+
+    /// The step launched with `config`.
+    fn build(&mut self, _: &CudaStep, config: Config) -> Tuned {
+        Tuned::new(format!("{config:?}"), config)
+    }
+}
+
+/// The multiply-adds of the matmul `step` runs on the GEMM: a matmul step's, or a GEMM fusion's; `None` for any other
+/// step (a flash attention's dots run on the attention forward).
+fn macs(step: &CudaStep) -> Option<usize> {
+    let (dot, lhs, product) = match &step.primitive {
+        p @ Primitive::DotGeneral { .. } => (p, &step.inputs[0].1, step.output.1.numel()),
+        Primitive::Fusion { name, body, .. } if name != FORWARD => {
+            let dot = gemm_dot(body)?;
+            (
+                &dot.primitive,
+                body.type_of(dot.inputs[0]),
+                body.type_of(dot.output).numel(),
+            )
+        }
+        _ => return None,
+    };
+
+    let Primitive::DotGeneral {
+        lhs_contracting, ..
+    } = dot
+    else {
+        return None;
+    };
+
+    Some(product * lhs.shape[lhs_contracting[0]])
+}
+
+/// The Ampere GEMM's tiles.
+impl GemmTuning for Cuda {
+    type Tuner = Gemms;
+
+    /// The GEMM tuner, the same under every config.
+    fn gemm_tuner(_: &CompilerConfig) -> Gemms {
+        Gemms
     }
 }

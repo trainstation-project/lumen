@@ -5,6 +5,7 @@ use std::ops::{Deref, DerefMut};
 
 use super::unsupported;
 use crate::Device;
+use crate::autotune::Timer;
 use crate::plan::Step;
 use crate::plan::run::Buffers;
 
@@ -20,8 +21,8 @@ use crate::codegen::row::triton::{row_count, row_groups, row_looped};
 use crate::codegen::store::triton::{load, store};
 use crate::codegen::triton::{Kernel, ROW, Template};
 use crate::codegen::utils::triton as codegen;
-use crate::graph::{Primitive, UPDATES};
-use crate::plan::StepBase;
+use crate::graph::{Primitive, TensorType, UPDATES};
+use crate::plan::{Buffer, StepBase};
 use crate::runtime::kernel::triton::{Function, Launches, launch};
 use crate::{DType, Tensor, TensorOptions};
 
@@ -372,4 +373,61 @@ pub(crate) fn layouts<'a>(tensors: impl IntoIterator<Item = &'a Tensor>) -> u64 
     }
 
     hasher.finish()
+}
+
+/// Times steps on `device` with CUDA events.
+pub(crate) struct TritonTimer {
+    pub(crate) device: Device,
+}
+
+impl Timer for TritonTimer {
+    type Step = TritonStep;
+    type Buffers = (Vec<Tensor>, Tensor, Vec<Tensor>);
+
+    /// The device steps run on.
+    fn device(&self) -> Device {
+        self.device
+    }
+
+    /// Zeroed inputs and outputs for `step`; scalars live on the CPU, and in-place ops write their operand.
+    fn buffers(&self, step: &TritonStep) -> Result<Option<Self::Buffers>, String> {
+        let zeros = |ty: &TensorType, device| {
+            Tensor::zeros(
+                &ty.shape,
+                TensorOptions::new().dtype(ty.dtype).device(device),
+            )
+        };
+
+        let inputs: Vec<Tensor> = step
+            .inputs
+            .iter()
+            .map(|(b, ty)| match b {
+                Buffer::Scalar(_) => zeros(ty, Device::Cpu(0)),
+                _ => zeros(ty, self.device),
+            })
+            .collect();
+
+        let out = match step.primitive {
+            Primitive::DynamicUpdateSlice | Primitive::ScatterAdd { .. } => inputs[0].clone(),
+            _ => zeros(&step.output.1, self.device),
+        };
+
+        let outs = step
+            .extra_outputs
+            .iter()
+            .map(|(_, ty)| zeros(ty, self.device))
+            .collect();
+
+        Ok(Some((inputs, out, outs)))
+    }
+
+    /// One run of the step.
+    fn run(
+        &self,
+        (inputs, out, outs): &Self::Buffers,
+        step: &TritonStep,
+        _: usize,
+    ) -> Result<(), String> {
+        step.run_raw(inputs, out, outs)
+    }
 }

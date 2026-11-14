@@ -2,8 +2,7 @@
 //! kernel and its launcher are Python (`ampere.py`, `launch.py`).
 
 mod autotune;
-mod config;
-pub(crate) use config::*;
+pub(crate) use autotune::*;
 
 use std::fmt::Write;
 use std::hash::{DefaultHasher, Hash, Hasher};

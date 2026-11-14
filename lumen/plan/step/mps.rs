@@ -2,9 +2,11 @@
 //! captured on its first run and replayed with new pointers on later ones.
 
 use super::unsupported;
-use crate::autotune::mps::Tunable;
+use crate::allocator::Scratch;
+use crate::autotune::Timer;
 use crate::codegen::dot_general::mps::plan_matmul;
 use crate::codegen::dynamic_slice::mps::{MAX_RANK, copy};
+use crate::codegen::elementwise::mps::Tunable;
 use crate::codegen::utils::mps::Mps;
 use crate::graph::{NEURAL_ENGINE, Primitive, TensorType, View};
 use crate::plan::run::Buffers;
@@ -256,9 +258,7 @@ impl MpsStep {
             return crate::codegen::scatter_add::mps::encode(step, inputs, output, scratch, keep);
         }
         if let Fusion { .. } = step.primitive {
-            return crate::runtime::kernel::mps::encode::encode(
-                step, inputs, output, scratch, keep,
-            );
+            return crate::runtime::kernel::mps::encode(step, inputs, output, scratch, keep);
         }
         if let LinearCrossEntropy = step.primitive {
             return crate::codegen::dot_general::mps::encode_linear_cross_entropy(
@@ -518,5 +518,140 @@ impl MpsStep {
                 unreachable!("rewritten as a gather (passes/take_along_axis.rs)")
             }
         }
+    }
+}
+
+/// Byte alignment of each buffer carved out of the timing scratch.
+const ALIGNMENT: usize = 256;
+
+/// Timer that runs tuning candidates on the first MPS device.
+pub(crate) struct MpsTimer;
+
+impl Timer for MpsTimer {
+    type Step = MpsStep;
+    type Buffers = TimerBuffers;
+
+    fn device(&self) -> Device {
+        Device::Mps(0)
+    }
+
+    /// Allocates the timing buffers for `step`.
+    fn buffers(&self, step: &MpsStep) -> Result<Option<TimerBuffers>, String> {
+        Ok(TimerBuffers::new(step))
+    }
+
+    /// Encodes one launch, rotating through input copies so repeats read cold memory.
+    fn run(&self, buffers: &TimerBuffers, step: &MpsStep, rep: usize) -> Result<(), String> {
+        let inputs = &buffers.copies[rep % buffers.copies.len()];
+        step.run_raw(inputs, buffers.output, buffers.scratch, Vec::new())
+    }
+}
+
+/// Input bytes to spread across copies so repeated runs miss the cache.
+const COLD_BYTES: usize = 64 << 20;
+/// Most input copies allocated for timing.
+const MOST_COPIES: usize = 256;
+
+/// Zeroed device memory holding rotated input copies, the outputs and scratch for a timed step.
+pub(crate) struct TimerBuffers {
+    _memory: Scratch,
+    /// Per copy, the input pointers followed by the extra output pointers.
+    copies: Vec<Vec<*const u8>>,
+    output: *mut u8,
+    scratch: *mut u8,
+}
+
+/// Bytes spanned by a tensor of type `ty` under `view`, including the view's offset when `offset` is set.
+fn bytes_spanned(ty: &TensorType, view: Option<&View>, offset: bool) -> usize {
+    let size = ty.dtype.size_of();
+
+    match view {
+        _ if ty.numel() == 0 => 0,
+        None => ty.numel() * size,
+        Some(view) => {
+            let last: usize = ty
+                .shape
+                .iter()
+                .zip(&view.strides)
+                .map(|(&d, &s)| (d - 1) * s)
+                .sum();
+
+            (last + 1 + if offset { view.offset } else { 0 }) * size
+        }
+    }
+}
+
+/// Rounds `bytes` up to a nonzero multiple of `ALIGNMENT`.
+fn aligned(bytes: usize) -> usize {
+    bytes.div_ceil(ALIGNMENT).max(1) * ALIGNMENT
+}
+
+impl TimerBuffers {
+    /// Lays out the buffers for `step`, halving the copy count until the allocation succeeds.
+    fn new(step: &MpsStep) -> Option<Self> {
+        let inputs: Vec<usize> = step
+            .inputs
+            .iter()
+            .zip(&step.views)
+            .map(|((b, ty), view)| match b {
+                Buffer::Scalar(_) => ty.dtype.size_of(),
+                _ => bytes_spanned(ty, view.as_ref(), false),
+            })
+            .map(aligned)
+            .collect();
+
+        let outputs: Vec<usize> = std::iter::once(&step.output)
+            .chain(&step.extra_outputs)
+            .enumerate()
+            .map(|(k, (_, ty))| {
+                bytes_spanned(ty, step.output_views.get(k).and_then(Option::as_ref), true)
+            })
+            .map(aligned)
+            .collect();
+
+        let scratch = aligned(step.scratch.map_or(0, |(_, bytes)| bytes));
+        let read: usize = inputs.iter().sum();
+        let written: usize = outputs.iter().sum();
+        let mut copies = COLD_BYTES.div_ceil(read).clamp(2, MOST_COPIES);
+
+        let memory = loop {
+            match Scratch::zeroed(read * copies + written + scratch) {
+                Some(memory) => break memory,
+                None if copies > 1 => copies /= 2,
+                None => return None,
+            }
+        };
+
+        // Layout: `copies` input sets back to back, then the outputs, then scratch.
+        let base = memory.as_ptr();
+        let mut at = read * copies;
+        let mut outs = Vec::with_capacity(outputs.len());
+
+        for size in &outputs {
+            outs.push(base.wrapping_add(at));
+            at += size;
+        }
+
+        let copies = (0..copies)
+            .map(|c| {
+                let mut at = c * read;
+
+                let ins = inputs.iter().map(|size| {
+                    let p = base.wrapping_add(at).cast_const();
+                    at += size;
+                    p
+                });
+
+                ins.chain(outs[1..].iter().map(|p| p.cast_const()))
+                    .collect()
+            })
+            .collect();
+
+        Some(TimerBuffers {
+            output: outs[0],
+            scratch: base.wrapping_add(at),
+            _memory: memory,
+            copies,
+        })
     }
 }

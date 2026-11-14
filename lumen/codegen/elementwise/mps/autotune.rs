@@ -1,6 +1,17 @@
 //! Metal elementwise kernel launch tunings: the candidates, the default, and the sizes worth autotuning.
+//!
+//! Autotuning the Metal elementwise kernel: how a fusion's elements split across threads (`Tuning`), for fusions
+//! codegen kept tunable.
 
-use crate::graph::Graph;
+use crate::autotune::Kernels;
+use crate::codegen::elementwise::ElementwiseTuning;
+use crate::codegen::utils::mps::Mps;
+use crate::graph::{Graph, Primitive};
+use crate::graph_compiler::CompilerConfig;
+use crate::plan::step::mps::Encode;
+use crate::plan::{MpsStep, Tuned};
+use crate::runtime::kernel::mps::{compile_kernels, record_launch, uncompiled};
+use std::collections::{BTreeMap, HashMap};
 
 /// Launch shape for a generated kernel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -136,5 +147,96 @@ impl PyMpsElementwiseConfig {
             self.group(),
             crate::autotune::python::py_repr(&self.contiguous())
         )
+    }
+}
+
+/// What a tunable elementwise fusion needs to regenerate its kernel under another tuning.
+#[derive(Debug, Clone)]
+pub(crate) struct Tunable {
+    /// Per fusion input, whether it is passed by value.
+    pub by_value: Vec<bool>,
+    /// Strided views its outputs are written through, keyed by output index, as `(offset, strides)`.
+    pub views: HashMap<usize, (usize, Vec<usize>)>,
+}
+
+/// What a tunable elementwise fusion `step` keeps as its kernel, or `None` for any other step.
+fn tunable(step: &MpsStep) -> Option<&Tunable> {
+    step.kernel.as_ref()
+}
+
+/// Tuning backend for elementwise fusions: those whose step keeps a `Tunable` as its kernel.
+pub(crate) struct Elementwise {
+    config: CompilerConfig,
+    /// Kernel sources built so far, compiled together by `compile`.
+    sources: BTreeMap<String, String>,
+}
+
+impl Kernels for Elementwise {
+    type Step = MpsStep;
+    type Config = Tuning;
+
+    /// Tunings to try for a tunable fusion of a mid-sized output, or none.
+    fn configs(&self, step: &MpsStep) -> Vec<Tuning> {
+        let Primitive::Fusion { body, .. } = &step.primitive else {
+            return Vec::new();
+        };
+
+        match tunable(step).is_some() && TUNED_ELEMENTS.contains(&step.output.1.numel()) {
+            true => crate::codegen::mps::tunings_of(body),
+            false => Vec::new(),
+        }
+    }
+
+    /// Whether `step` is a fusion lowered to the elementwise kernel, of any size (tuned only at mid sizes).
+    fn handles(&self, step: &MpsStep) -> bool {
+        let Primitive::Fusion { body, .. } = &step.primitive else {
+            return false;
+        };
+
+        tunable(step).is_some() && !crate::codegen::mps::tunings_of(body).is_empty()
+    }
+
+    /// Generates the fusion's kernel under `tuning` and an encoder that launches it.
+    fn build(&mut self, step: &MpsStep, tuning: Tuning) -> Tuned {
+        let Primitive::Fusion { body, .. } = &step.primitive else {
+            unreachable!("a fusion")
+        };
+
+        let t = tunable(step).expect("a tunable fusion");
+
+        // Codegen generated this body's kernel under another tuning, so it generates under this one too.
+        let (kernel, source) =
+            crate::codegen::mps::kernel(body, &t.by_value, &self.config, &t.views, Some(tuning))
+                .expect("a kernel of a tunable fusion under any tuning");
+
+        record_launch(&kernel, body, Some(tuning));
+        self.sources.insert(kernel.clone(), source);
+        let name = kernel.clone();
+
+        let encode: Encode = Box::new(move |step, inputs, output, scratch, keep| {
+            crate::runtime::kernel::mps::encode_with(
+                step, &name, None, None, inputs, output, scratch, keep,
+            )
+        });
+
+        Tuned::new(kernel, encode)
+    }
+
+    /// Compiles the newly generated elementwise kernels.
+    fn compile(&mut self) -> Result<(), String> {
+        compile_kernels(uncompiled(&mut self.sources))
+    }
+}
+
+/// The Metal elementwise kernel's tunings.
+impl ElementwiseTuning for Mps {
+    type Tuner = Elementwise;
+
+    /// An elementwise tuner generating kernels under `config`.
+    fn elementwise_tuner(config: &CompilerConfig) -> Elementwise {
+        Elementwise {
+            config: config.clone(),
+            sources: BTreeMap::new(),
+        }
     }
 }

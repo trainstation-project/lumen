@@ -71,7 +71,7 @@ def compile(
 ):
     """The GEMM for operands of dtypes named `a_dtype` and `b_dtype` writing `d_dtype`, with majors `a_major` ("m" or
     "k"), `b_major` ("k" or "n", of B as the caller's (k, n)) and `d_major` ("m" or "n"), batched or not, with `tile`
-    (tile_m, tile_n, tile_k, warps, stages) from `codegen/dot_general/cuda/config.rs` (stages 0 for as many as fit),
+    (tile_m, tile_n, tile_k, warps, stages) from `codegen/dot_general/cuda/autotune.rs` (stages 0 for as many as fit),
     accumulating in float32, loaded into the current context; `aligned_m`, `aligned_n` and `aligned_k` for an m, n or
     k that is a multiple of the tile's (fewer bounds checks, see `AmpereGemm`); `layouts`, A's, B's and D's (shape,
     strides) as the caller holds them, compiles it for exactly those (each tensor then passed as its address alone).

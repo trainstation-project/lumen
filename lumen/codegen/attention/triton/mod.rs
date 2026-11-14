@@ -3,10 +3,9 @@
 //! layout, and the traced score ops.
 
 mod autotune;
-mod config;
 pub(crate) mod launch;
 
-pub(crate) use config::*;
+pub(crate) use autotune::*;
 
 use std::fmt::Write;
 

@@ -2,9 +2,8 @@
 //! beside this file, in the Metal prelude) and the source generated per fusion to call them.
 
 mod autotune;
-mod config;
 
-pub(crate) use config::*;
+pub(crate) use autotune::*;
 
 use std::fmt::Write;
 

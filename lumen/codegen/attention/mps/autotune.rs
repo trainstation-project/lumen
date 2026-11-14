@@ -1,8 +1,20 @@
 //! Metal flash-attention block sizes, the largest whose tiles fit in threadgroup memory, and the forward's
 //! tunings.
+//!
+//! Autotuning the Metal flash-attention forward: its kernel (8x8 matrices or Metal Performance Primitives), its
+//! simdgroups and its key block.
 
 use crate::DType;
+use crate::autotune::Kernels;
+use crate::codegen::attention::AttentionTuning;
+use crate::codegen::utils::mps::Mps;
+use crate::graph::Primitive;
+use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::passes::attention::{Attention, Backward, grid_batch};
+use crate::plan::step::mps::Encode;
+use crate::plan::{MpsStep, Tuned};
+use crate::runtime::kernel::mps::{compile_routed, uncompiled};
+use std::collections::BTreeMap;
 
 /// Query rows per block for the backward kernel, the largest that fits in threadgroup memory.
 pub(crate) fn backward_block(b: &Backward) -> usize {
@@ -189,5 +201,107 @@ crate::autotune::python::config_class! {
             (false, 8) => ![32, 16, 64].into_iter().any(fit),
             (false, keys) => fit(keys),
         })
+    }
+}
+
+/// Tuning backend for flash attention forwards: the kernel (8x8 matrices or Metal Performance Primitives), its
+/// simdgroups and its key block.
+#[derive(Default)]
+pub(crate) struct Attentions {
+    /// Kernel sources built so far, compiled together by `compile`.
+    sources: BTreeMap<String, String>,
+}
+
+impl Kernels for Attentions {
+    type Step = MpsStep;
+    type Config = crate::codegen::attention::mps::Tuning;
+
+    /// The tunings of an attention forward step's matched attention, laid out as the step reads it.
+    fn configs(&self, step: &MpsStep) -> Vec<Self::Config> {
+        let Primitive::Fusion { body, .. } = &step.primitive else {
+            return Vec::new();
+        };
+
+        let strides = crate::runtime::kernel::mps::attention_strides(step, body);
+
+        match crate::graph_compiler::passes::attention::of_body_strided(body, &strides) {
+            Some(a) => crate::codegen::attention::mps::tunings(&a),
+            None => Vec::new(),
+        }
+    }
+
+    /// Whether `step` is an attention forward run by the flash-attention kernel (not the decode one), of any
+    /// size (tuned only from a million query-key pairs a head).
+    fn handles(&self, step: &MpsStep) -> bool {
+        let Primitive::Fusion { body, .. } = &step.primitive else {
+            return false;
+        };
+
+        let strides = crate::runtime::kernel::mps::attention_strides(step, body);
+
+        crate::graph_compiler::passes::attention::of_body_strided(body, &strides)
+            .is_some_and(|a| !crate::codegen::attention::mps::decodes(&a))
+    }
+
+    /// Whether forced `tuning` runs `step`'s attention (it fits threadgroup memory, see `attention::mps::fits`).
+    fn accepts(&self, step: &MpsStep, tuning: &Self::Config) -> bool {
+        let Primitive::Fusion { body, .. } = &step.primitive else {
+            return false;
+        };
+
+        let strides = crate::runtime::kernel::mps::attention_strides(step, body);
+
+        crate::graph_compiler::passes::attention::of_body_strided(body, &strides).is_some_and(|a| {
+            !crate::codegen::attention::mps::decodes(&a)
+                && crate::codegen::attention::mps::fits(&a, tuning)
+        })
+    }
+
+    /// Generates the forward for `tuning` and an encoder launching it.
+    fn build(&mut self, step: &MpsStep, tuning: Self::Config) -> Tuned {
+        let Primitive::Fusion { body, .. } = &step.primitive else {
+            unreachable!("an attention fusion")
+        };
+
+        let strides = crate::runtime::kernel::mps::attention_strides(step, body);
+        let a = crate::graph_compiler::passes::attention::of_body_strided(body, &strides)
+            .expect("an attention it was tuned for");
+
+        let (kernel, source) = crate::codegen::attention::mps::forward_with(body, &a, tuning)
+            .expect("a tuning generates as the untuned forward does");
+
+        self.sources.insert(kernel.clone(), source);
+        let name = kernel.clone();
+        let views = step.views.clone();
+
+        // Tuned for the step's views: other views (an input bound strided at run time) take the default kernel.
+        let encode: Encode = Box::new(move |step, inputs, output, scratch, keep| {
+            let Primitive::Fusion { name: fusion, .. } = &step.primitive else {
+                unreachable!("an attention fusion")
+            };
+
+            let tuned = (step.views == views).then_some((name.as_str(), tuning));
+
+            crate::runtime::kernel::mps::encode_with(
+                step, fusion, None, tuned, inputs, output, scratch, keep,
+            )
+        });
+
+        Tuned::new(kernel, encode)
+    }
+
+    /// Compiles the newly generated forwards.
+    fn compile(&mut self) -> Result<(), String> {
+        compile_routed(uncompiled(&mut self.sources))
+    }
+}
+
+/// The Metal attention forward's tunings.
+impl AttentionTuning for Mps {
+    type Tuner = Attentions;
+
+    /// An attention tuner with nothing generated yet.
+    fn attention_tuner(_: &CompilerConfig) -> Attentions {
+        Attentions::default()
     }
 }

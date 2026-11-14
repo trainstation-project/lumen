@@ -3,8 +3,7 @@
 //! Rust launches it (`runtime::kernel::cuda::ATTENTION`).
 
 mod autotune;
-mod config;
-pub(crate) use config::*;
+pub(crate) use autotune::*;
 
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::passes::attention::{self, Access, Attention, Score, Strides, Term};

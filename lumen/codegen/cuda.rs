@@ -2,9 +2,9 @@
 //! gives the step's tensors and kept in the step's memo; tensors laid out otherwise get theirs at launch.
 
 use crate::autotune::Autotuner;
-use crate::autotune::cuda::{AttentionForwards, Events, Gemms};
-use crate::codegen::dot_general::GemmCodegen;
+use crate::codegen::attention::AttentionTuning;
 use crate::codegen::dot_general::cuda::matmul;
+use crate::codegen::dot_general::{GemmCodegen, GemmTuning};
 use crate::codegen::elementwise::ElementwiseCodegen;
 use crate::codegen::elementwise::cuda::Layouts;
 use crate::codegen::kinds::gemm_dot;
@@ -13,6 +13,7 @@ use crate::graph::{Graph, Primitive, TensorType};
 use crate::graph_compiler::device::{Device, DeviceModule};
 use crate::graph_compiler::passes::attention::FORWARD;
 use crate::graph_compiler::{Options, plan_options};
+use crate::plan::step::cuda::CudaTimer;
 use crate::plan::{CpuPlan, CudaPlan, CudaStep, Plan, Step as _, StepBase};
 use std::sync::Arc;
 
@@ -170,12 +171,12 @@ impl Device for Cuda {
 
         if config.autotune || crate::autotune::forcing() {
             let tuner = Autotuner {
-                timer: Events { device },
+                timer: CudaTimer { device },
                 autotune: config.autotune,
             };
 
-            tuner.tune(&mut Gemms, &mut plan)?;
-            tuner.tune(&mut AttentionForwards, &mut plan)?;
+            tuner.tune(&mut Cuda::gemm_tuner(config), &mut plan)?;
+            tuner.tune(&mut Cuda::attention_tuner(config), &mut plan)?;
         }
 
         Ok(Box::new(plan))

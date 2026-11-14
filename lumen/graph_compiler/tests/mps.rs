@@ -2265,7 +2265,7 @@ fn skinny_dots_split_their_contraction() {
 fn every_gemm_candidate_matches_the_reference() {
     use crate::autotune::Kernels;
     use crate::codegen::dot_general::mps as gemm;
-    use crate::codegen::dot_general::mps::autotune::{Gemms, matmul_of};
+    use crate::codegen::dot_general::mps::{Gemms, matmul_of};
 
     if !available() {
         return;
@@ -2388,7 +2388,7 @@ fn every_gemm_candidate_matches_the_reference() {
 fn every_tiled_gemm_stores_regions_halves_and_expansions_along_rows_and_columns() {
     use crate::autotune::Kernels;
     use crate::codegen::dot_general::mps as gemm;
-    use crate::codegen::dot_general::mps::autotune::{Gemms, matmul_of};
+    use crate::codegen::dot_general::mps::{Gemms, matmul_of};
 
     if !available() {
         return;
@@ -2576,7 +2576,7 @@ fn every_tiled_gemm_stores_regions_halves_and_expansions_along_rows_and_columns(
 fn every_tuned_paired_and_wide_norm_gemm_matches_the_reference() {
     use crate::autotune::Kernels;
     use crate::codegen::dot_general::mps::Algorithm;
-    use crate::codegen::dot_general::mps::autotune::{Gemms, matmul_of};
+    use crate::codegen::dot_general::mps::{Gemms, matmul_of};
 
     if !available() || !crate::runtime::kernel::mps::mpp_available() {
         return;
@@ -2787,8 +2787,8 @@ fn every_tuned_paired_and_wide_norm_gemm_matches_the_reference() {
 #[test]
 fn every_tuned_gemm_kernel_stores_every_epilogue() {
     use crate::autotune::Kernels;
-    use crate::codegen::dot_general::mps::autotune::{Gemms, matmul_of};
     use crate::codegen::dot_general::mps::{Algorithm, GemmConfig};
+    use crate::codegen::dot_general::mps::{Gemms, matmul_of};
 
     if !available() || !crate::runtime::kernel::mps::mpp_available() {
         return;
@@ -3128,7 +3128,7 @@ fn every_tuned_gemm_kernel_stores_every_epilogue() {
 #[test]
 fn every_gemm_candidate_accumulates_in_the_accum_dtype() {
     use crate::autotune::Kernels;
-    use crate::codegen::dot_general::mps::autotune::{Gemms, matmul_of};
+    use crate::codegen::dot_general::mps::{Gemms, matmul_of};
 
     if !available() {
         return;
@@ -3212,7 +3212,7 @@ fn every_gemm_candidate_accumulates_in_the_accum_dtype() {
 #[test]
 fn gemv_lanes_sum_in_a_bfloat_accumulator() {
     use crate::autotune::Kernels;
-    use crate::codegen::dot_general::mps::autotune::{Gemms, matmul_of};
+    use crate::codegen::dot_general::mps::{Gemms, matmul_of};
 
     if !available() {
         return;
@@ -3308,7 +3308,7 @@ fn gemv_lanes_sum_in_a_bfloat_accumulator() {
 fn strided_gemms_tune_mpp() {
     use crate::autotune::Kernels;
     use crate::codegen::dot_general::mps::Algorithm;
-    use crate::codegen::dot_general::mps::autotune::{Gemms, matmul_of};
+    use crate::codegen::dot_general::mps::{Gemms, matmul_of};
 
     if !available() || !crate::runtime::kernel::mps::mpp_available() {
         return;
@@ -3534,7 +3534,7 @@ fn a_reduction_feeding_a_norm_of_other_rows_is_its_own_kernel() {
 fn every_gemv_candidate_stores_every_epilogue() {
     use crate::autotune::Kernels;
     use crate::codegen::dot_general::mps::Algorithm;
-    use crate::codegen::dot_general::mps::autotune::{Gemms, matmul_of};
+    use crate::codegen::dot_general::mps::{Gemms, matmul_of};
 
     if !available() {
         return;

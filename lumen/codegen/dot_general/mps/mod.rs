@@ -1,8 +1,7 @@
 //! Metal `dot_general` kernels: picking the tile, collapsing operands into batched matmul form and launching.
 
-pub(crate) mod autotune;
+mod autotune;
 mod codegen;
-mod config;
 mod gemv;
 mod linear_cross_entropy;
 mod mpp;
@@ -10,8 +9,8 @@ mod row;
 mod skinny;
 mod tiled;
 
+pub(crate) use autotune::*;
 pub(crate) use codegen::*;
-pub(crate) use config::*;
 pub(crate) use gemv::*;
 pub(crate) use linear_cross_entropy::*;
 pub(crate) use mpp::*;

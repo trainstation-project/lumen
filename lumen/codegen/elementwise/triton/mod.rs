@@ -2,9 +2,8 @@
 //! `elementwise_kernel` (`kernel.py`); and the fill and copy kernels tensors run on CUDA.
 
 mod autotune;
-mod config;
 
-pub(crate) use config::*;
+pub(crate) use autotune::*;
 
 use std::collections::HashMap;
 use std::fmt::Write;

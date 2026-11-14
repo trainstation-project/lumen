@@ -1,4 +1,14 @@
 //! Triton flash-attention autotuning candidates and launch default.
+//!
+//! Autotuning Triton flash attention: its configs for attention steps.
+
+use crate::autotune::Kernels;
+use crate::codegen::attention::AttentionTuning;
+use crate::codegen::attention::triton::launch;
+use crate::codegen::dot_general::triton::launch::Run;
+use crate::codegen::utils::triton::Triton;
+use crate::graph_compiler::CompilerConfig;
+use crate::plan::{TritonStep, Tuned};
 
 /// Tile shape and launch parameters for one Triton flash-attention candidate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,5 +70,40 @@ crate::autotune::python::config_class! {
     #[staticmethod]
     fn candidates() -> Vec<Self> {
         ATTENTION_CONFIGS.iter().copied().map(PyTritonAttentionConfig).collect()
+    }
+}
+
+/// Autotuning candidates for flash-attention steps.
+pub(crate) struct Attentions;
+
+impl Kernels for Attentions {
+    type Step = TritonStep;
+    type Config = AttentionConfig;
+
+    /// Every attention config for an attention step, none otherwise.
+    fn configs(&self, step: &TritonStep) -> Vec<AttentionConfig> {
+        match launch::is_attention(&step.primitive) {
+            true => ATTENTION_CONFIGS.to_vec(),
+            false => Vec::new(),
+        }
+    }
+
+    /// A launch of `step` with `config`.
+    fn build(&mut self, _: &TritonStep, config: AttentionConfig) -> Tuned {
+        let run: Run = Box::new(move |step, inputs, out, outs| {
+            launch::attention(step, inputs, out, outs, Some(&config))
+        });
+
+        Tuned::new(format!("{config:?}"), run)
+    }
+}
+
+/// Triton flash attention's configs.
+impl AttentionTuning for Triton {
+    type Tuner = Attentions;
+
+    /// The attention tuner, the same under every config.
+    fn attention_tuner(_: &CompilerConfig) -> Attentions {
+        Attentions
     }
 }

@@ -2,10 +2,8 @@
 //! fixed `elementwise` loop (`kernel.metal`) runs.
 
 mod autotune;
-mod config;
 
-pub(crate) use autotune::Tunable;
-pub(crate) use config::*;
+pub(crate) use autotune::*;
 
 use std::collections::HashMap;
 use std::fmt::Write;

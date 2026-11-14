@@ -1,4 +1,15 @@
 //! Triton GEMM autotuning candidates and launch defaults, plain and with a row epilogue.
+//!
+//! Autotuning the Triton GEMM: its configs for GEMM steps, whole-row tiles for a row epilogue.
+
+use crate::autotune::Kernels;
+use crate::codegen::dot_general::GemmTuning;
+use crate::codegen::dot_general::triton as codegen;
+use crate::codegen::dot_general::triton::launch::{DOT_ROW, Run, gemm, is_gemm};
+use crate::codegen::utils::triton::Triton;
+use crate::graph::Primitive;
+use crate::graph_compiler::CompilerConfig;
+use crate::plan::{TritonStep, Tuned};
 
 /// Tile shape and launch parameters for one Triton GEMM candidate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,5 +151,42 @@ crate::autotune::python::config_class! {
         .into_iter()
         .map(PyTritonGemmConfig)
         .collect()
+    }
+}
+
+/// Autotuning candidates for GEMM steps.
+pub(crate) struct Gemms;
+
+impl Kernels for Gemms {
+    type Step = TritonStep;
+    type Config = Config;
+
+    /// Every GEMM config for a GEMM step (whole-row tiles for a row epilogue), none otherwise.
+    fn configs(&self, step: &TritonStep) -> Vec<Config> {
+        match &step.primitive {
+            Primitive::Fusion { name, .. } if name == DOT_ROW => {
+                codegen::row_gemm_configs(step.output.1.shape.last().copied().unwrap_or(1))
+            }
+            _ if is_gemm(step) => CONFIGS.to_vec(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// A launch of `step` with `config`.
+    fn build(&mut self, _: &TritonStep, config: Config) -> Tuned {
+        let run: Run =
+            Box::new(move |step, inputs, out, outs| gemm(step, inputs, out, outs, Some(&config)));
+
+        Tuned::new(format!("{config:?}"), run)
+    }
+}
+
+/// The Triton GEMM's configs.
+impl GemmTuning for Triton {
+    type Tuner = Gemms;
+
+    /// The GEMM tuner, the same under every config.
+    fn gemm_tuner(_: &CompilerConfig) -> Gemms {
+        Gemms
     }
 }

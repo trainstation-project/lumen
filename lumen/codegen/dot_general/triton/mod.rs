@@ -2,12 +2,11 @@
 //! column regions of the GEMM output.
 
 mod autotune;
-mod config;
 pub(crate) mod cross_entropy;
 pub(crate) mod launch;
 pub(crate) mod row;
 
-pub(crate) use config::*;
+pub(crate) use autotune::*;
 
 use std::fmt::Write;
 

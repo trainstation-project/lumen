@@ -7,7 +7,9 @@ pub(crate) mod tpu;
 pub(crate) mod triton;
 
 use crate::DType;
+use crate::autotune::Kernels;
 use crate::graph::Graph;
+use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::passes::attention::{Attention, Backward, Dropout, Score, Strides};
 
 /// A backend's flash-attention code generator: the code its kernels run for a fused attention body,
@@ -26,4 +28,13 @@ pub(crate) trait AttentionCodegen {
     /// Code applying dropout `d` to each head's `sq` x `sk` probabilities, computed in `dtype`, for the
     /// forward and backward code to call. Fails on a backend whose kernels have no dropout yet.
     fn dropout(d: &Dropout, dtype: DType, sq: usize, sk: usize) -> Result<String, String>;
+}
+
+/// A backend's autotuning of its flash attention: the `Kernels` the candidate configs of its attention steps come from.
+pub(crate) trait AttentionTuning {
+    /// The backend's attention tuner.
+    type Tuner: Kernels;
+
+    /// A attention tuner for plans compiled under `config`.
+    fn attention_tuner(config: &CompilerConfig) -> Self::Tuner;
 }

@@ -6,6 +6,8 @@ pub(crate) mod mps;
 pub(crate) mod tpu;
 pub(crate) mod triton;
 
+use crate::autotune::Kernels;
+use crate::graph_compiler::CompilerConfig;
 use std::collections::HashMap;
 
 use crate::graph::Graph;
@@ -28,4 +30,13 @@ pub(crate) trait ElementwiseCodegen {
         views: &HashMap<usize, (usize, Vec<usize>)>,
         schedule: &Self::Schedule,
     ) -> Result<Self::Code, String>;
+}
+
+/// A backend's autotuning of its elementwise kernels: the `Kernels` the candidate configs of its elementwise fusions come from.
+pub(crate) trait ElementwiseTuning {
+    /// The backend's elementwise tuner.
+    type Tuner: Kernels;
+
+    /// A elementwise tuner for plans compiled under `config`.
+    fn elementwise_tuner(config: &CompilerConfig) -> Self::Tuner;
 }

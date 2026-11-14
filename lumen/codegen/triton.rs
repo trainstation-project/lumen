@@ -3,7 +3,9 @@
 
 use crate::DType;
 use crate::autotune::Autotuner;
-use crate::autotune::triton::{Events, Gemms, Loops, Tiles};
+use crate::codegen::attention::AttentionTuning;
+use crate::codegen::dot_general::GemmTuning;
+use crate::codegen::elementwise::ElementwiseTuning;
 use crate::codegen::kinds::{gemm_dot, reduction_root};
 use crate::codegen::layout::{TILE, transpose_tiling};
 use crate::codegen::reduction::ReductionCodegen;
@@ -16,6 +18,7 @@ use crate::graph::{Primitive, UPDATES};
 use crate::graph_compiler::device::{Device, DeviceModule, Triton};
 use crate::graph_compiler::passes::horizontal::segments;
 use crate::graph_compiler::{Options, plan_options, positions};
+use crate::plan::step::triton::TritonTimer;
 use crate::plan::{Buffer, CpuPlan, Plan, Step as _, StepBase, TritonPlan, TritonStep};
 
 /// A generated Triton loop kernel for one plan step.
@@ -374,13 +377,13 @@ impl Device for Triton {
 
         if config.autotune || crate::autotune::forcing() {
             let tuner = Autotuner {
-                timer: Events { device },
+                timer: TritonTimer { device },
                 autotune: config.autotune,
             };
 
-            tuner.tune(&mut Gemms, &mut plan)?;
-            tuner.tune(&mut Tiles, &mut plan)?;
-            tuner.tune(&mut Loops, &mut plan)?;
+            tuner.tune(&mut codegen::Triton::gemm_tuner(config), &mut plan)?;
+            tuner.tune(&mut codegen::Triton::attention_tuner(config), &mut plan)?;
+            tuner.tune(&mut codegen::Triton::elementwise_tuner(config), &mut plan)?;
         }
 
         Ok(Box::new(plan))

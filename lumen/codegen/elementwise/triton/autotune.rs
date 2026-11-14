@@ -1,6 +1,15 @@
 //! Triton loop launch configs: the autotuning candidates and default of the elementwise kernels, which the
 //! other kernels looping over a flat range or a row (row, reduction, scan and the in-place updates) launch
 //! with too.
+//!
+//! Autotuning Triton loop kernels: their block configs, for the kernels codegen kept on the steps.
+
+use crate::autotune::Kernels;
+use crate::codegen::elementwise::ElementwiseTuning;
+use crate::codegen::triton::{Kernel, Template};
+use crate::codegen::utils::triton::Triton;
+use crate::graph_compiler::CompilerConfig;
+use crate::plan::{TritonStep, Tuned};
 
 /// Block size and warp count for a kernel that loops over a flat range or a row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,5 +100,48 @@ crate::autotune::python::config_class! {
         .into_iter()
         .map(PyTritonLoopConfig)
         .collect()
+    }
+}
+
+/// Autotuning candidates for loop kernels, the ones codegen kept on the steps.
+pub(crate) struct Loops;
+
+/// The loop kernel codegen kept on `step`, if it has one.
+fn loop_kernel(step: &TritonStep) -> Option<&Kernel> {
+    step.kernel.as_ref()
+}
+
+impl Kernels for Loops {
+    type Step = TritonStep;
+    type Config = LoopConfig;
+
+    /// Loop configs whose block covers the kernel's lanes and splits; none for a scatter-add.
+    fn configs(&self, step: &TritonStep) -> Vec<LoopConfig> {
+        let Some(kernel) = loop_kernel(step) else {
+            return Vec::new();
+        };
+
+        // Timed on zeroed indices, every update would add into one position, measuring contention on it
+        // rather than the kernels: a scatter-add's launch with the configs in its config.rs.
+        if let Some(Template::ScatterAdd { .. }) = kernel.template {
+            return Vec::new();
+        }
+
+        loop_configs(kernel.lanes.max(kernel.splits.next_power_of_two()))
+    }
+
+    /// The step launched with `config`.
+    fn build(&mut self, _: &TritonStep, config: LoopConfig) -> Tuned {
+        Tuned::new(format!("{config:?}"), config)
+    }
+}
+
+/// Triton loop kernels' configs.
+impl ElementwiseTuning for Triton {
+    type Tuner = Loops;
+
+    /// The loop tuner, the same under every config.
+    fn elementwise_tuner(_: &CompilerConfig) -> Loops {
+        Loops
     }
 }
