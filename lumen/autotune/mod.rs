@@ -1,12 +1,8 @@
 //! Backend-independent kernel autotuning: benchmarks candidate configs of each plan step and keeps the fastest.
 
-pub(crate) mod cuda;
 pub(crate) mod forced;
-#[cfg(lumen_mps_linked)]
-pub(crate) mod mps;
 #[cfg(feature = "python")]
 pub(crate) mod python;
-pub(crate) mod triton;
 
 pub(crate) use forced::forcing;
 
