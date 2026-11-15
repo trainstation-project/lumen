@@ -53,23 +53,6 @@ pub(crate) fn is_attention(p: &Primitive) -> bool {
     matches!(p, Primitive::Fusion { name, .. } if name == FORWARD || name == BACKWARD)
 }
 
-/// A tuned flash-attention launch with its config baked in.
-type Run =
-    Box<dyn Fn(&StepBase, &[Tensor], &Tensor, &[Tensor]) -> Result<(), String> + Send + Sync>;
-
-/// Runs flash-attention `step` with its tuned config, or the untuned one for its head size.
-pub(crate) fn run(
-    step: &StepBase,
-    inputs: &[Tensor],
-    out: &Tensor,
-    outs: &[Tensor],
-) -> Result<(), String> {
-    match step.launch::<Run>() {
-        Some(run) => run(step, inputs, out, outs),
-        None => attention(step, inputs, out, outs, None),
-    }
-}
-
 /// `t`, or a contiguous copy of it when `kept` refuses its layout.
 fn contiguous(t: &Tensor, kept: impl Fn(&Tensor) -> bool) -> Result<Tensor, String> {
     if t.is_contiguous() || kept(t) {

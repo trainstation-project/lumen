@@ -15,9 +15,12 @@ use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
 use super::run::Buffers;
-use crate::Device;
 use crate::graph::{Primitive, Scope, TensorType, View};
 use crate::tensor::contiguous_strides;
+use crate::{Device, Tensor};
+
+/// The tensors a step runs on, each a view of its buffer: its inputs, its output and its further outputs.
+pub(crate) type Tensors = (Vec<Tensor>, Tensor, Vec<Tensor>);
 
 /// Where a step reads or writes a value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -117,8 +120,12 @@ impl fmt::Debug for Memo {
 pub struct Tuned {
     /// Name of the chosen kernel.
     pub kernel: String,
-    /// Backend launch configuration, recovered with `StepBase::launch`.
+    /// Backend launch configuration, recovered with `Tuned::launch`.
     launch: Arc<dyn Any + Send + Sync>,
+    /// The views of the step's operands it was tuned for (a backend whose variants assume them runs it only on
+    /// those: MPS).
+    #[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
+    pub(crate) views: Vec<Option<View>>,
 }
 
 impl Tuned {
@@ -127,7 +134,18 @@ impl Tuned {
         Tuned {
             kernel,
             launch: Arc::new(launch),
+            views: Vec::new(),
         }
+    }
+
+    /// The launch, tuned for a step reading its operands through `views`.
+    pub(crate) fn for_views(self, views: Vec<Option<View>>) -> Self {
+        Tuned { views, ..self }
+    }
+
+    /// The launch configuration, if it is an `L`.
+    pub(crate) fn launch<L: 'static>(&self) -> Option<&L> {
+        self.launch.downcast_ref::<L>()
     }
 }
 
@@ -138,11 +156,6 @@ impl fmt::Debug for Tuned {
 }
 
 impl StepBase {
-    /// The tuned launch configuration, if one of type `L` was stored.
-    pub(crate) fn launch<L: 'static>(&self) -> Option<&L> {
-        self.tuned.as_ref()?.launch.downcast_ref::<L>()
-    }
-
     /// Element strides each operand is read with: its view's, or contiguous ones.
     pub(crate) fn input_strides(&self) -> Vec<Vec<usize>> {
         let strides = |(_, ty): &(Buffer, TensorType), view: &Option<View>| match view {

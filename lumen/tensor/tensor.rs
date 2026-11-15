@@ -183,7 +183,7 @@ impl Tensor {
 
         #[cfg(lumen_mps_linked)]
         if let Device::Mps(_) = self.device() {
-            return crate::runtime::kernel::mps::encode::fill(self, value)
+            return crate::runtime::kernel::mps::fill(self, value)
                 .unwrap_or_else(|e| panic!("fill_: {e}"));
         }
 
@@ -837,7 +837,7 @@ impl Tensor {
         #[cfg(lumen_mps_linked)]
         if self.device() == Device::Mps(0) && src.device() == Device::Mps(0) {
             if self.numel() > 0 {
-                crate::runtime::kernel::mps::encode::copy(self, src)?;
+                crate::runtime::kernel::mps::copy(self, src)?;
             }
 
             return Ok(self);

@@ -3,7 +3,10 @@
 
 use crate::DType;
 use crate::autotune::Autotuner;
-use crate::autotune::triton::{Events, Gemms, Loops, Tiles};
+use crate::codegen::attention::triton::FlashAttention;
+use crate::codegen::dot_general::triton::Gemm;
+use crate::codegen::elementwise::triton::Loop;
+use crate::codegen::kernel::Runner;
 use crate::codegen::kinds::{gemm_dot, reduction_root};
 use crate::codegen::layout::{TILE, transpose_tiling};
 use crate::codegen::reduction::ReductionCodegen;
@@ -16,7 +19,10 @@ use crate::graph::{Primitive, UPDATES};
 use crate::graph_compiler::device::{Device, DeviceModule, Triton};
 use crate::graph_compiler::passes::horizontal::segments;
 use crate::graph_compiler::{Options, plan_options, positions};
+use crate::plan::step::Tensors;
+use crate::plan::step::triton::{Collective, TritonTimer, Unsupported, Wait};
 use crate::plan::{Buffer, CpuPlan, Plan, Step as _, StepBase, TritonPlan, TritonStep};
+use std::sync::Arc;
 
 /// A generated Triton loop kernel for one plan step.
 #[derive(Debug, Clone)]
@@ -162,9 +168,31 @@ pub(crate) fn codegen(plan: CpuPlan, options: &Options) -> Result<TritonPlan, St
     let deterministic = options.config.deterministic;
 
     plan.map(|step| {
-        let kernel = loop_kernel(&step, deterministic)?;
-        Ok(TritonStep::new(step.into_base(), kernel))
+        let code = loop_kernel(&step, deterministic)?;
+        let base = step.into_base();
+        let kernel = kernel_of(&base, code.is_some());
+        Ok(TritonStep::new(base, code, kernel))
     })
+}
+
+/// The kernel `step` runs: flash attention, the GEMM, a collective or a wait, else its generated loop kernel (when
+/// codegen generated one: `looped`), else none (it fails when it runs).
+fn kernel_of(step: &StepBase, looped: bool) -> Arc<dyn Runner<TritonStep, Tensors>> {
+    match &step.primitive {
+        p if crate::codegen::attention::triton::launch::is_attention(p) => Arc::new(FlashAttention),
+        _ if crate::codegen::dot_general::triton::launch::is_gemm(step) => Arc::new(Gemm),
+        p if p.is_collective() => Arc::new(Collective),
+        Primitive::DeviceWait | Primitive::HostWait => Arc::new(Wait),
+        Primitive::Fusion { .. }
+        | Primitive::Cumsum { .. }
+        | Primitive::DynamicUpdateSlice
+        | Primitive::ScatterAdd { .. }
+            if looped =>
+        {
+            Arc::new(Loop)
+        }
+        _ => Arc::new(Unsupported),
+    }
 }
 
 /// The name of a templated kernel: `kind` plus a hash of `key`, what its `BODY` is generated from (the
@@ -374,13 +402,11 @@ impl Device for Triton {
 
         if config.autotune || crate::autotune::forcing() {
             let tuner = Autotuner {
-                timer: Events { device },
+                timer: TritonTimer { device },
                 autotune: config.autotune,
             };
 
-            tuner.tune(&mut Gemms, &mut plan)?;
-            tuner.tune(&mut Tiles, &mut plan)?;
-            tuner.tune(&mut Loops, &mut plan)?;
+            tuner.tune_steps(&mut plan)?;
         }
 
         Ok(Box::new(plan))

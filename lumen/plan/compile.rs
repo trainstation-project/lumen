@@ -548,7 +548,7 @@ impl CpuPlan {
                 packed: Vec::new(),
                 interleaved: Vec::new(),
             },
-            steps: steps.into_iter().map(CpuStep).collect(),
+            steps: steps.into_iter().map(CpuStep::new).collect(),
         }
     }
 }

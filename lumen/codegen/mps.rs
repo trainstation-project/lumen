@@ -2,12 +2,16 @@
 //! fusion step its kernel name; and the kernel shape (GEMV row, GEMM, row reduction, reduction, transpose or
 //! elementwise) each fused body lowers to.
 
-use crate::autotune::mps::Tunable;
 use crate::codegen::attention::AttentionCodegen;
+use crate::codegen::attention::mps::FlashAttention;
+use crate::codegen::dot_general::mps::Gemm;
 use crate::codegen::dot_general::mps::{gemm_kernel, gemm_row_kernel, gemv_config, row_dot};
 use crate::codegen::dynamic_slice::DynamicSliceCodegen;
 use crate::codegen::elementwise::ElementwiseCodegen;
-use crate::codegen::elementwise::mps::{Tuning, elementwise_tuning, elementwise_tunings};
+use crate::codegen::elementwise::mps::{
+    Elementwise, Tunable, Tuning, elementwise_tuning, elementwise_tunings,
+};
+use crate::codegen::kernel::Runner;
 use crate::codegen::kinds::{gemm_dot, reduction_root, row_reductions};
 use crate::codegen::layout::{LayoutCodegen, transpose_tiling};
 use crate::codegen::reduction::ReductionCodegen;
@@ -18,9 +22,11 @@ use crate::graph_compiler::device::{Device, DeviceModule};
 use crate::graph_compiler::passes::attention::{self, Strides};
 use crate::graph_compiler::passes::place_views;
 use crate::graph_compiler::{CompilerConfig, Options};
+use crate::plan::step::mps::{Encoding, Unsupported};
 use crate::plan::{Buffer, CpuPlan, MpsPlan, MpsStep, Plan, PlanOptions, Step as _, StepBase};
-use crate::runtime::kernel::mps::encode::{compile_routed, record_launch};
+use crate::runtime::kernel::mps::{compile_routed, record_launch};
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 /// The MPS plan of `plan`: generates and compiles each pending fusion step's kernel, writing its outputs through
 /// the step's output views and reading its by-value inputs as scalars, and names the step after it. An
@@ -30,7 +36,7 @@ pub(crate) fn codegen(mut plan: CpuPlan, options: &Options) -> Result<MpsPlan, S
     let mut sources = BTreeMap::new();
     let mut kernels: Vec<Option<Tunable>> = plan.steps().iter().map(|_| None).collect();
 
-    for (at, step) in plan.steps_mut().iter_mut().map(|s| &mut s.0).enumerate() {
+    for (at, step) in plan.steps_mut().iter_mut().map(|s| &mut s.base).enumerate() {
         // Output views, keyed by output index, of a fusion writing straight into a placed buffer.
         let mut views: HashMap<usize, (usize, Vec<usize>)> = step
             .output_views
@@ -93,8 +99,58 @@ pub(crate) fn codegen(mut plan: CpuPlan, options: &Options) -> Result<MpsPlan, S
     }
 
     compile_routed(sources)?;
-    let mut kernels = kernels.into_iter();
-    plan.map(|step| Ok(MpsStep::new(step.into_base(), kernels.next().flatten())))
+    let mut codes = kernels.into_iter();
+
+    // The kernels steps run, each shared by every step running it.
+    let gemm: Arc<dyn Runner<MpsStep, Encoding>> = Arc::new(Gemm {
+        config: config.clone(),
+    });
+
+    let elementwise: Arc<dyn Runner<MpsStep, Encoding>> = Arc::new(Elementwise {
+        config: config.clone(),
+    });
+
+    let forward: Arc<dyn Runner<MpsStep, Encoding>> = Arc::new(FlashAttention);
+
+    plan.map(|step| {
+        let base = step.into_base();
+        let code = codes.next().flatten();
+
+        let kernel = kernel_of(&base, code.is_some(), [&gemm, &forward, &elementwise]);
+
+        Ok(MpsStep::new(base, code, kernel))
+    })
+}
+
+/// The kernel `step` runs: the GEMMs for a matmul fusion they take, the flash-attention forward for an attention, the
+/// elementwise kernel for a fusion codegen kept tunable (`tunable`), the fusion encoder for any other fusion, else
+/// its primitive's kernel. The `tuned` kernels (GEMM, attention, elementwise) are shared by the plan's steps.
+fn kernel_of(
+    step: &StepBase,
+    tunable: bool,
+    [gemm, forward, elementwise]: [&Arc<dyn Runner<MpsStep, Encoding>>; 3],
+) -> Arc<dyn Runner<MpsStep, Encoding>> {
+    use Primitive::*;
+
+    match &step.primitive {
+        _ if crate::codegen::dot_general::mps::runs(step) => gemm.clone(),
+        _ if crate::codegen::attention::mps::runs(step) => forward.clone(),
+        _ if crate::codegen::elementwise::mps::runs(step, tunable) => elementwise.clone(),
+        Fusion { .. } => Arc::new(crate::runtime::kernel::mps::Fusion),
+        ReduceSum { .. } | ReduceMax { .. } => Arc::new(crate::codegen::reduction::mps::Reduction),
+        Cumsum { .. } => Arc::new(crate::codegen::scan::mps::Cumsum),
+        ScatterAdd { .. } => Arc::new(crate::codegen::scatter_add::mps::ScatterAdd),
+        LinearCrossEntropy => Arc::new(crate::codegen::dot_general::mps::LinearCrossEntropy),
+        DotGeneral { .. } => Arc::new(crate::codegen::dot_general::mps::Matmul),
+        Reshape { .. } => Arc::new(crate::codegen::dynamic_slice::mps::Copy),
+        DynamicSlice { .. } | DynamicUpdateSlice => {
+            Arc::new(crate::codegen::dynamic_slice::mps::DynamicSlice)
+        }
+        Full { .. } | Iota { .. } => Arc::new(crate::codegen::factory::mps::Factory),
+        RandomBits { .. } => Arc::new(crate::codegen::random::mps::RandomBits),
+        HostWait => Arc::new(crate::plan::step::mps::HostWait),
+        _ => Arc::new(Unsupported),
+    }
 }
 
 /// Default launch tuning when `body` lowers to the elementwise kernel, else `None`.
@@ -223,9 +279,7 @@ pub(crate) fn scratch_bytes(p: &Primitive, inputs: &[&TensorType], _output: &Ten
         Primitive::Cumsum {
             axis, accum_dtype, ..
         } => crate::codegen::scan::mps::scratch_bytes(inputs[0], *axis, *accum_dtype),
-        Primitive::Fusion { body, .. } => {
-            crate::runtime::kernel::mps::encode::fusion_scratch_bytes(body)
-        }
+        Primitive::Fusion { body, .. } => crate::runtime::kernel::mps::fusion_scratch_bytes(body),
         Primitive::LinearCrossEntropy => {
             crate::codegen::dot_general::mps::linear_cross_entropy_scratch(inputs[0], inputs[1])
         }
@@ -311,18 +365,11 @@ fn lower(module: DeviceModule<'_, Mps>) -> Result<MpsPlan, String> {
 
     if config.autotune || crate::autotune::forcing() {
         let tuner = crate::autotune::Autotuner {
-            timer: crate::autotune::mps::Mps,
+            timer: crate::plan::step::mps::MpsTimer,
             autotune: config.autotune,
         };
 
-        let mut elementwise = crate::autotune::mps::Elementwise {
-            config,
-            sources: BTreeMap::new(),
-        };
-
-        tuner.tune(&mut elementwise, &mut plan)?;
-        tuner.tune(&mut crate::autotune::mps::Gemms::new(config), &mut plan)?;
-        tuner.tune(&mut crate::autotune::mps::Attentions::default(), &mut plan)?;
+        tuner.tune_steps(&mut plan)?;
     }
 
     // Relabel dots reading packed weight blocks (directly or through same-sized elementwise steps) as `Nx dot_general`.

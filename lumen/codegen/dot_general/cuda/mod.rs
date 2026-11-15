@@ -1,21 +1,27 @@
 //! The CUDA (CuTe DSL) GEMM: which matmuls it runs, its launch configs, and the epilogue it runs fused after one. The
 //! kernel and its launcher are Python (`ampere.py`, `launch.py`).
-
-mod config;
-pub(crate) use config::*;
+//!
+//! The CUDA (CuTe DSL) GEMM kernel: its autotuning candidates, the tile it launches with untuned, and its launch on
+//! matmul steps and GEMM fusions (their epilogue generated for the tensors' layouts).
 
 use std::fmt::Write;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 use crate::DType;
+use crate::Tensor;
 use crate::codegen::dot_general::GemmCodegen;
 use crate::codegen::elementwise::cuda::Layouts;
 use crate::codegen::emitter::Emit;
 use crate::codegen::emitter::cuda::Emitter;
+use crate::codegen::kernel::Kernel;
+use crate::codegen::kinds::gemm_dot;
 use crate::codegen::regions::{Region, gemm_expanded, gemm_regions};
 use crate::codegen::store::triton::gather_index;
 use crate::codegen::utils::cuda::{Cuda, cute_type, unsigned};
 use crate::graph::{Graph, Node, Primitive, Var};
+use crate::plan::CudaStep;
+use crate::plan::step::Tensors;
+use crate::runtime::kernel::cuda::{GEMM, Output};
 
 /// Bytes of the vectors the GEMM's epilogue moves the product by, from shared memory to its outputs.
 const VECTOR_BYTES: usize = 16;
@@ -372,4 +378,381 @@ def EPILOGUE(ins, outs, acc, l, m, n, aligned: cutlass.Constexpr):
 
         Ok((format!("cuda_gemm_{:016x}", hasher.finish()), source))
     }
+}
+
+/// CTA tile, warps and pipeline stages of one Ampere GEMM (`ampere.py`'s `AmpereGemm`) candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Config {
+    /// Output rows per CTA.
+    pub tile_m: usize,
+    /// Output columns per CTA.
+    pub tile_n: usize,
+    /// Reduction-axis slice each pipeline stage holds.
+    pub tile_k: usize,
+    /// Warps per CTA (4 or 8), laid out 2 along M by `warps / 2` along N.
+    pub warps: usize,
+    /// A/B pipeline stages in shared memory, 0 for as many as fit at the CTAs per SM `warps` allows (two with 4
+    /// warps, one with 8); a count only one CTA per SM fits runs one.
+    pub stages: usize,
+}
+
+/// GEMM candidates the autotuner benchmarks, largest tiles first, each with 3 to 5 stages where they fit (a 64-deep
+/// k-tile's A/B stage is twice a 32-deep one's), and the 32-deep ones also with as many as fit (6 to 9, the stages
+/// they ran with before stages were tuned). On an H100 (bf16) 128 x 256 of 64 x 64 warp tiles leads from 4096³
+/// up (457 vs 405 TFLOPS for 128 x 128), and the 64-row tiles at 128 x 4096 x 4096 (142 vs 70), where bigger tiles
+/// leave SMs idle; on an A100 128 x 128 x 64 at 1000 x 4096 x 1000, where 64 CTAs leave SMs idle (80 vs 86 us for
+/// 128 x 128 x 32).
+pub(crate) const CONFIGS: [Config; 24] = [
+    Config {
+        tile_m: 128,
+        tile_n: 256,
+        tile_k: 32,
+        warps: 8,
+        stages: 3,
+    },
+    Config {
+        tile_m: 128,
+        tile_n: 256,
+        tile_k: 32,
+        warps: 8,
+        stages: 4,
+    },
+    Config {
+        tile_m: 128,
+        tile_n: 256,
+        tile_k: 32,
+        warps: 8,
+        stages: 5,
+    },
+    Config {
+        tile_m: 128,
+        tile_n: 256,
+        tile_k: 32,
+        warps: 8,
+        stages: 0,
+    },
+    Config {
+        tile_m: 128,
+        tile_n: 256,
+        tile_k: 64,
+        warps: 8,
+        stages: 3,
+    },
+    Config {
+        tile_m: 128,
+        tile_n: 128,
+        tile_k: 32,
+        warps: 4,
+        stages: 3,
+    },
+    Config {
+        tile_m: 128,
+        tile_n: 128,
+        tile_k: 32,
+        warps: 4,
+        stages: 4,
+    },
+    Config {
+        tile_m: 128,
+        tile_n: 128,
+        tile_k: 32,
+        warps: 4,
+        stages: 5,
+    },
+    Config {
+        tile_m: 128,
+        tile_n: 128,
+        tile_k: 64,
+        warps: 4,
+        stages: 3,
+    },
+    Config {
+        tile_m: 128,
+        tile_n: 128,
+        tile_k: 64,
+        warps: 4,
+        stages: 4,
+    },
+    Config {
+        tile_m: 128,
+        tile_n: 64,
+        tile_k: 32,
+        warps: 4,
+        stages: 3,
+    },
+    Config {
+        tile_m: 128,
+        tile_n: 64,
+        tile_k: 32,
+        warps: 4,
+        stages: 4,
+    },
+    Config {
+        tile_m: 128,
+        tile_n: 64,
+        tile_k: 32,
+        warps: 4,
+        stages: 5,
+    },
+    Config {
+        tile_m: 128,
+        tile_n: 64,
+        tile_k: 32,
+        warps: 4,
+        stages: 0,
+    },
+    Config {
+        tile_m: 64,
+        tile_n: 128,
+        tile_k: 32,
+        warps: 4,
+        stages: 3,
+    },
+    Config {
+        tile_m: 64,
+        tile_n: 128,
+        tile_k: 32,
+        warps: 4,
+        stages: 4,
+    },
+    Config {
+        tile_m: 64,
+        tile_n: 128,
+        tile_k: 32,
+        warps: 4,
+        stages: 5,
+    },
+    Config {
+        tile_m: 64,
+        tile_n: 128,
+        tile_k: 32,
+        warps: 4,
+        stages: 0,
+    },
+    Config {
+        tile_m: 64,
+        tile_n: 64,
+        tile_k: 32,
+        warps: 4,
+        stages: 3,
+    },
+    Config {
+        tile_m: 64,
+        tile_n: 64,
+        tile_k: 32,
+        warps: 4,
+        stages: 4,
+    },
+    Config {
+        tile_m: 64,
+        tile_n: 64,
+        tile_k: 32,
+        warps: 4,
+        stages: 5,
+    },
+    Config {
+        tile_m: 64,
+        tile_n: 64,
+        tile_k: 32,
+        warps: 4,
+        stages: 0,
+    },
+    Config {
+        tile_m: 64,
+        tile_n: 64,
+        tile_k: 64,
+        warps: 4,
+        stages: 3,
+    },
+    Config {
+        tile_m: 64,
+        tile_n: 64,
+        tile_k: 64,
+        warps: 4,
+        stages: 4,
+    },
+];
+
+/// Fewest multiply-adds a matmul is autotuned at (1024³): below, the GEMM takes tens of microseconds whatever its
+/// tile, while timing every candidate costs a CuTe compile each.
+pub(crate) const TUNED_MACS: usize = 1 << 30;
+
+/// The untuned tile for outputs it fills the GPU with: 128 x 256, 8 warps, as many stages as fit.
+const WIDE: Config = Config {
+    tile_m: 128,
+    tile_n: 256,
+    tile_k: 32,
+    warps: 8,
+    stages: 0,
+};
+
+/// The untuned tile otherwise: 128 x 128, 4 warps, two CTAs an SM.
+const NARROW: Config = Config {
+    tile_m: 128,
+    tile_n: 128,
+    tile_k: 32,
+    warps: 4,
+    stages: 0,
+};
+
+/// The config used untuned for a `batch` x (`m`, `n`) output on a GPU of `sms` SMs: the wide tile once its CTAs
+/// alone make a wave, else the narrow one so smaller outputs still spread over every SM.
+#[cfg_attr(not(all(feature = "python", lumen_cuda_linked)), allow(dead_code))]
+pub(crate) fn untuned(batch: usize, m: usize, n: usize, sms: usize) -> Config {
+    let tiles = batch * m.div_ceil(WIDE.tile_m) * n.div_ceil(WIDE.tile_n);
+
+    match tiles >= sms {
+        true => WIDE,
+        false => NARROW,
+    }
+}
+
+#[cfg(feature = "python")]
+crate::autotune::python::config_class! {
+    /// `lumen.autotune.CudaGemmConfig`: a tile of the CUDA backend's SM80 GEMM, one of its autotuning candidates or
+    /// any other (`stages` 0 for as many as fit).
+    PyCudaGemmConfig(Config) = "CudaGemmConfig" {
+        tile_m: usize,
+        tile_n: usize,
+        tile_k: usize,
+        warps: usize,
+        stages: usize = 0,
+    }
+
+    /// Every config the autotuner times, in its order.
+    #[staticmethod]
+    fn candidates() -> Vec<Self> {
+        CONFIGS.iter().copied().map(PyCudaGemmConfig).collect()
+    }
+}
+
+/// The Ampere GEMM, running a matmul step or a GEMM fusion (its epilogue writing the fusion's outputs from the
+/// product).
+pub(crate) struct Gemm;
+
+impl Kernel for Gemm {
+    type Step = CudaStep;
+    type Buffers = Tensors;
+    type Config = Config;
+
+    /// Every GEMM tile for a step of at least `TUNED_MACS` multiply-adds, none otherwise.
+    fn configs(&self, step: &CudaStep) -> Vec<Config> {
+        match macs(step) {
+            Some(macs) if macs >= TUNED_MACS => CONFIGS.to_vec(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// Runs the matmul on the GEMM with `config`'s tile, A as (.., m, k) and B as (.., k, n) whichever of their dims
+    /// contract; a GEMM fusion's epilogue, generated for its tensors' layouts (kept in the step's memo), writes its
+    /// outputs from the product.
+    fn run(
+        &self,
+        step: &CudaStep,
+        config: Option<&Config>,
+        (inputs, out, outs): &Tensors,
+    ) -> Result<(), String> {
+        // A GEMM fusion's matmul, and the body it runs in.
+        let fused = match &step.primitive {
+            Primitive::Fusion { body, .. } => gemm_dot(body).map(|dot| (body, dot)),
+            _ => None,
+        };
+
+        let (dot, [lhs, rhs]) = match (&step.primitive, fused) {
+            (p @ Primitive::DotGeneral { .. }, _) => (p, [0, 1]),
+            (_, Some((body, dot))) => {
+                let position = |v| {
+                    body.inputs()
+                        .iter()
+                        .position(|&i| i == v)
+                        .expect("an input")
+                };
+                (
+                    &dot.primitive,
+                    [position(dot.inputs[0]), position(dot.inputs[1])],
+                )
+            }
+            _ => unreachable!("a matmul step or a GEMM fusion"),
+        };
+
+        let Primitive::DotGeneral {
+            lhs_contracting,
+            rhs_contracting,
+            ..
+        } = dot
+        else {
+            unreachable!("a matmul")
+        };
+
+        let gemm = GEMM.get().ok_or(
+            "the CUDA backend's GEMM runs from Python (lumen.codegen.dot_general.cuda): none is installed",
+        )?;
+
+        let outputs: Vec<Tensor> = std::iter::once(out).chain(outs).cloned().collect();
+
+        if outputs.iter().all(|t| t.numel() == 0) {
+            return Ok(());
+        }
+
+        let rank = inputs[lhs].ndim();
+
+        let a = match lhs_contracting[0] == rank - 1 {
+            true => inputs[lhs].clone(),
+            false => inputs[lhs].transpose(rank - 2, rank - 1),
+        };
+
+        let b = match rhs_contracting[0] == rank - 2 {
+            true => inputs[rhs].clone(),
+            false => inputs[rhs].transpose(rank - 2, rank - 1),
+        };
+
+        let Some((body, dot)) = fused else {
+            return gemm(&a, &b, Output::Product(out), config);
+        };
+
+        let tensors: Vec<Tensor> = inputs.iter().chain(&outputs).map(Tensor::flat).collect();
+        let (ins, outs) = tensors.split_at(inputs.len());
+
+        let layouts = Layouts {
+            inputs: inputs.iter().map(|t| t.strides().to_vec()).collect(),
+            outputs: outputs.iter().map(|t| t.strides().to_vec()).collect(),
+            spans: tensors.iter().map(Tensor::numel).collect(),
+        };
+
+        let code = crate::codegen::cuda::generated(step, layouts)?;
+
+        let output = Output::Epilogue {
+            code: code.as_ref(),
+            dtype: body.type_of(dot.output).dtype,
+            inputs: ins,
+            outputs: outs,
+        };
+
+        gemm(&a, &b, output, config)
+    }
+}
+
+/// The multiply-adds of the matmul `step` runs on the GEMM: a matmul step's, or a GEMM fusion's.
+fn macs(step: &CudaStep) -> Option<usize> {
+    let (dot, lhs, product) = match &step.primitive {
+        p @ Primitive::DotGeneral { .. } => (p, &step.inputs[0].1, step.output.1.numel()),
+        Primitive::Fusion { body, .. } => {
+            let dot = gemm_dot(body)?;
+            (
+                &dot.primitive,
+                body.type_of(dot.inputs[0]),
+                body.type_of(dot.output).numel(),
+            )
+        }
+        _ => return None,
+    };
+
+    let Primitive::DotGeneral {
+        lhs_contracting, ..
+    } = dot
+    else {
+        return None;
+    };
+
+    Some(product * lhs.shape[lhs_contracting[0]])
 }

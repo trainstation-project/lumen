@@ -171,3 +171,26 @@ pub(crate) fn encode(
         name: label,
     })
 }
+
+/// The Metal scatter-add kernels.
+pub(crate) struct ScatterAdd;
+
+impl crate::codegen::kernel::Kernel for ScatterAdd {
+    type Step = crate::plan::MpsStep;
+    type Buffers = crate::plan::step::mps::Encoding;
+    type Config = ();
+
+    /// Encodes the scatter-add.
+    fn run(
+        &self,
+        step: &crate::plan::MpsStep,
+        _: Option<&()>,
+        e: &crate::plan::step::mps::Encoding,
+    ) -> Result<(), String> {
+        let (inputs, output, scratch, keep) =
+            (e.inputs.as_slice(), e.output, e.scratch, e.keep.clone());
+        let _ = scratch;
+
+        encode(step, inputs, output, scratch, keep)
+    }
+}

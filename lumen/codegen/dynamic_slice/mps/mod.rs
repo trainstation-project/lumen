@@ -2,8 +2,10 @@
 //! an out-of-place update starts from, and the source of a fused chain of dynamic-update-slices.
 
 use crate::codegen::utils::mps::Mps;
+use crate::graph::Primitive;
 use crate::runtime::kernel::Launch as _;
 use crate::runtime::kernel::mps::MpsLaunch;
+use crate::runtime::kernel::mps::{Grid, dims_arg, u64_arg};
 use std::fmt::Write;
 
 use indoc::formatdoc;
@@ -163,5 +165,117 @@ impl DynamicSliceCodegen for Mps {
         Err(format!(
             "a dynamic_update_slice into {operand} runs Metal's fixed kernel"
         ))
+    }
+}
+
+/// The copy the plan writes an output aliasing another buffer with (a reshape): the input's bytes copied whole.
+pub(crate) struct Copy;
+
+impl crate::codegen::kernel::Kernel for Copy {
+    type Step = crate::plan::MpsStep;
+    type Buffers = crate::plan::step::mps::Encoding;
+    type Config = ();
+
+    /// Copies the input's bytes into the output.
+    fn run(
+        &self,
+        step: &crate::plan::MpsStep,
+        _: Option<&()>,
+        e: &crate::plan::step::mps::Encoding,
+    ) -> Result<(), String> {
+        let (inputs, output, scratch, keep) =
+            (e.inputs.as_slice(), e.output, e.scratch, e.keep.clone());
+        let _ = scratch;
+
+        crate::codegen::dynamic_slice::mps::copy(
+            inputs[0],
+            output,
+            &step.output.1,
+            keep,
+            step.label,
+        )
+    }
+}
+
+/// The Metal dynamic-slice and dynamic-update-slice kernels; an out-of-place update first copies its operand.
+pub(crate) struct DynamicSlice;
+
+impl crate::codegen::kernel::Kernel for DynamicSlice {
+    type Step = crate::plan::MpsStep;
+    type Buffers = crate::plan::step::mps::Encoding;
+    type Config = ();
+
+    /// Launches the slice or update.
+    fn run(
+        &self,
+        step: &crate::plan::MpsStep,
+        _: Option<&()>,
+        e: &crate::plan::step::mps::Encoding,
+    ) -> Result<(), String> {
+        let (inputs, output, scratch, keep) =
+            (e.inputs.as_slice(), e.output, e.scratch, e.keep.clone());
+        let _ = scratch;
+
+        let x = &step.inputs[0].1;
+        let rank = x.shape.len();
+
+        if rank > MAX_RANK {
+            return Err(format!(
+                "{}: {rank} dimensions are more than its MPS kernels take ({MAX_RANK})",
+                step.label
+            ));
+        }
+
+        let bytes = x.dtype.size_of();
+
+        let (source, block, first) = match &step.primitive {
+            Primitive::DynamicSlice { slice_sizes } => (inputs[0], slice_sizes.clone(), 1),
+            Primitive::DynamicUpdateSlice => (inputs[1], step.inputs[1].1.shape.clone(), 2),
+            _ => unreachable!("a dynamic slice"),
+        };
+
+        let update = matches!(step.primitive, Primitive::DynamicUpdateSlice);
+
+        if update && output.cast_const() != inputs[0] {
+            copy(inputs[0], output, x, keep.clone(), step.label)?;
+        }
+
+        let index_dtype = step
+            .inputs
+            .get(first)
+            .map_or("i32".into(), |(_, t)| t.dtype.to_string());
+
+        // Unused index slots point at the source buffer; the kernel only reads the first `rank`.
+        let mut buffers = vec![source, output.cast_const()];
+        buffers.extend((0..MAX_RANK).map(|d| *inputs.get(first + d).unwrap_or(&source)));
+        let count: usize = block.iter().product();
+
+        let args = [
+            dims_arg(x.shape.clone()),
+            dims_arg(block.clone()),
+            u32_arg(rank as u32),
+            u64_arg(count),
+        ];
+
+        // Use 32-bit offsets when the operand fits, 64-bit otherwise.
+        let width = match x.numel() <= u32::MAX as usize {
+            true => 32,
+            false => 64,
+        };
+
+        let kernel = match update {
+            true => format!("dynamic_update_slice_{bytes}_{index_dtype}_{width}"),
+            false => format!("dynamic_slice_{bytes}_{index_dtype}_{width}"),
+        };
+
+        let grid = Grid::Threads([count.div_ceil(16 / bytes), 1, 1]);
+        Mps::launch(MpsLaunch {
+            kernel: &kernel,
+            buffers: &buffers,
+            args: &args,
+            grid,
+            keep,
+            name: step.label,
+        })
     }
 }
