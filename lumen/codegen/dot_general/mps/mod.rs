@@ -23,6 +23,7 @@ pub(crate) use tiled::*;
 use crate::codegen::dot_general::mps as gemm;
 use crate::codegen::kernel::Kernel;
 use crate::codegen::kinds::gemm_dot;
+use crate::codegen::utils::mps::Mps;
 use crate::graph::Primitive;
 use crate::graph::TensorType;
 use crate::graph::Var;
@@ -30,7 +31,9 @@ use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::passes::dot::canonicalize::matmul_order;
 use crate::plan::step::mps::Encoding;
 use crate::plan::{Buffer, MpsStep, StepBase};
+use crate::runtime::kernel::Launch as _;
 use crate::runtime::kernel::mps::Grid;
+use crate::runtime::kernel::mps::{MpsLaunch, dims_arg};
 use crate::runtime::kernel::mps::{compile_kernels, compile_mpp_kernels, variants};
 use crate::tensor::contiguous_strides;
 use std::collections::BTreeMap;
@@ -594,7 +597,13 @@ impl Kernel for Gemm {
     /// Encodes the variant for `config` (its untuned kernel when `None`).
     fn run(&self, step: &MpsStep, config: Option<&GemmConfig>, e: &Encoding) -> Result<(), String> {
         let Some(&config) = config else {
-            return step.encode_untuned(&e.inputs, e.output, e.scratch, e.keep.clone());
+            return crate::runtime::kernel::mps::encode(
+                step,
+                &e.inputs,
+                e.output,
+                e.scratch,
+                e.keep.clone(),
+            );
         };
 
         let Primitive::Fusion { name: fusion, .. } = &step.primitive else {
@@ -650,4 +659,83 @@ impl Gemm {
 /// or skinny).
 pub(crate) fn runs(step: &StepBase) -> bool {
     matmul_of(step).is_some() && tiled_gemm(step)
+}
+
+/// The Metal linear cross-entropy kernels.
+pub(crate) struct LinearCrossEntropy;
+
+impl crate::codegen::kernel::Kernel for LinearCrossEntropy {
+    type Step = crate::plan::MpsStep;
+    type Buffers = crate::plan::step::mps::Encoding;
+    type Config = ();
+
+    /// Encodes the linear cross-entropy.
+    fn run(
+        &self,
+        step: &crate::plan::MpsStep,
+        _: Option<&()>,
+        e: &crate::plan::step::mps::Encoding,
+    ) -> Result<(), String> {
+        let (inputs, output, scratch, keep) =
+            (e.inputs.as_slice(), e.output, e.scratch, e.keep.clone());
+        let _ = scratch;
+
+        encode_linear_cross_entropy(step, inputs, output, scratch, keep)
+    }
+}
+
+/// The precompiled Metal matmul kernel of a lone `dot_general`.
+pub(crate) struct Matmul;
+
+impl crate::codegen::kernel::Kernel for Matmul {
+    type Step = crate::plan::MpsStep;
+    type Buffers = crate::plan::step::mps::Encoding;
+    type Config = ();
+
+    /// Launches the matmul for the operands' layouts.
+    fn run(
+        &self,
+        step: &crate::plan::MpsStep,
+        _: Option<&()>,
+        e: &crate::plan::step::mps::Encoding,
+    ) -> Result<(), String> {
+        let (inputs, output, scratch, keep) =
+            (e.inputs.as_slice(), e.output, e.scratch, e.keep.clone());
+        let _ = scratch;
+
+        let (lhs, rhs, out) = (&step.inputs[0].1, &step.inputs[1].1, &step.output.1);
+        let name = step.label;
+
+        let strides = |k: usize| {
+            let ty = &step.inputs[k].1;
+
+            step.views[k]
+                .as_ref()
+                .map_or_else(|| contiguous_strides(&ty.shape), |v| v.strides.clone())
+        };
+
+        let launch_ = plan_matmul(
+            &step.primitive,
+            lhs,
+            rhs,
+            out,
+            &strides(0),
+            &strides(1),
+            name,
+            None,
+        )?;
+
+        let Primitive::DotGeneral { accum_dtype, .. } = &step.primitive else {
+            unreachable!("a dot_general")
+        };
+
+        Mps::launch(MpsLaunch {
+            kernel: &format!("matmul_{}_{accum_dtype}_{}", lhs.dtype, out.dtype),
+            buffers: &[inputs[0], inputs[1], output.cast_const()],
+            args: &[dims_arg(launch_.p)],
+            grid: launch_.grid,
+            keep,
+            name,
+        })
+    }
 }

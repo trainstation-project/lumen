@@ -731,3 +731,26 @@ impl ReductionCodegen for Mps {
         )))
     }
 }
+
+/// The Metal reduction kernels of a lone `reduce_sum` or `reduce_max`.
+pub(crate) struct Reduction;
+
+impl crate::codegen::kernel::Kernel for Reduction {
+    type Step = crate::plan::MpsStep;
+    type Buffers = crate::plan::step::mps::Encoding;
+    type Config = ();
+
+    /// Encodes the reduction.
+    fn run(
+        &self,
+        step: &crate::plan::MpsStep,
+        _: Option<&()>,
+        e: &crate::plan::step::mps::Encoding,
+    ) -> Result<(), String> {
+        let (inputs, output, scratch, keep) =
+            (e.inputs.as_slice(), e.output, e.scratch, e.keep.clone());
+        let _ = scratch;
+
+        encode(step, inputs, output, scratch, keep)
+    }
+}

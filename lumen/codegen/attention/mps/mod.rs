@@ -713,7 +713,13 @@ impl Kernel for FlashAttention {
         e: &Encoding,
     ) -> Result<(), String> {
         let Some(&tuning) = tuning else {
-            return step.encode_untuned(&e.inputs, e.output, e.scratch, e.keep.clone());
+            return crate::runtime::kernel::mps::encode(
+                step,
+                &e.inputs,
+                e.output,
+                e.scratch,
+                e.keep.clone(),
+            );
         };
 
         let Primitive::Fusion { name: fusion, .. } = &step.primitive else {

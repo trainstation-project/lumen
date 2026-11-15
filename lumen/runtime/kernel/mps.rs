@@ -1378,3 +1378,26 @@ pub(crate) fn fusion_scratch_bytes(body: &Graph) -> usize {
         None => 0,
     }
 }
+
+/// The Metal kernel of an untuned fusion (elementwise, row, reduction, transpose, updates, attention backward, a GEMM the tiled kernels don't take, or the Neural Engine), launched by its kind.
+pub(crate) struct Fusion;
+
+impl crate::codegen::kernel::Kernel for Fusion {
+    type Step = crate::plan::MpsStep;
+    type Buffers = crate::plan::step::mps::Encoding;
+    type Config = ();
+
+    /// Encodes the fusion's kernel.
+    fn run(
+        &self,
+        step: &crate::plan::MpsStep,
+        _: Option<&()>,
+        e: &crate::plan::step::mps::Encoding,
+    ) -> Result<(), String> {
+        let (inputs, output, scratch, keep) =
+            (e.inputs.as_slice(), e.output, e.scratch, e.keep.clone());
+        let _ = scratch;
+
+        encode(step, inputs, output, scratch, keep)
+    }
+}

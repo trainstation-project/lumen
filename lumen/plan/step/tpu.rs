@@ -1,34 +1,43 @@
-//! Running plan steps on TPU: each step's kernel, generated when its plan compiles, lowered once per device and
-//! launched into the device's batch.
+//! Running plan steps on TPU: each step's kernel (`codegen::kernel`), which codegen picked: its Pallas kernel,
+//! generated when its plan compiles, lowered once per device and launched into the device's batch.
 
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
 use super::{unsupported, viewed};
 use crate::Device;
+use crate::codegen::kernel::Runner;
 use crate::codegen::tpu::Kernel;
-use crate::codegen::tpu::{Rows, kernel};
-use crate::codegen::utils::tpu::Tpu;
-use crate::codegen::utils::tpu::lowering::lowering;
 use crate::graph::Primitive;
 use crate::plan::run::Buffers;
 use crate::plan::{Buffer, Step, StepBase};
-use crate::runtime::kernel::Launch as _;
-use crate::runtime::kernel::tpu::TpuLaunch;
 
-/// A step of a Pallas kernel on a TPU.
+/// The raw buffers a TPU step runs on: its TPU, its inputs (then its further outputs) and its output.
+pub(crate) struct Pointers {
+    pub(crate) index: usize,
+    pub(crate) inputs: Vec<*const u8>,
+    pub(crate) output: *mut u8,
+}
+
+/// A step on a TPU: the step, the kernel it runs, and the Pallas kernel codegen generated for it.
 #[derive(Debug, Clone)]
 pub struct TpuStep {
     base: StepBase,
-    /// The kernel codegen generated for the step; none when it has nothing to launch, or is a gather only the
-    /// SparseCore may take.
-    pub(crate) kernel: Option<Kernel>,
+    /// The Pallas kernel codegen generated for the step; none when it has nothing to launch, or is a gather only
+    /// the SparseCore may take.
+    pub(crate) code: Option<Kernel>,
+    /// The kernel the step runs.
+    pub(crate) kernel: Arc<dyn Runner<TpuStep, Pointers>>,
 }
 
 impl TpuStep {
-    /// `base` with the kernel codegen generated for it.
-    pub(crate) fn new(base: StepBase, kernel: Option<Kernel>) -> Self {
-        TpuStep { base, kernel }
+    /// `base`, running `kernel`, with the Pallas kernel `code` codegen generated for it.
+    pub(crate) fn new(
+        base: StepBase,
+        code: Option<Kernel>,
+        kernel: Arc<dyn Runner<TpuStep, Pointers>>,
+    ) -> Self {
+        TpuStep { base, code, kernel }
     }
 }
 
@@ -49,86 +58,19 @@ impl DerefMut for TpuStep {
 }
 
 impl Step for TpuStep {
-    /// Runs the step on its TPU: its kernel lowered once per device and launched into the device's batch.
+    /// Runs the step's kernel on its TPU's buffers, launched into the device's batch.
     fn run(&self, buffers: &Buffers) -> Result<(), String> {
         let Device::Tpu(index) = buffers.device else {
             unreachable!("a TPU plan runs on a TPU")
         };
 
-        let step = &self.base;
-        let inputs = &buffers.args(step);
-        let output = buffers.pointer(&step.output);
-
-        // A gather runs on the SparseCore when its buffers' rows allow, known only at launch.
-        if let Primitive::Gather { .. } = step.primitive
-            && crate::codegen::gather::tpu::sparse_core(index, step, inputs, output)?
-        {
-            return Ok(());
-        }
-
-        // A step without a kernel has nothing to launch, or is a gather neither kernel takes, which fails with its
-        // TensorCore kernel's error.
-        let Some(kernel) = &self.kernel else {
-            return match step.primitive {
-                Primitive::Gather { .. } => kernel(step).map(|_| ()),
-                _ => Ok(()),
-            };
+        let pointers = Pointers {
+            index,
+            inputs: buffers.args(self),
+            output: buffers.pointer(&self.output),
         };
 
-        let n = step.inputs.len();
-        let output = output.cast_const();
-
-        let rows: Vec<*const u8> = match kernel.rows {
-            Rows::Split => inputs[..n]
-                .iter()
-                .copied()
-                .chain([output])
-                .chain(inputs[n..].iter().copied())
-                .collect(),
-            Rows::Last => inputs.iter().copied().chain([output]).collect(),
-            Rows::Step => inputs[..n].iter().copied().chain([output]).collect(),
-        };
-
-        let copy = kernel.copied.is_some() && inputs[0] != output;
-        let scalars = rows.len() + kernel.scalars.len();
-        let device = crate::allocator::tpu::rows(index)?;
-
-        let key = {
-            use std::hash::{Hash, Hasher};
-
-            let mut h = std::collections::hash_map::DefaultHasher::new();
-            (index, device, copy).hash(&mut h);
-            h.finish()
-        };
-
-        let launched = || -> Result<(), String> {
-            let (mosaic, spec) = &*step.memo.get(key, || {
-                let fields = match (copy, &kernel.copied) {
-                    (true, Some(copied)) => copied,
-                    _ => &kernel.spec,
-                };
-
-                lowering(index, kernel.module, fields, scalars, None)
-                    .map_err(|e| format!("{}: {e}", kernel.kernel))
-            })?;
-
-            Tpu::launch(TpuLaunch {
-                device: index,
-                module: kernel.module,
-                kernel: &kernel.kernel,
-                spec: String::new(),
-                rows: &rows,
-                scalars: &kernel.scalars,
-                host: &[],
-                sparse: None,
-                lowered: Some((Arc::clone(mosaic), Arc::clone(spec))),
-            })
-        };
-
-        launched().map_err(|e| match &kernel.context {
-            Some(context) => format!("{context}: {e}"),
-            None => e,
-        })
+        self.kernel.run(self, self.tuned.as_ref(), &pointers)
     }
 
     /// Errors unless `device` is a TPU, no step reads runtime scalars or an operand through a view.

@@ -22,7 +22,7 @@ use crate::graph_compiler::device::{Device, DeviceModule};
 use crate::graph_compiler::passes::attention::{self, Strides};
 use crate::graph_compiler::passes::place_views;
 use crate::graph_compiler::{CompilerConfig, Options};
-use crate::plan::step::mps::{Encoded, Encoding};
+use crate::plan::step::mps::{Encoding, Unsupported};
 use crate::plan::{Buffer, CpuPlan, MpsPlan, MpsStep, Plan, PlanOptions, Step as _, StepBase};
 use crate::runtime::kernel::mps::{compile_routed, record_launch};
 use std::collections::{BTreeMap, HashMap};
@@ -36,7 +36,7 @@ pub(crate) fn codegen(mut plan: CpuPlan, options: &Options) -> Result<MpsPlan, S
     let mut sources = BTreeMap::new();
     let mut kernels: Vec<Option<Tunable>> = plan.steps().iter().map(|_| None).collect();
 
-    for (at, step) in plan.steps_mut().iter_mut().map(|s| &mut s.0).enumerate() {
+    for (at, step) in plan.steps_mut().iter_mut().map(|s| &mut s.base).enumerate() {
         // Output views, keyed by output index, of a fusion writing straight into a placed buffer.
         let mut views: HashMap<usize, (usize, Vec<usize>)> = step
             .output_views
@@ -111,25 +111,46 @@ pub(crate) fn codegen(mut plan: CpuPlan, options: &Options) -> Result<MpsPlan, S
     });
 
     let forward: Arc<dyn Runner<MpsStep, Encoding>> = Arc::new(FlashAttention);
-    let encoded: Arc<dyn Runner<MpsStep, Encoding>> = Arc::new(Encoded);
 
     plan.map(|step| {
         let base = step.into_base();
         let code = codes.next().flatten();
 
-        // The GEMMs for a matmul fusion they take, the flash-attention forward for an attention, the elementwise
-        // kernel for a fusion codegen kept tunable, else the step's untuned kernels.
-        let kernel = match () {
-            _ if crate::codegen::dot_general::mps::runs(&base) => gemm.clone(),
-            _ if crate::codegen::attention::mps::runs(&base) => forward.clone(),
-            _ if crate::codegen::elementwise::mps::runs(&base, code.is_some()) => {
-                elementwise.clone()
-            }
-            _ => encoded.clone(),
-        };
+        let kernel = kernel_of(&base, code.is_some(), [&gemm, &forward, &elementwise]);
 
         Ok(MpsStep::new(base, code, kernel))
     })
+}
+
+/// The kernel `step` runs: the GEMMs for a matmul fusion they take, the flash-attention forward for an attention, the
+/// elementwise kernel for a fusion codegen kept tunable (`tunable`), the fusion encoder for any other fusion, else
+/// its primitive's kernel. The `tuned` kernels (GEMM, attention, elementwise) are shared by the plan's steps.
+fn kernel_of(
+    step: &StepBase,
+    tunable: bool,
+    [gemm, forward, elementwise]: [&Arc<dyn Runner<MpsStep, Encoding>>; 3],
+) -> Arc<dyn Runner<MpsStep, Encoding>> {
+    use Primitive::*;
+
+    match &step.primitive {
+        _ if crate::codegen::dot_general::mps::runs(step) => gemm.clone(),
+        _ if crate::codegen::attention::mps::runs(step) => forward.clone(),
+        _ if crate::codegen::elementwise::mps::runs(step, tunable) => elementwise.clone(),
+        Fusion { .. } => Arc::new(crate::runtime::kernel::mps::Fusion),
+        ReduceSum { .. } | ReduceMax { .. } => Arc::new(crate::codegen::reduction::mps::Reduction),
+        Cumsum { .. } => Arc::new(crate::codegen::scan::mps::Cumsum),
+        ScatterAdd { .. } => Arc::new(crate::codegen::scatter_add::mps::ScatterAdd),
+        LinearCrossEntropy => Arc::new(crate::codegen::dot_general::mps::LinearCrossEntropy),
+        DotGeneral { .. } => Arc::new(crate::codegen::dot_general::mps::Matmul),
+        Reshape { .. } => Arc::new(crate::codegen::dynamic_slice::mps::Copy),
+        DynamicSlice { .. } | DynamicUpdateSlice => {
+            Arc::new(crate::codegen::dynamic_slice::mps::DynamicSlice)
+        }
+        Full { .. } | Iota { .. } => Arc::new(crate::codegen::factory::mps::Factory),
+        RandomBits { .. } => Arc::new(crate::codegen::random::mps::RandomBits),
+        HostWait => Arc::new(crate::plan::step::mps::HostWait),
+        _ => Arc::new(Unsupported),
+    }
 }
 
 /// Default launch tuning when `body` lowers to the elementwise kernel, else `None`.

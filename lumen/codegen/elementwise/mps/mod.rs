@@ -363,7 +363,13 @@ impl Kernel for Elementwise {
     /// Encodes the fusion's kernel generated under `tuning`, or its untuned kernel when `None`.
     fn run(&self, step: &MpsStep, tuning: Option<&Tuning>, e: &Encoding) -> Result<(), String> {
         let Some(&tuning) = tuning else {
-            return step.encode_untuned(&e.inputs, e.output, e.scratch, e.keep.clone());
+            return crate::runtime::kernel::mps::encode(
+                step,
+                &e.inputs,
+                e.output,
+                e.scratch,
+                e.keep.clone(),
+            );
         };
 
         let name = self.variants(step, &[tuning])?.remove(0);

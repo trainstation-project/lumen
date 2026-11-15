@@ -199,3 +199,26 @@ pub(crate) fn encode(
 
     pass(false, keep)
 }
+
+/// The Metal scan kernel of a `cumsum`.
+pub(crate) struct Cumsum;
+
+impl crate::codegen::kernel::Kernel for Cumsum {
+    type Step = crate::plan::MpsStep;
+    type Buffers = crate::plan::step::mps::Encoding;
+    type Config = ();
+
+    /// Encodes the scan.
+    fn run(
+        &self,
+        step: &crate::plan::MpsStep,
+        _: Option<&()>,
+        e: &crate::plan::step::mps::Encoding,
+    ) -> Result<(), String> {
+        let (inputs, output, scratch, keep) =
+            (e.inputs.as_slice(), e.output, e.scratch, e.keep.clone());
+        let _ = scratch;
+
+        encode(step, inputs, output, scratch, keep)
+    }
+}
