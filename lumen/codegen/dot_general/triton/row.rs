@@ -6,7 +6,7 @@ use std::fmt::Write;
 
 use indoc::formatdoc;
 
-use super::autotune::MOST_GEMM_ROW;
+use super::MOST_GEMM_ROW;
 use crate::DType;
 use crate::codegen::emitter::Emit;
 use crate::codegen::emitter::triton::Emitter;

@@ -9,39 +9,12 @@ pub(crate) use forced::forcing;
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex, PoisonError};
 
+use crate::codegen::kernel::Runner;
 use crate::device::Device;
 use crate::graph::Primitive;
 use crate::plan::{DevicePlan, Step, StepBase, Tuned};
 use crate::runtime::event::event_for;
 use crate::runtime::stream::hold;
-
-/// A backend's source of kernel candidates for plan steps.
-pub(crate) trait Kernels {
-    /// The backend's plan steps.
-    type Step;
-    /// Backend-specific tuning parameters of one candidate.
-    type Config: Clone + 'static;
-
-    /// Candidate configs for `step`; empty when the step isn't tuned.
-    fn configs(&self, step: &Self::Step) -> Vec<Self::Config>;
-    /// Whether `step` runs on this family's kernels, so a forced config applies to it: by default, whether it
-    /// has candidates (a family whose candidates depend on the step's size overrides it).
-    fn handles(&self, step: &Self::Step) -> bool {
-        !self.configs(step).is_empty()
-    }
-    /// Whether forced `config` can run `step` (a step it can't run keeps its untuned kernel): by default, whether
-    /// this family handles `step`.
-    fn accepts(&self, step: &Self::Step, config: &Self::Config) -> bool {
-        let _ = config;
-        self.handles(step)
-    }
-    /// Builds the kernel for `step` under `config`.
-    fn build(&mut self, step: &Self::Step, config: Self::Config) -> Tuned;
-    /// Compiles every candidate built so far, before any is timed.
-    fn compile(&mut self) -> Result<(), String> {
-        Ok(())
-    }
-}
 
 /// Runs plan steps on a device so they can be timed.
 pub(crate) trait Timer {
@@ -131,12 +104,13 @@ fn key(step: &StepBase) -> String {
 
 static PICKS: LazyLock<Mutex<HashMap<String, usize>>> = LazyLock::new(Default::default);
 
-fn pick<K>(device: Device, step: &StepBase) -> String {
+/// What a tuning result is kept under across plans: the kernel `family`'s name, the device and the step's
+/// primitive, operand types, views and output type.
+fn pick(family: &str, device: Device, step: &StepBase) -> String {
     let types: Vec<String> = step.inputs.iter().map(|(_, ty)| ty.to_string()).collect();
 
     format!(
-        "{} {device} {} {} {:?} -> {}",
-        std::any::type_name::<K>(),
+        "{family} {device} {} {} {:?} -> {}",
         step.primitive,
         types.join(" "),
         step.views,
@@ -144,38 +118,74 @@ fn pick<K>(device: Device, step: &StepBase) -> String {
     )
 }
 
-impl<T: Timer> Autotuner<T> {
-    /// Sets the `tuned` kernel of each tunable step in `plan` to its fastest candidate, outside the profiler.
-    pub(crate) fn tune<K: Kernels<Step = T::Step>>(
-        &self,
-        kernels: &mut K,
-        plan: &mut DevicePlan<T::Step>,
-    ) -> Result<(), String> {
-        crate::profiler::untraced(|| self.tune_untraced(kernels, plan))
+/// A plan step that runs a `Kernel` (`codegen::kernel`): its candidates and forced config come from it.
+pub(crate) trait KernelStep: Sized {
+    /// What the step's kernel runs on.
+    type Buffers;
+
+    /// The step's kernel.
+    fn kernel(&self) -> &dyn Runner<Self, Self::Buffers>;
+
+    /// The name of the step's kernel, keying its tuning results.
+    fn kernel_name(&self) -> &'static str {
+        self.kernel().name()
     }
 
-    /// Body of [`Self::tune`].
-    fn tune_untraced<K: Kernels<Step = T::Step>>(
-        &self,
-        kernels: &mut K,
-        plan: &mut DevicePlan<T::Step>,
-    ) -> Result<(), String> {
-        // A config forced for this family: every step it handles (and can run) is built with it, untimed.
-        if let Some(config) = forced::forced::<K::Config>() {
-            for i in 0..plan.steps().len() {
-                if kernels.accepts(&plan.steps()[i], &config) {
-                    let tuned = kernels.build(&plan.steps()[i], config.clone());
-                    plan.steps_mut()[i].tuned = Some(tuned);
+    /// The step's candidate configs.
+    fn candidates(&self) -> Vec<Tuned> {
+        self.kernel().candidates(self)
+    }
+
+    /// The config forced for the step's kernel, if one is and it runs the step.
+    fn forced(&self) -> Option<Tuned> {
+        self.kernel().forced(self)
+    }
+
+    /// Prepares the step's launches under each of `tuned`'s configs.
+    fn prepare(&self, tuned: &[Tuned]) -> Result<(), String> {
+        self.kernel().prepare(self, tuned)
+    }
+}
+
+impl<T: Timer> Autotuner<T> {
+    /// Sets each step's `tuned` config: a config forced for its kernel, else (when autotuning) its kernel's fastest
+    /// candidate, outside the profiler.
+    pub(crate) fn tune_steps(&self, plan: &mut DevicePlan<T::Step>) -> Result<(), String>
+    where
+        T::Step: KernelStep,
+    {
+        crate::profiler::untraced(|| {
+            for step in plan.steps_mut() {
+                if let Some(tuned) = step.forced() {
+                    step.prepare(std::slice::from_ref(&tuned))?;
+                    step.tuned = Some(tuned);
                 }
             }
 
-            return kernels.compile();
-        }
+            if !self.autotune {
+                return Ok(());
+            }
 
-        if !self.autotune {
-            return Ok(());
-        }
+            let jobs = self.jobs(plan, |step| match step.tuned.is_some() {
+                true => Vec::new(),
+                false => step.candidates(),
+            });
 
+            for (steps, candidates) in &jobs {
+                plan.steps()[steps[0]].prepare(candidates)?;
+            }
+
+            self.time(plan, jobs, |step| step.kernel_name().to_owned())
+        })
+    }
+
+    /// The steps of `plan` with candidates (from `candidates`), grouped with the later steps of the same kernel,
+    /// operand types and views, which take the same pick.
+    fn jobs(
+        &self,
+        plan: &DevicePlan<T::Step>,
+        mut candidates: impl FnMut(&T::Step) -> Vec<Tuned>,
+    ) -> Vec<(Vec<usize>, Vec<Tuned>)> {
         let mut same: HashMap<String, usize> = HashMap::new();
         let mut jobs: Vec<(Vec<usize>, Vec<Tuned>)> = Vec::new();
 
@@ -185,11 +195,7 @@ impl<T: Timer> Autotuner<T> {
                 continue;
             }
 
-            let candidates: Vec<Tuned> = kernels
-                .configs(step)
-                .into_iter()
-                .map(|config| kernels.build(step, config))
-                .collect();
+            let candidates = candidates(step);
 
             if !candidates.is_empty() {
                 same.insert(key(step), jobs.len());
@@ -197,15 +203,25 @@ impl<T: Timer> Autotuner<T> {
             }
         }
 
-        if jobs.is_empty() {
-            return Ok(());
-        }
+        jobs
+    }
 
-        kernels.compile()?;
+    /// Times each job's candidates on its first step and sets every step of the job to the fastest (or to the one
+    /// picked before for the same `family`'s kernel, device and step).
+    fn time(
+        &self,
+        plan: &mut DevicePlan<T::Step>,
+        jobs: Vec<(Vec<usize>, Vec<Tuned>)>,
+        family: impl Fn(&T::Step) -> String,
+    ) -> Result<(), String> {
         let picks = || PICKS.lock().unwrap_or_else(PoisonError::into_inner);
 
         for (steps, candidates) in jobs {
-            let picked = pick::<K>(self.timer.device(), &plan.steps()[steps[0]]);
+            let picked = pick(
+                &family(&plan.steps()[steps[0]]),
+                self.timer.device(),
+                &plan.steps()[steps[0]],
+            );
 
             if let Some(&k) = picks().get(&picked).filter(|&&k| k < candidates.len()) {
                 for i in steps {

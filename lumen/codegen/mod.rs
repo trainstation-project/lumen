@@ -6,6 +6,7 @@ pub(crate) mod dynamic_slice;
 pub(crate) mod elementwise;
 pub(crate) mod emitter;
 pub(crate) mod gather;
+pub(crate) mod kernel;
 pub(crate) mod kinds;
 pub(crate) mod layout;
 #[cfg(lumen_mps_linked)]

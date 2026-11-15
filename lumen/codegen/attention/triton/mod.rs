@@ -1,11 +1,12 @@
 //! Triton flash attention: the kernels (`kernel.py` beside this file) and the helpers generated per fusion
 //! by `Triton`'s `AttentionCodegen` for them to call: loads and stores of an operand tile through its matched
 //! layout, and the traced score ops.
+//!
+//! Triton flash-attention autotuning candidates and launch default.
+//!
+//! Autotuning Triton flash attention: its configs for attention steps.
 
-mod autotune;
 pub(crate) mod launch;
-
-pub(crate) use autotune::*;
 
 use std::fmt::Write;
 
@@ -20,6 +21,8 @@ use crate::graph::Graph;
 use crate::graph_compiler::passes::attention::{
     Access, Attention, Backward, Dropout, Score, Strides, Term,
 };
+use crate::plan::TritonStep;
+use crate::plan::step::Tensors;
 use crate::tensor::contiguous_strides;
 use crate::{DType, Scalar};
 
@@ -301,5 +304,130 @@ impl AttentionCodegen for Triton {
             {lines}    return s.to(tl.float32)
             "
         )
+    }
+}
+
+/// Tile shape and launch parameters for one Triton flash-attention candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(feature = "python"), allow(dead_code))]
+pub struct AttentionConfig {
+    /// Query rows per tile.
+    pub block_m: usize,
+    /// Key rows per tile.
+    pub block_n: usize,
+    /// Software pipelining depth (`num_stages`).
+    pub stages: usize,
+    /// Warps per program (`num_warps`).
+    pub warps: usize,
+}
+
+/// Flash-attention candidates the autotuner benchmarks, largest tiles first.
+pub(crate) const ATTENTION_CONFIGS: [AttentionConfig; 9] = [
+    AttentionConfig {
+        block_m: 128,
+        block_n: 128,
+        stages: 2,
+        warps: 8,
+    },
+    AttentionConfig {
+        block_m: 128,
+        block_n: 64,
+        stages: 3,
+        warps: 8,
+    },
+    AttentionConfig {
+        block_m: 128,
+        block_n: 64,
+        stages: 3,
+        warps: 4,
+    },
+    AttentionConfig {
+        block_m: 64,
+        block_n: 128,
+        stages: 2,
+        warps: 4,
+    },
+    AttentionConfig {
+        block_m: 64,
+        block_n: 64,
+        stages: 3,
+        warps: 4,
+    },
+    AttentionConfig {
+        block_m: 64,
+        block_n: 64,
+        stages: 2,
+        warps: 4,
+    },
+    AttentionConfig {
+        block_m: 64,
+        block_n: 32,
+        stages: 2,
+        warps: 4,
+    },
+    AttentionConfig {
+        block_m: 32,
+        block_n: 32,
+        stages: 1,
+        warps: 4,
+    },
+    AttentionConfig {
+        block_m: 16,
+        block_n: 32,
+        stages: 1,
+        warps: 4,
+    },
+];
+
+/// The config used when autotuning is off: 64x64 tiles, or 32x32 when a head row is over 256 bytes, so
+/// its tiles fit in shared memory.
+pub(crate) fn untuned_attention(head_bytes: usize) -> AttentionConfig {
+    match head_bytes <= 256 {
+        true => ATTENTION_CONFIGS[5],
+        false => ATTENTION_CONFIGS[7],
+    }
+}
+
+#[cfg(feature = "python")]
+crate::autotune::python::config_class! {
+    /// `lumen.autotune.TritonAttentionConfig`: a tile of the Triton backend's flash attention.
+    PyTritonAttentionConfig(AttentionConfig) = "TritonAttentionConfig" {
+        block_m: usize,
+        block_n: usize,
+        stages: usize,
+        warps: usize,
+    }
+
+    /// Every config the autotuner times, in its order.
+    #[staticmethod]
+    fn candidates() -> Vec<Self> {
+        ATTENTION_CONFIGS.iter().copied().map(PyTritonAttentionConfig).collect()
+    }
+}
+
+/// Triton flash attention, running an attention forward or backward step.
+pub(crate) struct FlashAttention;
+
+impl crate::codegen::kernel::Kernel for FlashAttention {
+    type Step = TritonStep;
+    type Buffers = Tensors;
+    type Config = AttentionConfig;
+
+    /// Every attention config for an attention step.
+    fn configs(&self, step: &TritonStep) -> Vec<AttentionConfig> {
+        match launch::is_attention(&step.primitive) {
+            true => ATTENTION_CONFIGS.to_vec(),
+            false => Vec::new(),
+        }
+    }
+
+    /// Launches the attention with `config`, its untuned one when `None`.
+    fn run(
+        &self,
+        step: &TritonStep,
+        config: Option<&AttentionConfig>,
+        (inputs, out, outs): &Tensors,
+    ) -> Result<(), String> {
+        launch::attention(step, inputs, out, outs, config)
     }
 }

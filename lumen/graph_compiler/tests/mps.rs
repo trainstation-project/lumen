@@ -2263,9 +2263,9 @@ fn skinny_dots_split_their_contraction() {
 /// Every tiled, MPP and skinny GEMM config computes plain and bias-fused matmuls like the reference.
 #[test]
 fn every_gemm_candidate_matches_the_reference() {
-    use crate::autotune::Kernels;
     use crate::codegen::dot_general::mps as gemm;
-    use crate::codegen::dot_general::mps::{Gemms, matmul_of};
+    use crate::codegen::dot_general::mps::{Gemm, matmul_of};
+    use crate::codegen::kernel::{Kernel, tuned};
 
     if !available() {
         return;
@@ -2350,16 +2350,17 @@ fn every_gemm_candidate_matches_the_reference() {
                     _ => &[],
                 };
 
-                let mut gemms = Gemms::default();
+                let gemms = Gemm::default();
 
                 let built: Vec<_> = gemm::config()
                     .iter()
                     .chain(mpp)
                     .chain(skinny)
-                    .map(|&config| (config, gemms.build(&step, config)))
+                    .map(|&config| (config, tuned::<Gemm>(&step, config)))
                     .collect();
 
-                gemms.compile().unwrap();
+                let prepared: Vec<_> = built.iter().map(|(c, _)| *c).collect();
+                gemms.prepare(&step, &prepared).unwrap();
 
                 for (config, tuned) in built {
                     plan.steps_mut()[at].tuned = Some(tuned);
@@ -2386,9 +2387,9 @@ fn every_gemm_candidate_matches_the_reference() {
 /// Every tiled GEMM config stores column regions, row halves and concatenated expansions correctly.
 #[test]
 fn every_tiled_gemm_stores_regions_halves_and_expansions_along_rows_and_columns() {
-    use crate::autotune::Kernels;
     use crate::codegen::dot_general::mps as gemm;
-    use crate::codegen::dot_general::mps::{Gemms, matmul_of};
+    use crate::codegen::dot_general::mps::{Gemm, matmul_of};
+    use crate::codegen::kernel::{Kernel, tuned};
 
     if !available() {
         return;
@@ -2543,14 +2544,15 @@ fn every_tiled_gemm_stores_regions_halves_and_expansions_along_rows_and_columns(
         assert_eq!(plan.steps().len(), 1, "{case}: {plan}");
         let step = plan.steps()[0].clone();
         assert!(matmul_of(&step).is_some(), "{case}: {plan}");
-        let mut gemms = Gemms::default();
+        let gemms = Gemm::default();
 
         let built: Vec<_> = gemm::config()
             .iter()
-            .map(|&config| (config, gemms.build(&step, config)))
+            .map(|&config| (config, tuned::<Gemm>(&step, config)))
             .collect();
 
-        gemms.compile().unwrap();
+        let prepared: Vec<_> = built.iter().map(|(c, _)| *c).collect();
+        gemms.prepare(&step, &prepared).unwrap();
 
         for (config, tuned) in built {
             plan.steps_mut()[0].tuned = Some(tuned);
@@ -2574,9 +2576,9 @@ fn every_tiled_gemm_stores_regions_halves_and_expansions_along_rows_and_columns(
 /// Every MPP config handles gated pairs (halves or interleaved) and an RMS norm wider than one tile.
 #[test]
 fn every_tuned_paired_and_wide_norm_gemm_matches_the_reference() {
-    use crate::autotune::Kernels;
     use crate::codegen::dot_general::mps::Algorithm;
-    use crate::codegen::dot_general::mps::{Gemms, matmul_of};
+    use crate::codegen::dot_general::mps::{Gemm, matmul_of};
+    use crate::codegen::kernel::{Kernel, tuned};
 
     if !available() || !crate::runtime::kernel::mps::mpp_available() {
         return;
@@ -2746,7 +2748,7 @@ fn every_tuned_paired_and_wide_norm_gemm_matches_the_reference() {
                 .expect("a matmul step");
 
             let step = plan.steps()[at].clone();
-            let mut gemms = Gemms::new(&CompilerConfig::default());
+            let gemms = Gemm::default();
 
             let configs: Vec<_> = gemms
                 .configs(&step)
@@ -2758,10 +2760,11 @@ fn every_tuned_paired_and_wide_norm_gemm_matches_the_reference() {
 
             let built: Vec<_> = configs
                 .into_iter()
-                .map(|config| (config, gemms.build(&step, config)))
+                .map(|config| (config, tuned::<Gemm>(&step, config)))
                 .collect();
 
-            gemms.compile().unwrap();
+            let prepared: Vec<_> = built.iter().map(|(c, _)| *c).collect();
+            gemms.prepare(&step, &prepared).unwrap();
 
             for (config, tuned) in built {
                 plan.steps_mut()[at].tuned = Some(tuned);
@@ -2786,9 +2789,9 @@ fn every_tuned_paired_and_wide_norm_gemm_matches_the_reference() {
 /// MPP and skinny GEMM candidates pick the expected epilogue layout flags and store every epilogue correctly.
 #[test]
 fn every_tuned_gemm_kernel_stores_every_epilogue() {
-    use crate::autotune::Kernels;
     use crate::codegen::dot_general::mps::{Algorithm, GemmConfig};
-    use crate::codegen::dot_general::mps::{Gemms, matmul_of};
+    use crate::codegen::dot_general::mps::{Gemm, matmul_of};
+    use crate::codegen::kernel::{Kernel, tuned};
 
     if !available() || !crate::runtime::kernel::mps::mpp_available() {
         return;
@@ -3072,7 +3075,7 @@ fn every_tuned_gemm_kernel_stores_every_epilogue() {
 
             let got = gemm::gemm_flags(body, gemm_dot(body).unwrap());
             assert_eq!(got, want, "{case} {algorithm:?}: {body}");
-            let mut gemms = Gemms::new(&CompilerConfig::default());
+            let gemms = Gemm::default();
 
             let configs: Vec<_> = gemms
                 .configs(&step)
@@ -3098,10 +3101,11 @@ fn every_tuned_gemm_kernel_stores_every_epilogue() {
 
             let built: Vec<_> = configs
                 .into_iter()
-                .map(|config| (config, gemms.build(&step, config)))
+                .map(|config| (config, tuned::<Gemm>(&step, config)))
                 .collect();
 
-            gemms.compile().unwrap();
+            let prepared: Vec<_> = built.iter().map(|(c, _)| *c).collect();
+            gemms.prepare(&step, &prepared).unwrap();
 
             for (config, tuned) in built {
                 plan.steps_mut()[at].tuned = Some(tuned);
@@ -3127,8 +3131,8 @@ fn every_tuned_gemm_kernel_stores_every_epilogue() {
 /// count bfloat16 cannot hold, whichever partial sums a candidate splits it into.
 #[test]
 fn every_gemm_candidate_accumulates_in_the_accum_dtype() {
-    use crate::autotune::Kernels;
-    use crate::codegen::dot_general::mps::{Gemms, matmul_of};
+    use crate::codegen::dot_general::mps::{Gemm, matmul_of};
+    use crate::codegen::kernel::{Kernel, tuned};
 
     if !available() {
         return;
@@ -3180,16 +3184,17 @@ fn every_gemm_candidate_accumulates_in_the_accum_dtype() {
                 .expect("a matmul step");
 
             let step = plan.steps()[at].clone();
-            let mut gemms = Gemms::new(&CompilerConfig::default());
+            let gemms = Gemm::default();
 
             let built: Vec<_> = gemms
                 .configs(&step)
                 .into_iter()
-                .map(|config| (config, gemms.build(&step, config)))
+                .map(|config| (config, tuned::<Gemm>(&step, config)))
                 .collect();
 
             assert!(built.len() > 1, "{accum} {m}x{n}: tuned candidates");
-            gemms.compile().unwrap();
+            let prepared: Vec<_> = built.iter().map(|(c, _)| *c).collect();
+            gemms.prepare(&step, &prepared).unwrap();
 
             for (config, tuned) in built {
                 plan.steps_mut()[at].tuned = Some(tuned);
@@ -3211,8 +3216,8 @@ fn every_gemm_candidate_accumulates_in_the_accum_dtype() {
 /// rounded once (288).
 #[test]
 fn gemv_lanes_sum_in_a_bfloat_accumulator() {
-    use crate::autotune::Kernels;
-    use crate::codegen::dot_general::mps::{Gemms, matmul_of};
+    use crate::codegen::dot_general::mps::{Gemm, matmul_of};
+    use crate::codegen::kernel::{Kernel, tuned};
 
     if !available() {
         return;
@@ -3272,12 +3277,12 @@ fn gemv_lanes_sum_in_a_bfloat_accumulator() {
         .expect("a matmul step");
 
     let step = plan.steps()[at].clone();
-    let mut gemms = Gemms::new(&CompilerConfig::default());
+    let gemms = Gemm::default();
 
     let built: Vec<_> = gemms
         .configs(&step)
         .into_iter()
-        .map(|config| (config, gemms.build(&step, config)))
+        .map(|config| (config, tuned::<Gemm>(&step, config)))
         .collect();
 
     assert!(!built.is_empty(), "GEMV candidates");
@@ -3286,7 +3291,8 @@ fn gemv_lanes_sum_in_a_bfloat_accumulator() {
             .iter()
             .all(|(c, _)| c.algorithm == gemm::Algorithm::Gemv)
     );
-    gemms.compile().unwrap();
+    let prepared: Vec<_> = built.iter().map(|(c, _)| *c).collect();
+    gemms.prepare(&step, &prepared).unwrap();
 
     for (config, tuned) in built {
         plan.steps_mut()[at].tuned = Some(tuned);
@@ -3306,9 +3312,9 @@ fn gemv_lanes_sum_in_a_bfloat_accumulator() {
 /// each of them reads the view through its strides.
 #[test]
 fn strided_gemms_tune_mpp() {
-    use crate::autotune::Kernels;
     use crate::codegen::dot_general::mps::Algorithm;
-    use crate::codegen::dot_general::mps::{Gemms, matmul_of};
+    use crate::codegen::dot_general::mps::{Gemm, matmul_of};
+    use crate::codegen::kernel::{Kernel, tuned};
 
     if !available() || !crate::runtime::kernel::mps::mpp_available() {
         return;
@@ -3375,7 +3381,7 @@ fn strided_gemms_tune_mpp() {
         "the slice is read in place: {plan}"
     );
 
-    let mut gemms = Gemms::new(&CompilerConfig::default());
+    let gemms = Gemm::default();
 
     let configs: Vec<_> = gemms
         .configs(&step)
@@ -3387,10 +3393,11 @@ fn strided_gemms_tune_mpp() {
 
     let built: Vec<_> = configs
         .into_iter()
-        .map(|config| (config, gemms.build(&step, config)))
+        .map(|config| (config, tuned::<Gemm>(&step, config)))
         .collect();
 
-    gemms.compile().unwrap();
+    let prepared: Vec<_> = built.iter().map(|(c, _)| *c).collect();
+    gemms.prepare(&step, &prepared).unwrap();
 
     let scale = expected.iter().fold(0f32, |m, v| m.max(v.abs()));
 
@@ -3532,9 +3539,9 @@ fn a_reduction_feeding_a_norm_of_other_rows_is_its_own_kernel() {
 /// Every GEMV config stores plain, row-half and row-region epilogues for either vector side, bit-identical to the default.
 #[test]
 fn every_gemv_candidate_stores_every_epilogue() {
-    use crate::autotune::Kernels;
     use crate::codegen::dot_general::mps::Algorithm;
-    use crate::codegen::dot_general::mps::{Gemms, matmul_of};
+    use crate::codegen::dot_general::mps::{Gemm, matmul_of};
+    use crate::codegen::kernel::{Kernel, tuned};
 
     if !available() {
         return;
@@ -3802,7 +3809,7 @@ fn every_gemv_candidate_stores_every_epilogue() {
 
         let untuned = plan.run(&on_mps).unwrap();
         let step = plan.steps()[at].clone();
-        let mut gemms = Gemms::new(&CompilerConfig::default());
+        let gemms = Gemm::default();
         let configs = gemms.configs(&step);
 
         assert!(
@@ -3812,10 +3819,11 @@ fn every_gemv_candidate_stores_every_epilogue() {
 
         let built: Vec<_> = configs
             .into_iter()
-            .map(|config| (Some(config), Some(gemms.build(&step, config))))
+            .map(|config| (Some(config), Some(tuned::<Gemm>(&step, config))))
             .collect();
 
-        gemms.compile().unwrap();
+        let prepared: Vec<_> = built.iter().filter_map(|(c, _)| *c).collect();
+        gemms.prepare(&step, &prepared).unwrap();
 
         let check = |config: &Option<_>, got: &[Tensor]| {
             for (want, have) in expected.iter().zip(got) {

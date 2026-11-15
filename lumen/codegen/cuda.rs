@@ -2,17 +2,20 @@
 //! gives the step's tensors and kept in the step's memo; tensors laid out otherwise get theirs at launch.
 
 use crate::autotune::Autotuner;
-use crate::codegen::attention::AttentionTuning;
+use crate::codegen::attention::cuda::FlashAttention;
+use crate::codegen::dot_general::GemmCodegen;
+use crate::codegen::dot_general::cuda::Gemm;
 use crate::codegen::dot_general::cuda::matmul;
-use crate::codegen::dot_general::{GemmCodegen, GemmTuning};
 use crate::codegen::elementwise::ElementwiseCodegen;
-use crate::codegen::elementwise::cuda::Layouts;
+use crate::codegen::elementwise::cuda::{Elementwise, Layouts};
+use crate::codegen::kernel::Runner;
 use crate::codegen::kinds::gemm_dot;
 use crate::codegen::utils::cuda::Cuda;
 use crate::graph::{Graph, Primitive, TensorType};
 use crate::graph_compiler::device::{Device, DeviceModule};
 use crate::graph_compiler::passes::attention::FORWARD;
 use crate::graph_compiler::{Options, plan_options};
+use crate::plan::step::Tensors;
 use crate::plan::step::cuda::CudaTimer;
 use crate::plan::{CpuPlan, CudaPlan, CudaStep, Plan, Step as _, StepBase};
 use std::sync::Arc;
@@ -108,7 +111,20 @@ pub(crate) fn codegen(plan: CpuPlan, _: &Options) -> Result<CudaPlan, String> {
         generated(step, layouts)?;
     }
 
-    plan.map(|step| Ok(CudaStep(step.into_base())))
+    plan.map(|step| {
+        let base = step.into_base();
+
+        // Each step's kernel: the GEMM for a matmul or a GEMM fusion, the attention forward for a flash attention,
+        // else the kernel generated for its elementwise body (or its copy).
+        let kernel: Arc<dyn Runner<CudaStep, Tensors>> = match &base.primitive {
+            Primitive::DotGeneral { .. } => Arc::new(Gemm),
+            Primitive::Fusion { name, .. } if name == FORWARD => Arc::new(FlashAttention),
+            Primitive::Fusion { body, .. } if gemm_dot(body).is_some() => Arc::new(Gemm),
+            _ => Arc::new(Elementwise),
+        };
+
+        Ok(CudaStep { base, kernel })
+    })
 }
 
 /// The body of a copy of `x` reshaped to `shape`: its input, reshaped, its output.
@@ -175,8 +191,7 @@ impl Device for Cuda {
                 autotune: config.autotune,
             };
 
-            tuner.tune(&mut Cuda::gemm_tuner(config), &mut plan)?;
-            tuner.tune(&mut Cuda::attention_tuner(config), &mut plan)?;
+            tuner.tune_steps(&mut plan)?;
         }
 
         Ok(Box::new(plan))

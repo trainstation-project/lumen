@@ -43,7 +43,7 @@ def compile(dtype, layouts, heads_per_kv, causal, scores, config):
     and O as (batch, rows, heads, head dim), the LSE as (batch, heads, rows), every head dim contiguous; `heads_per_kv`
     query heads share each K/V head. `causal` is the causal diagonal's shift (key `k` seen by query `q` when
     `k <= q + causal`) or None; `scores` the traced score ops, `("round", _, dtype)` or `("mul", c, dtype)` with
-    lumen dtype names; `config` (tile_m, tile_n, stages, warps, q_in_regs) from `codegen/attention/cuda/autotune.rs`.
+    lumen dtype names; `config` (tile_m, tile_n, stages, warps, q_in_regs) from `codegen/attention/cuda/mod.rs`.
     Returns its launch info as `lumen.codegen.utils.cuda.compile` does: its ``CUfunction``, warps per block, dynamic
     shared bytes, that a plain ``cuLaunchKernel`` runs it, and its parameters' types (each an address)."""
     if dtype not in ("float16", "bfloat16"):

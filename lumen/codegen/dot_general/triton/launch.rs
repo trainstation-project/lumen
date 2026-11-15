@@ -294,20 +294,3 @@ pub(crate) fn is_gemm(step: &StepBase) -> bool {
         _ => false,
     }
 }
-
-/// A tuned GEMM launch with its config baked in.
-pub(crate) type Run =
-    Box<dyn Fn(&StepBase, &[Tensor], &Tensor, &[Tensor]) -> Result<(), String> + Send + Sync>;
-
-/// Runs GEMM `step` with its tuned config, or the untuned default.
-pub(crate) fn run(
-    step: &StepBase,
-    inputs: &[Tensor],
-    out: &Tensor,
-    outs: &[Tensor],
-) -> Result<(), String> {
-    match step.launch::<Run>() {
-        Some(run) => run(step, inputs, out, outs),
-        None => gemm(step, inputs, out, outs, None),
-    }
-}

@@ -7,9 +7,7 @@ pub(crate) mod mps;
 pub(crate) mod tpu;
 pub(crate) mod triton;
 
-use crate::autotune::Kernels;
 use crate::graph::{Graph, Node};
-use crate::graph_compiler::CompilerConfig;
 
 /// A backend's GEMM code generator: the code computing a GEMM fusion `body`, its `dot` with the elementwise
 /// epilogue after it, the inputs flagged in `by_value` passed as scalars.
@@ -27,13 +25,4 @@ pub(crate) trait GemmCodegen {
         by_value: &[bool],
         options: &Self::Options,
     ) -> Result<Self::Code, String>;
-}
-
-/// A backend's autotuning of its GEMMs: the `Kernels` the candidate configs of its matmul steps come from.
-pub(crate) trait GemmTuning {
-    /// The backend's GEMM tuner.
-    type Tuner: Kernels;
-
-    /// A GEMM tuner for plans compiled under `config`.
-    fn gemm_tuner(config: &CompilerConfig) -> Self::Tuner;
 }

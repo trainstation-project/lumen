@@ -3,10 +3,11 @@
 
 use super::unsupported;
 use crate::allocator::Scratch;
-use crate::autotune::Timer;
+use crate::autotune::{KernelStep, Timer};
 use crate::codegen::dot_general::mps::plan_matmul;
 use crate::codegen::dynamic_slice::mps::{MAX_RANK, copy};
 use crate::codegen::elementwise::mps::Tunable;
+use crate::codegen::kernel::Runner;
 use crate::codegen::utils::mps::Mps;
 use crate::graph::{NEURAL_ENGINE, Primitive, TensorType, View};
 use crate::plan::run::Buffers;
@@ -19,36 +20,45 @@ use crate::runtime::wait::wait;
 use crate::tensor::contiguous_strides;
 use crate::{Device, Tensor};
 use std::ops::{Deref, DerefMut};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use crate::runtime::kernel::mps::{
     Grid, dims_arg, element_arg, elementwise_grid, u32_arg, u64_arg,
 };
 
-/// A specialized encoder a step carries in its launch slot: `(step, inputs, output, scratch, keep)`.
-pub(crate) type Encode = Box<
-    dyn Fn(&StepBase, &[*const u8], *mut u8, *mut u8, Vec<Tensor>) -> Result<(), String>
-        + Send
-        + Sync,
->;
+/// The raw buffers an MPS step's kernels are encoded on: its inputs (then its further outputs), its output and its
+/// scratch, and the tensors its launches keep alive.
+pub(crate) struct Encoding {
+    pub(crate) inputs: Vec<*const u8>,
+    pub(crate) output: *mut u8,
+    pub(crate) scratch: *mut u8,
+    pub(crate) keep: Vec<Tensor>,
+}
 
-/// A step of Metal kernels: an elementwise fusion keeps what the autotuner needs to regenerate its kernel, and
-/// each step its launches once captured.
+/// A step of Metal kernels: the kernel it runs, what an elementwise fusion needs to regenerate its kernel, and its
+/// launches once captured.
 #[derive(Debug, Clone)]
 pub struct MpsStep {
     base: StepBase,
     /// What an elementwise fusion needs to regenerate its kernel under another tuning.
-    pub(crate) kernel: Option<Tunable>,
+    pub(crate) code: Option<Tunable>,
+    /// The kernel the step runs.
+    pub(crate) kernel: Arc<dyn Runner<MpsStep, Encoding>>,
     /// The step's launches, prepared for replay once captured (`None` when they can't be replayed); any change
     /// to the step drops them.
     captured: OnceLock<Option<Prepared>>,
 }
 
 impl MpsStep {
-    /// `base` with the kernel codegen generated for it.
-    pub(crate) fn new(base: StepBase, kernel: Option<Tunable>) -> Self {
+    /// `base`, running `kernel`, with what codegen kept to regenerate its elementwise kernel (`code`).
+    pub(crate) fn new(
+        base: StepBase,
+        code: Option<Tunable>,
+        kernel: Arc<dyn Runner<MpsStep, Encoding>>,
+    ) -> Self {
         MpsStep {
             base,
+            code,
             kernel,
             captured: OnceLock::new(),
         }
@@ -218,10 +228,61 @@ impl Step for MpsStep {
     }
 }
 
+/// A step tunes its kernel's configs.
+impl KernelStep for MpsStep {
+    type Buffers = Encoding;
+
+    /// The step's kernel.
+    fn kernel(&self) -> &dyn Runner<MpsStep, Encoding> {
+        self.kernel.as_ref()
+    }
+}
+
+/// The untuned Metal kernels of a step no tuned kernel runs (reductions, scans, row and other fusions, copies,
+/// dynamic slices), encoded by primitive.
+pub(crate) struct Encoded;
+
+impl crate::codegen::kernel::Kernel for Encoded {
+    type Step = MpsStep;
+    type Buffers = Encoding;
+    type Config = ();
+
+    /// Encodes the step's kernels.
+    fn run(&self, step: &MpsStep, _: Option<&()>, e: &Encoding) -> Result<(), String> {
+        step.encode_untuned(&e.inputs, e.output, e.scratch, e.keep.clone())
+    }
+}
+
 impl MpsStep {
     /// Encodes the step's kernels into the MPS stream on `inputs`, `output` and `scratch`, routing by primitive to
     /// its kernel family. Errors when the output has more elements than 32-bit kernel indices reach.
     pub(crate) fn run_raw(
+        &self,
+        inputs: &[*const u8],
+        output: *mut u8,
+        scratch: *mut u8,
+        keep: Vec<Tensor>,
+    ) -> Result<(), String> {
+        // Its tuned config applies to the views it was tuned for, unless an input is a view its kernel would load
+        // element by element.
+        let tuned = self
+            .tuned
+            .as_ref()
+            .filter(|t| t.views == self.views && !crate::codegen::mps::loads_views(self));
+
+        let encoding = Encoding {
+            inputs: inputs.to_vec(),
+            output,
+            scratch,
+            keep,
+        };
+
+        self.kernel.run(self, tuned, &encoding)
+    }
+
+    /// Encodes the step's untuned kernels into the MPS stream, routing by primitive to its kernel family. Errors
+    /// when the output has more elements than 32-bit kernel indices reach.
+    pub(crate) fn encode_untuned(
         &self,
         inputs: &[*const u8],
         output: *mut u8,
@@ -237,15 +298,6 @@ impl MpsStep {
                 "{}: {n} elements are more than MPS kernels index",
                 step.primitive.name()
             ));
-        }
-
-        // A step-specific (tuned) encoder applies unless an input is a view its kernel would load element by
-        // element; a GEMM strides through its dot's operand views.
-        if let Some(encode) = step
-            .launch::<Encode>()
-            .filter(|_| !crate::codegen::mps::loads_views(step))
-        {
-            return encode(step, inputs, output, scratch, keep);
         }
 
         if let ReduceSum { .. } | ReduceMax { .. } = step.primitive {
