@@ -72,11 +72,11 @@ fn lanes(dtype: DType) -> usize {
     VECTOR_BYTES / dtype.size_of()
 }
 
-/// Whether the GEMM runs an epilogue after `dot` in `graph`: a matmul it runs whose product's rows are whole vectors
-/// (the epilogue reads it a 16-byte vector at a time, each wholly inside the product or outside it) and whose readers,
-/// when they split its product into column regions, each take whole vectors of it: regions along its last axis, each
-/// a plain slice or the interleaved members of a reshape (as many as divide a vector), not the two halves of the
-/// product (which would need both halves' tiles in one CTA).
+/// Whether the GEMM runs an epilogue after `dot` in `graph`: a matmul it runs whose readers, when they split its
+/// product into column regions, each take whole vectors of it (the epilogue reads the product a 16-byte vector at a
+/// time): regions along its last axis, each a plain slice or the interleaved members of a reshape (as many as divide a
+/// vector), not the two halves of the product (which would need both halves' tiles in one CTA), and a product whose
+/// rows aren't whole vectors has none (its epilogue skips the lanes past each row instead).
 pub(crate) fn epilogue(graph: &Graph, dot: &Node) -> bool {
     if !matmul(graph, dot) {
         return false;
@@ -85,7 +85,7 @@ pub(crate) fn epilogue(graph: &Graph, dot: &Node) -> bool {
     let product = graph.type_of(dot.output);
     let (rank, lanes) = (product.shape.len(), lanes(product.dtype));
 
-    if !product.shape[rank - 1].is_multiple_of(lanes) {
+    if !product.shape[rank - 1].is_multiple_of(lanes) && gemm_regions(graph, dot).is_some() {
         return false;
     }
 
@@ -132,7 +132,8 @@ impl GemmCodegen for Cuda {
     /// product elements `acc` of batch `l`, row `m` and columns `n` on, read and written in the fusion's tensors
     /// `ins` (its inputs) and `outs` (its outputs) at their `layouts`. Without regions, its outputs are the
     /// product's shape: each read or written where the product is moves by one vector when `aligned` (every tensor
-    /// 16-byte aligned). With regions, each vector lies in one; each of its member tuples' values computes the
+    /// 16-byte aligned) and the product's rows are whole vectors; a row that isn't skips the last vector's lanes past
+    /// it. With regions, each vector lies in one; each of its member tuples' values computes the
     /// outputs reading the region at their own index. An expansion (the product's shape twice, concatenated) stores
     /// its two halves' values into their slots of it. The module also names each tensor's CuTe type and span
     /// (`TYPES`, `SPANS`, its inputs first: `INPUTS`) and the product's elements a vector (`VECTOR`).
@@ -216,10 +217,19 @@ impl GemmCodegen for Cuda {
                     }
                 }
 
+                // A row of the product not whole vectors: its rows don't start on a vector, so nothing moves by vectors,
+                // and the last vector's lanes past the row are skipped.
+                let partial = !cols.is_multiple_of(lanes);
+
+                let moved = match partial {
+                    true => "cutlass.const_expr(False)",
+                    false => "cutlass.const_expr(aligned)",
+                };
+
                 // The tensors read or written where the product is: a vector each, moved whole when aligned.
                 let read: Vec<usize> = emitter.fragments.iter().copied().collect();
                 writeln!(code, "    j0 = ({} * {rows} + m) * {cols} + n", at("l")).unwrap();
-                writeln!(code, "    if cutlass.const_expr(aligned):").unwrap();
+                writeln!(code, "    if {moved}:").unwrap();
 
                 for &k in &read {
                     writeln!(
@@ -247,10 +257,19 @@ impl GemmCodegen for Cuda {
                     writeln!(code, "        fout{k} = out{k}").unwrap();
                 }
 
+                let lane = format!("{}{stores}", emitter.lines);
+
+                let lane = match partial {
+                    true => {
+                        let indented: String = lane.lines().map(|l| format!("    {l}\n")).collect();
+                        format!("        if n + lane < {cols}:\n{indented}")
+                    }
+                    false => lane,
+                };
+
                 write!(
                     code,
-                    "        pass\n\n    for lane in cutlass.range_constexpr(VECTOR):\n        j = j0 + lane\n        v = lane if cutlass.const_expr(aligned) else j\n        a = acc[lane]\n{}{stores}\n    if cutlass.const_expr(aligned):\n",
-                    emitter.lines
+                    "        pass\n\n    for lane in cutlass.range_constexpr(VECTOR):\n        j = j0 + lane\n        v = lane if {moved} else j\n        a = acc[lane]\n{lane}\n    if {moved}:\n"
                 )
                 .unwrap();
 

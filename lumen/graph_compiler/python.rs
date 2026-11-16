@@ -883,8 +883,18 @@ fn cuda_gemm(
 
         let operands: Vec<&crate::Tensor> = [a, b].into_iter().chain(product).collect();
 
-        // Each operand's copy width: the widest vector its address, contiguous extent and strides allow.
-        let widths: Vec<usize> = operands.iter().map(|t| copy_bytes(t)).collect();
+        // Each operand's copy width: the widest vector its address, contiguous extent and strides allow (16 for a
+        // product the GEMM doesn't write). Keyed only when one is narrower, so an aligned GEMM's key is as before.
+        let mut widths = [16; 3];
+
+        for (w, t) in widths.iter_mut().zip(&operands) {
+            *w = copy_bytes(t);
+        }
+
+        let narrow = match widths == [16; 3] {
+            true => String::new(),
+            false => format!("|{widths:?}"),
+        };
 
         let dtype = match &output {
             Output::Product(d) => d.dtype(),
@@ -925,7 +935,7 @@ fn cuda_gemm(
         };
 
         let key = format!(
-            "gemm|cuda:{device}|{dtypes:?}|{a_major}{b_major}{d_major}|{batched}|{tile:?}|{aligned_m}{aligned_n}{aligned_k}|{layouts:?}|{widths:?}|{:?}",
+            "gemm|cuda:{device}|{dtypes:?}|{a_major}{b_major}{d_major}|{batched}|{tile:?}|{aligned_m}{aligned_n}{aligned_k}|{layouts:?}{narrow}|{:?}",
             epilogue.map(|(name, _, aligned)| (name, aligned))
         );
 
@@ -933,7 +943,7 @@ fn cuda_gemm(
             Python::attach(|py| {
                 let kwargs = PyDict::new(py);
                 kwargs.set_item("epilogue", epilogue)?;
-                kwargs.set_item("copy_bytes", widths.clone())?;
+                kwargs.set_item("copy_bytes", &widths[..operands.len()])?;
 
                 let (function, warps, shared, plain, types) = py
                     .import("lumen.codegen.dot_general.cuda.launch")?

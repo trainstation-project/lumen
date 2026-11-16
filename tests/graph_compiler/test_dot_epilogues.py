@@ -49,6 +49,7 @@ class _ScaledMatmul(lumen.nn.Module):
             "float32",
         ),
         (lambda x, w, y: F.tanh(F.matmul(x, w, "float32", "float32") + y), [(2, 32, 96), (96, 80), (80,)], "float32"),
+        (lambda x, w, y: F.relu(F.matmul(x, w, "float32", x.dtype) + y), [(16, 32), (32, 15), (15,)], "bfloat16"),
     ],
     ids=[
         "bias relu",
@@ -60,6 +61,7 @@ class _ScaledMatmul(lumen.nn.Module):
         "transposed residual",
         "reshaped",
         "batched by a matrix",
+        "odd width",
     ],
 )
 def test_matmul_epilogues_fuse(device, f, shapes, dtype):
