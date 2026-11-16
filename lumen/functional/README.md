@@ -25,4 +25,5 @@ The public functional API, `lumen.functional` (usually imported as `F`): torch-s
 - Functions follow torch's names and semantics unless the docstring of the function says otherwise; reductions and `cumsum` accumulate in a wider dtype where torch does.
 - Ops are traced exactly as written, with no hidden casts beyond the documented promotion. Float matmuls accumulate in float32 (float64 stays float64; integers accumulate in their own dtype), per `tracer._accum_dtype`.
 - Some ops are traced as other primitives (`gt` as `other < input`, `ge` as `other <= input`), so the graph has fewer primitive kinds.
+- Every argument naming a dimension (`dim`, a reduction's dims, `cat`'s, `rms_norm`'s `normalized_shape`) is an `AxisType` (`lumen/tensor/names.py`): a position or an axis name of a named tensor, resolved by `names.axis`. Elementwise ops broadcast named operands by name (`tracer._broadcast`); `cat` aligns named tensors to the first's order, and `stack` with a name names its new, first axis.
 - These functions only work inside `lumen.compile`.

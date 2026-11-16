@@ -18,6 +18,7 @@ tracing (`graph`, `functional`, `autograd`) -> graph (`graph`) -> graph compiler
 
 - `graph/` - the traced `Graph`, its `Primitive`s, the Python tracer, `compile` and `prims`.
 - `functional/` - torch-style functional ops (`lumen.functional`) traced into primitives, including attention and cross entropy.
+- `named/` - contraction by axis name (`lumen.named.dot`, `contract`) of named tensors; the names themselves live on `Tensor` and `TracedTensor` (see `graph/` and `tensor/`).
 - `autograd/` - JAX-style JVP and transpose rules, `grad`/`vjp`/`jvp`, custom `Function`s, run during tracing.
 - `graph_compiler/` - frontend and per-device pass pipelines, compiler config (`lumen.config.compiler`), and lowering a graph to a plan.
 - `codegen/` - per-op, per-device kernel generators (Metal, CUDA CuTe DSL, Triton, Pallas/Mosaic) and the shared `Kernel` trait.
@@ -40,5 +41,6 @@ tracing (`graph`, `functional`, `autograd`) -> graph (`graph`) -> graph compiler
 ## Conventions
 
 - Programs always run inside `lumen.compile`; the Python ops trace primitives rather than compute eagerly.
+- A tensor's axes may have names (`x.rename("batch", "seq")`), optional metadata resolved while tracing: ops take names wherever they take dimensions and broadcast named operands by name; an unnamed tensor behaves as if names did not exist.
 - Python shims (`__init__.py`, `_C.pyi`) live in the same folder as the Rust they wrap, and each folder's bindings are registered as `lumen.<folder>._C` from `python.rs`.
 - Device-specific code sits in `mps`, `cuda`, `triton`, `tpu` or `cpu` files or subfolders next to the shared code of the same feature.

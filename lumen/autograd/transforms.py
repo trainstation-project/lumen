@@ -86,7 +86,8 @@ def _check(fn_name, args):
 def jvp(fn, primals, tangents):
     """``fn(*primals)`` and its derivative along ``tangents`` (forward
     mode, ``jax.jvp``): each a tree (tensors, modules, lists, tuples) of
-    ``primals``' structure; the result's tangent is of its structure."""
+    ``primals``' structure, a named tangent aligned to its primal by name;
+    the result's tangent is of its structure, each named as its value."""
 
     leaves = _check("jvp", primals)
     tangent_leaves = tracer._tree_leaves(tangents)
@@ -98,6 +99,7 @@ def jvp(fn, primals, tangents):
     tangent = {}
 
     for p, t in zip(leaves, tangent_leaves):
+        t = tracer._like(t, p, "jvp")
         if (t.dtype, t.shape) != (p.dtype, p.shape):
             raise TypeError(
                 f"jvp: a tangent must have its primal's type, got {t.dtype}{list(t.shape)} for {p.dtype}{list(p.shape)}"
@@ -108,7 +110,12 @@ def jvp(fn, primals, tangents):
 
     _jvp_tape(tape, tangent)
 
-    return out, tracer._tree_map(lambda o: _value(tangent[o.var]) if o.var in tangent else _full(o, 0), out)
+    def tangent_of(o):
+        """Output ``o``'s tangent, zeros if it has none, named as ``o``."""
+        t = _value(tangent[o.var]) if o.var in tangent else _full(o, 0)
+        return tracer._renamed(t, o.names)
+
+    return out, tracer._tree_map(tangent_of, out)
 
 
 def linearize(fn, *primals):
@@ -198,14 +205,16 @@ def _transpose_node(graph, name, inputs, params, out, linear_vars, cts):
 
 def vjp(fn, *primals):
     """``fn(*primals)``, and a function from a cotangent of it (of its
-    structure) to those of ``primals`` (a tuple, each of its primal's
-    structure): reverse mode, ``jax.vjp``."""
+    structure, a named one aligned to its value by name) to those of
+    ``primals`` (a tuple, each of its primal's structure, named as it):
+    reverse mode, ``jax.vjp``."""
     out, (seeds, linear, linear_vars, tangents) = linearize(fn, *primals)
 
     def vjp_fn(ct):
         """Cotangents of ``primals`` given ``ct``, a cotangent of ``fn``'s output tree."""
         cts = {}
         for o, c in zip(tracer._tree_leaves(out), tracer._tree_leaves(ct)):
+            c = tracer._like(c, o, "vjp")
             if (c.dtype, c.shape) != (o.dtype, o.shape):
                 raise TypeError(
                     f"vjp: a cotangent must have its value's type, got {c.dtype}{list(c.shape)} for {o.dtype}{list(o.shape)}"
@@ -216,9 +225,9 @@ def vjp(fn, *primals):
         cts = backward_pass(linear, linear_vars, cts)
 
         def cotangent(p):
-            """``p``'s cotangent, zeros if nothing reached its seed."""
+            """``p``'s cotangent, zeros if nothing reached its seed, named as ``p``."""
             seed = seeds.get(p.var)
-            return _value(cts[seed]) if seed in cts else _full(p, 0)
+            return tracer._renamed(_value(cts[seed]) if seed in cts else _full(p, 0), p.names)
 
         return tuple(tracer._tree_map(cotangent, p) for p in primals)
 
@@ -228,7 +237,8 @@ def vjp(fn, *primals):
 def value_and_grad(fn, argnums=0):
     """A function returning ``fn``'s value (a float scalar) and its
     gradient with respect to argument ``argnums`` (a tensor, or a module:
-    a module of its gradients), or each of a tuple of them: ``jax.value_and_grad``.
+    a module of its gradients; named as the argument), or each of a tuple
+    of them: ``jax.value_and_grad``.
     Like every op, it runs while tracing (inside ``lumen.compile``)."""
 
     def value_and_grad_fn(*args):

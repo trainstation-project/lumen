@@ -12,8 +12,9 @@ The concrete tensor: a strided view of device storage, its dtypes and scalars, p
 - `tensor_options.rs` is `TensorOptions`, an optional dtype and device; `DEFAULT_DTYPE` is f32.
 - `parameter.rs` handles parameters: whole contiguous meta tensors that get a real tensor per device the first time a compiled function uses them (`placed`), optionally packed with other parameters into one shared block (`pack`). A version counter bumps on each write so compiled functions can tell their copies are stale.
 - `dlpack.rs` and `dlpack.py` export tensors as DLPack capsules (versioned or legacy) that share memory, and adopt capsules from other libraries (`from_dlpack`), releasing the producer when the storage is freed.
-- `python.rs` binds `Tensor` to Python (construction from nested lists, views, copies, element access, DLPack) and has `parse_dtype` and `dtype_name`.
-- `__init__.py` exposes dtype names, `default_dtype`, factories (`tensor`, `empty`, `zeros`, `ones`, `full`, `arange`) and NumPy conversion (`to_numpy`, `from_numpy`, with `ml_dtypes` for the sub-byte and float8 dtypes).
+- `python.rs` binds `Tensor` to Python (construction from nested lists, views, copies, element access, DLPack) and has `parse_dtype` and `dtype_name`. Its `PyTensor` also holds the optional axis names (`names`, `_with_names`; part of `_signature`), which copies (`to`, `cpu`, `clone`, `contiguous`) keep and views drop.
+- `names.py` holds `AxisType` (`str | int`: a position or an axis name) and `Axes` (one or a sequence of them), the types of every dimension argument, and `axis`, the one resolver of an `AxisType` to a position (an `IndexError` out of range, a `KeyError` for an unknown name) behind every op and collective taking a dimension; it also checks names and resolves orders (`check`, `position`, `renamed`, `refined`, `order`), for `Tensor` and `TracedTensor` alike.
+- `__init__.py` exposes dtype names, `default_dtype`, factories (`tensor`, `empty`, `zeros`, `ones`, `full`, `arange`) and NumPy conversion (`to_numpy`, `from_numpy`, with `ml_dtypes` for the sub-byte and float8 dtypes), and attaches the methods of names to `Tensor` (`rename`, `refine_names`, `align_to`, `size`, `dim_of`).
 - `_C.pyi` types the native module; `tests.rs` holds unit tests.
 
 ## How it connects

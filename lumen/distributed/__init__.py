@@ -6,6 +6,8 @@ result. Every process issues its collectives in program order, so a pair's sends
 order they were written. ``group`` is ``None`` (every process), a ``DeviceMesh`` or a list of global ranks;
 ``src``, ``dst`` and roots are global ranks."""
 
+from __future__ import annotations
+
 import atexit
 import ctypes
 import importlib.util
@@ -25,6 +27,8 @@ from lumen.distributed._C import (
     init_process_group,
     is_initialized,
 )
+from lumen.tensor import names as _names
+from lumen.tensor.names import AxisType
 
 __all__ = [
     "DeviceMesh",
@@ -164,7 +168,7 @@ def all_reduce(tensor, op="sum", group=None):
     return tensor if len(ranks) == 1 else prims.device_wait(prims.all_reduce(tensor, op, ranks))
 
 
-def all_gather(tensor, dim=0, group=None):
+def all_gather(tensor, dim: AxisType = 0, group=None):
     """Every process in ``group``'s ``tensor`` concatenated along ``dim``, in rank order (PyTorch's
     ``all_gather_into_tensor``, any ``dim``)."""
     from lumen.graph import prims
@@ -172,10 +176,10 @@ def all_gather(tensor, dim=0, group=None):
     ranks = _ranks(group)
     if len(ranks) == 1:
         return tensor
-    return _merge(prims.device_wait(prims.all_gather(tensor, ranks)), dim % tensor.ndim)
+    return _merge(prims.device_wait(prims.all_gather(tensor, ranks)), _names.axis(dim, tensor.ndim, tensor.names))
 
 
-def reduce_scatter(tensor, dim=0, op="sum", group=None):
+def reduce_scatter(tensor, dim: AxisType = 0, op="sum", group=None):
     """``tensor`` combined across ``group``'s processes with ``op``, each keeping its share of ``dim`` (split
     into one equal block per process, in rank order): PyTorch's ``reduce_scatter_tensor``, any ``dim``."""
     from lumen.graph import prims
@@ -183,11 +187,11 @@ def reduce_scatter(tensor, dim=0, op="sum", group=None):
     ranks = _ranks(group)
     if len(ranks) == 1:
         return tensor
-    rows = _split(tensor, dim % tensor.ndim, len(ranks), "reduce_scatter")
+    rows = _split(tensor, _names.axis(dim, tensor.ndim, tensor.names), len(ranks), "reduce_scatter")
     return prims.device_wait(prims.reduce_scatter(rows, op, ranks))
 
 
-def all_to_all(tensor, split_dim=0, concat_dim=0, group=None):
+def all_to_all(tensor, split_dim: AxisType = 0, concat_dim: AxisType = 0, group=None):
     """``tensor`` split along ``split_dim`` into one equal block per process of ``group``, block ``j`` sent to
     the ``j``-th; the blocks received concatenated along ``concat_dim`` in rank order (PyTorch's
     ``all_to_all_single`` with equal splits, any dims)."""
@@ -196,8 +200,9 @@ def all_to_all(tensor, split_dim=0, concat_dim=0, group=None):
     ranks = _ranks(group)
     if len(ranks) == 1:
         return tensor
-    rows = _split(tensor, split_dim % tensor.ndim, len(ranks), "all_to_all")
-    return _merge(prims.device_wait(prims.all_to_all(rows, ranks)), concat_dim % tensor.ndim)
+    rows = _split(tensor, _names.axis(split_dim, tensor.ndim, tensor.names), len(ranks), "all_to_all")
+    concat = _names.axis(concat_dim, tensor.ndim, tensor.names)
+    return _merge(prims.device_wait(prims.all_to_all(rows, ranks)), concat)
 
 
 def broadcast(tensor, src=0, group=None):
@@ -217,7 +222,7 @@ def reduce(tensor, dst=0, op="sum", group=None):
     return tensor if len(ranks) == 1 else prims.device_wait(prims.reduce(tensor, op, dst, ranks))
 
 
-def gather(tensor, dst=0, dim=0, group=None):
+def gather(tensor, dst=0, dim: AxisType = 0, group=None):
     """Every process in ``group``'s ``tensor`` concatenated along ``dim``, in rank order, on process ``dst``;
     zeros on the others (PyTorch's ``gather`` into one tensor)."""
     from lumen.graph import prims
@@ -225,10 +230,10 @@ def gather(tensor, dst=0, dim=0, group=None):
     ranks = _ranks(group)
     if len(ranks) == 1:
         return tensor
-    return _merge(prims.device_wait(prims.gather_to(tensor, dst, ranks)), dim % tensor.ndim)
+    return _merge(prims.device_wait(prims.gather_to(tensor, dst, ranks)), _names.axis(dim, tensor.ndim, tensor.names))
 
 
-def scatter(tensor, src=0, dim=0, group=None):
+def scatter(tensor, src=0, dim: AxisType = 0, group=None):
     """Process ``src``'s ``tensor`` split along ``dim`` into one equal block per process of ``group``, the
     ``r``-th going to the ``r``-th; the other processes pass a tensor of the same type, which is not read
     (PyTorch's ``scatter`` from one tensor)."""
@@ -237,7 +242,7 @@ def scatter(tensor, src=0, dim=0, group=None):
     ranks = _ranks(group)
     if len(ranks) == 1:
         return tensor
-    rows = _split(tensor, dim % tensor.ndim, len(ranks), "scatter")
+    rows = _split(tensor, _names.axis(dim, tensor.ndim, tensor.names), len(ranks), "scatter")
     return prims.device_wait(prims.scatter_from(rows, src, ranks))
 
 
