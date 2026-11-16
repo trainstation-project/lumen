@@ -24,6 +24,7 @@ Automatic differentiation, written in Python and run during tracing. The transfo
 ## Conventions
 
 - Rules follow JAX's design: a JVP rule per primitive, a transpose rule for each linear primitive, and reverse mode by transposing the linearized program.
+- Primals, tangents, cotangents and outputs are trees walked by `tracer._tree_map`: tensors, modules, lists, tuples and `register_tree` classes such as `lumen.named.NamedTensor` (whose gradients come back named; `grad` takes one of no axes as its scalar).
 - Only float leaves get tangents; integer and bool values have none.
 - Tangents and cotangents must match their primal's dtype and shape exactly; the transforms raise `TypeError` otherwise.
 - `rules.py` must be imported for its side effect before any transform runs; `transforms.py` does this.

@@ -18,6 +18,7 @@ tracing (`graph`, `functional`, `autograd`) -> graph (`graph`) -> graph compiler
 
 - `graph/` - the traced `Graph`, its `Primitive`s, the Python tracer, `compile` and `prims`.
 - `functional/` - torch-style functional ops (`lumen.functional`) traced into primitives, including attention and cross entropy.
+- `named/` - named tensors (`lumen.named`): `NamedTensor` and ops taking axis names, broadcasting by name, resolved into positional `functional` ops while tracing.
 - `autograd/` - JAX-style JVP and transpose rules, `grad`/`vjp`/`jvp`, custom `Function`s, run during tracing.
 - `graph_compiler/` - frontend and per-device pass pipelines, compiler config (`lumen.config.compiler`), and lowering a graph to a plan.
 - `codegen/` - per-op, per-device kernel generators (Metal, CUDA CuTe DSL, Triton, Pallas/Mosaic) and the shared `Kernel` trait.

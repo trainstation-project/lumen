@@ -226,10 +226,12 @@ def vjp(fn, *primals):
 
 
 def value_and_grad(fn, argnums=0):
-    """A function returning ``fn``'s value (a float scalar) and its
-    gradient with respect to argument ``argnums`` (a tensor, or a module:
-    a module of its gradients), or each of a tuple of them: ``jax.value_and_grad``.
-    Like every op, it runs while tracing (inside ``lumen.compile``)."""
+    """A function returning ``fn``'s value (a float scalar, or a
+    ``lumen.named.NamedTensor`` of no axes) and its gradient with respect
+    to argument ``argnums`` (a tensor, or a module: a module of its
+    gradients; a named tensor: one named as it is), or each of a tuple of
+    them: ``jax.value_and_grad``. Like every op, it runs while tracing
+    (inside ``lumen.compile``)."""
 
     def value_and_grad_fn(*args):
         """Returns ``fn(*args)`` and its gradient with respect to the ``argnums`` arguments."""
@@ -243,9 +245,12 @@ def value_and_grad(fn, argnums=0):
             return fn(*full)
 
         out, pullback = vjp(f, *(args[i] for i in nums))
-        if not isinstance(out, TracedTensor) or out.shape != () or not _is_float(out.dtype):
+        # A registered tree (a named tensor) holding one scalar is a scalar too.
+        leaves = tracer._tree_leaves(out) if type(out) in tracer._TREES else [out]
+        value = leaves[0] if len(leaves) == 1 else None
+        if not isinstance(value, TracedTensor) or value.shape != () or not _is_float(value.dtype):
             raise TypeError(f"grad: fn must return a float scalar, got {out!r}")
-        grads = pullback(_full(out, 1))
+        grads = pullback(_full(value, 1))
         return out, grads[0] if isinstance(argnums, int) else grads
 
     return value_and_grad_fn

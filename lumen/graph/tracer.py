@@ -87,11 +87,77 @@ def _device_type(d):
     return None if d is None else str(d).split(":")[0]
 
 
+# Classes the tracer walks into as containers (``register_tree``): class -> (flatten, unflatten).
+_TREES = {}
+
+
+def register_tree(cls, flatten, unflatten):
+    """Makes ``cls`` a container the tracer walks, as JAX's
+    ``register_pytree_node``: ``flatten(x)`` gives ``(children, aux)``, its
+    tensors (a tuple) and its static part (hashable: part of a compiled
+    function's signature), and ``unflatten(aux, children)`` builds one back.
+    Such a value can be a compiled function's argument (at top level, as a
+    tensor can) and in what it returns, and a primal, tangent or cotangent
+    of ``lumen.grad``, ``vjp`` and ``jvp``."""
+    _TREES[cls] = (flatten, unflatten)
+
+
+@dataclasses.dataclass(frozen=True)
+class _Flattened:
+    """Stands, among a compiled function's arguments, for a registered tree
+    argument (``register_tree``) flattened into the ``count`` children
+    after it: its class and static part, so the signature holds them."""
+
+    cls: type
+    aux: object
+    count: int
+
+
+def _flattened(args):
+    """``args`` with each registered tree argument replaced by a
+    ``_Flattened`` marker followed by its children (tensors), which the
+    tracer treats as any other arguments."""
+    if not any(type(a) in _TREES for a in args):
+        return args
+    flat = []
+    for a in args:
+        tree = _TREES.get(type(a))
+        if tree is None:
+            flat.append(a)
+            continue
+        children, aux = tree[0](a)
+        flat += [_Flattened(type(a), aux, len(children)), *children]
+    return tuple(flat)
+
+
+def _regrouping(fn):
+    """``fn`` taking ``_flattened`` arguments: it rebuilds each registered
+    tree argument from its marker and children before calling ``fn``."""
+
+    @functools.wraps(fn)
+    def regrouped(*args):
+        """``fn`` of ``args`` with their flattened trees rebuilt."""
+        if not any(isinstance(a, _Flattened) for a in args):
+            return fn(*args)
+        rebuilt, rest = [], iter(args)
+        for a in rest:
+            if isinstance(a, _Flattened):
+                a = _TREES[a.cls][1](a.aux, tuple(next(rest) for _ in range(a.count)))
+            rebuilt.append(a)
+        return fn(*rebuilt)
+
+    return regrouped
+
+
 def _tree_map(f, x):
-    """``x`` with each traced tensor in it (through modules, lists and
-    tuples) replaced by ``f(t)``."""
+    """``x`` with each traced tensor in it (through modules, lists, tuples
+    and ``register_tree`` classes) replaced by ``f(t)``."""
     if isinstance(x, TracedTensor):
         return f(x)
+    tree = _TREES.get(type(x))
+    if tree is not None:
+        children, aux = tree[0](x)
+        return tree[1](aux, tuple(_tree_map(f, c) for c in children))
     if isinstance(x, nn.Module):
         fields = {fl.name: _tree_map(f, getattr(x, fl.name)) for fl in dataclasses.fields(x)}
         return dataclasses.replace(x, **fields)
@@ -446,7 +512,8 @@ def _trace(fn, args, device, runtime=_runtime(()), portable=False, split=False):
     layout = [kinds[v] for v in graph.inputs()]
 
     outputs = _tree_leaves(out)
-    if not isinstance(out, (TracedTensor, nn.Module, list, tuple)) or any(o.graph is not graph for o in outputs):
+    returnable = isinstance(out, (TracedTensor, nn.Module, list, tuple)) or type(out) in _TREES
+    if not returnable or any(o.graph is not graph for o in outputs):
         raise TypeError(f"a compiled function must return tensors computed from its inputs, got {out!r}")
     # Values reassigned during the trace become extra outputs after the returned ones, then the kept effects.
     written = [k for k, (sid, t) in enumerate(weights.items()) if t.var != assigned[sid]]
@@ -724,7 +791,7 @@ class Compiled:
         key = _keyed(structure, slots, _runtime(self._dynamic)), target, _compiler_flags()
         result = None
         if key not in self._plans:
-            result = _settled(self._fn, args, target, self._dynamic, self._pinned, self._proven)
+            result = _settled(_regrouping(self._fn), args, target, self._dynamic, self._pinned, self._proven)
             structure, slots, weights = _walk(args)
             key = _keyed(structure, slots, _runtime(self._dynamic)), target, _compiler_flags()
         if result is not None:
@@ -808,6 +875,7 @@ class Compiled:
                     return value.cpu() if host else value
 
                 return _tree_map(returned, out)
+        args = _flattened(args)
         walked = _walk(args)
         graph, plan, workspace, out, inputs = self._prepare(args, walked)
         if self._latest[0] in self._freed:
@@ -1046,7 +1114,7 @@ class Compiled:
     def _planned(self, name, args, device):
         """Graph, a fresh plan on ``device``, ones-filled inputs and a workspace for ``args``' signature, for ``name``."""
         if args:
-            self._prepare(args)
+            self._prepare(_flattened(args))
         elif not self._latest:
             raise RuntimeError(f"{name}: call {self._fn.__name__} first, or pass it arguments to trace")
         ((_, target, _),) = self._latest
@@ -1075,7 +1143,8 @@ def make_graph(fn):
     @functools.wraps(fn)
     def graph(*args):
         """The graph ``fn`` traces to on ``args``."""
-        return _settled(fn, args, _device(args, None), set(), set(), set(), portable=True, split=False)[0]
+        args = _flattened(args)
+        return _settled(_regrouping(fn), args, _device(args, None), set(), set(), set(), portable=True, split=False)[0]
 
     return graph
 
