@@ -117,6 +117,25 @@ fn different_parameters_or_order_are_kept() {
     assert_eq!(names(&cse(&g)), names(&g));
 }
 
+/// CSE keeps equal collectives apart: each is a message, and processes must issue as many.
+#[test]
+fn equal_collectives_are_kept() {
+    let mut g = Graph::new();
+    let x = g.input(ty(&[4]));
+
+    let sum = || AllReduce {
+        op: crate::graph::Reduction::Sum,
+        ranks: vec![0, 1],
+    };
+
+    let a = apply(&mut g, sum(), &[x]);
+    let b = apply(&mut g, sum(), &[x]);
+    let c = apply(&mut g, Add, &[a, b]);
+    g.set_outputs(&[c]).unwrap();
+
+    assert_eq!(names(&cse(&g)), ["all_reduce", "all_reduce", "add"]);
+}
+
 /// Asserts `g` and `simplified` produce identical `f32` outputs on `inputs`.
 fn same_values(g: &Graph, simplified: &Graph, inputs: &[crate::Tensor]) {
     let want = reference::run(g, inputs).unwrap();

@@ -1,4 +1,11 @@
-"""Helpers shared by test files: device params, seeded inputs, and the modules several tests trace."""
+"""Helpers shared by test files: device params, seeded inputs, the modules several tests trace, and a launcher of
+multi-process programs."""
+
+import json
+import os
+import socket
+import subprocess
+import sys
 
 import numpy as np
 import pytest
@@ -37,3 +44,40 @@ def placed(shape, dtype, device, seed=0):
 def meta(*shape, dtype="float32"):
     """An empty meta tensor of `shape` and `dtype`, a placeholder for tracing."""
     return lumen.empty(list(shape), dtype, device="meta")
+
+
+def free_port():
+    """A TCP port on localhost that is free right now."""
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def launch(program, world_size, env=lambda rank: {}):
+    """Runs `program` in `world_size` Python processes wired by env rendezvous; returns each one's last
+    JSON line, sorted by rank. `env` adds variables per rank."""
+    port = free_port()
+    processes = [
+        subprocess.Popen(
+            [sys.executable, "-c", program],
+            env={
+                **os.environ,
+                "MASTER_ADDR": "127.0.0.1",
+                "MASTER_PORT": str(port),
+                "RANK": str(rank),
+                "LOCAL_RANK": str(rank),
+                "WORLD_SIZE": str(world_size),
+                **env(rank),
+            },
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for rank in reversed(range(world_size))
+    ]
+    results = []
+    for p in processes:
+        out, err = p.communicate(timeout=300)
+        assert p.returncode == 0, err
+        results.append(json.loads(out.splitlines()[-1]))
+    return sorted(results, key=lambda r: r["rank"])

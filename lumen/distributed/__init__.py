@@ -4,7 +4,8 @@ transfers are traced inside ``lumen.compile``, mirroring ``torch.distributed``'s
 asynchronously and ends in a ``device_wait``, which the plan places just before the first op that reads the
 result. Every process issues its collectives in program order, so a pair's sends and receives match in the
 order they were written. ``group`` is ``None`` (every process), a ``DeviceMesh`` or a list of global ranks;
-``src``, ``dst`` and roots are global ranks."""
+``src``, ``dst`` and roots are global ranks. ``shard_map`` (from ``spmd``, with its named collectives) maps a
+function over a mesh's processes as JAX's does."""
 
 import atexit
 import ctypes
@@ -28,6 +29,8 @@ from lumen.distributed._C import (
 
 __all__ = [
     "DeviceMesh",
+    "P",
+    "PartitionSpec",
     "TCPStore",
     "all_gather",
     "all_reduce",
@@ -47,6 +50,8 @@ __all__ = [
     "scatter",
     "send",
     "set_tpu_launch_env",
+    "shard_map",
+    "spmd",
 ]
 
 # chip count on one host -> LUMEN_TPU_TOPOLOGY host bounds
@@ -262,3 +267,9 @@ def barrier(group=None):
     """Blocks the host until every process of ``group`` has called ``barrier`` as many times, through the default
     group's store (PyTorch's ``barrier``); device work already queued is not waited for. Called outside traces."""
     _barrier(_ranks(group))
+
+
+# Imported last: it builds on the collectives above. Its named collectives (`spmd.psum`, ...) stay in
+# `lumen.distributed.spmd`, as `jax.lax`'s do, since `all_gather` and `all_to_all` take other arguments here.
+from lumen.distributed import spmd  # noqa: E402
+from lumen.distributed.spmd import P, PartitionSpec, shard_map  # noqa: E402
