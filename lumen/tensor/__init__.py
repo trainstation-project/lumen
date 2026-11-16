@@ -1,10 +1,13 @@
-"""Python tensor API: dtype names, tensor factories (traced as prims inside ``lumen.compile``) and numpy/DLPack interop."""
+"""Python tensor API: dtype names, tensor factories (traced as prims inside ``lumen.compile``), numpy/DLPack interop
+and the methods of axis names."""
 
 import builtins
 
 from lumen.tensor import dlpack
+from lumen.tensor import names as _names
 from lumen.tensor._C import Tensor
 from lumen.tensor.dlpack import from_dlpack
+from lumen.tensor.names import AxisType
 
 __all__ = [
     "Tensor",
@@ -169,10 +172,46 @@ def _tensor__array__(self, dtype=None, copy=None):
     return arr
 
 
-# Attach numpy and DLPack protocols to the native Tensor class.
+def _rename(self, *names, **mapping):
+    """It, sharing its memory, with its axes named ``names``, one per dim (a
+    lone None drops the names), or renamed by ``mapping`` (old name to
+    new), as torch's ``rename``. Names are metadata a compiled function
+    reads at trace time (``TracedTensor``): its results come back named."""
+    return self._with_names(_names.renamed(self.names, self.ndim, names, mapping))
+
+
+def _refine_names(self, *names):
+    """It named ``names`` if it is unnamed; a named tensor must have them already (torch's ``refine_names``)."""
+    return self._with_names(_names.refined(self.names, self.ndim, names))
+
+
+def _align_to(self, *order):
+    """A view of it with its axes in ``order`` (names; one ``...`` stands for the others in their order)."""
+    order = _names.order(self.names, order, "align_to")
+    if order == self.names:
+        return self
+    return self.permute([self.names.index(n) for n in order])._with_names(order)
+
+
+def _size(self, dim: AxisType | None = None):
+    """The shape, or the size of dimension ``dim`` (a position or an axis name)."""
+    return self.shape if dim is None else self.shape[_names.axis(dim, self.ndim, self.names, "size")]
+
+
+def _dim_of(self, name: str) -> int:
+    """The position of axis ``name``; a KeyError if it has none."""
+    return _names.position(self.names, name, "dim_of")
+
+
+# Attach numpy and DLPack protocols, and the methods of names, to the native Tensor class.
 try:
     Tensor.__array__ = _tensor__array__
     Tensor.__dlpack__ = dlpack.__dlpack__
     Tensor.__dlpack_device__ = dlpack.__dlpack_device__
+    Tensor.rename = _rename
+    Tensor.refine_names = _refine_names
+    Tensor.align_to = _align_to
+    Tensor.size = _size
+    Tensor.dim_of = _dim_of
 except (AttributeError, TypeError):  # pragma: no cover
     pass

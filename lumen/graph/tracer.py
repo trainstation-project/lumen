@@ -1,5 +1,7 @@
 """Tracing Python functions into lumen graphs: ``TracedTensor``, ``compile`` and ``make_graph``."""
 
+from __future__ import annotations
+
 import builtins
 import contextlib
 import dataclasses
@@ -9,13 +11,16 @@ import math
 import os
 import sys
 import warnings
+from typing import Sequence
 
 from lumen import nn
 from lumen.config._C import config
 from lumen.graph import prims
 from lumen.graph._C import Graph
 from lumen.graph_compiler._C import Plan
+from lumen.tensor import names as _names
 from lumen.tensor._C import Tensor, _pack
+from lumen.tensor.names import Axes, AxisType
 
 __all__ = [
     "TracedTensor",
@@ -87,77 +92,11 @@ def _device_type(d):
     return None if d is None else str(d).split(":")[0]
 
 
-# Classes the tracer walks into as containers (``register_tree``): class -> (flatten, unflatten).
-_TREES = {}
-
-
-def register_tree(cls, flatten, unflatten):
-    """Makes ``cls`` a container the tracer walks, as JAX's
-    ``register_pytree_node``: ``flatten(x)`` gives ``(children, aux)``, its
-    tensors (a tuple) and its static part (hashable: part of a compiled
-    function's signature), and ``unflatten(aux, children)`` builds one back.
-    Such a value can be a compiled function's argument (at top level, as a
-    tensor can) and in what it returns, and a primal, tangent or cotangent
-    of ``lumen.grad``, ``vjp`` and ``jvp``."""
-    _TREES[cls] = (flatten, unflatten)
-
-
-@dataclasses.dataclass(frozen=True)
-class _Flattened:
-    """Stands, among a compiled function's arguments, for a registered tree
-    argument (``register_tree``) flattened into the ``count`` children
-    after it: its class and static part, so the signature holds them."""
-
-    cls: type
-    aux: object
-    count: int
-
-
-def _flattened(args):
-    """``args`` with each registered tree argument replaced by a
-    ``_Flattened`` marker followed by its children (tensors), which the
-    tracer treats as any other arguments."""
-    if not any(type(a) in _TREES for a in args):
-        return args
-    flat = []
-    for a in args:
-        tree = _TREES.get(type(a))
-        if tree is None:
-            flat.append(a)
-            continue
-        children, aux = tree[0](a)
-        flat += [_Flattened(type(a), aux, len(children)), *children]
-    return tuple(flat)
-
-
-def _regrouping(fn):
-    """``fn`` taking ``_flattened`` arguments: it rebuilds each registered
-    tree argument from its marker and children before calling ``fn``."""
-
-    @functools.wraps(fn)
-    def regrouped(*args):
-        """``fn`` of ``args`` with their flattened trees rebuilt."""
-        if not any(isinstance(a, _Flattened) for a in args):
-            return fn(*args)
-        rebuilt, rest = [], iter(args)
-        for a in rest:
-            if isinstance(a, _Flattened):
-                a = _TREES[a.cls][1](a.aux, tuple(next(rest) for _ in range(a.count)))
-            rebuilt.append(a)
-        return fn(*rebuilt)
-
-    return regrouped
-
-
 def _tree_map(f, x):
-    """``x`` with each traced tensor in it (through modules, lists, tuples
-    and ``register_tree`` classes) replaced by ``f(t)``."""
+    """``x`` with each traced tensor in it (through modules, lists and
+    tuples) replaced by ``f(t)``."""
     if isinstance(x, TracedTensor):
         return f(x)
-    tree = _TREES.get(type(x))
-    if tree is not None:
-        children, aux = tree[0](x)
-        return tree[1](aux, tuple(_tree_map(f, c) for c in children))
     if isinstance(x, nn.Module):
         fields = {fl.name: _tree_map(f, getattr(x, fl.name)) for fl in dataclasses.fields(x)}
         return dataclasses.replace(x, **fields)
@@ -451,7 +390,7 @@ def _trace(fn, args, device, runtime=_runtime(()), portable=False, split=False):
     in the one graph. Precision warnings point at the line computing the
     value they are about."""
     graph = Graph()
-    traced = [TracedTensor(graph, graph.input(a.dtype, a.shape), device) if isinstance(a, Tensor) else a for a in args]
+    traced = [_input(graph, a, device) if isinstance(a, Tensor) else a for a in args]
     runtime_slots = _runtime_slots(args, runtime)
     host = _Host(graph, device) if split else None
     kinds = {t.var: ("arg", k) for k, t in enumerate(t for t in traced if isinstance(t, TracedTensor))}
@@ -464,14 +403,19 @@ def _trace(fn, args, device, runtime=_runtime(()), portable=False, split=False):
         kinds[inputs[slot].var if host is None else host.precreate(inputs[slot].var, dtype, ()).var] = ("scalar", k)
     weights = {}
     for t in _weights(args):
-        weights[t.storage_id] = TracedTensor(graph, graph.input(t.dtype, t.shape), device)
+        weights[t.storage_id] = _input(graph, t, device)
         kinds[weights[t.storage_id].var] = ("weight", len(weights) - 1)
+
+    def weight(t):
+        """The graph input of weight ``t``, named as ``t`` (a weight in two fields may be named otherwise in each)."""
+        w = weights.get(t.storage_id, t)
+        return w if w is t or w.names == t.names else _renamed(w, t.names)
 
     def mapped(i, a):
         """Argument ``i`` with its module weights and runtime scalars swapped for their graph inputs."""
         if isinstance(a, TracedTensor):
             return a
-        return nn.map_tensors(a, lambda t: weights.get(t.storage_id, t), lambda path, v: inputs.get((i, path), v))
+        return nn.map_tensors(a, weight, lambda path, v: inputs.get((i, path), v))
 
     traced = [mapped(i, a) for i, a in enumerate(traced)]
     scalars = [inputs[slot] for slot, _ in runtime_slots]
@@ -503,7 +447,7 @@ def _trace(fn, args, device, runtime=_runtime(()), portable=False, split=False):
                 now = _as_tensor(now, dtype, "a scalar field's value")
                 scalars[k] = now if now.dtype == dtype else now.to(dtype)
         if host is not None:
-            out = _tree_map(lambda o: host.imported(o) if host.owns(o) else o, out)
+            out = _tree_map(lambda o: _renamed(host.imported(o), o.names) if host.owns(o) else o, out)
         effects = [t.var for t in _EFFECTS[-1]]
     if host is not None:
         kinds.update({host.imports[v].var: ("hoisted", j) for j, v in enumerate(host.hoisted)})
@@ -512,8 +456,7 @@ def _trace(fn, args, device, runtime=_runtime(()), portable=False, split=False):
     layout = [kinds[v] for v in graph.inputs()]
 
     outputs = _tree_leaves(out)
-    returnable = isinstance(out, (TracedTensor, nn.Module, list, tuple)) or type(out) in _TREES
-    if not returnable or any(o.graph is not graph for o in outputs):
+    if not isinstance(out, (TracedTensor, nn.Module, list, tuple)) or any(o.graph is not graph for o in outputs):
         raise TypeError(f"a compiled function must return tensors computed from its inputs, got {out!r}")
     # Values reassigned during the trace become extra outputs after the returned ones, then the kept effects.
     written = [k for k, (sid, t) in enumerate(weights.items()) if t.var != assigned[sid]]
@@ -556,6 +499,48 @@ def _trace(fn, args, device, runtime=_runtime(()), portable=False, split=False):
     return graph, out, (written, written_slots, written_arguments, host_part), drawn, changed, layout
 
 
+def _input(graph, t, device):
+    """A new input of ``graph`` on ``device`` for tensor ``t``: of its type, and named as it is."""
+    x = TracedTensor(graph, graph.input(t.dtype, t.shape), device)
+    x.names = t.names
+    return x
+
+
+def _renamed(x, names):
+    """Traced ``x`` named ``names`` (unchecked), with no op: ``x`` itself if it has them, else a view of
+    ``x`` (assigning one assigns the other, as torch's ``rename``)."""
+    if x.names == names:
+        return x
+    out = TracedTensor(x.graph, x.var, x.device)
+    base = x._base if x._base is not None else x
+    out._base, out._ops, out._seen = base, x._ops, base._version
+    out.weak, out.recipe, out.names = x.weak, x.recipe, names
+    return out
+
+
+def _with_names(out, names, x):
+    """``out``, the result of an op on traced ``x`` (``x`` itself when the
+    op changed nothing), named ``names``: a named split or merge, which
+    the reshape it is does not name (``propagation``)."""
+    if out is x:
+        return _renamed(x, names)
+    out.names = names
+    return out
+
+
+def _like(t, ref, op):
+    """Traced ``t``, a value of ``ref``'s type (a gradient, a tangent),
+    named as ``ref``: aligned to it by name if both are named (a ValueError
+    naming ``op`` if their names differ), renamed if only ``ref`` is."""
+    if ref.names is None or not isinstance(t, TracedTensor) or t.names == ref.names:
+        return t
+    if t.names is not None:
+        if set(t.names) != set(ref.names):
+            raise ValueError(f"{op}: axes {t.names} do not match {ref.names}")
+        t = t.align_to(*ref.names)
+    return _renamed(t, ref.names)
+
+
 def _lift(x):
     """``x`` as an operand of the graph being traced; a tensor the function
     closes over is an error (it would be invisible to the graph)."""
@@ -590,7 +575,7 @@ def _walk(args):
                     )
                 ids.append(x.storage_id)
                 params.setdefault(x.storage_id, x)
-            return ("tensor", x.dtype, tuple(x.shape))
+            return ("tensor", x.dtype, tuple(x.shape), x.names)
         if isinstance(x, nn.Module):
             names = _FIELDS.get(type(x))
             if names is None:
@@ -615,7 +600,7 @@ def _keyed(structure, slots, runtime):
 
 
 def _signature(args, runtime):
-    """What a plan for ``args`` depends on: the tensors' types, the
+    """What a plan for ``args`` depends on: the tensors' types and names, the
     modules' and containers' structure (``nn.structure``: a runtime
     scalar's type, a static one's value), which weights are shared, and the
     other arguments' values."""
@@ -791,7 +776,7 @@ class Compiled:
         key = _keyed(structure, slots, _runtime(self._dynamic)), target, _compiler_flags()
         result = None
         if key not in self._plans:
-            result = _settled(_regrouping(self._fn), args, target, self._dynamic, self._pinned, self._proven)
+            result = _settled(self._fn, args, target, self._dynamic, self._pinned, self._proven)
             structure, slots, weights = _walk(args)
             key = _keyed(structure, slots, _runtime(self._dynamic)), target, _compiler_flags()
         if result is not None:
@@ -869,13 +854,14 @@ class Compiled:
                     return self._run(key, plan, workspace, list(args))[0]
                 outputs = iter(zip(self._run(key, plan, workspace, list(args)), to_host))
 
-                def returned(_):
-                    """The next plan output, copied to the host if its traced tensor was on the CPU."""
+                def returned(t):
+                    """The next plan output for traced output ``t``: copied to the host if ``t`` was on the CPU,
+                    and named as ``t``."""
                     value, host = next(outputs)
-                    return value.cpu() if host else value
+                    value = value.cpu() if host else value
+                    return value if t.names is None else value._with_names(t.names)
 
                 return _tree_map(returned, out)
-        args = _flattened(args)
         walked = _walk(args)
         graph, plan, workspace, out, inputs = self._prepare(args, walked)
         if self._latest[0] in self._freed:
@@ -900,11 +886,13 @@ class Compiled:
         to_host = []
 
         def result_of(t):
-            """The next plan output for traced output ``t``, copied to the host when ``t`` is a CPU value."""
+            """The next plan output for traced output ``t``, copied to the host when ``t`` is a CPU value,
+            and named as ``t``."""
             value = next(outputs)
             host = ran and _device_type(t.device) == "cpu" and _device_type(value.device) != "cpu"
             to_host.append(host)
-            return value.cpu() if host else value
+            value = value.cpu() if host else value
+            return value if t.names is None else value._with_names(t.names)
 
         result = _tree_map(result_of, out)
         if ran and all(type(a) is Tensor for a in args):
@@ -913,7 +901,7 @@ class Compiled:
             plain = host[0] is None and not (written or written_scalars or written_arguments or drawn is not None)
             if plain and not plan.neural_engine and len(inputs) == len(args):
                 signature = tuple([a._signature for a in args])
-                lone = isinstance(out, TracedTensor) and to_host == [False]
+                lone = isinstance(out, TracedTensor) and out.names is None and to_host == [False]
                 self._fast[signature, _compiler_flags()] = (
                     plan,
                     workspace,
@@ -1114,7 +1102,7 @@ class Compiled:
     def _planned(self, name, args, device):
         """Graph, a fresh plan on ``device``, ones-filled inputs and a workspace for ``args``' signature, for ``name``."""
         if args:
-            self._prepare(_flattened(args))
+            self._prepare(args)
         elif not self._latest:
             raise RuntimeError(f"{name}: call {self._fn.__name__} first, or pass it arguments to trace")
         ((_, target, _),) = self._latest
@@ -1143,8 +1131,7 @@ def make_graph(fn):
     @functools.wraps(fn)
     def graph(*args):
         """The graph ``fn`` traces to on ``args``."""
-        args = _flattened(args)
-        return _settled(_regrouping(fn), args, _device(args, None), set(), set(), set(), portable=True, split=False)[0]
+        return _settled(fn, args, _device(args, None), set(), set(), set(), portable=True, split=False)[0]
 
     return graph
 
@@ -1257,13 +1244,60 @@ def _broadcast_to(x, shape):
     return prims.broadcast_in_dim(x, shape, range(lead, len(shape)))
 
 
+def _union(op, named):
+    """The axes of a broadcast by name of the ``named`` traced tensors, and
+    their sizes: the order of the one with the most axes (the first such),
+    so it is read as stored, then each other name in order of first
+    appearance. A name's sizes must agree (no size-1 stretching)."""
+    sizes = {}
+    for t in named:
+        for n, size in zip(t.names, t.shape):
+            if sizes.setdefault(n, size) != size:
+                raise ValueError(f"{op}: axis {n!r} has size {sizes[n]} in one operand and {size} in another")
+    widest = builtins.max(named, key=lambda t: t.ndim)
+    names = tuple(dict.fromkeys((*widest.names, *sizes)))
+    return names, tuple(sizes[n] for n in names)
+
+
+def _broadcast(op, *tensors):
+    """Traced ``tensors`` broadcast to one shape (the ``op`` they are operands
+    of, for errors). Two or more with names broadcast by name: each named
+    one transposed to the union's order (``_union``) and broadcast over
+    the names it lacks, named as the union; the unnamed ones broadcast
+    positionally to it. Otherwise positionally (NumPy's rules), so an
+    unnamed program traces as it always has."""
+    named = [t for t in tensors if t.names is not None]
+    if len(named) < 2:
+        shape = _broadcast_shapes(*(t.shape for t in tensors))
+        return [_broadcast_to(t, shape) for t in tensors]
+    names, shape = _union(op, named)
+    unnamed = [t.shape for t in tensors if t.names is None]
+    try:
+        fits = _broadcast_shapes(shape, *unnamed) == shape
+    except RuntimeError:
+        fits = False
+    if not fits:
+        raise ValueError(f"{op}: unnamed operands of shapes {unnamed} do not broadcast to the axes {names} {shape}")
+
+    def aligned(t):
+        """Named ``t`` laid out for ``names``: its axes in their order, broadcast over the others."""
+        mine = [n for n in names if n in t.names]
+        t = t.align_to(*mine)
+        if t.shape == shape:
+            return t
+        out = prims.broadcast_in_dim(t, shape, [names.index(n) for n in mine])
+        out.names = names
+        return out
+
+    return [_broadcast_to(t, shape) if t.names is None else aligned(t) for t in tensors]
+
+
 def _operands(op, *operands):
     """``operands`` as traced tensors of their common dtype, broadcast to a
-    common shape."""
+    common shape (by name when several are named: ``_broadcast``)."""
     dtype = _common_dtype(op, operands)
     tensors = [_as_tensor(x, dtype, op) for x in operands]
-    shape = _broadcast_shapes(*(t.shape for t in tensors))
-    return [_broadcast_to(t, shape) for t in tensors]
+    return _broadcast(op, *tensors)
 
 
 def _elementwise(prim, *operands):
@@ -1275,22 +1309,20 @@ def _elementwise(prim, *operands):
     return out
 
 
-def _dim(dim, ndim):
-    """``dim`` in ``[-ndim, ndim)`` as a nonnegative dimension; a 0-d tensor
-    takes dimension 0 or -1."""
-    n = builtins.max(ndim, 1)
-    if not -n <= dim < n:
-        raise IndexError(f"Dimension out of range (expected to be in range of [{-n}, {n - 1}], but got {dim})")
-    return dim % n
+def _dim(dim: AxisType, ndim: int, names: tuple[str, ...] | None = None) -> int:
+    """``dim`` (a position in ``[-ndim, ndim)`` or an axis name of ``names``,
+    the tensor's) as a nonnegative dimension (``names.axis``)."""
+    return _names.axis(dim, ndim, names)
 
 
-def _dims(dim, ndim):
-    """A ``dim=`` argument (None, an int, or a sequence) as a sorted tuple;
-    None or ``()`` means every dimension."""
+def _dims(dim: Axes | None, ndim: int, names: tuple[str, ...] | None = None) -> tuple[int, ...]:
+    """A ``dim=`` argument (None, an int or an axis name of ``names``, or a
+    sequence of them) as a sorted tuple; None or ``()`` means every
+    dimension."""
     if dim is None or dim == ():
         return tuple(range(ndim))
-    dims = (dim,) if isinstance(dim, int) else tuple(dim)
-    return tuple(sorted({_dim(d, ndim) for d in dims} & set(range(ndim))))
+    dims = (dim,) if isinstance(dim, (int, str)) else tuple(dim)
+    return tuple(sorted({_dim(d, ndim, names) for d in dims} & set(range(ndim))))
 
 
 def _sizes(args):
@@ -1309,6 +1341,16 @@ def _le(x, y):
     """Elementwise ``x <= y``."""
     less = prims.lt(x, y)
     return prims.select(less, less, prims.eq(x, y))
+
+
+def _gt(x, y):
+    """Elementwise ``x > y``, traced as ``y < x``."""
+    return prims.lt(y, x)
+
+
+def _ge(x, y):
+    """Elementwise ``x >= y``, traced as ``y <= x``."""
+    return _le(y, x)
 
 
 def _ne(x, y):
@@ -1374,8 +1416,7 @@ def _power(x, y):
             base, y = prims.mul(base, base), y >> 1
         return result
     if isinstance(y, TracedTensor) and _is_float(x.dtype) and not _is_float(y.dtype) and y.dtype != "bool":
-        shape = _broadcast_shapes(x.shape, y.shape)
-        return prims.pow(_broadcast_to(x, shape), _broadcast_to(y, shape))
+        return prims.pow(*_broadcast("pow", x, y))
     return _elementwise(prims.pow, x, y)
 
 
@@ -1483,10 +1524,18 @@ def _scatter(x, ops, value):
 class TracedTensor:
     """A value of the graph being traced, standing in for a tensor inside a
     function passed to ``lumen.compile``. It has a dtype and shape but no
-    data; its methods record primitives into the graph."""
+    data; its methods record primitives into the graph.
+
+    Its axes may have names (``names``: a tuple of strings, one per axis,
+    unique; None, the default, for an unnamed tensor). Every method and
+    ``lumen.functional`` op taking a dimension then also takes a name, and
+    elementwise ops broadcast named operands by name (``_broadcast``). Each
+    primitive names its result from its operands' (``propagation``), so
+    names cost nothing when the plan runs."""
 
     __slots__ = (
         "graph",
+        "names",
         "_var",
         "dtype",
         "shape",
@@ -1508,6 +1557,7 @@ class TracedTensor:
         self.weak = False
         self.grad = None
         self.recipe = None
+        self.names = None
         self.device = device or (_DEVICES[-1] if _DEVICES else None)
         dtype, shape = graph.type_of(var)
         self.dtype = dtype
@@ -1524,8 +1574,9 @@ class TracedTensor:
         return self._var
 
     def __repr__(self):
-        """The value's graph variable, dtype and shape."""
-        return f"TracedTensor(%{self.var}, dtype={self.dtype}, shape={list(self.shape)})"
+        """The value's graph variable, dtype and shape, and its axes' names if it has them."""
+        names = "" if self.names is None else f", names={self.names}"
+        return f"TracedTensor(%{self.var}, dtype={self.dtype}, shape={list(self.shape)}{names})"
 
     def __bool__(self):
         """Raises: a traced value has no data to branch on."""
@@ -1542,9 +1593,30 @@ class TracedTensor:
         """Number of dimensions (torch's ``dim()``)."""
         return self.ndim
 
-    def size(self, dim=None):
-        """The shape, or the size of dimension ``dim``."""
-        return self.shape if dim is None else self.shape[_dim(dim, self.ndim)]
+    def size(self, dim: AxisType | None = None):
+        """The shape, or the size of dimension ``dim`` (a position or an axis name)."""
+        return self.shape if dim is None else self.shape[_dim(dim, self.ndim, self.names)]
+
+    def dim_of(self, name: str) -> int:
+        """The position of axis ``name``; a KeyError if it has none."""
+        return _names.position(self.names, name, "dim_of")
+
+    def rename(self, *names, **mapping):
+        """It with its axes named ``names``, one per axis (a lone None drops
+        the names), or renamed by ``mapping`` (old name to new): no op, a
+        view of it (torch's ``rename``)."""
+        return _renamed(self, _names.renamed(self.names, self.ndim, names, mapping))
+
+    def refine_names(self, *names):
+        """It named ``names`` if it is unnamed; a named tensor must have them already (torch's ``refine_names``)."""
+        return _renamed(self, _names.refined(self.names, self.ndim, names))
+
+    def align_to(self, *order):
+        """It with its axes in ``order`` (names; one ``...`` stands for the
+        others in their order): a transpose, none if they are in order
+        already."""
+        order = _names.order(self.names, order, "align_to")
+        return self.permute([self.names.index(n) for n in order])
 
     def numel(self):
         """Number of elements."""
@@ -1566,8 +1638,8 @@ class TracedTensor:
     __ne__ = _binary(_ne)
     __lt__ = _binary(prims.lt)
     __le__ = _binary(_le)
-    __gt__ = _binary(prims.lt, reflected=True)
-    __ge__ = _binary(_le, reflected=True)
+    __gt__ = _binary(_gt)
+    __ge__ = _binary(_ge)
 
     def __truediv__(self, other):
         """``self / other`` (float division)."""
@@ -1779,9 +1851,10 @@ class TracedTensor:
         view.copy_(_broadcast_to(value.reshape(shape), view.shape))
 
     def backward(self, gradient=None):
-        """Its gradient (``gradient``: its cotangent; for a scalar, 1 by
-        default) with respect to the traced function's tensor arguments and
-        its modules' weights, added to their ``.grad`` (``torch.Tensor.backward``,
+        """Its gradient (``gradient``: its cotangent, aligned to it by name
+        if both are named; for a scalar, 1 by default) with respect to the
+        traced function's tensor arguments and its modules' weights, added
+        to their ``.grad``, named as they are (``torch.Tensor.backward``,
         within the trace: return them). As ``lumen.grad`` computes it."""
         from lumen.autograd.transforms import backward
 
@@ -1793,12 +1866,13 @@ class TracedTensor:
 
             gradient = prims.full((), 1.0, self.dtype)
 
+        gradient = _like(_lift(gradient), self, "backward")
         for leaf, g in zip(leaves, backward(self, gradient, list(tape), leaves)):
             if g is not None:
                 if leaf.grad is not None:
                     g = leaf.grad + g
 
-                leaf.grad = g
+                leaf.grad = _renamed(g, leaf.names)
 
     def __matmul__(self, other):
         """Raises: matmul needs explicit dtypes, through ``lumen.functional.matmul``."""
@@ -1894,34 +1968,88 @@ class TracedTensor:
 
     view = reshape
 
-    def flatten(self, start_dim=0, end_dim=-1):
-        """Dimensions ``start_dim..=end_dim`` merged into one."""
+    def flatten(self, start_dim: AxisType | Sequence[str] = 0, end_dim: AxisType = -1):
+        """Dimensions ``start_dim..=end_dim`` (positions or names) merged
+        into one. Named (torch's ``flatten(dims, out_dim)``): axes
+        ``start_dim`` (a sequence of names, the first the outermost) merged
+        into one named ``end_dim``, where the first of them stored is, after
+        a transpose only if they are not already adjacent and in that
+        order."""
+        if isinstance(start_dim, (list, tuple)):
+            return self._merge(start_dim, end_dim)
         if self.ndim == 0:
             return self.reshape(1)
-        start, end = _dim(start_dim, self.ndim), _dim(end_dim, self.ndim)
+        start, end = _dim(start_dim, self.ndim, self.names), _dim(end_dim, self.ndim, self.names)
         return self.reshape(self.shape[:start] + (-1,) + self.shape[end + 1 :])
 
-    def unsqueeze(self, dim):
+    def _merge(self, axes, into):
+        """Named ``flatten``: ``axes`` (names) merged into one axis named ``into``."""
+        if not isinstance(into, str):
+            raise TypeError(f"flatten: the merged axis needs a name, got {into!r}")
+        axes = _names.check(axes, len(axes), "flatten")
+        if not axes:
+            raise ValueError("flatten: name the axes to merge")
+        for n in axes:
+            _names.position(self.names, n, "flatten")
+        # The merged group goes where its first stored axis is, so an adjacent group needs no transpose.
+        at = builtins.min(self.names.index(n) for n in axes)
+        before = [n for n in self.names[:at] if n not in axes]
+        after = [n for n in self.names[at:] if n not in axes]
+        names = _names.check((*before, into, *after), len(before) + len(after) + 1, "flatten")
+        size = {n: self.shape[d] for d, n in enumerate(self.names)}
+        shape = [size[n] for n in before] + [math.prod(size[n] for n in axes)] + [size[n] for n in after]
+        aligned = self.align_to(*before, *axes, *after)
+        return _with_names(aligned.reshape(shape), names, aligned)
+
+    def unflatten(self, dim: AxisType, sizes):
+        """Dimension ``dim`` (a position or a name) split into dimensions of
+        ``sizes`` (the first the outermost; one may be -1, inferred), where
+        it was (torch's ``unflatten``): a reshape. Sizes given with names, as
+        ``(name, size)`` pairs or a dict (``x.unflatten("embed", {"heads":
+        8, "head": -1})``), name the new axes; the others keep theirs."""
+        d = _dim(dim, self.ndim, self.names)
+        pairs = list(sizes.items()) if isinstance(sizes, dict) else list(sizes)
+        named = bool(pairs) and all(isinstance(p, (list, tuple)) for p in pairs)
+        parts = [int(p[1]) for p in pairs] if named else [int(p) for p in pairs]
+        if not parts:
+            raise ValueError("unflatten: give the sizes to split into")
+        n = self.shape[d]
+        if parts.count(-1) > 1:
+            raise ValueError(f"unflatten: only one size can be inferred, got {parts}")
+        known = math.prod(s for s in parts if s != -1)
+        if -1 in parts:
+            if known == 0 or n % known:
+                raise ValueError(f"unflatten: dimension {dim!r} of size {n} does not split into {parts}")
+            parts[parts.index(-1)] = n // known
+        if math.prod(parts) != n:
+            raise ValueError(f"unflatten: dimension {dim!r} of size {n} does not split into {parts}")
+        out = self.reshape(self.shape[:d] + tuple(parts) + self.shape[d + 1 :])
+        if not named or self.names is None:
+            return out
+        names = self.names[:d] + tuple(p[0] for p in pairs) + self.names[d + 1 :]
+        return _with_names(out, _names.check(names, out.ndim, "unflatten"), self)
+
+    def unsqueeze(self, dim: int):
         """A size-1 dimension inserted at ``dim``."""
         dim = _dim(dim, self.ndim + 1)
         return self.reshape(self.shape[:dim] + (1,) + self.shape[dim:])
 
-    def squeeze(self, dim=None):
-        """Size-1 dimensions removed: those in ``dim``, or all if None."""
-        dims = _dims(dim, self.ndim)
+    def squeeze(self, dim: Axes | None = None):
+        """Size-1 dimensions removed: those in ``dim`` (positions or names), or all if None."""
+        dims = _dims(dim, self.ndim, self.names)
         return self.reshape(tuple(n for d, n in enumerate(self.shape) if not (d in dims and n == 1)))
 
-    def permute(self, *dims):
-        """A view with its dimensions reordered to ``dims``."""
-        dims = [_dim(d, self.ndim) for d in _sizes(dims)]
+    def permute(self, *dims: AxisType | Sequence[AxisType]):
+        """A view with its dimensions reordered to ``dims`` (positions or names)."""
+        dims = [_dim(d, self.ndim, self.names) for d in _sizes(dims)]
         if sorted(dims) != list(range(self.ndim)):
             raise RuntimeError(f"permute: {dims} is not a permutation of the dimensions of a {self.ndim}-d tensor")
         return self if dims == sorted(dims) else _view(self, prims.transpose(self, dims), ("permute", tuple(dims)))
 
-    def transpose(self, dim0, dim1):
-        """A view with dimensions ``dim0`` and ``dim1`` swapped."""
+    def transpose(self, dim0: AxisType, dim1: AxisType):
+        """A view with dimensions ``dim0`` and ``dim1`` (positions or names) swapped."""
         dims = list(range(self.ndim))
-        a, b = _dim(dim0, self.ndim), _dim(dim1, self.ndim)
+        a, b = _dim(dim0, self.ndim, self.names), _dim(dim1, self.ndim, self.names)
         dims[a], dims[b] = dims[b], dims[a]
         return self.permute(dims)
 
@@ -1965,9 +2093,13 @@ class TracedTensor:
         """Basic indexing (torch, NumPy): integers (which drop their
         dimension), slices with unit steps, and one ``...``; or a tensor of
         integer indices into the first dimension (``weight[ids]``, an
-        embedding's lookup: ``prims.gather``)."""
+        embedding's lookup: ``prims.gather``). A named tensor keeps the
+        names of the dimensions it keeps. A dict indexes by name
+        (``_by_name``)."""
         if isinstance(key, TracedTensor):
             return prims.gather(self, key, 0)
+        if isinstance(key, dict):
+            return self._by_name(key)
         key = key if isinstance(key, tuple) else (key,)
         ellipses = [i for i, k in enumerate(key) if k is Ellipsis]
         if len(ellipses) > 1:
@@ -1996,13 +2128,46 @@ class TracedTensor:
                 raise TypeError(f"indices must be integers, slices or '...', got {type(k).__name__}")
         out = self._slice(starts, limits)
         # Integer indices kept their dimension as size 1 in the slice; reshape drops them.
-        return out if tuple(shape) == out.shape else out.reshape(shape)
+        if tuple(shape) == out.shape:
+            return out
+        out = out.reshape(shape)
+        if self.names is None:
+            return out
+        return _with_names(out, tuple(n for n, k in zip(self.names, key) if isinstance(k, slice)), self)
 
-    def narrow(self, dim, start, length):
-        """The ``length`` elements of dimension ``dim`` from ``start``: an
-        int, or a 0-d integer tensor read when it runs (clamped so the
-        elements are inside, as ``prims.dynamic_slice``)."""
-        d = _dim(dim, self.ndim)
+    def _by_name(self, selection):
+        """It indexed by name: ``selection`` maps axis names to an int (the
+        axis is dropped), a slice of unit step (it is kept, narrowed), or a
+        named tensor of integer indices (a gather: the axis is replaced by
+        the indices' axes, ``weight[{"vocab": ids}]``)."""
+        for n in selection:
+            _names.position(self.names, n, "indexing by name")
+        key, gathers = [], []
+        for n in self.names:
+            k = selection.get(n, slice(None))
+            if isinstance(k, TracedTensor):
+                if k.names is None and k.shape:
+                    raise TypeError(f"indexing by name: the indices for axis {n!r} need names (rename)")
+                gathers.append((n, k))
+                k = slice(None)
+            elif not isinstance(k, (int, slice)) or isinstance(k, bool):
+                raise TypeError(
+                    f"indexing by name: axis {n!r} takes an int, a slice or a tensor of indices, got {k!r}"
+                )
+            key.append(k)
+        out = self[tuple(key)]
+        for n, ids in gathers:
+            clash = [m for m in ids.names or () if m in out.names and m != n]
+            if clash:
+                raise ValueError(f"indexing by name: the indices' axes {clash} are already axes of the tensor indexed")
+            out = prims.gather(out, ids, out.names.index(n))
+        return out
+
+    def narrow(self, dim: AxisType, start, length):
+        """The ``length`` elements of dimension ``dim`` (a position or a
+        name) from ``start``: an int, or a 0-d integer tensor read when it
+        runs (clamped so the elements are inside, as ``prims.dynamic_slice``)."""
+        d = _dim(dim, self.ndim, self.names)
         n = self.shape[d]
         if isinstance(start, TracedTensor):
             starts, sizes = [0] * self.ndim, list(self.shape)
@@ -2017,10 +2182,11 @@ class TracedTensor:
         starts[d], limits[d] = start, start + length
         return self._slice(starts, limits)
 
-    def split(self, split_size_or_sections, dim=0):
-        """Pieces along ``dim`` (torch): of ``split_size_or_sections``
-        elements each (the last may be smaller), or of the given sizes."""
-        d = _dim(dim, self.ndim)
+    def split(self, split_size_or_sections, dim: AxisType = 0):
+        """Pieces along ``dim`` (a position or a name; torch): of
+        ``split_size_or_sections`` elements each (the last may be smaller),
+        or of the given sizes."""
+        d = _dim(dim, self.ndim, self.names)
         n = self.shape[d]
         if isinstance(split_size_or_sections, int):
             size = split_size_or_sections
@@ -2040,10 +2206,10 @@ class TracedTensor:
             start += size
         return tuple(pieces)
 
-    def chunk(self, chunks, dim=0):
+    def chunk(self, chunks, dim: AxisType = 0):
         """Up to ``chunks`` equal pieces along ``dim`` (torch: each of
         ``ceil(size / chunks)`` elements, the last possibly smaller)."""
         if chunks <= 0:
             raise RuntimeError(f"chunk expects `chunks` to be greater than 0, got: {chunks}")
-        n = self.shape[_dim(dim, self.ndim)]
+        n = self.shape[_dim(dim, self.ndim, self.names)]
         return self.split(builtins.max(-(-n // chunks), 1), dim)

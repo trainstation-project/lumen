@@ -1,7 +1,10 @@
 """Functional tensor operations traced into lumen primitives (``lumen.functional``)."""
 
+from __future__ import annotations
+
 import builtins
 import math
+from typing import Sequence
 
 from lumen.autograd.function import Function
 from lumen.graph import prims
@@ -9,6 +12,7 @@ from lumen.graph.tracer import (
     TracedTensor,
     _accum_dtype,
     _as_tensor,
+    _broadcast,
     _broadcast_shapes,
     _broadcast_to,
     _common_dtype,
@@ -16,6 +20,8 @@ from lumen.graph.tracer import (
     _dims,
     _dot,
     _elementwise,
+    _ge,
+    _gt,
     _is_float,
     _le,
     _lift,
@@ -23,7 +29,9 @@ from lumen.graph.tracer import (
     _ne,
     _require_float,
     _true_div,
+    _with_names,
 )
+from lumen.tensor.names import Axes, AxisType
 
 __all__ = [
     "add",
@@ -153,12 +161,12 @@ def le(input, other):
 
 def gt(input, other):
     """Elementwise ``input > other``, traced as ``other < input``."""
-    return _elementwise(prims.lt, other, input)
+    return _elementwise(_gt, input, other)
 
 
 def ge(input, other):
     """Elementwise ``input >= other``, traced as ``other <= input``."""
-    return _elementwise(_le, other, input)
+    return _elementwise(_ge, input, other)
 
 
 def maximum(input, other):
@@ -173,7 +181,7 @@ def minimum(input, other):
 
 def where(condition, input, other):
     """``input`` where ``condition`` (a bool tensor), else ``other``,
-    broadcast together."""
+    broadcast together (by name when several are named)."""
     condition, input, other = _lift(condition), _lift(input), _lift(other)
     if not isinstance(condition, TracedTensor) or condition.dtype != "bool":
         raise TypeError("where expected condition to be a bool tensor")
@@ -185,8 +193,7 @@ def where(condition, input, other):
         input = prims.full(condition.shape, input, dtype)
     dtype = _common_dtype("where", (input, other))
     input, other = _as_tensor(input, dtype, "where"), _as_tensor(other, dtype, "where")
-    shape = _broadcast_shapes(condition.shape, input.shape, other.shape)
-    return prims.select(*(_broadcast_to(t, shape) for t in (condition, input, other)))
+    return prims.select(*_broadcast("where", condition, input, other))
 
 
 def exp(input):
@@ -255,28 +262,28 @@ def _keep(input, out, dims, keepdim):
     return out.reshape(tuple(1 if d in dims else n for d, n in enumerate(input.shape)))
 
 
-def sum(input, dim=None, keepdim=False):
-    """Sum over ``dim`` (all dimensions if None), accumulated in the
-    tensor's dtype, the result's (integers wrap): for another, convert
-    first (``F.sum(x.float())``); a cast of the result after it runs in
-    the reduction's kernel."""
-    dims = _dims(dim, input.ndim)
+def sum(input, dim: Axes | None = None, keepdim=False):
+    """Sum over ``dim`` (positions or axis names; all dimensions if None),
+    accumulated in the tensor's dtype, the result's (integers wrap): for
+    another, convert first (``F.sum(x.float())``); a cast of the result
+    after it runs in the reduction's kernel."""
+    dims = _dims(dim, input.ndim, input.names)
     return _keep(input, prims.reduce_sum(input, dims, input.dtype), dims, keepdim)
 
 
-def mean(input, dim=None, keepdim=False):
-    """Mean over ``dim`` (all dimensions if None), in the tensor's dtype, as
-    :func:`sum`."""
+def mean(input, dim: Axes | None = None, keepdim=False):
+    """Mean over ``dim`` (positions or axis names; all dimensions if None),
+    in the tensor's dtype, as :func:`sum`."""
     if not _is_float(input.dtype):
         raise RuntimeError(f"mean(): input dtype must be floating point, got {input.dtype}")
-    dims = _dims(dim, input.ndim)
+    dims = _dims(dim, input.ndim, input.names)
     count = math.prod(input.shape[d] for d in dims)
     return sum(input, dims, keepdim) / count
 
 
-def amax(input, dim=(), keepdim=False):
-    """Maximum over ``dim`` (all dimensions if empty)."""
-    dims = _dims(dim, input.ndim)
+def amax(input, dim: Axes = (), keepdim=False):
+    """Maximum over ``dim`` (positions or axis names; all dimensions if empty)."""
+    dims = _dims(dim, input.ndim, input.names)
     return _keep(input, prims.reduce_max(input, dims), dims, keepdim)
 
 
@@ -292,7 +299,7 @@ def max(input, other=None):
     raise NotImplementedError("max(input, dim) returns indices, which lumen does not support yet; use amax")
 
 
-def cumsum(input, dim, dtype=None):
+def cumsum(input, dim: AxisType, dtype=None):
     """The cumulative sum along ``dim`` (``torch.cumsum``), accumulated in
     ``dtype``, the result's: the tensor's if None (integers wrap), or
     float32 for a float16 or bfloat16 tensor, each element widened exactly
@@ -302,11 +309,12 @@ def cumsum(input, dim, dtype=None):
     widened = dtype == "float32" and x.dtype in ("float16", "bfloat16")
     if dtype != x.dtype and not widened:
         x = x.to(dtype=dtype)
-    return prims.cumsum(x, _dim(dim, x.ndim), False, dtype)
+    return prims.cumsum(x, _dim(dim, x.ndim, x.names), False, dtype)
 
 
-def softmax(input, dim):
-    """``exp(x - max) / sum(exp(x - max))`` along ``dim``, traced as those
+def softmax(input, dim: AxisType):
+    """``exp(x - max) / sum(exp(x - max))`` along ``dim`` (a position or an
+    axis name), traced as those
     primitives: over the last dimension, the MPS compiler runs them as one
     row kernel (a chain of normalization diamonds,
     ``graph_compiler/passes/diamonds.rs``)."""
@@ -315,8 +323,9 @@ def softmax(input, dim):
     return e / sum(e, dim, keepdim=True)
 
 
-def log_softmax(input, dim):
-    """``log(softmax(input))`` along ``dim``, computed from the max-shifted input for stability."""
+def log_softmax(input, dim: AxisType):
+    """``log(softmax(input))`` along ``dim`` (a position or an axis name),
+    computed from the max-shifted input for stability."""
     x = _require_float(_lift(input), "log_softmax")
     shifted = x - amax(x, dim, keepdim=True)
     return shifted - log(sum(exp(shifted), dim, keepdim=True))
@@ -364,17 +373,26 @@ class _RMSNorm(Function):
         return dx, dw, None
 
 
-def rms_norm(input, normalized_shape, weight=None, eps=None):
+def rms_norm(input, normalized_shape: int | Sequence[int] | str | Sequence[str], weight=None, eps=None):
     """``torch.nn.functional.rms_norm``: ``input`` normalized by its root mean
     square over the last dimension (``normalized_shape``, its size),
-    ``input * rsqrt(mean(input^2) + eps)``, times ``weight`` if given.
+    ``input * rsqrt(mean(input^2) + eps)``, times ``weight`` if given;
+    ``normalized_shape`` may name the axis instead (it must be the last).
     ``eps`` defaults to the dtype's machine epsilon, as in torch. Its
     forward saves each row's ``1 / rms`` and its backward reuses it (one row
     reduction for the input's gradient, a column sum for the weight's); the
     MPS compiler runs each as one row kernel (a normalization diamond), with
     the ops computing ``input`` fused in."""
     x = _require_float(_lift(input), "rms_norm")
-    shape = [normalized_shape] if isinstance(normalized_shape, int) else list(normalized_shape)
+    shape = [normalized_shape] if isinstance(normalized_shape, (int, str)) else list(normalized_shape)
+
+    # Named axes: the trailing ones, of their sizes.
+    if builtins.any(isinstance(n, str) for n in shape):
+        if x.names is None or x.names[-len(shape) :] != tuple(shape):
+            raise NotImplementedError(
+                f"rms_norm normalizes the last dimension: axes {tuple(shape)} must end {x.names}: align_to(..., name)"
+            )
+        shape = list(x.shape[-len(shape) :])
 
     if shape != list(x.shape[-1:]):
         raise NotImplementedError(f"rms_norm normalizes the last dimension, of size {x.shape[-1:]}, got {shape}")
@@ -568,7 +586,7 @@ def _flip(input):
     return prims.neg(input)
 
 
-def amin(input, dim=(), keepdim=False):
+def amin(input, dim: Axes = (), keepdim=False):
     """Minimum over ``dim`` (all dimensions if empty)."""
     input = _lift(input)
     return _flip(amax(_flip(input), dim, keepdim))
@@ -582,23 +600,24 @@ def min(input, other=None):
     return minimum(input, other)
 
 
-def any(input, dim=None, keepdim=False):
+def any(input, dim: Axes | None = None, keepdim=False):
     """Whether any element over ``dim`` (all if None) is nonzero."""
     return amax(_truth(input), () if dim is None else dim, keepdim)
 
 
-def all(input, dim=None, keepdim=False):
+def all(input, dim: Axes | None = None, keepdim=False):
     """Whether every element over ``dim`` (all if None) is nonzero."""
     return logical_not(any(logical_not(input), dim, keepdim))
 
 
-def _arg(input, dim, keepdim, best):
-    """First index along ``dim`` where ``input`` attains ``best`` (``amax`` or ``amin``), as int32; flattened if ``dim`` is None."""
+def _arg(input, dim: AxisType | None, keepdim, best):
+    """First index along ``dim`` (a position or an axis name) where ``input`` attains ``best`` (``amax`` or
+    ``amin``), as int32; flattened if ``dim`` is None."""
     input = _lift(input)
     if dim is None:
         flat = input.reshape((-1,))
         return _arg(flat, 0, False, best)
-    d = _dim(dim, input.ndim)
+    d = _dim(dim, input.ndim, input.names)
     target = best(input, d, True)
     # Indices of matching positions, others replaced by the dimension size, so the min index is the first hit.
     index = prims.iota("int32", input.shape, d)
@@ -607,27 +626,48 @@ def _arg(input, dim, keepdim, best):
     return amin(prims.select(hit, index, big), d, keepdim)
 
 
-def argmax(input, dim=None, keepdim=False):
+def argmax(input, dim: AxisType | None = None, keepdim=False):
     """The index of the (first) maximum over ``dim`` (of every element, if
     None), as int32."""
     return _arg(input, dim, keepdim, amax)
 
 
-def argmin(input, dim=None, keepdim=False):
+def argmin(input, dim: AxisType | None = None, keepdim=False):
     """The index of the (first) minimum over ``dim`` (of every element, if
     None), as int32."""
     return _arg(input, dim, keepdim, amin)
 
 
-def cat(tensors, dim=0):
-    """``tensors`` one after another along ``dim`` (``torch.cat``)."""
-    tensors = [_lift(t) for t in tensors]
-    return prims.concatenate(tensors, _dim(dim, tensors[0].ndim))
+def _aligned(tensors, op):
+    """``tensors``, each aligned by name to the first's order when all are named (their names must match)."""
+    first = tensors[0]
+    if not builtins.all(t.names is not None for t in tensors):
+        return tensors
+    for t in tensors:
+        if set(t.names) != set(first.names):
+            raise ValueError(f"{op}: axes {t.names} do not match {first.names}")
+    return [t.align_to(*first.names) for t in tensors]
 
 
-def stack(tensors, dim=0):
-    """``tensors`` (of one shape) stacked along a new dimension ``dim``."""
+def cat(tensors, dim: AxisType = 0):
+    """``tensors`` one after another along ``dim`` (a position or an axis
+    name; ``torch.cat``). Named tensors are aligned by name to the first's
+    order."""
+    tensors = _aligned([_lift(t) for t in tensors], "cat")
+    return prims.concatenate(tensors, _dim(dim, tensors[0].ndim, tensors[0].names))
+
+
+def stack(tensors, dim: AxisType = 0):
+    """``tensors`` (of one shape) stacked along a new dimension ``dim``; a
+    name names the new axis, which goes first, the named tensors aligned by
+    name to the first's order."""
     tensors = [_lift(t) for t in tensors]
+    if isinstance(dim, str):
+        names = tensors[0].names
+        if names is None or dim in names:
+            raise ValueError(f"stack: a new axis {dim!r} needs named tensors without it, got axes {names}")
+        tensors = _aligned(tensors, "stack")
+        return _with_names(cat([t.unsqueeze(0) for t in tensors], 0), (dim, *names), None)
     d = _dim(dim, tensors[0].ndim + 1)
     return cat([t.unsqueeze(d) for t in tensors], d)
 
@@ -643,11 +683,11 @@ def triu(input, diagonal=0):
     return prims.select(keep, input, prims.full(input.shape, 0, input.dtype))
 
 
-def diagonal(input, offset=0, dim1=0, dim2=1):
+def diagonal(input, offset=0, dim1: AxisType = 0, dim2: AxisType = 1):
     """The diagonal of ``input``'s dimensions ``dim1`` and ``dim2`` (two
     dimensions), ``offset`` above the main one."""
     input = _lift(input)
-    if input.ndim != 2 or (_dim(dim1, 2), _dim(dim2, 2)) != (0, 1):
+    if input.ndim != 2 or (_dim(dim1, 2, input.names), _dim(dim2, 2, input.names)) != (0, 1):
         raise NotImplementedError("diagonal takes a matrix's (dim1=0, dim2=1)")
     n, m = input.shape
     length = builtins.max(0, builtins.min(n, m - offset) if offset >= 0 else builtins.min(n + offset, m))
@@ -691,12 +731,12 @@ def pad(input, pad, mode="constant", value=0):
     return out
 
 
-def gather(input, dim, index):
+def gather(input, dim: AxisType, index):
     """``input``'s elements along ``dim`` at ``index`` (of its rank):
     ``out[i][j] = input[i][index[i][j]]`` for ``dim=1``
     (``torch.gather``, ``numpy.take_along_axis``)."""
     input, index = _lift(input), _lift(index)
-    return prims.take_along_axis(input, index, _dim(dim, input.ndim))
+    return prims.take_along_axis(input, index, _dim(dim, input.ndim, input.names))
 
 
 def einsum(equation, *operands, accum_dtype, output_dtype):

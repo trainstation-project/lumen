@@ -1,6 +1,6 @@
 """Python wrappers that record each lumen primitive into the graph being traced."""
 
-from lumen.graph import tracer
+from lumen.graph import propagation, tracer
 
 __all__ = [
     "add",
@@ -90,8 +90,17 @@ __all__ = [
 ]
 
 
+def _named(out, name, operands, params):
+    """``out``, primitive ``name``'s result on ``operands``, named by the primitive's rule
+    (``propagation``) when an operand has names."""
+    if any(getattr(x, "names", None) is not None for x in operands):
+        out.names = propagation.rule(name).names(operands, params, out.shape)
+    return out
+
+
 def bind(name, *operands, **params):
-    """Record ``name(*operands, **params)`` in the graph being traced."""
+    """Record ``name(*operands, **params)`` in the graph being traced; its result is named from the
+    operands' names (``propagation``)."""
     graph = tracer.current_graph()
     operands = [tracer._lift(x) for x in operands]
     host = tracer._HOSTS[-1] if tracer._HOSTS else None
@@ -101,7 +110,7 @@ def bind(name, *operands, **params):
         if out is not None:
             same = len(operands) == 1 and (out.dtype, out.shape) == (operands[0].dtype, operands[0].shape)
             out.weak = same and operands[0].weak
-            return out
+            return _named(out, name, operands, params)
         operands = [host.imported(x) if host.owns(x) else x for x in operands]
     for x in operands:
         if not isinstance(x, tracer.TracedTensor) or x.graph is not graph:
@@ -120,7 +129,7 @@ def bind(name, *operands, **params):
     # Results computed from any CPU operand, or copied to the host, live on the CPU.
     if name == "to_host" or (name != "to_device" and any(tracer._device_type(x.device) == "cpu" for x in operands)):
         out.device = "cpu:0"
-    return out
+    return _named(out, name, operands, params)
 
 
 def add(x, y):

@@ -293,16 +293,35 @@ pub(crate) fn to_scalar(value: &Bound<'_, PyAny>) -> PyResult<Scalar> {
     }
 }
 
+/// A tensor's `_signature`: its dtype, shape, device and axis names.
+type Signature<'py> = (
+    &'static str,
+    Bound<'py, PyTuple>,
+    String,
+    Option<Bound<'py, PyTuple>>,
+);
+
 /// Python's `lumen.Tensor`, wrapping a core tensor.
 #[pyclass(name = "Tensor", module = "lumen")]
 pub(crate) struct PyTensor {
     pub(crate) inner: Tensor,
+    /// The axes' names, one per dim, or None for an unnamed tensor: metadata only, which views and kernels never
+    /// read (`lumen/tensor/__init__.py` holds the methods that use them).
+    names: Option<Vec<String>>,
 }
 
 impl PyTensor {
-    /// Wraps a core tensor for Python.
+    /// Wraps a core tensor for Python, unnamed.
     pub(crate) fn wrap(inner: Tensor) -> Self {
-        PyTensor { inner }
+        PyTensor { inner, names: None }
+    }
+
+    /// Wraps `inner`, a copy of this tensor (a dtype or device conversion), named as this tensor is.
+    fn same_names(&self, inner: Tensor) -> Self {
+        PyTensor {
+            inner,
+            names: self.names.clone(),
+        }
     }
 
     /// Resolves a possibly negative `index` along `dim`, raising `IndexError` when out of range.
@@ -429,17 +448,33 @@ impl PyTensor {
         self.inner.shape().to_vec()
     }
 
-    /// `(dtype, shape, device)`, identifying the tensor's type for trace caching.
+    /// `(dtype, shape, device, names)`, identifying the tensor's type for trace caching.
     #[getter]
-    fn _signature<'py>(
-        &self,
-        py: Python<'py>,
-    ) -> PyResult<(&'static str, Bound<'py, pyo3::types::PyTuple>, String)> {
+    fn _signature<'py>(&self, py: Python<'py>) -> PyResult<Signature<'py>> {
         Ok((
             dtype_name(self.inner.dtype()),
-            pyo3::types::PyTuple::new(py, self.inner.shape())?,
+            PyTuple::new(py, self.inner.shape())?,
             self.inner.device().to_string(),
+            self.names(py)?,
         ))
+    }
+
+    /// The axes' names (a tuple of strings, one per dim), or None for an unnamed tensor.
+    #[getter]
+    fn names<'py>(&self, py: Python<'py>) -> PyResult<Option<Bound<'py, PyTuple>>> {
+        self.names
+            .as_ref()
+            .map(|names| PyTuple::new(py, names))
+            .transpose()
+    }
+
+    /// This tensor (sharing its storage) named `names`, unchecked: `lumen/tensor/__init__.py`'s `rename` checks
+    /// them. None drops the names.
+    fn _with_names(&self, names: Option<Vec<String>>) -> Self {
+        PyTensor {
+            inner: self.inner.clone(),
+            names,
+        }
     }
 
     /// The tensor's element strides.
@@ -532,7 +567,7 @@ impl PyTensor {
 
     /// This tensor if contiguous, else a contiguous copy.
     fn contiguous(&self) -> PyResult<Self> {
-        Ok(Self::wrap(match self.inner.dtype() {
+        Ok(self.same_names(match self.inner.dtype() {
             DType::F32 => self.inner.contiguous::<f32>(),
             DType::F64 => self.inner.contiguous::<f64>(),
             DType::F16 => self.inner.contiguous::<f16>(),
@@ -573,7 +608,7 @@ impl PyTensor {
             t = t.to(device);
         }
 
-        Ok(Self::wrap(t))
+        Ok(self.same_names(t))
     }
 
     /// Fills every element with `value` in place.
@@ -610,7 +645,7 @@ impl PyTensor {
 
         let t = unsafe { Tensor::empty(self.inner.shape(), options) };
         t.copy_(&self.inner).map_err(PyValueError::new_err)?;
-        Ok(Self::wrap(t))
+        Ok(self.same_names(t))
     }
 
     /// True for a whole meta tensor, usable as a parameter.
@@ -673,7 +708,7 @@ impl PyTensor {
     /// A copy on the host.
     fn cpu(&self) -> PyResult<Self> {
         has_data(&self.inner)?;
-        Ok(Self::wrap(self.inner.to(core::Device::Cpu(0))))
+        Ok(self.same_names(self.inner.to(core::Device::Cpu(0))))
     }
 
     /// The elements as nested Python lists.
@@ -714,9 +749,17 @@ impl PyTensor {
         }
     }
 
-    /// The tensor's elements, dtype and device.
+    /// The tensor's elements, dtype and device, and its axes' names if it has them.
     fn __repr__(&self) -> String {
-        format!("{}", self.inner)
+        let text = format!("{}", self.inner);
+
+        match &self.names {
+            Some(names) => {
+                let names = names.iter().map(|n| format!("{n:?}")).collect::<Vec<_>>();
+                format!("{}, names=({}))", &text[..text.len() - 1], names.join(", "))
+            }
+            None => text,
+        }
     }
 
     /// Size of the first dim.
