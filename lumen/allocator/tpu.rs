@@ -203,21 +203,16 @@ impl TpuAllocator {
 }
 
 impl Allocator for TpuAllocator {
-    /// Takes whole rows at a row-aligned offset.
-    fn allocate(&self, nbytes: usize) -> NonNull<u8> {
-        self.allocate_aligned(nbytes, ROW)
-    }
-
     /// Takes `nbytes` rounded up to whole rows at a multiple of `alignment` (at least a row).
-    fn allocate_aligned(&self, nbytes: usize, alignment: usize) -> NonNull<u8> {
+    fn allocate(&self, nbytes: usize, alignment: usize) -> NonNull<u8> {
         let nbytes = nbytes.next_multiple_of(ROW);
 
         self.region
-            .take_aligned(nbytes, alignment.max(ROW), |n| self.reserve(n), || {})
+            .take(nbytes, alignment.max(ROW), |n| self.reserve(n), || {})
     }
 
     /// Returns the rows of a block from `allocate`.
-    unsafe fn deallocate(&self, ptr: NonNull<u8>, nbytes: usize) {
+    unsafe fn deallocate(&self, ptr: NonNull<u8>, nbytes: usize, _alignment: usize) {
         self.region.give(ptr, nbytes.next_multiple_of(ROW))
     }
 }

@@ -24,26 +24,21 @@ fn allocator_or_panic(device: Device) -> Arc<dyn Allocator> {
 }
 
 impl Storage {
-    /// Allocates `nbytes` on `device`; panics if the device has no allocator.
-    pub fn new(nbytes: usize, device: Device) -> Self {
-        Self::with_allocator(nbytes, allocator_or_panic(device), device)
+    /// Allocates `nbytes` on `device` at a multiple of `alignment`; panics if the device has no allocator.
+    pub fn new(nbytes: usize, alignment: usize, device: Device) -> Self {
+        Self::with_allocator(nbytes, alignment, allocator_or_panic(device), device)
     }
 
-    /// Allocates `nbytes` on `device` aligned to `alignment` bytes.
-    pub fn aligned(nbytes: usize, alignment: usize, device: Device) -> Self {
+    /// Allocates `nbytes` at a multiple of `alignment` with `allocator`, recording the storage as on `device`.
+    pub fn with_allocator(
+        nbytes: usize,
+        alignment: usize,
+        allocator: Arc<dyn Allocator>,
+        device: Device,
+    ) -> Self {
         Storage {
             id: NEXT_STORAGE_ID.fetch_add(1, Ordering::Relaxed),
-            data: DataPtr::allocate_aligned(allocator_or_panic(device), nbytes, alignment),
-            device,
-            parameter: Parameter::default(),
-        }
-    }
-
-    /// Allocates `nbytes` with `allocator`, recording the storage as on `device`.
-    pub fn with_allocator(nbytes: usize, allocator: Arc<dyn Allocator>, device: Device) -> Self {
-        Storage {
-            id: NEXT_STORAGE_ID.fetch_add(1, Ordering::Relaxed),
-            data: DataPtr::allocate(allocator, nbytes),
+            data: DataPtr::allocate(allocator, nbytes, alignment),
             device,
             parameter: Parameter::default(),
         }
