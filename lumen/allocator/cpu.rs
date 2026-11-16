@@ -1,4 +1,4 @@
-//! Host allocator: 64-byte aligned heap memory with optional memory profiling.
+//! Host allocator: heap memory, at least 64-byte aligned, with optional memory profiling.
 
 use std::alloc::{self, Layout};
 use std::collections::BTreeSet;
@@ -28,9 +28,10 @@ impl CpuAllocator {
 }
 
 impl Allocator for CpuAllocator {
-    /// Returns 64-byte aligned memory; zero-byte requests get a dangling aligned pointer.
-    fn allocate(&self, nbytes: usize) -> NonNull<u8> {
-        let layout = Layout::from_size_align(nbytes, 64).expect("invalid allocation layout");
+    /// Returns memory aligned to `alignment` (at least 64 bytes); zero-byte requests get a dangling aligned
+    /// pointer.
+    fn allocate(&self, nbytes: usize, alignment: usize) -> NonNull<u8> {
+        let layout = layout(nbytes, alignment);
 
         if nbytes == 0 {
             return NonNull::new(std::ptr::without_provenance_mut(layout.align())).unwrap();
@@ -57,7 +58,7 @@ impl Allocator for CpuAllocator {
     }
 
     /// Frees the block, reporting it to the profiler if it was allocated while profiling.
-    unsafe fn deallocate(&self, ptr: NonNull<u8>, nbytes: usize) {
+    unsafe fn deallocate(&self, ptr: NonNull<u8>, nbytes: usize, alignment: usize) {
         if nbytes == 0 {
             return;
         }
@@ -75,6 +76,11 @@ impl Allocator for CpuAllocator {
             crate::profiler::report_memory(Device::Cpu(0), addr, -(nbytes as i64), total, total);
         }
 
-        unsafe { alloc::dealloc(ptr.as_ptr(), Layout::from_size_align_unchecked(nbytes, 64)) }
+        unsafe { alloc::dealloc(ptr.as_ptr(), layout(nbytes, alignment)) }
     }
+}
+
+/// The layout of a block of `nbytes` at `alignment`, at least 64 bytes.
+fn layout(nbytes: usize, alignment: usize) -> Layout {
+    Layout::from_size_align(nbytes, alignment.max(64)).expect("invalid allocation layout")
 }

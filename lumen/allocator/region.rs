@@ -83,32 +83,19 @@ impl Region {
         self.lock().live_bytes
     }
 
-    #[cfg_attr(not(any(lumen_mps_linked, lumen_cuda_linked)), allow(dead_code))]
-    /// Takes an `ALIGNMENT`-aligned block, see `take_aligned`.
-    pub(crate) fn take(
-        &self,
-        nbytes: usize,
-        reserve: impl Fn(usize) -> NonNull<u8>,
-        synchronize: impl Fn(),
-    ) -> NonNull<u8> {
-        self.take_aligned(nbytes, ALIGNMENT, reserve, synchronize)
-    }
-
     /// Takes `nbytes` at a multiple of `alignment`, reserving the range with `reserve` on first use.
     /// Calls `synchronize` and retries once when no block fits, then panics with the free-space summary.
-    pub(crate) fn take_aligned(
+    pub(crate) fn take(
         &self,
         nbytes: usize,
         alignment: usize,
         reserve: impl Fn(usize) -> NonNull<u8>,
         synchronize: impl Fn(),
     ) -> NonNull<u8> {
-        let data = self
-            .try_take_aligned(nbytes, alignment, &reserve)
-            .or_else(|| {
-                synchronize();
-                self.try_take_aligned(nbytes, alignment, &reserve)
-            });
+        let data = self.try_take(nbytes, alignment, &reserve).or_else(|| {
+            synchronize();
+            self.try_take(nbytes, alignment, &reserve)
+        });
 
         data.unwrap_or_else(|| {
             let state = self.lock();
@@ -127,7 +114,7 @@ impl Region {
 
     /// Takes the first free block that fits `nbytes` at `alignment`, or `None` when none does.
     /// A zero-byte request returns the start of the first free block without taking it.
-    pub(crate) fn try_take_aligned(
+    pub(crate) fn try_take(
         &self,
         nbytes: usize,
         alignment: usize,

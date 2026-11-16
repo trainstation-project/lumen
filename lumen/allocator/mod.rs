@@ -36,19 +36,17 @@ use crate::device::Device;
 
 /// Device memory allocator shared by every buffer on a device.
 pub trait Allocator: Send + Sync {
-    /// Returns `nbytes` of device memory, panicking when out of memory.
-    fn allocate(&self, nbytes: usize) -> NonNull<u8>;
-    /// Like `allocate` but at a multiple of `alignment`; the default ignores the alignment.
-    fn allocate_aligned(&self, nbytes: usize, _alignment: usize) -> NonNull<u8> {
-        self.allocate(nbytes)
-    }
+    /// Returns `nbytes` of device memory starting at a multiple of `alignment` (a power of two),
+    /// panicking when out of memory.
+    fn allocate(&self, nbytes: usize, alignment: usize) -> NonNull<u8>;
+
     /// Returns `ptr` to the allocator.
     ///
     /// # Safety
     ///
-    /// `ptr` must be `nbytes` bytes this allocator allocated, not yet
-    /// given back, and unused after the call.
-    unsafe fn deallocate(&self, ptr: NonNull<u8>, nbytes: usize);
+    /// `ptr` must be `nbytes` bytes this allocator allocated at `alignment`, not
+    /// yet given back, and unused after the call.
+    unsafe fn deallocate(&self, ptr: NonNull<u8>, nbytes: usize, alignment: usize);
 }
 
 /// Returns the shared allocator for `device`, or an error when the device isn't available.

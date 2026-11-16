@@ -9,6 +9,8 @@ use super::Allocator;
 pub struct DataPtr {
     ptr: NonNull<u8>,
     nbytes: usize,
+    /// The alignment it was allocated at, which its allocator takes back with it.
+    alignment: usize,
     allocator: Arc<dyn Allocator>,
 }
 
@@ -16,40 +18,30 @@ unsafe impl Send for DataPtr {}
 unsafe impl Sync for DataPtr {}
 
 impl DataPtr {
-    /// Allocates `nbytes` from `allocator`.
-    pub fn allocate(allocator: Arc<dyn Allocator>, nbytes: usize) -> Self {
-        DataPtr {
-            ptr: allocator.allocate(nbytes),
-            nbytes,
-            allocator,
-        }
-    }
-
     /// Allocates `nbytes` from `allocator` starting at a multiple of `alignment`.
-    pub fn allocate_aligned(
-        allocator: Arc<dyn Allocator>,
-        nbytes: usize,
-        alignment: usize,
-    ) -> Self {
+    pub fn allocate(allocator: Arc<dyn Allocator>, nbytes: usize, alignment: usize) -> Self {
         DataPtr {
-            ptr: allocator.allocate_aligned(nbytes, alignment),
+            ptr: allocator.allocate(nbytes, alignment),
             nbytes,
+            alignment,
             allocator,
         }
     }
 
     /// # Safety
     ///
-    /// `ptr` must be `nbytes` bytes `allocator` allocated, owned by the
-    /// result alone: it gives them back to `allocator` when dropped.
+    /// `ptr` must be `nbytes` bytes `allocator` allocated at `alignment`, owned
+    /// by the result alone: it gives them back to `allocator` when dropped.
     pub unsafe fn from_raw_parts(
         ptr: NonNull<u8>,
         nbytes: usize,
+        alignment: usize,
         allocator: Arc<dyn Allocator>,
     ) -> Self {
         DataPtr {
             ptr,
             nbytes,
+            alignment,
             allocator,
         }
     }
@@ -73,6 +65,9 @@ impl DataPtr {
 /// Returns the buffer's bytes to its allocator.
 impl Drop for DataPtr {
     fn drop(&mut self) {
-        unsafe { self.allocator.deallocate(self.ptr, self.nbytes) }
+        unsafe {
+            self.allocator
+                .deallocate(self.ptr, self.nbytes, self.alignment)
+        }
     }
 }

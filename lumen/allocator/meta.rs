@@ -8,9 +8,11 @@ use super::Allocator;
 pub struct MetaAllocator;
 
 impl Allocator for MetaAllocator {
-    fn allocate(&self, _nbytes: usize) -> NonNull<u8> {
-        NonNull::dangling()
+    /// A dangling pointer at `alignment`.
+    fn allocate(&self, _nbytes: usize, alignment: usize) -> NonNull<u8> {
+        NonNull::new(std::ptr::without_provenance_mut(alignment.max(1))).expect("nonzero")
     }
 
-    unsafe fn deallocate(&self, _ptr: NonNull<u8>, _nbytes: usize) {}
+    /// Nothing to give back.
+    unsafe fn deallocate(&self, _ptr: NonNull<u8>, _nbytes: usize, _alignment: usize) {}
 }
