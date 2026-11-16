@@ -51,9 +51,7 @@ impl Scratch {
     /// Allocates `nbytes` of zeroed Metal memory, or `None` when Metal cannot allocate it.
     pub(crate) fn zeroed(nbytes: usize) -> Option<Self> {
         let data = NonNull::new(unsafe { ffi::lumen_mps_alloc(nbytes) })?;
-
         unsafe { std::ptr::write_bytes(data.as_ptr(), 0, nbytes) };
-
         Some(Scratch(data))
     }
 
@@ -89,12 +87,16 @@ impl MpsAllocator {
 
 #[cfg(lumen_mps_linked)]
 impl Allocator for MpsAllocator {
-    /// Takes `nbytes` from the heap region, reserving the heap on first use, and places a Metal buffer there.
-    fn allocate(&self, nbytes: usize) -> NonNull<u8> {
+    /// Takes `nbytes` at `alignment` from the heap region, reserving the heap on first use, and places a Metal
+    /// buffer there.
+    fn allocate(&self, nbytes: usize, alignment: usize) -> NonNull<u8> {
         // every allocation is also registered as a placed buffer so kernels can bind it; zero-byte requests still need one
-        let data = self
-            .region
-            .take(nbytes, heap, crate::runtime::stream::mps::synchronize);
+        let data = self.region.take(
+            nbytes,
+            alignment,
+            heap,
+            crate::runtime::stream::mps::synchronize,
+        );
 
         if unsafe { ffi::lumen_mps_place(data.as_ptr(), nbytes.max(1)) } != 0 {
             panic!("Metal could not place a buffer of {nbytes} bytes in its heap");
@@ -104,9 +106,8 @@ impl Allocator for MpsAllocator {
     }
 
     /// Releases the placed buffer and returns its bytes to the region.
-    unsafe fn deallocate(&self, ptr: NonNull<u8>, nbytes: usize) {
+    unsafe fn deallocate(&self, ptr: NonNull<u8>, nbytes: usize, _alignment: usize) {
         unsafe { ffi::lumen_mps_unplace(ptr.as_ptr()) };
-
         self.region.give(ptr, nbytes)
     }
 }

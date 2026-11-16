@@ -82,7 +82,7 @@ impl Tensor {
         let dtype = options.dtype_opt().unwrap_or(DEFAULT_DTYPE);
         let device = device_of(&options);
         let alignment = alignment.max(device_alignment(device, dtype, size));
-        let storage = Storage::aligned(device_bytes(device, dtype, size), alignment, device);
+        let storage = Storage::new(device_bytes(device, dtype, size), alignment, device);
         recorded(op, Self::wrap(Arc::new(storage), dtype, size))
     }
 
@@ -90,7 +90,8 @@ impl Tensor {
     unsafe fn empty_like(&self) -> Self {
         let allocator = Arc::clone(self.storage.allocator());
         let nbytes = device_bytes(self.device(), self.dtype, &self.shape);
-        let storage = Storage::with_allocator(nbytes, allocator, self.device());
+        let alignment = device_alignment(self.device(), self.dtype, &self.shape);
+        let storage = Storage::with_allocator(nbytes, alignment, allocator, self.device());
         Self::wrap(Arc::new(storage), self.dtype, &self.shape)
     }
 

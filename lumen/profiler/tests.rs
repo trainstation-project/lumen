@@ -371,18 +371,18 @@ fn memory_is_recorded_only_with_profile_memory() {
 fn region_reports_allocations_with_its_totals() {
     use crate::Allocator;
     let mut region = crate::allocator::Region::new(Device::Cpu(0), 2 << 20);
-    let reserve = |n| crate::CpuAllocator.allocate(n);
-    let first = region.take(1, reserve, || {});
+    let reserve = |n| crate::CpuAllocator.allocate(n, crate::allocator::ALIGNMENT);
+    let first = region.take(1, crate::allocator::ALIGNMENT, reserve, || {});
     region.give(first, 1);
 
     let p = profile(with_memory(), || {
-        let block = region.take(100, reserve, || {});
+        let block = region.take(100, crate::allocator::ALIGNMENT, reserve, || {});
         region.give(block, 100);
     });
 
     let base = region.base().expect("reserved above");
 
-    unsafe { crate::CpuAllocator.deallocate(base, 2 << 20) };
+    unsafe { crate::CpuAllocator.deallocate(base, 2 << 20, crate::allocator::ALIGNMENT) };
 
     let memory: Vec<&Event> = named(&p, "[memory]")
         .into_iter()

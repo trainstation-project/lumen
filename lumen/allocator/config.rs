@@ -1,6 +1,10 @@
-//! Process-wide size of the static region each accelerator allocator reserves.
+//! Process-wide allocator settings: the size of the static region each accelerator allocator reserves,
+//! and the alignment of its blocks.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Byte alignment and granularity of every `Region` block.
+pub const ALIGNMENT: usize = 256;
 
 /// Static region size used until `set_static_allocator_bytes` changes it: 1 GiB.
 pub const DEFAULT_STATIC_ALLOCATOR_BYTES: usize = 1 << 30;

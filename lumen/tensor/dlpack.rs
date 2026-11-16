@@ -485,11 +485,12 @@ struct Adopted<T> {
 }
 
 impl<T: Managed> Allocator for Adopted<T> {
-    fn allocate(&self, nbytes: usize) -> NonNull<u8> {
-        self.device.allocate(nbytes)
+    /// A block of the device's own allocator.
+    fn allocate(&self, nbytes: usize, alignment: usize) -> NonNull<u8> {
+        self.device.allocate(nbytes, alignment)
     }
 
-    unsafe fn deallocate(&self, ptr: NonNull<u8>, nbytes: usize) {
+    unsafe fn deallocate(&self, ptr: NonNull<u8>, nbytes: usize, alignment: usize) {
         let mut buffer = self.buffer.lock().unwrap_or_else(|e| e.into_inner());
 
         match buffer.take() {
@@ -498,7 +499,7 @@ impl<T: Managed> Allocator for Adopted<T> {
                 *buffer = other;
                 drop(buffer);
 
-                unsafe { self.device.deallocate(ptr, nbytes) }
+                unsafe { self.device.deallocate(ptr, nbytes, alignment) }
             }
         }
     }
@@ -513,7 +514,8 @@ fn adopt<T: Managed>(managed: *mut T, layout: DLLayout) -> Tensor {
         buffer: Mutex::new(Some((data.as_ptr().addr(), Producer(managed)))),
     };
 
-    let data = unsafe { DataPtr::from_raw_parts(data, layout.nbytes, Arc::new(allocator)) };
+    // The producer's buffer goes back to the producer, not to an allocator: its alignment is no one's to keep.
+    let data = unsafe { DataPtr::from_raw_parts(data, layout.nbytes, 1, Arc::new(allocator)) };
     let storage = Storage::from_data_ptr(data, layout.device);
 
     Tensor::from_storage(
