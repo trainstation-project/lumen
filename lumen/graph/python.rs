@@ -648,10 +648,30 @@ fn call_custom_op(kernel: usize, args: &[crate::Tensor]) -> Result<(), String> {
     })
 }
 
+/// The axis names of primitive `name`'s (with `params`) result of `shape` on `operands` (each a shape and its
+/// names, if named), by `Primitive::names`; a ValueError when the operands' names conflict.
+#[pyfunction]
+fn names(
+    name: &str,
+    params: &Bound<'_, PyDict>,
+    operands: Vec<(Vec<usize>, Option<Vec<String>>)>,
+    shape: Vec<usize>,
+) -> PyResult<Option<Vec<String>>> {
+    let operands: Vec<crate::graph::propagation::Named> = operands
+        .iter()
+        .map(|(s, n)| (&s[..], n.as_deref()))
+        .collect();
+
+    primitive(name, params)?
+        .names(&operands, &shape)
+        .map_err(PyValueError::new_err)
+}
+
 /// Adds the graph bindings to `lumen.graph._C` and installs the custom-op call hook.
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     crate::graph::custom::set_hook(call_custom_op);
     m.add_function(wrap_pyfunction!(_register_custom_op, m)?)?;
+    m.add_function(wrap_pyfunction!(names, m)?)?;
     m.add_class::<PyGraph>()?;
     m.add("FUSION_SEPARATOR", crate::graph::FUSION_SEPARATOR)
 }

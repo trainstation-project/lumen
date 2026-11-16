@@ -1,6 +1,6 @@
 """Python wrappers that record each lumen primitive into the graph being traced."""
 
-from lumen.graph import propagation, tracer
+from lumen.graph import _C, tracer
 
 __all__ = [
     "add",
@@ -92,15 +92,16 @@ __all__ = [
 
 def _named(out, name, operands, params):
     """``out``, primitive ``name``'s result on ``operands``, named by the primitive's rule
-    (``propagation``) when an operand has names."""
+    (``Primitive::names``, ``lumen/graph/propagation.rs``) when an operand has names."""
     if any(getattr(x, "names", None) is not None for x in operands):
-        out.names = propagation.rule(name).names(operands, params, out.shape)
+        names = _C.names(name, params, [(x.shape, getattr(x, "names", None)) for x in operands], out.shape)
+        out.names = None if names is None else tuple(names)
     return out
 
 
 def bind(name, *operands, **params):
     """Record ``name(*operands, **params)`` in the graph being traced; its result is named from the
-    operands' names (``propagation``)."""
+    operands' names (``Primitive::names``)."""
     graph = tracer.current_graph()
     operands = [tracer._lift(x) for x in operands]
     host = tracer._HOSTS[-1] if tracer._HOSTS else None

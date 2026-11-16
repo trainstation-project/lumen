@@ -9,6 +9,15 @@ def _register_custom_op(f: Any) -> int:
     """Keep custom op function ``f`` (called with its operands as tensors
     when its step runs): its handle (``lumen.custom_op``)."""
 
+def names(
+    name: str,
+    params: dict[str, Any],
+    operands: Sequence[tuple[Sequence[int], Sequence[str] | None]],
+    shape: Sequence[int],
+) -> list[str] | None:
+    """The axis names of primitive ``name``'s (with ``params``) result of ``shape`` on ``operands`` (each a shape
+    and its names, if named), by ``Primitive::names``; a ValueError when the operands' names conflict."""
+
 class Graph:
     """A graph of primitive ops, built by tracing (``lumen/graph/``)."""
 

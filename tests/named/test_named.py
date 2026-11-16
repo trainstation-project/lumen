@@ -12,7 +12,7 @@ from helpers import CPU, MPS, TPU, TRITON_CUDA, meta, rand
 import lumen
 import lumen.functional as F
 import lumen.named as N
-from lumen.graph import prims, propagation
+from lumen.graph import prims
 
 DEVICES = [CPU, MPS, TRITON_CUDA, TPU]
 
@@ -596,9 +596,8 @@ RULE_CASES = {
 
 @pytest.mark.parametrize("name", sorted(RULE_CASES))
 def test_every_rule(name):
-    """Each primitive with a name rule (propagation.RULES) names its result as the rule says; one without
-    (iota, full, ...) drops names. Every rule in the table has a case here."""
-    assert set(RULE_CASES) == set(propagation.RULES)
+    """Each primitive that names its result (``Primitive::names``) names it as its rule says; one that doesn't
+    (iota, full, ...) drops names."""
     build, want = RULE_CASES[name]
     got = []
 
@@ -616,7 +615,6 @@ def test_every_rule(name):
 def test_primitives_without_a_rule_drop_names():
     """A primitive with no rule gives an unnamed result: one of named operands (a custom op's), and the
     factories, whose unnamed results take a named operand's names in an elementwise op."""
-    assert propagation.rule("custom_call") is propagation.DROP and propagation.rule("iota") is propagation.DROP
     got = []
 
     def f(x):

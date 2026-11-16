@@ -1,5 +1,5 @@
 """Contraction by axis name: ``dot`` and ``contract`` of named traced tensors, each a ``dot_general`` (or a chain
-of them) whose result the primitive's rule names (``lumen.graph.propagation``)."""
+of them) whose result the primitive's rule names (``Primitive::names``)."""
 
 from __future__ import annotations
 
