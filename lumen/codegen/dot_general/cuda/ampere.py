@@ -50,6 +50,7 @@ class AmpereGemm:
         epilogue: types.ModuleType | None = None,
         epilogue_aligned: bool = False,
         d_dtype: type[cutlass.Numeric] | None = None,
+        copy_bytes: tuple[int, int, int] = (16, 16, 16),
     ):
         """The GEMM for `a_dtype` operands accumulating in `accum_dtype`, one CTA per (M, N) tile of `tile_shape_mnk`
         (K defaulting to four MMA instructions), with `NUM_WARPS` warps (4, or 8 for the widest tiles) and
@@ -60,7 +61,10 @@ class AmpereGemm:
         many CTAs per SM as fit them, at most the default. With `epilogue` (a generated module: `EPILOGUE` and its
         tensors' `TYPES`, `SPANS` and `INPUTS`, see `codegen/dot_general/cuda`) it writes no D: each thread hands its
         vectors of the product, rounded to `d_dtype`, to `EPILOGUE`, which computes and stores the fusion's outputs,
-        moving its tensors by vectors when `epilogue_aligned` (every one 16-byte aligned)."""
+        moving its tensors by vectors when `epilogue_aligned` (every one 16-byte aligned). `copy_bytes` is A's, B's
+        and D's vector width (16, 8, 4 or 2 bytes, dividing each tensor's address, contiguous extent and strides), so a
+        vector lies wholly inside the tensor or outside it: A and B load by cp.async of that width (synchronous copies
+        below 4 bytes) and D stores by it."""
         if arch not in (80, 86, 87, 89):
             raise ValueError(f"SM80-family GEMM supports arch in {self._supported_archs}, got {arch}")
 
@@ -71,6 +75,7 @@ class AmpereGemm:
         self.fixed_ab_stage = ab_stage
         self.epilogue_module = epilogue
         self.epilogue_aligned = epilogue_aligned
+        self.a_copy_bytes, self.b_copy_bytes, self.d_copy_bytes = copy_bytes
         self.fused_d_dtype = d_dtype
         self.accum_dtype = accum_dtype
         self.is_persistent = is_persistent
@@ -377,10 +382,10 @@ class AmpereGemm:
         tidx: Int32,
     ) -> Callable:
         """`copy(k_tile, stage, pred_k=False)`: the cp.async of k-tile `k_tile` of row tile `tile_idx` of `mX` (mn, k)
-        into stage `stage` of `sX` (tile_mn, tile_k, STAGE). Vectors outside `mX` are zero in smem (extents are
-        16-byte multiples, so a vector is wholly inside or outside): rows past MN are zeroed in every stage here, once
-        per tile, and columns past K by `pred_k`, which only the last k-tile needs. With `aligned` (the tile divides
-        `mX`'s rows) no row is checked."""
+        into stage `stage` of `sX` (tile_mn, tile_k, STAGE). Vectors outside `mX` are zero in smem (the copy width
+        divides the contiguous extent, so a vector is wholly inside or outside): rows past MN are zeroed in every stage
+        here, once per tile, and columns past K by `pred_k`, which only the last k-tile needs. With `aligned` (the tile
+        divides `mX`'s rows) no row is checked."""
         tile_shape = (tile_mn, self.cta_tile_shape_mnk[2])
         # (tile_mn, tile_k, RestK)
         gX = cute.local_tile(mX, tile_shape, (tile_idx, None))
@@ -458,9 +463,9 @@ class AmpereGemm:
         tile_coord_mnkl: cute.Coord,
         tidx: Int32,
     ) -> Callable:
-        """`copy_D(src_idx, dst_idx)`: stage `src_idx` of `sD` to epilogue subtile `dst_idx` (epi_m, epi_n) of D's
-        tile `tile_coord_mnkl`, in 16-byte vectors along D's contiguous dimension, skipping those outside D (none when
-        `aligned_m` and `aligned_n`; only the coordinate of a dimension the tile does not divide is checked)."""
+        """`copy_D(src_idx, dst_idx)`: stage `src_idx` of `sD` to epilogue subtile `dst_idx` (epi_m, epi_n) of D's tile
+        `tile_coord_mnkl`, in vectors of `d_copy_bytes` along D's contiguous dimension, skipping those outside D (none
+        when `aligned_m` and `aligned_n`; only the coordinate of a dimension the tile does not divide is checked)."""
         tile_mn = self.cta_tile_shape_mnk[:2]
         gD = cute.local_tile(mD_mn, tile_mn, (tile_coord_mnkl[0], tile_coord_mnkl[1]))
         cD = cute.local_tile(cute.make_identity_tensor(mD_mn.shape), tile_mn, (tile_coord_mnkl[0], tile_coord_mnkl[1]))
@@ -476,7 +481,7 @@ class AmpereGemm:
             sD = layout_utils.select(sD, [1, 0, 2])
             major_size = self.epi_tile[0]
 
-        vec = 128 // self.d_dtype.width
+        vec = self.d_copy_bytes * 8 // self.d_dtype.width
         threads_per_row = math.gcd(major_size // vec, self.NUM_THREADS)
         tiled_copy = copy_utils.tiled_copy_2d(self.d_dtype, threads_per_row, self.NUM_THREADS, vec)
         thr_copy = tiled_copy.get_slice(tidx)
@@ -648,12 +653,16 @@ class AmpereGemm:
     def _make_gmem_tiled_copy_AB(self, dtype, major_mode, tile_mn, copy_bits=128):
         """cp.async tiled copy of a (tile_mn, tile_k) operand tile by all CTA threads in `copy_bits` vectors along its
         contiguous dimension, at most a 128-byte cache line per row of threads (QuACK's `_make_gmem_tiled_copy_A`
-        with the tile's MN extent passed in, for A and B)."""
-        atom_async_copy = cute.make_copy_atom(
-            cpasync.CopyG2SOp(cache_mode=cpasync.LoadCacheMode.GLOBAL),
-            dtype,
-            num_bits_per_copy=copy_bits,
-        )
+        with the tile's MN extent passed in, for A and B): 16-byte vectors bypass L1 (`.cg`), 4- and 8-byte ones
+        cache it (`.ca`, as cp.async requires), and 2-byte ones, which cp.async can't copy, are plain loads and
+        stores."""
+        if copy_bits >= 32:
+            mode = cpasync.LoadCacheMode.GLOBAL if copy_bits == 128 else cpasync.LoadCacheMode.ALWAYS
+            op = cpasync.CopyG2SOp(cache_mode=mode)
+        else:
+            op = cute.nvgpu.CopyUniversalOp()
+
+        atom_async_copy = cute.make_copy_atom(op, dtype, num_bits_per_copy=copy_bits)
         copy_elems = copy_bits // dtype.width
         loads_per_cache_line = 128 * 8 // copy_bits  # 128 bytes per cache line
         shape_dim_1 = cute.size(self.cta_tile_shape_mnk[2]) // copy_elems
@@ -841,8 +850,13 @@ class AmpereGemm:
 
         self._setup_attributes()
 
-        tiled_copy_A = self._make_gmem_tiled_copy_AB(self.a_dtype, self.a_layout, self.cta_tile_shape_mnk[0])
-        tiled_copy_B = self._make_gmem_tiled_copy_AB(self.b_dtype, self.b_layout, self.cta_tile_shape_mnk[1])
+        tiled_copy_A = self._make_gmem_tiled_copy_AB(
+            self.a_dtype, self.a_layout, self.cta_tile_shape_mnk[0], self.a_copy_bytes * 8
+        )
+
+        tiled_copy_B = self._make_gmem_tiled_copy_AB(
+            self.b_dtype, self.b_layout, self.cta_tile_shape_mnk[1], self.b_copy_bytes * 8
+        )
 
         grid = TileScheduler.get_grid_shape(self._scheduler_params(mA, mB), Int32(0))
 
