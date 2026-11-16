@@ -68,6 +68,7 @@ def compile(
     aligned_k,
     layouts,
     epilogue=None,
+    copy_bytes=(16, 16, 16),
 ):
     """The GEMM for operands of dtypes named `a_dtype` and `b_dtype` writing `d_dtype`, with majors `a_major` ("m" or
     "k"), `b_major` ("k" or "n", of B as the caller's (k, n)) and `d_major` ("m" or "n"), batched or not, with `tile`
@@ -78,6 +79,8 @@ def compile(
     With `epilogue`, (name, source, aligned) of a fused epilogue's generated module (`codegen/dot_general/cuda`), it
     writes no D (`layouts` holds A's and B's alone; `d_dtype` is the product's): the epilogue computes the fusion's
     outputs from the product, its tensors passed as pointers after A and B, 16-byte aligned when `aligned`.
+    `copy_bytes` is A's, B's and D's copy width (16, 8, 4 or 2 bytes, each dividing its address, contiguous extent
+    and strides), which their loads and stores move by.
     Returns its launch info as `lumen.codegen.utils.cuda.compile` does: its ``CUfunction``, warps per block, dynamic
     shared bytes, that a plain ``cuLaunchKernel`` runs it, and its parameters' types (a tensor struct each, of
     `tensor_bytes` bytes, checked against the loaded kernel)."""
@@ -104,12 +107,13 @@ def compile(
         epilogue=generated,
         epilogue_aligned=aligned,
         d_dtype=out,
+        copy_bytes=tuple(copy_bytes) + (16,) * (3 - len(copy_bytes)),
     )
 
     # Static shapes and strides: CuTe folds them into the kernel.
     tensors = [
-        cute.runtime.make_fake_tensor(dtype, tuple(shape), stride=tuple(strides), assumed_align=16)
-        for dtype, (shape, strides) in zip((ab, ab, out), layouts)
+        cute.runtime.make_fake_tensor(dtype, tuple(shape), stride=tuple(strides), assumed_align=width)
+        for dtype, (shape, strides), width in zip((ab, ab, out), layouts, copy_bytes)
     ]
 
     # A fused epilogue's tensors, by pointer.

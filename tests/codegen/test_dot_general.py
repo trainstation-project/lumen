@@ -137,13 +137,19 @@ def test_matmul_tiles_fit_its_rows(m, tiles):
         (None, 200, 64, 256),
         (None, 512, 256, 384),
         (3, 64, 96, 80),
+        (None, 16, 32, 15),
+        (None, 100, 30, 50),
+        (None, 13, 7, 9),
+        (2, 33, 17, 11),
     ],
 )
 def test_cuda_gemm_matches_numpy_in_every_layout(dtype, output, lhs_k, rhs_k, batch, m, k, n):
-    """On the CUDA backend (CuTe DSL), a matmul of float16 or bfloat16 runs on the Ampere GEMM, accumulating in float32:
-    either operand may be transposed (contracting its first dimension rather than its last, or its last rather than its
-    first), tiles may be left partial at the edges (200 x 136 of 128-wide tiles), it may be batched, and it may write
-    float32. Each matches NumPy within its output dtype's rounding."""
+    """On the CUDA backend (CuTe DSL), a matmul of float16 or bfloat16 runs on the Ampere GEMM, accumulating in
+    float32: either operand may be transposed (contracting its first dimension rather than its last, or its last rather
+    than its first), tiles may be left partial at the edges (200 x 136 of 128-wide tiles), it may be batched, and it
+    may write float32. Extents need not be multiples of 8: each tensor moves by the widest vector its extents allow (8
+    or 4 bytes for 100 x 30 x 50, one element for 13 x 7 x 9). Each matches NumPy within its output dtype's
+    rounding."""
     rng = np.random.default_rng(0)
     lead = () if batch is None else (batch,)
     shapes = (lead + ((m, k) if lhs_k == 1 else (k, m)), lead + ((k, n) if rhs_k == 0 else (n, k)))
@@ -204,13 +210,13 @@ def _bf16_operands(shapes):
 @pytest.mark.parametrize("lhs_k, rhs_k", [(1, 0), (1, 1), (0, 0), (0, 1)])
 @pytest.mark.parametrize(
     "batch, m, k, n",
-    [(None, 256, 256, 512), (None, 200, 72, 136), (None, 256, 72, 136), (3, 128, 96, 200)],
-    ids=["aligned", "partial", "partial n and k", "batched"],
+    [(None, 256, 256, 512), (None, 200, 72, 136), (None, 256, 72, 136), (3, 128, 96, 200), (None, 130, 70, 15)],
+    ids=["aligned", "partial", "partial n and k", "batched", "unaligned"],
 )
 def test_cuda_gemm_runs_every_candidate(config, lhs_k, rhs_k, batch, m, k, n):
     """Forced by ``lumen.autotune.use``, each of the CUDA GEMM's autotuning candidates matches NumPy, in every
     layout: on a shape every tile divides, one none does (partial tiles, a partial last k-tile), one only m's tiles
-    divide (each dim's bounds checks apart), and batched."""
+    divide (each dim's bounds checks apart), batched, and one of extents no multiple of 8 (narrower copies)."""
     lead = () if batch is None else (batch,)
     shapes = (lead + ((m, k) if lhs_k == 1 else (k, m)), lead + ((k, n) if rhs_k == 0 else (n, k)))
     (a, b), (x, y) = _bf16_operands(shapes)

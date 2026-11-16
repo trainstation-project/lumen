@@ -825,9 +825,9 @@ fn triton_attention(
 /// `config`'s tile, or untuned the one `codegen::dot_general::cuda::untuned` picks for the product's shape, as
 /// elementwise kernels launch: `lumen.codegen.dot_general.cuda.launch.compile` compiles the GEMM once for the
 /// tensors' dtypes, majors, layouts and batching, the tile, whether the tile divides m and n, and k (each an `aligned`
-/// GEMM without those bounds checks), and a fused epilogue's module and whether its tensors are 16-byte aligned; every
-/// launch is a `cuLaunchKernel` from here, passing each operand (and the product) as its address and a fused
-/// epilogue's tensors as pointers, without Python. Its operands and product must start 16-byte aligned.
+/// GEMM without those bounds checks), each operand's copy width (`copy_bytes`), and a fused epilogue's module and
+/// whether its tensors are 16-byte aligned; every launch is a `cuLaunchKernel` from here, passing each operand (and
+/// the product) as its address and a fused epilogue's tensors as pointers, without Python.
 #[cfg_attr(not(lumen_cuda_linked), allow(unused_variables))]
 fn cuda_gemm(
     a: &crate::Tensor,
@@ -883,12 +883,8 @@ fn cuda_gemm(
 
         let operands: Vec<&crate::Tensor> = [a, b].into_iter().chain(product).collect();
 
-        if let Some(t) = operands.iter().find(|t| t.data_ptr() as usize % 16 != 0) {
-            return Err(format!(
-                "dot_general: the CUDA GEMM read or wrote a tensor of shape {:?} not 16-byte aligned",
-                t.shape()
-            ));
-        }
+        // Each operand's copy width: the widest vector its address, contiguous extent and strides allow.
+        let widths: Vec<usize> = operands.iter().map(|t| copy_bytes(t)).collect();
 
         let dtype = match &output {
             Output::Product(d) => d.dtype(),
@@ -929,7 +925,7 @@ fn cuda_gemm(
         };
 
         let key = format!(
-            "gemm|cuda:{device}|{dtypes:?}|{a_major}{b_major}{d_major}|{batched}|{tile:?}|{aligned_m}{aligned_n}{aligned_k}|{layouts:?}|{:?}",
+            "gemm|cuda:{device}|{dtypes:?}|{a_major}{b_major}{d_major}|{batched}|{tile:?}|{aligned_m}{aligned_n}{aligned_k}|{layouts:?}|{widths:?}|{:?}",
             epilogue.map(|(name, _, aligned)| (name, aligned))
         );
 
@@ -937,6 +933,7 @@ fn cuda_gemm(
             Python::attach(|py| {
                 let kwargs = PyDict::new(py);
                 kwargs.set_item("epilogue", epilogue)?;
+                kwargs.set_item("copy_bytes", widths.clone())?;
 
                 let (function, warps, shared, plain, types) = py
                     .import("lumen.codegen.dot_general.cuda.launch")?
@@ -990,6 +987,36 @@ fn cuda_gemm(
 
     #[cfg(not(lumen_cuda_linked))]
     Err("dot_general: CUDA kernels launch only where lumen links CUDA".into())
+}
+
+/// The widest vector, in bytes, the GEMM can copy `t` by along its contiguous dimension: 16, 8, 4 or 2 (one element
+/// of a 16-bit `t`), dividing its address, every non-unit stride's bytes and its contiguous extent's bytes, so each
+/// vector lies wholly inside the tensor or outside it.
+#[cfg(lumen_cuda_linked)]
+fn copy_bytes(t: &crate::Tensor) -> usize {
+    let size = t.dtype().size_of();
+    let address = t.data_ptr() as usize;
+
+    let contiguous = t
+        .shape()
+        .iter()
+        .zip(t.strides())
+        .find(|&(_, &s)| s == 1)
+        .map_or(1, |(&d, _)| d);
+
+    let fits = |v: usize| {
+        address.is_multiple_of(v)
+            && (contiguous * size).is_multiple_of(v)
+            && t.strides()
+                .iter()
+                .all(|&s| s == 1 || (s * size).is_multiple_of(v))
+    };
+
+    [16, 8, 4, 2]
+        .into_iter()
+        .find(|&v| v <= size || fits(v))
+        .unwrap_or(size)
+        .max(size)
 }
 
 /// Runs flash-attention forward `forward` on `tensors` (its operands' tensors) with `config` on lumen's stream, as the

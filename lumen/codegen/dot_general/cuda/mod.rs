@@ -27,8 +27,9 @@ use crate::runtime::kernel::cuda::{GEMM, Output};
 const VECTOR_BYTES: usize = 16;
 
 /// Whether `node` is a matmul the GEMM runs: float16 or bfloat16 operands of rank 2, or 3 with a leading batch dim,
-/// contracting one dim each, accumulated in float32 and written as float16, bfloat16 or float32, every extent a
-/// multiple of 8 (its tiles move 16-byte vectors along whichever dim is contiguous).
+/// contracting one dim each, accumulated in float32 and written as float16, bfloat16 or float32, of any extents (its
+/// tiles move the widest vectors each tensor's address, contiguous extent and strides allow, 16 bytes down to one
+/// element).
 pub(crate) fn matmul(graph: &Graph, node: &Node) -> bool {
     use crate::DType::{BF16, F16, F32};
 
@@ -63,7 +64,7 @@ pub(crate) fn matmul(graph: &Graph, node: &Node) -> bool {
         && rhs.shape.len() == rank
         && typed
         && matches!(out.dtype, F16 | BF16 | F32)
-        && extents.into_iter().all(|&d| d > 0 && d % 8 == 0)
+        && extents.into_iter().all(|&d| d > 0)
 }
 
 /// Elements of `dot`'s product (of `dtype`) in one of the epilogue's vectors.
@@ -71,10 +72,11 @@ fn lanes(dtype: DType) -> usize {
     VECTOR_BYTES / dtype.size_of()
 }
 
-/// Whether the GEMM runs an epilogue after `dot` in `graph`: a matmul it runs whose readers, when they split its
-/// product into column regions, each take whole vectors of it: regions along its last axis, each a plain slice or
-/// the interleaved members of a reshape (as many as divide a vector), not the two halves of the product (which would
-/// need both halves' tiles in one CTA).
+/// Whether the GEMM runs an epilogue after `dot` in `graph`: a matmul it runs whose product's rows are whole vectors
+/// (the epilogue reads it a 16-byte vector at a time, each wholly inside the product or outside it) and whose readers,
+/// when they split its product into column regions, each take whole vectors of it: regions along its last axis, each
+/// a plain slice or the interleaved members of a reshape (as many as divide a vector), not the two halves of the
+/// product (which would need both halves' tiles in one CTA).
 pub(crate) fn epilogue(graph: &Graph, dot: &Node) -> bool {
     if !matmul(graph, dot) {
         return false;
@@ -82,6 +84,10 @@ pub(crate) fn epilogue(graph: &Graph, dot: &Node) -> bool {
 
     let product = graph.type_of(dot.output);
     let (rank, lanes) = (product.shape.len(), lanes(product.dtype));
+
+    if !product.shape[rank - 1].is_multiple_of(lanes) {
+        return false;
+    }
 
     gemm_regions(graph, dot).is_none_or(|regions| {
         regions.iter().all(|c| {
