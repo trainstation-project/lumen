@@ -4,7 +4,9 @@ Device memory for tensors. Every `Storage` (see `lumen/tensor`) owns a `DataPtr`
 
 ## Files
 
-- `mod.rs` holds the `Allocator` trait, the owned `DataPtr` buffer, `allocator_for(device)` and `Region`, the first-fit sub-allocator the accelerator backends share.
+- `mod.rs` holds the `Allocator` trait and `allocator_for(device)`.
+- `region.rs` holds `Region`, the first-fit sub-allocator the accelerator backends share, and its block `ALIGNMENT`.
+- `data_ptr.rs` holds `DataPtr`, the owned buffer that gives its bytes back to its allocator when dropped.
 - `config.rs` holds the process-wide size of each accelerator's static region (`static_allocator_bytes`, default 1 GiB). Python reads and sets it through `lumen.config` (`lumen/config/python.rs`).
 - `cpu.rs` is `CpuAllocator`: 64-byte aligned host heap memory, reporting allocations to the memory profiler while profiling is on.
 - `meta.rs` is `MetaAllocator`: dangling pointers for meta tensors, which never touch memory.
