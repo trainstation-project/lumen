@@ -5,6 +5,7 @@ import builtins
 
 from lumen.tensor import dlpack
 from lumen.tensor import names as _names
+from lumen.tensor import placements as _placements
 from lumen.tensor._C import Tensor
 from lumen.tensor.dlpack import from_dlpack
 from lumen.tensor.names import AxisType
@@ -134,6 +135,8 @@ def to_numpy(t):
     an element. numpy has no bfloat16: convert those first."""
     import numpy as np
 
+    if t.placement is not None:
+        raise TypeError("to_numpy: the tensor is sharded: take this process's shard (to_local()) first")
     if t.dtype == "bfloat16":
         raise TypeError("numpy has no bfloat16: convert the tensor first (t.to(dtype=lumen.float32))")
     if t.dtype in _ML_DTYPES:
@@ -203,7 +206,61 @@ def _dim_of(self, name: str) -> int:
     return _names.position(self.names, name, "dim_of")
 
 
-# Attach numpy and DLPack protocols, and the methods of names, to the native Tensor class.
+def _distribute(self, mesh, placements):
+    """It, a global tensor every process holds, placed over ``mesh`` by ``placements`` (one ``Shard``,
+    ``Replicate`` or ``Partial`` per mesh dimension; ``lumen/tensor/placements.py``): a copy of this
+    process's shard (zeros for a partial sum's parts but the first; a meta tensor's is a new meta tensor),
+    named as it is (DTensor's ``distribute_tensor``)."""
+    if self.placement is not None:
+        raise TypeError("distribute: the tensor is sharded already")
+    spec = _placements.sharding(mesh, placements, self.ndim, self.names)
+    local = _placements.local_shape(self.shape, spec)
+    at = _placements.coordinate(mesh)
+    parts = enumerate(spec.placements)
+    zero = any(isinstance(p, _placements.Partial) and p.reduce_op == "sum" and at[i] for i, p in parts)
+    if self.device.startswith("meta"):
+        shard = Tensor.empty(list(local), self.dtype, self.device)
+    elif zero:
+        shard = Tensor.zeros(list(local), self.dtype, self.device)
+    else:
+        shard = self
+        for d, start in enumerate(_placements.offsets(self.shape, spec)):
+            if local[d] != self.shape[d]:
+                shard = shard.narrow(d, start, local[d])
+        shard = shard.clone()
+    return shard._with_names(self.names)._with_placement(spec, list(self.shape))
+
+
+def _to_local(self):
+    """Its local shard, sharing its memory, a local tensor (DTensor's ``to_local``)."""
+    return self if self.placement is None else self._with_placement(None)
+
+
+def _placements_of(self):
+    """Its placement on each mesh dimension (a tuple), or None for a local tensor (DTensor's ``placements``)."""
+    return None if self.placement is None else self.placement.placements
+
+
+def _mesh_of(self):
+    """The mesh it is sharded over, or None for a local tensor (DTensor's ``device_mesh``)."""
+    return None if self.placement is None else self.placement.mesh
+
+
+def _traced_only(name):
+    """A method that runs only on traced tensors, inside ``lumen.compile`` (it records collectives)."""
+
+    def method(self, *args, **kwargs):
+        """Raises: the method records collectives, which run inside ``lumen.compile``."""
+        from lumen.graph import tracer
+
+        tracer._lift(self)
+        tracer.current_graph()
+
+    method.__name__ = name
+    return method
+
+
+# Attach numpy and DLPack protocols, and the methods of names and placements, to the native Tensor class.
 try:
     Tensor.__array__ = _tensor__array__
     Tensor.__dlpack__ = dlpack.__dlpack__
@@ -213,5 +270,11 @@ try:
     Tensor.align_to = _align_to
     Tensor.size = _size
     Tensor.dim_of = _dim_of
+    Tensor.distribute = _distribute
+    Tensor.to_local = _to_local
+    Tensor.full_tensor = _traced_only("full_tensor")
+    Tensor.redistribute = _traced_only("redistribute")
+    Tensor.placements = property(_placements_of)
+    Tensor.device_mesh = property(_mesh_of)
 except (AttributeError, TypeError):  # pragma: no cover
     pass

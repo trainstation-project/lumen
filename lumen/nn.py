@@ -46,8 +46,10 @@ class Module:
     def load_state_dict(self, tensors, strict=True):
         """Copy ``tensors`` (``{path: tensor}``, as ``named_parameters``
         names them; a safetensors file's) into the weights' memory, which a
-        compiled function taking the module has placed. With ``strict``, every
-        weight must be given, and nothing else."""
+        compiled function taking the module has placed. A sharded weight takes
+        its global value (each process keeping its shard, as ``distribute``)
+        or this process's shard. With ``strict``, every weight must be given,
+        and nothing else."""
         params = dict(self.named_parameters())
         if strict:
             missing, unexpected = params.keys() - tensors.keys(), tensors.keys() - params.keys()
@@ -55,7 +57,10 @@ class Module:
                 raise KeyError(f"load_state_dict: missing {sorted(missing)}, unexpected {sorted(unexpected)}")
         for path, t in tensors.items():
             if path in params:
-                params[path].copy_(t)
+                w = params[path]
+                if w.placement is not None and t.placement is None and list(t.shape) == list(w.shape):
+                    t = t.distribute(w.device_mesh, w.placements)
+                w.copy_(t)
 
 
 # Annotations (types or their string forms under postponed evaluation) that mark a scalar field, mapped to its kind.

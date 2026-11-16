@@ -23,9 +23,11 @@ Automatic differentiation, written in Python and run during tracing. The transfo
 
 ## Conventions
 
+- `all_reduce` by max or min differentiates as `reduce_max` does: the tangents of the processes holding the result, averaged over ties.
 - Rules follow JAX's design: a JVP rule per primitive, a transpose rule for each linear primitive, and reverse mode by transposing the linearized program.
 - Primals, tangents, cotangents and outputs are trees walked by `tracer._tree_map`: tensors, modules, lists and tuples. Gradients, cotangents and tangents come back named as their primals or outputs; a named tangent or cotangent given is aligned to its value by name (`tracer._like`). Rules work on values rebuilt from vars (`core._value`), unnamed.
 - Only float leaves get tangents; integer and bool values have none.
+- Sharded values (placements) need nothing of the rules: the tape holds local values and explicit collectives, whose existing rules transpose them. The transforms translate at the edges (`lumen/graph/sharding.py`): a cotangent of a replicated output enters on one process of each group (the others' zero), so the copies' gradients add up to it once; a replicated leaf's gradient (partial over its processes) is all-reduced, a partial sum leaf's partitioned; a cotangent of a partial average is divided among the parts, of a partial max or min given to the parts equal to the whole (ties share), and such a leaf's parts' gradients are summed; gradients come back placed as their leaves. A `Function` with a sharded argument runs on replicated arguments, its results replicated.
 - Tangents and cotangents must match their primal's dtype and shape exactly; the transforms raise `TypeError` otherwise.
 - `rules.py` must be imported for its side effect before any transform runs; `transforms.py` does this.
 - A new differentiable primitive needs its rules registered in `rules.py` with `defjvp`, `deflinear` or a direct entry in the registries.

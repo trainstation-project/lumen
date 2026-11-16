@@ -101,9 +101,19 @@ def _summed(name, op):
 
 
 def _all_reduce_jvp(primals, tangents, out, op, ranks):
-    """The tangents summed across ``ranks``, as the values are."""
-    _summed("all_reduce", op)
-    return None if tangents[0] is None else prims.device_wait(prims.all_reduce(tangents[0], op, ranks))
+    """For a sum, the tangents summed across ``ranks``, as the values are. For a max or min, the tangents of
+    the ranks whose value is the result's, averaged (ties share evenly, as ``reduce_max``'s): the result is
+    reduced again here, since ``out`` is the collective's unwaited value."""
+    t = tangents[0]
+    if t is None:
+        return None
+    if op == "sum":
+        return prims.device_wait(prims.all_reduce(t, op, ranks))
+    (x,) = primals
+    whole = prims.device_wait(prims.all_reduce(x, op, ranks))
+    where = prims.cast(prims.eq(x, whole), x.dtype)
+    count = prims.device_wait(prims.all_reduce(where, "sum", ranks))
+    return prims.div(prims.device_wait(prims.all_reduce(prims.mul(t, where), "sum", ranks)), count)
 
 
 def _all_reduce_transpose(ct, x, op, ranks):

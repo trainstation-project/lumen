@@ -54,6 +54,9 @@ class Function:
         kwargs = bound.kwargs
 
         tracer.current_graph()
+        sharded = [v for v in (*args, *kwargs.values()) if isinstance(v, TracedTensor) and v.placement is not None]
+        if sharded:
+            return _replicated(cls, sharded, args, kwargs)
         ctx = FunctionCtx()
 
         # Hide the outer tapes while forward runs so its inner ops are not recorded individually.
@@ -77,6 +80,20 @@ class Function:
             tape.append((_FUNCTION, inputs, params, tuple(o.var for o in outs)))
 
         return out
+
+
+def _replicated(cls, sharded, args, kwargs):
+    """``cls.apply(*args, **kwargs)`` with ``sharded`` among its arguments: run on every argument's whole
+    value (a sharded one gathered and reduced first), as a primitive without strategies runs, its results
+    replicated over the arguments' mesh. Its ``forward`` and ``backward`` see local values alone."""
+    from lumen.graph import sharding
+    from lumen.tensor.placements import replicated
+
+    mesh = sharding._mesh(sharded)
+    whole = lambda v: sharding.replicate(v) if isinstance(v, TracedTensor) else v  # noqa: E731
+    out = cls.apply(*map(whole, args), **{k: whole(v) for k, v in kwargs.items()})
+    place = lambda o: o.distribute(mesh, replicated(mesh).placements)  # noqa: E731
+    return place(out) if isinstance(out, TracedTensor) else type(out)(map(place, out))
 
 
 def _function_jvp(params, ts, outs, tangents, linearizing):

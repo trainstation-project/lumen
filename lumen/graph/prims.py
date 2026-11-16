@@ -1,6 +1,6 @@
 """Python wrappers that record each lumen primitive into the graph being traced."""
 
-from lumen.graph import _C, tracer
+from lumen.graph import _C, sharding, tracer
 
 __all__ = [
     "add",
@@ -101,9 +101,12 @@ def _named(out, name, operands, params):
 
 def bind(name, *operands, **params):
     """Record ``name(*operands, **params)`` in the graph being traced; its result is named from the
-    operands' names (``Primitive::names``)."""
+    operands' names (``Primitive::names``). With a sharded operand, it runs on the local shards after the
+    collectives its strategy needs, and its result is placed (``sharding``)."""
     graph = tracer.current_graph()
     operands = [tracer._lift(x) for x in operands]
+    if any(getattr(x, "placement", None) is not None for x in operands):
+        return _named(sharding.propagate(name, operands, params), name, operands, params)
     host = tracer._HOSTS[-1] if tracer._HOSTS else None
     # Scalar-only work may run on the host graph; device ops read host values as imported scalar inputs.
     if host is not None:

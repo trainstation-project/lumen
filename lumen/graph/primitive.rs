@@ -449,11 +449,6 @@ impl Primitive {
         )
     }
 
-    /// Whether the op is a point-to-point transfer: never merged with an equal one, since each is a message.
-    pub fn is_point_to_point(&self) -> bool {
-        matches!(self, Primitive::Send { .. } | Primitive::Recv { .. })
-    }
-
     /// The op's display name; fusions and custom calls use their label.
     pub fn name(&self) -> &'static str {
         use Primitive::*;

@@ -293,13 +293,31 @@ pub(crate) fn to_scalar(value: &Bound<'_, PyAny>) -> PyResult<Scalar> {
     }
 }
 
-/// A tensor's `_signature`: its dtype, shape, device and axis names.
+/// A tensor's `_signature`: its dtype, shape, device, axis names and placement.
 type Signature<'py> = (
     &'static str,
     Bound<'py, PyTuple>,
     String,
     Option<Bound<'py, PyTuple>>,
+    Option<Py<PyAny>>,
 );
+
+/// A sharded tensor's placement over a device mesh (a `Sharding` of `lumen/tensor/placements.py`) and its
+/// global shape; the tensor's storage holds this process's local shard.
+struct Placed {
+    sharding: Py<PyAny>,
+    shape: Vec<usize>,
+}
+
+impl Clone for Placed {
+    /// Another reference to the same sharding, with the shape copied.
+    fn clone(&self) -> Self {
+        Placed {
+            sharding: Python::attach(|py| self.sharding.clone_ref(py)),
+            shape: self.shape.clone(),
+        }
+    }
+}
 
 /// Python's `lumen.Tensor`, wrapping a core tensor.
 #[pyclass(name = "Tensor", module = "lumen")]
@@ -308,19 +326,38 @@ pub(crate) struct PyTensor {
     /// The axes' names, one per dim, or None for an unnamed tensor: metadata only, which views and kernels never
     /// read (`lumen/tensor/__init__.py` holds the methods that use them).
     names: Option<Vec<String>>,
+    /// The placement over a device mesh of a sharded tensor, whose storage holds this process's shard, or None
+    /// for a local tensor: metadata `lumen.compile` reads at trace time, which views and kernels never read.
+    placement: Option<Placed>,
 }
 
 impl PyTensor {
-    /// Wraps a core tensor for Python, unnamed.
+    /// Wraps a core tensor for Python, unnamed and local.
     pub(crate) fn wrap(inner: Tensor) -> Self {
-        PyTensor { inner, names: None }
+        PyTensor {
+            inner,
+            names: None,
+            placement: None,
+        }
     }
 
-    /// Wraps `inner`, a copy of this tensor (a dtype or device conversion), named as this tensor is.
+    /// Wraps `inner`, a copy of this tensor (a dtype or device conversion), named and placed as this tensor is.
     fn same_names(&self, inner: Tensor) -> Self {
         PyTensor {
             inner,
             names: self.names.clone(),
+            placement: self.placement.clone(),
+        }
+    }
+
+    /// Raises for a sharded tensor: `op`, a view, reads the local shard alone, which a global shape cannot
+    /// index.
+    fn local(&self, op: &str) -> PyResult<()> {
+        match self.placement {
+            Some(_) => Err(PyTypeError::new_err(format!(
+                "{op}: the tensor is sharded: take this process's shard first (to_local())"
+            ))),
+            None => Ok(()),
         }
     }
 
@@ -442,21 +479,45 @@ impl PyTensor {
         Ok(Self::wrap(Tensor::arange(n, options)))
     }
 
-    /// The tensor's sizes.
+    /// The tensor's sizes: a sharded tensor's global ones.
     #[getter]
     fn shape(&self) -> Vec<usize> {
-        self.inner.shape().to_vec()
+        match &self.placement {
+            Some(placed) => placed.shape.clone(),
+            None => self.inner.shape().to_vec(),
+        }
     }
 
-    /// `(dtype, shape, device, names)`, identifying the tensor's type for trace caching.
+    /// `(dtype, shape, device, names, placement)`, identifying the tensor's type for trace caching.
     #[getter]
     fn _signature<'py>(&self, py: Python<'py>) -> PyResult<Signature<'py>> {
         Ok((
             dtype_name(self.inner.dtype()),
-            PyTuple::new(py, self.inner.shape())?,
+            PyTuple::new(py, self.shape())?,
             self.inner.device().to_string(),
             self.names(py)?,
+            self.placement(py),
         ))
+    }
+
+    /// The placement over a device mesh of a sharded tensor (a `Sharding`), or None for a local tensor.
+    #[getter]
+    fn placement(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.placement.as_ref().map(|p| p.sharding.clone_ref(py))
+    }
+
+    /// This tensor (sharing its storage, named as it is) as the shard of a tensor of global `shape` placed
+    /// by `placement`, unchecked: `lumen/tensor/placements.py` checks them. None makes it a local tensor.
+    #[pyo3(signature = (placement, shape=None))]
+    fn _with_placement(&self, placement: Option<Py<PyAny>>, shape: Option<Vec<usize>>) -> Self {
+        PyTensor {
+            inner: self.inner.clone(),
+            names: self.names.clone(),
+            placement: placement.map(|sharding| Placed {
+                sharding,
+                shape: shape.unwrap_or_else(|| self.inner.shape().to_vec()),
+            }),
+        }
     }
 
     /// The axes' names (a tuple of strings, one per dim), or None for an unnamed tensor.
@@ -474,6 +535,7 @@ impl PyTensor {
         PyTensor {
             inner: self.inner.clone(),
             names,
+            placement: self.placement.clone(),
         }
     }
 
@@ -489,10 +551,10 @@ impl PyTensor {
         self.inner.ndim()
     }
 
-    /// Number of elements.
+    /// Number of elements: a sharded tensor's global count.
     #[getter]
     fn numel(&self) -> usize {
-        self.inner.numel()
+        self.shape().iter().product()
     }
 
     /// The NumPy-style dtype name.
@@ -531,37 +593,44 @@ impl PyTensor {
 
     /// A view with a new shape; the tensor must be contiguous.
     fn reshape(&self, shape: Vec<usize>) -> PyResult<Self> {
+        self.local("reshape")?;
         Ok(Self::wrap(self.inner.reshape(&shape)))
     }
 
     /// The view of `len` entries along `dim` from `start`.
     fn narrow(&self, dim: usize, start: usize, len: usize) -> PyResult<Self> {
+        self.local("narrow")?;
         Ok(Self::wrap(self.inner.narrow(dim, start, len)))
     }
 
     /// The view at `index` (negative counts from the end) along `dim`, with that dim removed.
     fn select(&self, dim: usize, index: isize) -> PyResult<Self> {
+        self.local("select")?;
         let index = self.normalize_index(dim, index)?;
         Ok(Self::wrap(self.inner.select(dim, index)))
     }
 
     /// The view with dims `a` and `b` swapped.
     fn transpose(&self, a: usize, b: usize) -> PyResult<Self> {
+        self.local("transpose")?;
         Ok(Self::wrap(self.inner.transpose(a, b)))
     }
 
     /// The view with dims reordered as `dims`.
     fn permute(&self, dims: Vec<usize>) -> PyResult<Self> {
+        self.local("permute")?;
         Ok(Self::wrap(self.inner.permute(&dims)))
     }
 
     /// The view with a size-1 dim inserted at `dim`.
     fn unsqueeze(&self, dim: usize) -> PyResult<Self> {
+        self.local("unsqueeze")?;
         Ok(Self::wrap(self.inner.unsqueeze(dim)))
     }
 
     /// The view with size-1 dim `dim` removed.
     fn squeeze(&self, dim: usize) -> PyResult<Self> {
+        self.local("squeeze")?;
         Ok(Self::wrap(self.inner.squeeze_dim(dim)))
     }
 
@@ -749,23 +818,31 @@ impl PyTensor {
         }
     }
 
-    /// The tensor's elements, dtype and device, and its axes' names if it has them.
-    fn __repr__(&self) -> String {
-        let text = format!("{}", self.inner);
+    /// The tensor's elements (a sharded tensor's local shard), dtype and device, its axes' names if it has
+    /// them, and its placement and global shape if it is sharded.
+    fn __repr__(&self, py: Python<'_>) -> PyResult<String> {
+        let mut text = format!("{}", self.inner);
+        text.pop();
 
-        match &self.names {
-            Some(names) => {
-                let names = names.iter().map(|n| format!("{n:?}")).collect::<Vec<_>>();
-                format!("{}, names=({}))", &text[..text.len() - 1], names.join(", "))
-            }
-            None => text,
+        if let Some(names) = &self.names {
+            let names = names.iter().map(|n| format!("{n:?}")).collect::<Vec<_>>();
+            text = format!("{text}, names=({})", names.join(", "));
         }
+
+        if let Some(placed) = &self.placement {
+            let sharding = placed.sharding.bind(py).repr()?;
+            text = format!(
+                "{text}, placement={sharding}, global_shape={:?}",
+                placed.shape
+            );
+        }
+
+        Ok(text + ")")
     }
 
-    /// Size of the first dim.
+    /// Size of the first dim (a sharded tensor's global one).
     fn __len__(&self) -> PyResult<usize> {
-        self.inner
-            .shape()
+        self.shape()
             .first()
             .copied()
             .ok_or_else(|| PyTypeError::new_err("len() of a 0-d tensor"))
@@ -774,6 +851,7 @@ impl PyTensor {
     /// An int gives the view along dim 0 (a number for 1-D); a tuple of ints gives one element.
     fn __getitem__(&self, py: Python<'_>, key: &Bound<'_, PyAny>) -> PyResult<Py<PyAny>> {
         if let Ok(i) = key.extract::<isize>() {
+            self.local("indexing")?;
             let i = self.normalize_index(0, i)?;
             let view = self.inner.select(0, i);
 

@@ -4,7 +4,9 @@ transfers are traced inside ``lumen.compile``, mirroring ``torch.distributed``'s
 asynchronously and ends in a ``device_wait``, which the plan places just before the first op that reads the
 result. Every process issues its collectives in program order, so a pair's sends and receives match in the
 order they were written. ``group`` is ``None`` (every process), a ``DeviceMesh`` or a list of global ranks;
-``src``, ``dst`` and roots are global ranks."""
+``src``, ``dst`` and roots are global ranks. Tensors may be sharded over a mesh (``Shard``, ``Replicate``,
+``Partial``; ``from_local``, ``Tensor.distribute``) as PyTorch's DTensor: ops on them record the collectives
+they need while tracing (``lumen/graph/sharding.py``)."""
 
 from __future__ import annotations
 
@@ -28,10 +30,16 @@ from lumen.distributed._C import (
     is_initialized,
 )
 from lumen.tensor import names as _names
+from lumen.tensor import placements as _placements
 from lumen.tensor.names import AxisType
+from lumen.tensor.placements import Partial, Placement, Replicate, Shard
 
 __all__ = [
     "DeviceMesh",
+    "Partial",
+    "Placement",
+    "Replicate",
+    "Shard",
     "TCPStore",
     "all_gather",
     "all_reduce",
@@ -39,6 +47,7 @@ __all__ = [
     "barrier",
     "broadcast",
     "destroy_process_group",
+    "from_local",
     "gather",
     "get_rank",
     "get_world_size",
@@ -261,6 +270,28 @@ def recv(tensor, src, group=None):
     from lumen.graph import prims
 
     return prims.device_wait(prims.recv(tensor.shape, tensor.dtype, src, _ranks(group)))
+
+
+def from_local(local, mesh, placements, *, shape=None):
+    """``local``, this process's shard (a ``lumen.Tensor`` or a traced one), as a tensor placed over
+    ``mesh`` by ``placements`` (one ``Shard``, ``Replicate`` or ``Partial`` per mesh dimension), sharing
+    its memory (DTensor's ``from_local``, without checks across processes). Its global shape is ``shape``,
+    else ``local``'s with each sharded dimension times its mesh dimension's size (even shards); a ValueError
+    if ``local`` isn't this process's block of it."""
+    from lumen.graph import tracer
+
+    if local.placement is not None:
+        raise TypeError("from_local: the tensor is sharded already")
+    spec = _placements.sharding(mesh, placements, local.ndim, local.names)
+    shape = _placements.global_shape(local.shape, spec) if shape is None else tuple(shape)
+    block = _placements.local_shape(shape, spec)
+    if tuple(local.shape) != block:
+        raise ValueError(
+            f"from_local: this process's block of a {list(shape)} tensor is {list(block)}, got {list(local.shape)}"
+        )
+    if isinstance(local, tracer.TracedTensor):
+        return tracer._view_as(local, local.names, spec, shape)
+    return local._with_placement(spec, list(shape))
 
 
 def barrier(group=None):

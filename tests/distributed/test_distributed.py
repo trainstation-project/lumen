@@ -1,16 +1,14 @@
 """Tests of lumen.distributed: device meshes, the TCP store, process groups, collectives and multi-process
 launches."""
 
-import json
 import os
-import socket
 import subprocess
 import sys
 from datetime import timedelta
 
 import numpy as np
 import pytest
-from helpers import CPU, CUDA, MPS, TPU, TRITON_CUDA, meta
+from helpers import CPU, CUDA, MPS, TPU, TRITON_CUDA, launch, meta
 
 import lumen
 import lumen.distributed as dist
@@ -36,43 +34,6 @@ def one_process(monkeypatch):
     """Runs every test as a single process, without the launcher's variables."""
     for name in LAUNCHER:
         monkeypatch.delenv(name, raising=False)
-
-
-def free_port():
-    """A TCP port on localhost that is free right now."""
-    with socket.socket() as s:
-        s.bind(("127.0.0.1", 0))
-        return s.getsockname()[1]
-
-
-def launch(program, world_size, env=lambda rank: {}):
-    """Runs `program` in `world_size` Python processes wired by env rendezvous; returns each one's last
-    JSON line, sorted by rank. `env` adds variables per rank."""
-    port = free_port()
-    processes = [
-        subprocess.Popen(
-            [sys.executable, "-c", program],
-            env={
-                **os.environ,
-                "MASTER_ADDR": "127.0.0.1",
-                "MASTER_PORT": str(port),
-                "RANK": str(rank),
-                "LOCAL_RANK": str(rank),
-                "WORLD_SIZE": str(world_size),
-                **env(rank),
-            },
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        for rank in reversed(range(world_size))
-    ]
-    results = []
-    for p in processes:
-        out, err = p.communicate(timeout=300)
-        assert p.returncode == 0, err
-        results.append(json.loads(out.splitlines()[-1]))
-    return sorted(results, key=lambda r: r["rank"])
 
 
 def test_rank_and_world_size_default_to_one_process():
