@@ -4,10 +4,8 @@ use std::collections::BTreeMap;
 use std::ptr::NonNull;
 use std::sync::Mutex;
 
+use super::config::ALIGNMENT;
 use crate::device::Device;
-
-/// Byte alignment and granularity of every `Region` block.
-pub const ALIGNMENT: usize = 256;
 
 /// First-fit sub-allocator over one contiguous device range reserved on first use.
 #[cfg_attr(
@@ -125,16 +123,6 @@ impl Region {
                 crate::LIBRARY_NAME,
             )
         })
-    }
-
-    #[cfg(test)]
-    /// Non-panicking `take` at `ALIGNMENT`.
-    pub(crate) fn try_take(
-        &self,
-        nbytes: usize,
-        reserve: impl Fn(usize) -> NonNull<u8>,
-    ) -> Option<NonNull<u8>> {
-        self.try_take_aligned(nbytes, ALIGNMENT, reserve)
     }
 
     /// Takes the first free block that fits `nbytes` at `alignment`, or `None` when none does.

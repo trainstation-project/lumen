@@ -14,6 +14,7 @@ mod tests;
 #[cfg(lumen_tpu_linked)]
 pub(crate) mod tpu;
 
+pub use config::ALIGNMENT;
 pub use cpu::CpuAllocator;
 #[cfg(lumen_cuda_linked)]
 pub use cuda::CudaAllocator;
@@ -23,7 +24,6 @@ pub use meta::MetaAllocator;
 pub use mps::MpsAllocator;
 #[cfg(lumen_mps_linked)]
 pub(crate) use mps::Scratch;
-pub use region::ALIGNMENT;
 #[cfg(any(lumen_mps_linked, lumen_cuda_linked, lumen_tpu_linked, test))]
 pub(crate) use region::Region;
 #[cfg(lumen_tpu_linked)]
@@ -54,6 +54,7 @@ pub trait Allocator: Send + Sync {
 /// Returns the shared allocator for `device`, or an error when the device isn't available.
 pub fn allocator_for(device: Device) -> Result<Arc<dyn Allocator>, String> {
     device.check()?;
+
     static CPU: OnceLock<Arc<dyn Allocator>> = OnceLock::new();
     static META: OnceLock<Arc<dyn Allocator>> = OnceLock::new();
 

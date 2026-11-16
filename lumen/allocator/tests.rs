@@ -71,7 +71,7 @@ mod region {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use crate::allocator::Region;
+    use crate::allocator::{ALIGNMENT, Region};
     use crate::{Allocator, CpuAllocator, DataPtr, Device};
 
     /// `Region` over CPU memory that counts how often its range is reserved and released.
@@ -244,14 +244,14 @@ mod region {
 
         assert!(
             allocator
-                .try_take(1, |n| CpuAllocator.allocate(n))
+                .try_take_aligned(1, ALIGNMENT, |n| CpuAllocator.allocate(n))
                 .is_none(),
             "the next offset is past the end"
         );
 
         assert!(
             allocator
-                .try_take(1 << 20, |n| CpuAllocator.allocate(n))
+                .try_take_aligned(1 << 20, ALIGNMENT, |n| CpuAllocator.allocate(n))
                 .is_none()
         );
     }
