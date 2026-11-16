@@ -3,6 +3,7 @@
 
 pub(crate) mod custom;
 pub mod primitive;
+pub mod propagation;
 #[cfg(feature = "python")]
 pub(crate) mod python;
 #[cfg(test)]

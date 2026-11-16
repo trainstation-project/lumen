@@ -521,7 +521,7 @@ def _renamed(x, names):
 def _with_names(out, names, x):
     """``out``, the result of an op on traced ``x`` (``x`` itself when the
     op changed nothing), named ``names``: a named split or merge, which
-    the reshape it is does not name (``propagation``)."""
+    the reshape it is does not name (``Primitive::names``)."""
     if out is x:
         return _renamed(x, names)
     out.names = names
@@ -1530,7 +1530,7 @@ class TracedTensor:
     unique; None, the default, for an unnamed tensor). Every method and
     ``lumen.functional`` op taking a dimension then also takes a name, and
     elementwise ops broadcast named operands by name (``_broadcast``). Each
-    primitive names its result from its operands' (``propagation``), so
+    primitive names its result from its operands' (``Primitive::names``), so
     names cost nothing when the plan runs."""
 
     __slots__ = (
