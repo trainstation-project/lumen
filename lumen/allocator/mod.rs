@@ -1,5 +1,6 @@
-//! Device allocators and the owned `DataPtr` buffer, plus the `Region` sub-allocator
-//! accelerator backends carve their tensors from.
+//! Device allocators: the `Allocator` trait and `allocator_for`, with the owned `DataPtr` buffer
+//! (`data_ptr.rs`) and the `Region` sub-allocator accelerator backends carve their tensors from
+//! (`region.rs`).
 
 pub mod config;
 mod cpu;
@@ -23,6 +24,7 @@ pub use mps::MpsAllocator;
 #[cfg(lumen_mps_linked)]
 pub(crate) use mps::Scratch;
 pub use region::ALIGNMENT;
+#[cfg(any(lumen_mps_linked, lumen_cuda_linked, lumen_tpu_linked, test))]
 pub(crate) use region::Region;
 #[cfg(lumen_tpu_linked)]
 pub use tpu::TpuAllocator;
