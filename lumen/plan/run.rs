@@ -404,18 +404,8 @@ impl<S: Step + Clone> DevicePlan<S> {
                     step
                 };
 
-                let mut record = crate::profiler::record_op(step.label, || {
-                    step.inputs.iter().map(|(_, ty)| ty.clone()).collect()
-                });
-
-                record.outputs(|| {
-                    let extra = step.extra_outputs.iter().map(|(_, ty)| ty.clone());
-
-                    std::iter::once(step.output.1.clone())
-                        .chain(extra)
-                        .collect()
-                });
-
+                let mut record = crate::profiler::record_op(step.label, || step.io_types().inputs);
+                record.outputs(|| step.io_types().outputs);
                 record.accum(|| step.primitive.accum_dtypes(step.output.1.dtype));
                 record.strides(|| (step.input_strides(), step.output_strides()));
                 step.run(&Buffers { viewed, ..buffers })?;

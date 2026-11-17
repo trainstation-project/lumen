@@ -77,16 +77,23 @@ pub(crate) fn launch_stream() -> *mut c_void {
     LAUNCH_STREAM.load(Ordering::Acquire) as *mut c_void
 }
 
-/// The steps captured so far: each one's label and the nodes it added, by position in the graph.
-static CAPTURED: Mutex<Vec<(&'static str, std::ops::Range<usize>)>> = Mutex::new(Vec::new());
+/// A captured step as a profiled replay names its kernels: its label and its operands' and outputs' types.
+pub(crate) type Labelled = (&'static str, crate::profiler::IoTypes);
 
-/// Records that the capturing graph's nodes at `nodes` are the step labelled `label`'s.
+/// The steps captured so far: each one's label and types and the nodes it added, by position in the graph.
+static CAPTURED: Mutex<Vec<(Labelled, std::ops::Range<usize>)>> = Mutex::new(Vec::new());
+
+/// Records that the capturing graph's nodes at `nodes` are the step labelled `label`'s, with `types`.
 #[cfg_attr(not(feature = "python"), allow(dead_code))]
-pub(crate) fn captured(label: &'static str, nodes: std::ops::Range<usize>) {
+pub(crate) fn captured(
+    label: &'static str,
+    types: crate::profiler::IoTypes,
+    nodes: std::ops::Range<usize>,
+) {
     CAPTURED
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .push((label, nodes));
+        .push(((label, types), nodes));
 }
 
 /// `cudaStreamCaptureModeThreadLocal`: only this thread's unsafe calls invalidate the capture.
@@ -107,14 +114,14 @@ fn checked(err: i32, call: &str) -> Result<(), String> {
 /// A CUDA graph of lumen's kernel launches on one device: `begin` redirects them to a capture stream
 /// (blocking, so ordered with the default stream), `end` instantiates what was launched, and `replay`
 /// launches it all again. Memory allocated while capturing stays the graph's until it is dropped;
-/// `labels` names the step each node ran, in order (`None` for one launched outside a step).
+/// `labels` names the step each node ran, with its types, in order (`None` for one launched outside a step).
 pub struct CudaGraph {
     device: usize,
     stream: usize,
     exec: usize,
     held: Vec<usize>,
     #[cfg_attr(not(lumen_cupti_linked), allow(dead_code))]
-    labels: Vec<Option<&'static str>>,
+    labels: Vec<Option<Labelled>>,
 }
 
 impl CudaGraph {
@@ -175,9 +182,9 @@ impl CudaGraph {
         unsafe { ffi::cudaGraphGetNodes(graph, std::ptr::null_mut(), &mut nodes) };
         self.labels = vec![None; nodes];
 
-        for (label, at) in steps {
+        for (labelled, at) in steps {
             for node in at.filter(|&n| n < nodes) {
-                self.labels[node] = Some(label);
+                self.labels[node] = Some(labelled.clone());
             }
         }
 
@@ -224,8 +231,8 @@ impl CudaGraph {
         )
     }
 
-    /// Launches the captured graph on its stream; profiled, its kernels are timed under the names of
-    /// the steps that launched them while it captured.
+    /// Launches the captured graph on its stream; profiled, its kernels are timed under the names (and
+    /// types) of the steps that launched them while it captured.
     pub fn replay(&self) -> Result<(), String> {
         if self.exec == 0 {
             return Err("the CUDA graph was never captured".into());

@@ -125,7 +125,8 @@ def test_cuda_graphs_replay_runtime_scalars_and_write_back(device, cuda_graphs):
 def test_cuda_graphs_replay_under_the_profiler(device, cuda_graphs):
     """Profiled with CUDA timing, a captured plan still replays: each call
     is a ``CUDA graph`` range, and each kernel it ran is timed under the
-    step that launched it while capturing, as uncaptured runs name them."""
+    step that launched it while capturing, as uncaptured runs name them,
+    with that step's input and output types when recording shapes."""
     from lumen.profiler import ProfilerActivity, profile
 
     if ProfilerActivity.CUDA not in lumen.profiler.supported_activities():
@@ -135,12 +136,23 @@ def test_cuda_graphs_replay_under_the_profiler(device, cuda_graphs):
     for _ in range(3):
         compiled(X)
     graph = next(iter(compiled._graphs.values()))[0]
-    labels = [s["label"] for s in next(iter(compiled._plans.values()))[6][0][0].steps()]
-    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+    steps = next(iter(compiled._plans.values()))[6][0][0].steps()
+    labels = [s["label"] for s in steps]
+    types = {
+        s["label"]: (
+            [(dtype, list(shape)) for _, dtype, shape in s["inputs"]],
+            [(dtype, list(shape)) for _, dtype, shape in [s["output"], *s["extra_outputs"]]],
+        )
+        for s in steps
+    }
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True) as prof:
         for _ in range(2):
             compiled(X)
     events = prof.events()
     assert next(iter(compiled._graphs.values()))[0] is graph
     assert [e["name"] for e in events if e["kind"] == "user_range"] == ["CUDA graph"] * 2
-    kernels = [e["name"] for e in events if e["kind"] == "gpu"]
-    assert kernels and set(kernels) <= set(labels), (kernels, labels)
+    kernels = [e for e in events if e["kind"] == "gpu"]
+    assert kernels and {e["name"] for e in kernels} <= set(labels), (kernels, labels)
+    for e in kernels:
+        got = ([(d, list(s)) for d, s in e["inputs"]], [(d, list(s)) for d, s in e["outputs"]])
+        assert got == types[e["name"]], (e["name"], got, types[e["name"]])

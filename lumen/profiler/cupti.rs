@@ -7,6 +7,7 @@ use std::sync::{Mutex, Once};
 
 use super::GpuContext;
 use crate::device::Device;
+use crate::runtime::stream::cuda::Labelled;
 
 /// The subset of the CUPTI C API the profiler uses.
 mod ffi {
@@ -140,8 +141,8 @@ impl Record {
 static RECORDS: Mutex<Vec<Record>> = Mutex::new(Vec::new());
 /// Profiler context of each lumen launch id pushed as an external correlation.
 static CONTEXTS: Mutex<Option<HashMap<u64, GpuContext>>> = Mutex::new(None);
-/// The step labels of each CUDA graph replay's nodes, in order, by its external correlation id.
-static REPLAYS: Mutex<Option<HashMap<u64, Vec<Option<&'static str>>>>> = Mutex::new(None);
+/// The step labels and types of each CUDA graph replay's nodes, in order, by its external correlation id.
+static REPLAYS: Mutex<Option<HashMap<u64, Vec<Option<Labelled>>>>> = Mutex::new(None);
 /// Next external correlation id.
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 /// `(CUPTI timestamp, profiler timestamp)` taken together at start, to convert CUPTI times.
@@ -228,22 +229,18 @@ pub(crate) fn correlated<R>(device: Device, work: impl FnOnce() -> R) -> R {
 }
 
 /// Runs `launch`, a CUDA graph's replay, like [`correlated`]: its kernels and copies, which share the
-/// replay's correlation, are timed in order under `labels`, the steps that launched them while it captured
-/// (`None`: a launch outside a step, which keeps its kernel's name).
+/// replay's correlation, are timed in order under `labels`, the steps (names and types) that launched them
+/// while it captured (`None`: a launch outside a step, which keeps its kernel's name).
 pub(crate) fn replayed<R>(
     device: Device,
-    labels: &[Option<&'static str>],
+    labels: &[Option<Labelled>],
     launch: impl FnOnce() -> R,
 ) -> R {
     tagged(device, Some(labels), launch)
 }
 
 /// Body of [`correlated`] and [`replayed`]: `labels`, when given, name the tagged launches' records in order.
-fn tagged<R>(
-    device: Device,
-    labels: Option<&[Option<&'static str>]>,
-    work: impl FnOnce() -> R,
-) -> R {
+fn tagged<R>(device: Device, labels: Option<&[Option<Labelled>]>, work: impl FnOnce() -> R) -> R {
     let Some(context) = super::gpu_context(device) else {
         return work();
     };
@@ -328,7 +325,7 @@ pub(crate) fn stop() {
         }
     }
 
-    let mut labelled: HashMap<usize, &'static str> = HashMap::new();
+    let mut labelled: HashMap<usize, &Labelled> = HashMap::new();
 
     for (id, mut work) in ran {
         let labels = &replays[&id];
@@ -349,9 +346,12 @@ pub(crate) fn stop() {
         labelled.extend(
             work.iter()
                 .zip(labels)
-                .filter_map(|(&(_, k), &label)| label.map(|label| (k, label))),
+                .filter_map(|(&(_, k), label)| label.as_ref().map(|label| (k, label))),
         );
     }
+
+    // A replayed step's types go on its kernels when the session records shapes.
+    let shapes = super::flags() & super::SHAPES != 0;
 
     // CUPTI timestamps shifted onto the profiler clock.
     let to_ns = |t: u64| (profiler_ns + t).saturating_sub(cupti_ns);
@@ -370,7 +370,9 @@ pub(crate) fn stop() {
 
         let context = launches.get(&correlation).and_then(|id| contexts.get(id));
         let context = match labelled.get(&k) {
-            Some(label) => context.map(|c| c.launching(label)),
+            Some((label, types)) => {
+                context.map(|c| c.launching(label, shapes.then(|| types.clone())))
+            }
             None => context.cloned(),
         };
 
