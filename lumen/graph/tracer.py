@@ -500,21 +500,37 @@ def _trace(fn, args, device, runtime=_runtime(()), portable=False, split=False):
 
 
 def _input(graph, t, device):
-    """A new input of ``graph`` on ``device`` for tensor ``t``: of its type, and named as it is."""
-    x = TracedTensor(graph, graph.input(t.dtype, t.shape), device)
+    """A new input of ``graph`` on ``device`` for tensor ``t``: of its type (a sharded tensor's local
+    shard's), and named and placed as it is."""
+    local = t if t.placement is None else t.to_local()
+    x = TracedTensor(graph, graph.input(t.dtype, local.shape), device)
     x.names = t.names
+    if t.placement is not None:
+        x.placement, x.shape = t.placement, tuple(t.shape)
     return x
+
+
+def _returned(value, t):
+    """``value``, the plan's output for traced output ``t``, named and placed as ``t``."""
+    value = value if t.names is None else value._with_names(t.names)
+    return value if t.placement is None else value._with_placement(t.placement, list(t.shape))
 
 
 def _renamed(x, names):
     """Traced ``x`` named ``names`` (unchecked), with no op: ``x`` itself if it has them, else a view of
     ``x`` (assigning one assigns the other, as torch's ``rename``)."""
-    if x.names == names:
-        return x
+    return x if x.names == names else _view_as(x, names, x.placement, x.shape)
+
+
+def _view_as(x, names, placement, shape):
+    """A view of traced ``x`` (assigning one assigns the other) named ``names`` and placed by
+    ``placement`` (a ``Sharding``, or None for a local value) as a tensor of global ``shape``, unchecked:
+    metadata alone, no op."""
     out = TracedTensor(x.graph, x.var, x.device)
     base = x._base if x._base is not None else x
     out._base, out._ops, out._seen = base, x._ops, base._version
     out.weak, out.recipe, out.names = x.weak, x.recipe, names
+    out.placement, out.shape = placement, tuple(shape)
     return out
 
 
@@ -575,7 +591,7 @@ def _walk(args):
                     )
                 ids.append(x.storage_id)
                 params.setdefault(x.storage_id, x)
-            return ("tensor", x.dtype, tuple(x.shape), x.names)
+            return ("tensor", x.dtype, tuple(x.shape), x.names, x.placement)
         if isinstance(x, nn.Module):
             names = _FIELDS.get(type(x))
             if names is None:
@@ -856,10 +872,9 @@ class Compiled:
 
                 def returned(t):
                     """The next plan output for traced output ``t``: copied to the host if ``t`` was on the CPU,
-                    and named as ``t``."""
+                    and named and placed as ``t``."""
                     value, host = next(outputs)
-                    value = value.cpu() if host else value
-                    return value if t.names is None else value._with_names(t.names)
+                    return _returned(value.cpu() if host else value, t)
 
                 return _tree_map(returned, out)
         walked = _walk(args)
@@ -887,12 +902,11 @@ class Compiled:
 
         def result_of(t):
             """The next plan output for traced output ``t``, copied to the host when ``t`` is a CPU value,
-            and named as ``t``."""
+            and named and placed as ``t``."""
             value = next(outputs)
             host = ran and _device_type(t.device) == "cpu" and _device_type(value.device) != "cpu"
             to_host.append(host)
-            value = value.cpu() if host else value
-            return value if t.names is None else value._with_names(t.names)
+            return _returned(value.cpu() if host else value, t)
 
         result = _tree_map(result_of, out)
         if ran and all(type(a) is Tensor for a in args):
@@ -901,7 +915,12 @@ class Compiled:
             plain = host[0] is None and not (written or written_scalars or written_arguments or drawn is not None)
             if plain and not plan.neural_engine and len(inputs) == len(args):
                 signature = tuple([a._signature for a in args])
-                lone = isinstance(out, TracedTensor) and out.names is None and to_host == [False]
+                lone = (
+                    isinstance(out, TracedTensor)
+                    and out.names is None
+                    and out.placement is None
+                    and to_host == [False]
+                )
                 self._fast[signature, _compiler_flags()] = (
                     plan,
                     workspace,
@@ -994,7 +1013,7 @@ class Compiled:
         from lumen.runtime.stream._C import CudaGraph
 
         self._graphs.pop(id(plan), None)
-        buffers = [Tensor.empty(list(inputs[i].shape), inputs[i].dtype, key[1]) for i in args]
+        buffers = [Tensor.empty(list(inputs[i].to_local().shape), inputs[i].dtype, key[1]) for i in args]
         by_dtype = {}
         for i in scalars:
             by_dtype.setdefault(inputs[i].dtype, []).append(i)
@@ -1531,11 +1550,19 @@ class TracedTensor:
     ``lumen.functional`` op taking a dimension then also takes a name, and
     elementwise ops broadcast named operands by name (``_broadcast``). Each
     primitive names its result from its operands' (``Primitive::names``), so
-    names cost nothing when the plan runs."""
+    names cost nothing when the plan runs.
+
+    It may be sharded over a device mesh (``placement``: a ``Sharding`` of
+    ``lumen/tensor/placements.py``; None, the default, for a local value):
+    its ``shape`` is then the global one and its graph value this process's
+    local shard. Each primitive on sharded operands runs on the local
+    shards after the collectives its cheapest strategy needs (``sharding``,
+    PyTorch DTensor's propagation)."""
 
     __slots__ = (
         "graph",
         "names",
+        "placement",
         "_var",
         "dtype",
         "shape",
@@ -1558,6 +1585,7 @@ class TracedTensor:
         self.grad = None
         self.recipe = None
         self.names = None
+        self.placement = None
         self.device = device or (_DEVICES[-1] if _DEVICES else None)
         dtype, shape = graph.type_of(var)
         self.dtype = dtype
@@ -1574,9 +1602,11 @@ class TracedTensor:
         return self._var
 
     def __repr__(self):
-        """The value's graph variable, dtype and shape, and its axes' names if it has them."""
+        """The value's graph variable, dtype and shape, its axes' names if it has them, and its placement if
+        it is sharded."""
         names = "" if self.names is None else f", names={self.names}"
-        return f"TracedTensor(%{self.var}, dtype={self.dtype}, shape={list(self.shape)}{names})"
+        placement = "" if self.placement is None else f", placement={self.placement}"
+        return f"TracedTensor(%{self.var}, dtype={self.dtype}, shape={list(self.shape)}{names}{placement})"
 
     def __bool__(self):
         """Raises: a traced value has no data to branch on."""
@@ -1617,6 +1647,46 @@ class TracedTensor:
         already."""
         order = _names.order(self.names, order, "align_to")
         return self.permute([self.names.index(n) for n in order])
+
+    @property
+    def placements(self):
+        """Its placement on each mesh dimension (a tuple), or None for a local value (DTensor's ``placements``)."""
+        return None if self.placement is None else self.placement.placements
+
+    @property
+    def device_mesh(self):
+        """The mesh it is sharded over, or None for a local value (DTensor's ``device_mesh``)."""
+        return None if self.placement is None else self.placement.mesh
+
+    def distribute(self, mesh, placements):
+        """It, a global value every process holds, placed over ``mesh`` by ``placements`` (one
+        ``Shard``, ``Replicate`` or ``Partial`` per mesh dimension): this process keeps its shard
+        (DTensor's ``distribute_tensor``)."""
+        from lumen.graph import sharding
+
+        return sharding.distribute(self, mesh, placements)
+
+    def to_local(self):
+        """Its local shard, a local value (DTensor's ``to_local``): no op."""
+        if self.placement is None:
+            return self
+        return _view_as(self, self.names, None, self.graph.type_of(self.var)[1])
+
+    def full_tensor(self):
+        """The whole global value on every process, a local value: its shards gathered and its partial
+        values reduced (DTensor's ``full_tensor``)."""
+        from lumen.tensor.placements import replicated
+
+        if self.placement is None:
+            return self
+        return self.redistribute(placements=replicated(self.placement.mesh).placements).to_local()
+
+    def redistribute(self, device_mesh=None, placements=None):
+        """It placed by ``placements`` instead (over its own mesh: ``device_mesh``, if given, must be it),
+        through the collectives that takes (DTensor's ``redistribute``)."""
+        from lumen.graph import sharding
+
+        return sharding.redistribute(self, device_mesh, placements)
 
     def numel(self):
         """Number of elements."""
@@ -1692,7 +1762,15 @@ class TracedTensor:
         into it after each call of the compiled function (an optimizer's
         step)."""
         value = _lift(value)
-        if not isinstance(value, TracedTensor) or (value.dtype, value.shape) != (self.dtype, self.shape):
+        # A sharded tensor takes the value placed as it is (DTensor's copy_ redistributes).
+        if isinstance(value, TracedTensor) and self.placement is not None and value.placement != self.placement:
+            move = value.distribute if value.placement is None else value.redistribute
+            value = move(self.device_mesh, self.placements)
+        if (
+            not isinstance(value, TracedTensor)
+            or (value.dtype, value.shape) != (self.dtype, self.shape)
+            or value.placement != self.placement
+        ):
             raise TypeError(f"copy_: needs a tensor of its type, {self.dtype}{list(self.shape)}, got {value!r}")
         base = self._base
         if base is None:

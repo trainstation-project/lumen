@@ -4,7 +4,7 @@ Multi-process support: the default process group, TCP rendezvous store, device m
 
 ## Files
 
-- `__init__.py` is the Python API, mirroring `torch.distributed` names: `init_process_group`, `init_device_mesh`, `DeviceMesh`, `TCPStore`, `all_reduce`, `all_gather`, `reduce_scatter`, `all_to_all`, `broadcast`, `reduce`, `gather`, `scatter`, `send`, `recv`, `barrier`, and `set_tpu_launch_env`. Each collective binds its primitive followed by `prims.device_wait`. It also loads NCCL's library from the `nvidia-nccl` wheel when present.
+- `__init__.py` is the Python API, mirroring `torch.distributed` names: `init_process_group`, `init_device_mesh`, `DeviceMesh`, `TCPStore`, `all_reduce`, `all_gather`, `reduce_scatter`, `all_to_all`, `broadcast`, `reduce`, `gather`, `scatter`, `send`, `recv`, `barrier`, and `set_tpu_launch_env`. It also exports DTensor's placements (`Shard`, `Replicate`, `Partial`, from `lumen/tensor/placements.py`) and `from_local`, which places a process's shard over a mesh (given the global `shape` for uneven shards); ops on sharded tensors record their collectives through `lumen/graph/sharding.py`. Each collective binds its primitive followed by `prims.device_wait`. It also loads NCCL's library from the `nvidia-nccl` wheel when present.
 - `__main__.py` prints TPU launch variables (`python -m lumen.distributed`) for a shell to export before starting workers.
 - `mod.rs` holds the default process group (rank, world size, shared store), `env://` and `tcp://` rendezvous, `barrier`, and `DeviceMesh` (shape, dim names, coordinates, `slice`, `local_rank`).
 - `store.rs` is `TcpStore`: a threaded key-value server on the master rank and a blocking client (`set`, `get`, `add`, `delete_key`, `wait`), with a small binary wire format.

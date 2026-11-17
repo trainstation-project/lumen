@@ -30,8 +30,10 @@ def _is_float(dtype):
 
 
 def _full(like, value):
-    """A tensor of ``like``'s type filled with ``value``."""
-    return prims.full(like.shape, float(value) if _is_float(like.dtype) else int(value), like.dtype)
+    """A tensor of ``like``'s type (a sharded one's local shard's: a local value) filled with ``value``."""
+    sharded = getattr(like, "placement", None) is not None
+    shape = tracer.current_graph().type_of(like.var)[1] if sharded else like.shape
+    return prims.full(shape, float(value) if _is_float(like.dtype) else int(value), like.dtype)
 
 
 def _sum(xs):

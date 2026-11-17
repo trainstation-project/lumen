@@ -42,5 +42,6 @@ tracing (`graph`, `functional`, `autograd`) -> graph (`graph`) -> graph compiler
 
 - Programs always run inside `lumen.compile`; the Python ops trace primitives rather than compute eagerly.
 - A tensor's axes may have names (`x.rename("batch", "seq")`), optional metadata resolved while tracing: ops take names wherever they take dimensions and broadcast named operands by name; an unnamed tensor behaves as if names did not exist.
+- A tensor may be sharded over a device mesh (`x.distribute(mesh, [Shard(0)])`, PyTorch DTensor's placements), optional metadata too: its `shape` is the global one and its memory this process's shard, and ops on it record the collectives they need while tracing (`graph/sharding.py`); a tensor without a placement behaves as if placements did not exist.
 - Python shims (`__init__.py`, `_C.pyi`) live in the same folder as the Rust they wrap, and each folder's bindings are registered as `lumen.<folder>._C` from `python.rs`.
 - Device-specific code sits in `mps`, `cuda`, `triton`, `tpu` or `cpu` files or subfolders next to the shared code of the same feature.
