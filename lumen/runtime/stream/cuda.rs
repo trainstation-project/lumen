@@ -14,6 +14,7 @@ pub(crate) mod ffi {
     #[link(name = "cudart")]
     unsafe extern "C" {
         pub fn cudaDeviceSynchronize() -> i32;
+        pub fn cudaHostAlloc(ptr: *mut *mut c_void, size: usize, flags: u32) -> i32;
         pub fn cudaEventCreateWithFlags(event: *mut *mut c_void, flags: u32) -> i32;
         pub fn cudaEventRecord(event: *mut c_void, stream: *mut c_void) -> i32;
         pub fn cudaStreamSynchronize(stream: *mut c_void) -> i32;

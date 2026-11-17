@@ -517,7 +517,9 @@ impl Plan for StagedPlan {
 }
 
 impl StagedPlan {
-    /// Runs each stage, moving values between host and device, and gathers the outputs.
+    /// Runs each stage, moving values between host and device, and gathers the outputs. A copy to the host is
+    /// started without waiting (`device_transfer::pending`): the host stage reading it waits at its `device_wait`,
+    /// which the scheduler places before the copy's first reader; what is still pending at the end is waited for.
     fn run_staged(
         &self,
         inputs: &[Tensor],
@@ -528,6 +530,7 @@ impl StagedPlan {
         // Program inputs come first; packed blocks follow them.
         let n = self.inputs.len() - self.packed.len();
         let mut values: Vec<Vec<Tensor>> = Vec::with_capacity(staged.stages.len());
+        let started = std::cell::RefCell::new(Vec::new());
 
         let resolve = |values: &[Vec<Tensor>], source: Source| match source {
             Source::Input(i) => inputs[i].clone(),
@@ -536,7 +539,9 @@ impl StagedPlan {
                 let value = &values[s][k];
                 let mut op = crate::profiler::record_op("to_host", || vec![value.ty()]);
                 op.outputs(|| vec![value.ty()]);
-                value.to(Device::Cpu(0))
+                let host = crate::runtime::device_transfer::pending::to_host(value);
+                started.borrow_mut().push(host.clone());
+                host
             }
             Source::ToDevice(s, k) => {
                 let value = &values[s][k];
@@ -571,13 +576,16 @@ impl StagedPlan {
             values.push(outputs);
         }
 
-        Ok(staged
+        let outputs = staged
             .outputs
             .iter()
             .map(|&s| match s {
                 Source::Input(i) => inputs[i].to(device),
                 s => resolve(&values, s),
             })
-            .collect())
+            .collect();
+
+        crate::runtime::device_transfer::pending::wait_all(started.borrow().iter());
+        Ok(outputs)
     }
 }

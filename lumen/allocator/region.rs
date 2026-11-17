@@ -62,6 +62,17 @@ impl Region {
         }
     }
 
+    /// Whether `ptr` points into the region's reserved range (never before it is reserved).
+    #[cfg_attr(not(lumen_cuda_linked), allow(dead_code))]
+    pub(crate) fn contains(&self, ptr: NonNull<u8>) -> bool {
+        let addr = ptr.as_ptr().addr();
+
+        self.lock().base.as_ref().is_some_and(|base| {
+            let start = base.0.as_ptr().addr();
+            (start..start + self.capacity).contains(&addr)
+        })
+    }
+
     #[cfg(test)]
     /// Bytes the region was created with.
     pub(crate) fn capacity(&self) -> usize {

@@ -3,7 +3,7 @@
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 
-use crate::graph::{Graph, Primitive, Var};
+use crate::graph::{Graph, Node, Primitive, Var};
 
 /// Node-level dependency edges of a graph.
 struct Deps {
@@ -234,13 +234,17 @@ pub(crate) fn dfs(graph: &Graph) -> Vec<usize> {
 }
 
 /// Overlap schedule: a topological reorder of `graph` that runs each collective, and the nodes it depends on,
-/// as early as possible, and each `device_wait`, and the nodes depending on it, as late as possible, so
-/// communication overlaps the compute independent of it; returns node indices, the identity when the graph
-/// has no collective.
+/// as early as possible, and each `device_wait` (of a collective, or of a staged plan's copy from the device),
+/// and the nodes depending on it, as late as possible, so communication and copies overlap the compute
+/// independent of them; returns node indices, the identity when the graph has neither.
 pub(crate) fn overlap(graph: &Graph) -> Vec<usize> {
     let nodes = graph.nodes();
 
-    if !nodes.iter().any(|node| node.primitive.is_collective()) {
+    let overlapped = |node: &Node| {
+        node.primitive.is_collective() || matches!(node.primitive, Primitive::DeviceWait)
+    };
+
+    if !nodes.iter().any(overlapped) {
         return (0..nodes.len()).collect();
     }
 

@@ -25,9 +25,10 @@ and execution: graph -> frontend passes -> per-device pass pipeline -> codegen (
   to later passes), the `compile!` macro and the CPU device.
 - `pipeline.rs` - `Pipeline` (named, ordered list of passes), the `pipeline!` macro with the one pass list,
   and `pick!`, which picks a device's version of a pass or the identity pass.
-- `stages.rs` - splitting host/device programs into stages.
+- `stages.rs` - splitting host/device programs into stages; a host stage reads each value copied from the device
+  through a `device_wait`, since the copy is started without waiting (`runtime/device_transfer/pending.rs`).
 - `schedule.rs` - node schedulers used by `plan/compile.rs`: `list` and `dfs` (keep less memory live) and
-  `overlap` (run collectives early and `device_wait`s late).
+  `overlap` (run collectives early and `device_wait`s, of collectives or of copies from the device, late).
 - `remat.rs` - `rematerialize`: recomputes large values before later readers until the plan's workspace
   fits `memory_limit`; called from `plan/compile.rs`.
 - `python.rs` - the Python `Plan` class, kernel launch capture for code dumps, and the hooks through which

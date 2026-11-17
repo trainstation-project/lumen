@@ -372,12 +372,14 @@ def test_cpu_inside_a_compiled_function(device):
 @pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
 def test_cpu_inside_a_compiled_function_transfers(device):
     """``.cpu()`` inside a compiled MPS function splits it into stages: the
-    ops before it on the device, then its copy to the host (``to_host``:
-    ``lumen::copy_d2h``, its ``lumen::wait`` inside), then the ops reading
-    it on the host, compiled for the CPU, as PyTorch runs ops on CPU
-    tensors (no kernels), the result a CPU tensor. An op reading host and
-    device values raises PyTorch's error. The gradient comes back to the
-    device (``to_device``)."""
+    ops before it on the device, then its copy to the host (``to_host``,
+    started without waiting), then the ops reading it on the host, compiled
+    for the CPU, as PyTorch runs ops on CPU tensors (no kernels), the
+    result a CPU tensor. The host stage waits for the copy at its
+    ``device_wait``, before the first op reading it: on MPS the copy
+    (``lumen::copy_d2h``) runs there. An op reading host and device values
+    raises PyTorch's error. The gradient comes back to the device
+    (``to_device``)."""
 
     def mid(x):
         """Device work, a copy to the host, then host work."""
@@ -400,7 +402,8 @@ def test_cpu_inside_a_compiled_function_transfers(device):
         while copy.get("parent") in by_id:
             copy = by_id[copy["parent"]]
             names.append(copy["name"])
-        assert "to_host" in names
+        assert "device_wait" in names
+        assert any(e["name"] == "to_host" for e in events)
     else:
         y = f(x)
     assert y.device == "cpu:0" and y.tolist() == [7.0, 13.0]

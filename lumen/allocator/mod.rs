@@ -8,6 +8,8 @@ pub(crate) mod cuda;
 mod data_ptr;
 mod meta;
 mod mps;
+#[cfg(lumen_cuda_linked)]
+pub(crate) mod pinned;
 mod region;
 #[cfg(test)]
 mod tests;
