@@ -212,7 +212,7 @@ impl Primitive {
 
 /// The reduction a partial value is pending.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Pending {
+pub enum Op {
     Sum,
     Max,
     Min,
@@ -227,7 +227,7 @@ pub enum Placement {
     /// Every process holds the whole value.
     Replicate,
     /// Every process holds a part; the value is their reduction, not yet done.
-    Partial(Pending),
+    Partial(Op),
 }
 
 /// A sharding strategy on one mesh dimension: each operand's placement on it, and the result's.
@@ -236,7 +236,7 @@ pub type Strategy = (Vec<Placement>, Placement);
 impl Placement {
     /// Whether this is a partial value a linear op keeps partial: a sum's or an average's.
     fn summed(self) -> bool {
-        matches!(self, Placement::Partial(Pending::Sum | Pending::Avg))
+        matches!(self, Placement::Partial(Op::Sum | Op::Avg))
     }
 }
 
@@ -252,7 +252,7 @@ enum Linear {
     /// Linear in its first operand (`div`): a partial sum there, the others replicated.
     Numerator,
     /// The reduction itself (`max`, `min`): partial values of that reduction alike stay partial.
-    Same(Pending),
+    Same(Op),
     /// An identity (a transfer or wait): any partial value stays partial.
     Any,
 }
@@ -312,13 +312,13 @@ fn elementwise(placements: &[Placement], linear: Linear) -> Vec<Strategy> {
 
 /// A reduction by `op` over `axes` of an operand placed `p`: a shard along a reduced axis made partial, along a
 /// kept one kept (renumbered); a value partial by the same reduction (or an average, for a sum) kept.
-fn reduce(p: Placement, axes: &[usize], op: Pending) -> Vec<Strategy> {
+fn reduce(p: Placement, axes: &[usize], op: Op) -> Vec<Strategy> {
     use Placement::*;
 
     match p {
         Shard(d) if axes.contains(&d) => vec![(vec![p], Partial(op))],
         Shard(d) => vec![(vec![p], Shard(d - axes.iter().filter(|&&a| a < d).count()))],
-        Partial(q) if q == op || (op == Pending::Sum && p.summed()) => vec![(vec![p], p)],
+        Partial(q) if q == op || (op == Op::Sum && p.summed()) => vec![(vec![p], p)],
         _ => Vec::new(),
     }
 }
@@ -385,8 +385,8 @@ impl Primitive {
             Add | Sub | Neg => elementwise(placements, Linear::Sum),
             Mul => elementwise(placements, Linear::Scale),
             Div => elementwise(placements, Linear::Numerator),
-            Max => elementwise(placements, Linear::Same(Pending::Max)),
-            Binary(BinaryOp::Min) => elementwise(placements, Linear::Same(Pending::Min)),
+            Max => elementwise(placements, Linear::Same(Op::Max)),
+            Binary(BinaryOp::Min) => elementwise(placements, Linear::Same(Op::Min)),
             ToHost | ToDevice | HostWait => elementwise(placements, Linear::Any),
             Eq
             | Lt
@@ -404,8 +404,8 @@ impl Primitive {
             | Broadcast { .. }
             | Reduce { .. } => elementwise(placements, Linear::No),
 
-            ReduceSum { axes, .. } => reduce(placements[0], axes, Pending::Sum),
-            ReduceMax { axes } => reduce(placements[0], axes, Pending::Max),
+            ReduceSum { axes, .. } => reduce(placements[0], axes, Op::Sum),
+            ReduceMax { axes } => reduce(placements[0], axes, Op::Max),
 
             // A cumulative sum: sharded along another axis, or a partial sum.
             Cumsum { axis, .. } => {
@@ -501,7 +501,7 @@ impl Primitive {
                 }
 
                 for (&a, &b) in lhs_contracting.iter().zip(rhs_contracting) {
-                    out.push((vec![Shard(a), Shard(b)], Partial(Pending::Sum)));
+                    out.push((vec![Shard(a), Shard(b)], Partial(Op::Sum)));
                 }
 
                 for (k, &a) in lhs_free.iter().enumerate() {
@@ -573,7 +573,7 @@ impl Primitive {
                             out.push((vec![p, Replicate], Shard(to)));
                         }
                         Shard(_) if p == placements[0] => {
-                            out.push((vec![p, Replicate], Partial(Pending::Sum)));
+                            out.push((vec![p, Replicate], Partial(Op::Sum)));
                         }
                         Shard(k) if p == placements[1] => {
                             out.push((vec![Replicate, p], Shard(axis + k)));

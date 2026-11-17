@@ -673,15 +673,15 @@ type PyPlacement = (String, usize, String);
 
 /// Parses a `PyPlacement`.
 fn placement((kind, dim, op): &PyPlacement) -> PyResult<crate::graph::propagation::Placement> {
-    use crate::graph::propagation::{Pending, Placement};
+    use crate::graph::propagation::{Op, Placement};
 
     Ok(match (kind.as_str(), op.as_str()) {
         ("shard", _) => Placement::Shard(*dim),
         ("replicate", _) => Placement::Replicate,
-        ("partial", "sum") => Placement::Partial(Pending::Sum),
-        ("partial", "max") => Placement::Partial(Pending::Max),
-        ("partial", "min") => Placement::Partial(Pending::Min),
-        ("partial", "avg") => Placement::Partial(Pending::Avg),
+        ("partial", "sum") => Placement::Partial(Op::Sum),
+        ("partial", "max") => Placement::Partial(Op::Max),
+        ("partial", "min") => Placement::Partial(Op::Min),
+        ("partial", "avg") => Placement::Partial(Op::Avg),
         _ => {
             return Err(PyValueError::new_err(format!(
                 "unknown placement {kind:?} {op:?}"
@@ -692,13 +692,13 @@ fn placement((kind, dim, op): &PyPlacement) -> PyResult<crate::graph::propagatio
 
 /// `p` as a `PyPlacement`.
 fn py_placement(p: crate::graph::propagation::Placement) -> PyPlacement {
-    use crate::graph::propagation::{Pending, Placement};
+    use crate::graph::propagation::{Op, Placement};
 
-    let op = |op: Pending| match op {
-        Pending::Sum => "sum",
-        Pending::Max => "max",
-        Pending::Min => "min",
-        Pending::Avg => "avg",
+    let op = |op: Op| match op {
+        Op::Sum => "sum",
+        Op::Max => "max",
+        Op::Min => "min",
+        Op::Avg => "avg",
     };
 
     match p {
