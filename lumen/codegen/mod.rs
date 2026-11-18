@@ -24,6 +24,13 @@ pub(crate) mod tpu;
 pub(crate) mod triton;
 pub(crate) mod utils;
 
+/// A backend's codegen telling the graph compiler's `unsupported` pass which graphs it has no kernels for. A device
+/// implementing it runs the pass.
+pub(crate) trait Supports {
+    /// The error for the first op of `graph` this backend has no kernel for, if any.
+    fn check(graph: &crate::graph::Graph) -> Result<(), String>;
+}
+
 /// What a backend's codegen tells the graph compiler's `alone` pass: which lone nodes only a generated kernel
 /// computes, which inputs its kernels take by value, and each kernel's name. A device implementing it runs the
 /// pass.
