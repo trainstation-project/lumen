@@ -1,4 +1,4 @@
-# passes/ane
+# passes/apple_neural_engine
 
 The Apple Neural Engine pass. On MPS it moves large float16 GEMM regions that read fixed weights out of the
 Metal graph into Core ML programs, which run on the Neural Engine. It runs in the device pipeline after

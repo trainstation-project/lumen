@@ -4,7 +4,7 @@
 `f(x) W = f(x W)` for a linear `f` acting on the axes the matmul doesn't contract. A factor constant
 along the contracted axis, per lhs row (a norm's `1 / rms`, a softmax's `1 / sum`, a per-token scale) or
 per rhs column (a weight's per-channel dequantization scale), then scales the output rows or columns in
-the GEMM's epilogue, so the scaled operand is never needed whole. It runs after `ane` and before
+the GEMM's epilogue, so the scaled operand is never needed whole. It runs after `neural_engine` and before
 `split_k`, so the later fusion passes see the factor after the matmul.
 
 The rounding moves with the factor: a cast between the factor and the matmul now rounds the unscaled

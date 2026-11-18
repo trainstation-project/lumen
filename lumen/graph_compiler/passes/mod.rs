@@ -2,7 +2,7 @@
 //! backend compilers run (in a `graph_compiler::pipeline::Pipeline`).
 
 pub(crate) mod alone;
-pub(crate) mod ane;
+pub(crate) mod apple_neural_engine;
 #[cfg_attr(not(all(feature = "python", lumen_mps_linked)), allow(dead_code))]
 pub(crate) mod attention;
 #[cfg_attr(not(lumen_mps_linked), allow(dead_code))]

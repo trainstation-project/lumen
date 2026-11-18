@@ -226,7 +226,7 @@ macro_rules! pipeline {
             ))
             .push($crate::graph_compiler::pipeline::pick!(
                 $device,
-                $crate::graph_compiler::passes::ane::NeuralEngine,
+                $crate::graph_compiler::passes::apple_neural_engine::NeuralEngine,
                 config
             ))
             .push($crate::graph_compiler::pipeline::pick!(
