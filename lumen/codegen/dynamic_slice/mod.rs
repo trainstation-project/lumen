@@ -9,6 +9,18 @@ pub(crate) mod triton;
 
 use crate::graph::{Graph, TensorType};
 
+/// A backend whose `updates` kernel writes a chain of constant-offset `dynamic_update_slice`s at once, so the graph
+/// compiler's `updates` pass fuses chains into it: the chain lengths one kernel takes, and whether the pass waits
+/// for the `fuse` config flag.
+pub(crate) trait UpdateChains {
+    /// Fewest updates a fused chain holds.
+    const LEAST: usize;
+    /// Most updates one kernel takes (the buffers it can bind).
+    const MOST: usize;
+    /// Whether the pass runs only with `fuse` (else always).
+    const WITH_FUSE: bool = true;
+}
+
 /// A backend's dynamic-update-slice code generator: the code writing updates into an operand at their
 /// starts. Backends that run a fixed kernel for an op instead fail on it.
 pub(crate) trait DynamicSliceCodegen {
