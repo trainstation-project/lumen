@@ -30,7 +30,7 @@ impl<'a> CompilerPass<DeviceModule<'a, Mps>> for Concats {
         let valid = in_place_concats(
             &m.graph,
             |c, k, p, index| slot_writes(module, c, k, p, index, false),
-            |_, _, p, _| slot_worth(p),
+            |_, _, p, _| super::worth(p),
         );
         let mut unmarked = false;
 
@@ -104,21 +104,10 @@ pub(crate) fn slot_writes(
     }
 }
 
-/// Whether an operand `producer` writes into its slot is worth placing its concatenation for: the attention
-/// backward kernel's are (its gradients land side by side), others alone aren't.
-pub(crate) fn slot_worth(producer: &Node) -> bool {
-    matches!(pending(producer), Some(Kernel::AttentionBackward))
-}
-
 impl Slots for DeviceModule<'_, Mps> {
     /// Before fusion: what `concats::slot_writes` accepts, fusible nodes counting as kernels.
     fn writes(&self, concat: &Node, k: usize, producer: &Node, index: usize) -> bool {
         slot_writes(self, concat, k, producer, index, true)
-    }
-
-    /// The attention backward kernel's operands (`concats::slot_worth`).
-    fn worth(&self, _: &Node, _: usize, producer: &Node, _: usize) -> bool {
-        slot_worth(producer)
     }
 }
 
