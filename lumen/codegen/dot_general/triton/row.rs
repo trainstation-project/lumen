@@ -6,7 +6,7 @@ use std::fmt::Write;
 
 use indoc::formatdoc;
 
-use super::MOST_GEMM_ROW;
+use super::ROW_TILE;
 use crate::DType;
 use crate::codegen::emitter::Emit;
 use crate::codegen::emitter::triton::Emitter;
@@ -124,7 +124,7 @@ pub(crate) fn row_epilogue(
 
 /// Whether a `dot_row` fusion's `body` runs as one Triton GEMM with a row epilogue: its one unbatched
 /// float matmul, reading the body's inputs, makes the rows its row reductions run over (no column
-/// partials), rows of at most `MOST_GEMM_ROW`, each product element read only at its own index.
+/// partials), rows of at most `ROW_TILE`, each product element read only at its own index.
 pub(crate) fn dot_row_fits(body: &Graph) -> bool {
     let Some(dot) = gemm_dot(body) else {
         return false;
@@ -156,7 +156,7 @@ pub(crate) fn dot_row_fits(body: &Graph) -> bool {
             .iter()
             .all(|v| body.inputs().contains(v) && float(*v))
         && float(dot.output)
-        && width(body) <= MOST_GEMM_ROW
+        && width(body) <= ROW_TILE
         && row_fits(body)
         && at_own_index(body, dot.output)
 }

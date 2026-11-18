@@ -9,6 +9,8 @@ steps, and the autotuner times its configs.
 
 - `mod.rs` — the `GemmCodegen` trait: `gemm(body, dot, by_value, options)` returns a backend's `Code` for a GEMM
   fusion, with backend-specific `Options` (MPS tile configs, Triton operand/output layouts, TPU's step).
+  Also `RowTile`: the widest row one GEMM tile holds whole (`ROW_TILE`), which MPS and Triton implement and
+  `graph_compiler::passes::linear_reordering` reads.
 - `cuda/` — CUDA (CuTe DSL) GEMM.
 - `triton/` — Triton GEMM, row-epilogue GEMMs and linear cross entropy.
 - `mps/` — Metal GEMMs (tiled, MPP, skinny, GEMV, integer), row matmuls and linear cross entropy.
@@ -36,7 +38,7 @@ steps, and the autotuner times its configs.
 - `mod.rs`: `GemmCodegen for Triton` produces `GemmCode` (sizes `[batch, m, k, n]`, generated `prologue_a`,
   `prologue_b` jit loaders for the operands' strides, and an `epilogue` storing the tile with the fusion's
   elementwise ops, column regions included). `Config` (block_m/n/k, group_m, stages, warps), `CONFIGS` (7) with
-  `UNTUNED` index; `row_gemm_configs` / `untuned_row_gemm` for whole-row tiles; `MOST_GEMM_ROW` (256) caps a
+  `UNTUNED` index; `row_gemm_configs` / `untuned_row_gemm` for whole-row tiles; `ROW_TILE` (256) caps a
   row held in one tile and `partial_tile` picks partial widths for wider rows. Python class
   `lumen.autotune.TritonGemmConfig`. `Gemm` (`Kernel`) runs dots, GEMM fusions, `dot_row` fusions and linear
   cross entropy.
