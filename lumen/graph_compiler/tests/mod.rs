@@ -461,6 +461,49 @@ fn host_values_run_in_a_host_stage() {
     }
 }
 
+/// A host stage waits for its copy from the device at a `device_wait` placed after the host work that doesn't
+/// read the copy, so that work overlaps the copy (started without waiting); the result is unchanged.
+#[test]
+fn host_stages_wait_for_copies_at_their_first_reader() {
+    let device = match crate::device::mps::MPS.is_available() {
+        true => crate::Device::Mps(0),
+        false => crate::Device::Meta(0),
+    };
+
+    let mut g = Graph::new();
+    let x = g.input(ty(&[2]));
+    let three = apply(&mut g, full(&[2], 3.0), &[]);
+    let y = apply(&mut g, Mul, &[x, three]);
+    let h = apply(&mut g, ToHost, &[y]);
+
+    let iota = Iota {
+        dtype: DType::F32,
+        shape: vec![2],
+        dimension: 0,
+    };
+
+    let i = apply(&mut g, iota, &[]);
+    let two = apply(&mut g, full(&[2], 2.0), &[]);
+    let c = apply(&mut g, Mul, &[i, two]);
+    let z = apply(&mut g, Add, &[h, c]);
+    g.set_outputs(&[z]).unwrap();
+
+    let plan = super::compile(&g, device).unwrap();
+    let staged = plan.staged().expect("a staged plan");
+    let host = &staged.stages[1].plan;
+    let names: Vec<&str> = host.steps().iter().map(|s| s.primitive.name()).collect();
+    let at = |name: &str| names.iter().position(|&n| n == name).unwrap();
+
+    assert!(at("iota") < at("device_wait"), "{names:?}");
+    assert!(at("device_wait") < at("add"), "{names:?}");
+
+    if device == crate::Device::Mps(0) {
+        let x = crate::Tensor::from_slice(&[1.0f32, 2.0], DType::F32).to(device);
+        let out = plan.run(&[x]).unwrap();
+        assert_eq!(out[0].to_vec::<f32>(), [3.0, 8.0]);
+    }
+}
+
 /// A value copied to the host and straight back splits the plan into device, host and device stages.
 #[test]
 fn values_copied_back_at_once_pass_through_a_host_stage() {

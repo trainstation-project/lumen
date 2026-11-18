@@ -24,7 +24,7 @@ before `wide_rows`, `place_views`, `alone`, `concats` and `horizontal`; it consu
   ends, row roots, outputs, values read by unfusible nodes, expensive ops read more than once); `hosts`:
   a later fusion that can also write a root's value as an extra output (multi-output fusion), plus GEMM
   auxiliary outputs and row outputs and partials hosted by their row.
-- `emit.rs` — gathers each root's members, splitting a fusion that reads more than `max_inputs` buffers;
+- `emit.rs` — gathers each root's members, splitting a fusion that reads more than `max_inputs` buffers, and one of reshapes alone (emitted plain, each is a free view of its operand's buffer; as a fusion it would be a copy kernel);
   `row_dots` moves a GEMM and its epilogue into the row fusion reading it when `row_dot` accepts the body
   (reverting otherwise); `emitted` rebuilds the graph with `Fusion` nodes and `FusionOutput`s for hosted
   values, each step after the values it reads.

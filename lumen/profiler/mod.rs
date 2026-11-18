@@ -586,11 +586,11 @@ pub(crate) struct GpuContext {
 }
 
 impl GpuContext {
-    /// This context for a launch labelled `name` (a CUDA graph's step, replayed).
+    /// This context for a launch labelled `name` with `types` (a CUDA graph's step, replayed).
     #[cfg_attr(not(lumen_cupti_linked), allow(dead_code))]
-    pub(crate) fn launching(&self, name: &'static str) -> GpuContext {
+    pub(crate) fn launching(&self, name: &'static str, types: Option<IoTypes>) -> GpuContext {
         GpuContext {
-            launch: Some(Launch { name, types: None }),
+            launch: Some(Launch { name, types }),
             ..self.clone()
         }
     }

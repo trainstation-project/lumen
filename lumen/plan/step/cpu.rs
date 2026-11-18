@@ -1,5 +1,5 @@
-//! Running plan steps on the CPU: each step's kernel (`codegen::kernel`), its reference implementation or a host
-//! collective.
+//! Running plan steps on the CPU: each step's kernel (`codegen::kernel`), its reference implementation, a host
+//! collective, or a wait for a copy from the device.
 
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
@@ -23,18 +23,21 @@ pub(crate) struct Pointers {
 pub struct CpuStep {
     /// The step's primitive and buffers.
     pub base: StepBase,
-    /// The kernel the step runs: a host collective, else the reference implementation.
+    /// The kernel the step runs: a host collective, a wait, else the reference implementation.
     pub(crate) kernel: Arc<dyn Runner<CpuStep, Pointers>>,
 }
 
 impl CpuStep {
-    /// `base`, running a host collective for a collective's primitive, else its reference implementation.
+    /// `base`, running a host collective for a collective's primitive, a wait for `device_wait`, else its
+    /// reference implementation.
     pub(crate) fn new(base: StepBase) -> Self {
-        let kernel: Arc<dyn Runner<CpuStep, Pointers>> =
-            match crate::distributed::collective::ranks(&base.primitive) {
-                Some(_) => Arc::new(HostCollective),
-                None => Arc::new(Reference),
-            };
+        let collective = crate::distributed::collective::ranks(&base.primitive).is_some();
+
+        let kernel: Arc<dyn Runner<CpuStep, Pointers>> = match base.primitive {
+            _ if collective => Arc::new(HostCollective),
+            crate::graph::Primitive::DeviceWait => Arc::new(Wait),
+            _ => Arc::new(Reference),
+        };
 
         CpuStep { base, kernel }
     }
@@ -110,6 +113,28 @@ impl crate::codegen::kernel::Kernel for HostCollective {
                 &step.output.1,
             )
         }
+    }
+}
+
+/// `device_wait` on the host: blocks until the copy from the device writing the operand (a staged plan's transfer,
+/// `device_transfer::pending`) has finished, then passes the operand through.
+pub(crate) struct Wait;
+
+impl crate::codegen::kernel::Kernel for Wait {
+    type Step = CpuStep;
+    type Buffers = Pointers;
+    type Config = ();
+
+    /// Waits for the operand's pending copy, then writes it to the output unless it is already there.
+    fn run(&self, step: &CpuStep, _: Option<&()>, p: &Pointers) -> Result<(), String> {
+        crate::runtime::device_transfer::pending::wait(p.inputs[0].addr());
+
+        if p.output.cast_const() != p.inputs[0] {
+            let nbytes = step.output.1.numel() * step.output.1.dtype.size_of();
+            unsafe { std::ptr::copy_nonoverlapping(p.inputs[0], p.output, nbytes) };
+        }
+
+        Ok(())
     }
 }
 

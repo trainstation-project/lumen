@@ -11,7 +11,8 @@ use crate::graph_compiler::passes::diamonds::Row;
 pub(super) type Fusions = Vec<Option<(Vec<usize>, Vec<Var>)>>;
 
 /// Gathers each unhosted root's fusion, splitting fusions that read more than the backend's
-/// `max_inputs` values by turning all their members into roots and retrying.
+/// `max_inputs` values, and those of reshapes alone (each a free view of its operand once emitted plain,
+/// a copy kernel as a fusion), by turning all their members into roots and retrying.
 pub(super) fn fusions(
     a: &Analysis,
     backend: &Backend,
@@ -43,8 +44,31 @@ pub(super) fn fusions(
             })
             .collect();
 
-        if too_big.is_empty() {
+        let views: Vec<usize> = (0..nodes.len())
+            .filter(|&i| {
+                fusions[i].as_ref().is_some_and(|(members, _)| {
+                    members.len() > 1
+                        && members
+                            .iter()
+                            .all(|&m| matches!(nodes[m].primitive, Primitive::Reshape { .. }))
+                })
+            })
+            .collect();
+
+        if too_big.is_empty() && views.is_empty() {
             break fusions;
+        }
+
+        for &f in &views {
+            let (members, _) = fusions[f].as_ref().expect("a fusion");
+
+            for &m in members {
+                root[m] = true;
+            }
+
+            host.iter_mut()
+                .filter(|h| **h == Some(f))
+                .for_each(|h| *h = None);
         }
 
         for f in too_big {

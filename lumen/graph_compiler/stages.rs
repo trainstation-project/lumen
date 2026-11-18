@@ -382,7 +382,17 @@ fn value(p: &Placement, builders: &mut [Builder], s: usize, v: Var) -> Var {
     } else {
         let source = source(p, builders, v);
         builders[s].inputs.push(source);
-        builders[s].graph.input(p.graph.type_of(v).clone())
+        let input = builders[s].graph.input(p.graph.type_of(v).clone());
+
+        // A copy from the device arrives asynchronously: its readers read it after a `device_wait`, which the
+        // scheduler places just before the first of them.
+        match source {
+            Source::ToHost(..) => builders[s]
+                .graph
+                .apply(Primitive::DeviceWait, &[input])
+                .expect("a wait passes its operand's type through"),
+            _ => input,
+        }
     };
 
     builders[s].map[v] = Some(b);

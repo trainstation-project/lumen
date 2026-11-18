@@ -41,7 +41,7 @@ impl Step for CudaStep {
     /// Runs the step's kernel on its tensors under its tuned config.
     fn run(&self, buffers: &Buffers) -> Result<(), String> {
         let tensors = buffers.tensors(self);
-        traced(self.label, &tensors.1, || {
+        traced(self, &tensors.1, || {
             self.kernel.run(self, self.tuned.as_ref(), &tensors)
         })
     }

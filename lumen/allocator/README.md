@@ -7,12 +7,13 @@ Device memory for tensors. Every `Storage` (see `lumen/tensor`) owns a `DataPtr`
 - `mod.rs` holds the `Allocator` trait and `allocator_for(device)`.
 - `region.rs` holds `Region`, the first-fit sub-allocator the accelerator backends share.
 - `data_ptr.rs` holds `DataPtr`, the owned buffer that gives its bytes back to its allocator when dropped.
-- `config.rs` holds the process-wide size of each accelerator's static region (`static_allocator_bytes`, default 1 GiB) and `ALIGNMENT`, the alignment and granularity of every region block (256 bytes). Python reads and sets it through `lumen.config` (`lumen/config/python.rs`).
+- `config.rs` holds the process-wide size of each accelerator's static region (`static_allocator_bytes`, default 1 GiB), `ALIGNMENT`, the alignment and granularity of every region block (256 bytes), and `PINNED_ALLOCATOR_BYTES`, the CUDA pinned pool's size (256 MiB). Python reads and sets it through `lumen.config` (`lumen/config/python.rs`).
 - `cpu.rs` is `CpuAllocator`: host heap memory at the requested alignment (at least 64 bytes), reporting allocations to the memory profiler while profiling is on.
 - `meta.rs` is `MetaAllocator`: dangling pointers for meta tensors, which never touch memory.
 - `cuda.rs` is `CudaAllocator`: one `cudaMalloc`ed region per device, carved by `Region`. It also holds blocks taken while a CUDA graph captures (`hold`, `held`, `release`, used by `lumen/runtime/stream/cuda.rs`): a freed held block only returns to the region once its graph is dropped, because the graph still launches into it.
 - `mps/mod.rs` is `MpsAllocator`: one Metal heap per process, reserved on first use, with a placed `MTLBuffer` registered for each block. `Scratch` is a separate zeroed Metal buffer outside the region, used by MPS plan steps that need temporary memory.
 - `mps/mps_shim.mm` is the Objective-C side: it allocates heaps and buffers and maps raw pointers back to the `MTLBuffer` that contains them.
+- `pinned.rs` (CUDA only) is `PinnedAllocator`: host memory from one `cudaHostAlloc`ed range carved by `Region`, for asynchronous copies from the device (a copy into pageable memory blocks until it finishes); a block that doesn't fit comes from the host heap. `pinned()` returns it, `is_pinned(ptr)` tells its blocks apart.
 - `tpu.rs` is `TpuAllocator`: one PJRT runtime buffer per device holds every tensor, addressed in 512-byte rows (`ROW`). It also runs executables on that buffer (`run`), converts pointers to row indices (`rows_of`), waits on pending work and copies to the host.
 - `tests.rs` holds unit tests for every backend; device tests return early when the device is missing.
 

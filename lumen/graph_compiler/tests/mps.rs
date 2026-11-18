@@ -149,6 +149,44 @@ fn fuses_elementwise_and_layout_chains() {
     );
 }
 
+/// A chain of reshapes alone (a flatten, then split-K's chunking of the contracted dim) stays plain reshapes,
+/// which plans alias onto their operand's buffer, rather than a fusion kernel copying it.
+#[test]
+fn reshapes_alone_stay_views() {
+    let mut g = Graph::new();
+    let x = g.input(ty(DType::F32, &[1, 4, 8]));
+    let w = g.input(ty(DType::F32, &[2, 4, 3]));
+
+    let flat = Reshape {
+        new_sizes: vec![4, 8],
+    };
+
+    let chunked = Reshape {
+        new_sizes: vec![4, 2, 4],
+    };
+
+    let flat = apply(&mut g, flat, &[x]);
+    let chunked = apply(&mut g, chunked, &[flat]);
+
+    let dot = DotGeneral {
+        lhs_contracting: vec![1, 2],
+        rhs_contracting: vec![0, 1],
+        lhs_batch: vec![],
+        rhs_batch: vec![],
+        accum_dtype: DType::F32,
+        output_dtype: DType::F32,
+    };
+
+    let y = apply(&mut g, dot, &[chunked, w]);
+    g.set_outputs(&[y]).unwrap();
+
+    let inputs = [data(&[1, 4, 8], 1), data(&[2, 4, 3], 2)];
+    assert_eq!(
+        fused_primitives(&g, &inputs),
+        ["reshape", "reshape", "dot_general"]
+    );
+}
+
 /// An MLP fuses into one kernel per layer, split at its dots and reductions.
 #[test]
 fn reductions_and_contractions_are_boundaries() {

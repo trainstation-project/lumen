@@ -52,23 +52,23 @@ impl DerefMut for TritonStep {
     }
 }
 
-/// Runs `run`, a step's launch labelled `label` writing `out`: captured into a CUDA graph, the nodes it adds are
-/// the step's, by name; profiled, its kernels are timed under its name (each keeps its own as `kernel`).
+/// Runs `run`, `step`'s launch writing `out`: captured into a CUDA graph, the nodes it adds are the step's, by
+/// name and types; profiled, its kernels are timed under its name (each keeps its own as `kernel`) with its types.
 pub(crate) fn traced(
-    label: &'static str,
+    step: &StepBase,
     out: &Tensor,
     run: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
     #[cfg(all(feature = "python", lumen_cuda_linked))]
-    let run = || crate::runtime::kernel::cuda::driver::counted(label, run);
+    let run = || crate::runtime::kernel::cuda::driver::counted(step, run);
 
     #[cfg(lumen_cupti_linked)]
     let run = || {
-        crate::profiler::next_launch(label, Default::default);
+        crate::profiler::next_launch(step.label, || step.io_types());
         crate::profiler::cupti::correlated(out.device(), run)
     };
 
-    let _ = (label, out);
+    let _ = (step, out);
     run()
 }
 
@@ -76,7 +76,7 @@ impl Step for TritonStep {
     /// Runs the step's kernel on its tensors under its tuned config.
     fn run(&self, buffers: &Buffers) -> Result<(), String> {
         let tensors = buffers.tensors(self);
-        traced(self.label, &tensors.1, || {
+        traced(self, &tensors.1, || {
             self.kernel.run(self, self.tuned.as_ref(), &tensors)
         })
     }

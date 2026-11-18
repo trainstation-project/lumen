@@ -156,6 +156,18 @@ impl fmt::Debug for Tuned {
 }
 
 impl StepBase {
+    /// The types and strides of the step's operands and outputs, as the profiler attaches them to its kernels.
+    pub(crate) fn io_types(&self) -> crate::profiler::IoTypes {
+        let outputs = std::iter::once(&self.output).chain(&self.extra_outputs);
+
+        crate::profiler::IoTypes {
+            inputs: self.inputs.iter().map(|(_, ty)| ty.clone()).collect(),
+            outputs: outputs.map(|(_, ty)| ty.clone()).collect(),
+            input_strides: self.input_strides(),
+            output_strides: self.output_strides(),
+        }
+    }
+
     /// Element strides each operand is read with: its view's, or contiguous ones.
     pub(crate) fn input_strides(&self) -> Vec<Vec<usize>> {
         let strides = |(_, ty): &(Buffer, TensorType), view: &Option<View>| match view {

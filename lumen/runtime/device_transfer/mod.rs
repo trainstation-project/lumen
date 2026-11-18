@@ -5,6 +5,7 @@ mod cpu;
 mod cuda;
 #[cfg(lumen_mps_linked)]
 mod mps;
+pub(crate) mod pending;
 #[cfg(lumen_tpu_linked)]
 mod tpu;
 

@@ -86,6 +86,25 @@ impl Tensor {
         recorded(op, Self::wrap(Arc::new(storage), dtype, size))
     }
 
+    /// An uninitialized contiguous `dtype` tensor of `size` on `device`, its memory from `allocator` (such as the
+    /// pinned host pool).
+    ///
+    /// # Safety
+    ///
+    /// The contents are uninitialized; write them before reading.
+    #[cfg_attr(not(lumen_cuda_linked), allow(dead_code))]
+    pub(crate) unsafe fn empty_with(
+        size: &[usize],
+        dtype: DType,
+        device: Device,
+        allocator: Arc<dyn crate::allocator::Allocator>,
+    ) -> Self {
+        let nbytes = device_bytes(device, dtype, size);
+        let alignment = device_alignment(device, dtype, size);
+        let storage = Storage::with_allocator(nbytes, alignment, allocator, device);
+        Self::wrap(Arc::new(storage), dtype, size)
+    }
+
     /// An uninitialized contiguous tensor with this one's shape, dtype and allocator.
     unsafe fn empty_like(&self) -> Self {
         let allocator = Arc::clone(self.storage.allocator());
