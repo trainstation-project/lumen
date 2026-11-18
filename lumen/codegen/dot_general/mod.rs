@@ -9,6 +9,13 @@ pub(crate) mod triton;
 
 use crate::graph::{Graph, Node};
 
+/// A backend whose GEMM tile holds whole rows up to `ROW_TILE` wide, so a factor of those rows can move into the
+/// GEMM's epilogue (`graph_compiler::passes::linear_reordering` runs on each backend implementing it).
+pub(crate) trait RowTile {
+    /// The widest row one GEMM tile holds whole.
+    const ROW_TILE: usize;
+}
+
 /// A backend's GEMM code generator: the code computing a GEMM fusion `body`, its `dot` with the elementwise
 /// epilogue after it, the inputs flagged in `by_value` passed as scalars.
 pub(crate) trait GemmCodegen {

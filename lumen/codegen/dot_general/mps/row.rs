@@ -21,7 +21,7 @@ use crate::graph_compiler::CompilerConfig;
 pub(crate) const ROW_TILE: usize = 64;
 
 /// MPS's GEMM tile holds rows up to `ROW_TILE` whole (`linear_reordering`).
-impl crate::graph_compiler::passes::linear_reordering::RowTile for Mps {
+impl crate::codegen::dot_general::RowTile for Mps {
     const ROW_TILE: usize = ROW_TILE;
 }
 

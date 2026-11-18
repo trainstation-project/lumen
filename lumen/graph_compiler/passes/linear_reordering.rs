@@ -7,8 +7,8 @@
 //! traced program's in the last bits; `linear_reordering` (off by default) turns it on. It runs after
 //! `neural_engine` and before `split_k`, so the later fusion passes see the factor after the matmul.
 //!
-//! Devices: it runs on each device whose GEMM codegen implements `RowTile` (the widest row one GEMM tile holds
-//! whole), taking that as its `tile`: MPS (`codegen/dot_general/mps/row.rs`, `ROW_TILE`) and Triton
+//! Devices: it runs on each device whose GEMM codegen implements `codegen::dot_general::RowTile` (the widest row
+//! one GEMM tile holds whole), taking that as its `tile`: MPS (`codegen/dot_general/mps/row.rs`, `ROW_TILE`) and Triton
 //! (`codegen/dot_general/triton`, `ROW_TILE`). CPU, CUDA and TPU get the identity pass.
 //!
 //! The rewrite:
@@ -27,19 +27,12 @@
 //!   to the original output dtype. The graph is pruned afterwards.
 
 use crate::DType;
+use crate::codegen::dot_general::RowTile;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::{CompilerPass, DevicePass, Module};
 use crate::graph_compiler::pipeline::{Pass, when};
-
-/// A device whose GEMM codegen holds whole rows in a tile, so a factor of those rows can move into its epilogue:
-/// the widest such row. Each backend's GEMM codegen implements it (MPS and Triton); a device without it runs the
-/// identity pass.
-pub(crate) trait RowTile {
-    /// The widest row one GEMM tile holds whole.
-    const ROW_TILE: usize;
-}
 
 /// With `linear_reordering`, on every device whose GEMM has a `RowTile`: a matmul operand's factor along the
 /// kept axes (a norm's 1 / rms, a weight's per-channel scale) moves to its output, for its epilogue.

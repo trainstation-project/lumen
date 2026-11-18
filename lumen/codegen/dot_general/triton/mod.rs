@@ -578,9 +578,7 @@ pub(crate) const UNTUNED: usize = 2;
 pub(crate) const ROW_TILE: usize = 256;
 
 /// Triton's GEMM tile holds rows up to `ROW_TILE` whole (`linear_reordering`).
-impl crate::graph_compiler::passes::linear_reordering::RowTile
-    for crate::codegen::utils::triton::Triton
-{
+impl super::RowTile for crate::codegen::utils::triton::Triton {
     const ROW_TILE: usize = ROW_TILE;
 }
 
