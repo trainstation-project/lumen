@@ -2,6 +2,7 @@
 //! fusion step its kernel name; and the kernel shape (GEMV row, GEMM, row reduction, reduction, transpose or
 //! elementwise) each fused body lowers to.
 
+use crate::DType;
 use crate::codegen::attention::AttentionCodegen;
 use crate::codegen::attention::mps::FlashAttention;
 use crate::codegen::dot_general::mps::Gemm;
@@ -17,7 +18,7 @@ use crate::codegen::layout::{LayoutCodegen, transpose_tiling};
 use crate::codegen::reduction::ReductionCodegen;
 use crate::codegen::row::RowCodegen;
 use crate::codegen::utils::mps::Mps;
-use crate::graph::{Graph, Primitive, TensorType};
+use crate::graph::{Graph, Node, Primitive, TensorType, Var};
 use crate::graph_compiler::device::{Device, DeviceModule};
 use crate::graph_compiler::passes::attention::{self, Strides};
 use crate::graph_compiler::passes::place_views;
@@ -467,4 +468,42 @@ fn feeding(primitive: &Primitive, p: usize, inputs: usize) -> Vec<usize> {
     }
 
     reads
+}
+
+impl crate::codegen::Lone for DeviceModule<'_, Mps> {
+    /// Whether `n` needs its own kernel: a float GEMM, a copying concatenation, a gather, a layout op that
+    /// copies (a broadcast, transpose or slice not placed as a view) or an elementwise op.
+    fn alone(graph: &Graph, n: &Node) -> bool {
+        let float = |v: Var| {
+            matches!(
+                graph.type_of(v).dtype,
+                DType::F16 | DType::BF16 | DType::F32
+            )
+        };
+
+        let gemm = matches!(n.primitive, Primitive::DotGeneral { .. })
+            && n.inputs.iter().all(|&v| float(v))
+            && float(n.output);
+
+        gemm || matches!(
+            n.primitive,
+            Primitive::Concatenate {
+                in_place: false,
+                ..
+            } | Primitive::Gather { .. }
+                | Primitive::BroadcastInDim { .. }
+                | Primitive::Transpose { .. }
+                | Primitive::Slice { view: false, .. }
+        ) || crate::graph_compiler::elementwise(&n.primitive)
+    }
+
+    /// Graph input indices passed to kernels by value.
+    fn scalars(&mut self) -> Option<&mut Vec<usize>> {
+        Some(&mut self.scalars)
+    }
+
+    /// Requests a fusion kernel, returning its pending name; codegen reads its by-value inputs off the plan.
+    fn kernel(&mut self, _: &Graph, _: &[bool]) -> String {
+        request(Kernel::Fusion)
+    }
 }

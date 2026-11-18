@@ -11,9 +11,10 @@ use crate::codegen::elementwise::cuda::{Elementwise, Layouts};
 use crate::codegen::kernel::Runner;
 use crate::codegen::kinds::gemm_dot;
 use crate::codegen::utils::cuda::Cuda;
-use crate::graph::{Graph, Primitive, TensorType};
+use crate::graph::{Graph, Node, Primitive, TensorType};
 use crate::graph_compiler::device::{Device, DeviceModule};
 use crate::graph_compiler::passes::attention::FORWARD;
+use crate::graph_compiler::passes::fusion::cuda::{ELEMENTWISE, fusible};
 use crate::graph_compiler::{Options, plan_options};
 use crate::plan::step::Tensors;
 use crate::plan::step::cuda::CudaTimer;
@@ -195,5 +196,22 @@ impl Device for Cuda {
         }
 
         Ok(Box::new(plan))
+    }
+}
+
+impl crate::codegen::Lone for DeviceModule<'_, Cuda> {
+    /// Whether lone `n` needs a one-node kernel: every fusible node but reshapes, which are views.
+    fn alone(graph: &Graph, n: &Node) -> bool {
+        fusible(graph, n) && !matches!(n.primitive, Primitive::Reshape { .. })
+    }
+
+    /// The CUDA backend passes no inputs by value: runtime scalars are 0-d device tensors.
+    fn scalars(&mut self) -> Option<&mut Vec<usize>> {
+        None
+    }
+
+    /// Every kernel is an elementwise one.
+    fn kernel(&mut self, _: &Graph, _: &[bool]) -> String {
+        ELEMENTWISE.into()
     }
 }
