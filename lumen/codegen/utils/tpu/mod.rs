@@ -16,6 +16,14 @@ use crate::plan::StepBase;
 /// The TPU code generator.
 pub(crate) struct Tpu;
 
+/// TPU fuses chains of 1 or more updates, always: even one update runs as an `updates` kernel. Here, where `Tpu`
+/// is built without the TPU linked too, so every build's TPU pipeline has the pass (as its tests check).
+impl crate::codegen::dynamic_slice::UpdateChains for Tpu {
+    const LEAST: usize = 1;
+    const MOST: usize = usize::MAX;
+    const WITH_FUSE: bool = false;
+}
+
 /// Whether `p` can run inside a plain elementwise TPU kernel (only scalar broadcasts among layout ops).
 pub(crate) fn fusible(p: &Primitive) -> bool {
     use Primitive::*;
