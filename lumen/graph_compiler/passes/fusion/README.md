@@ -41,8 +41,10 @@ CPU gets the identity pass.
 
 A backend fills `Backend`: `fusible` (which nodes may join a fusion), `max_inputs`, `max_aux`,
 `multi_output_fusion`, `reduction_epilogues`, `contraction_epilogues`, `dot_epilogue` (which dots run an
-epilogue), `expansion` (whether a GEMM epilogue may write into a concatenation's slot) and `row_dot`
-(whether a GEMM plus row body runs as one kernel).
+epilogue), `expansion` (whether a GEMM epilogue may write into a concatenation's slot), `row_dot`
+(whether a GEMM plus row body runs as one kernel) and `swap_epilogues` (whether a GEMM epilogue may take a
+`SwapPairs`, swapping the accumulator's adjacent lanes in registers: Triton yes, MPS not, its epilogue functor
+seeing one element).
 
 - MPS: with `fuse`. Elementwise, layout, gather and reduction ops under 2^32 elements, never float64; 29
   input buffers; flags from config; `row_dot` limited to rows of at most `ROW_TILE` unless

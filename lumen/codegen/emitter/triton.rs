@@ -1,6 +1,6 @@
 //! Triton emitter: Python statements computing a fused body's values at symbolic flat indices.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
 use super::Emit;
@@ -35,9 +35,21 @@ pub(crate) struct Emitter<'a> {
     /// The product a GEMM row epilogue holds whole rows of, at flat index `j` of its tile: a gather
     /// picking one element of each row from it is a masked sum along the tile's rows.
     pub(crate) tile: Option<Var>,
+    /// Values held in registers as a tile at the kernel's own flat index (a GEMM epilogue's accumulator): one
+    /// can't be read at another index, so `SwapPairs` of a value computed from one swaps the tile's adjacent lanes.
+    pub(crate) registers: HashSet<Var>,
 }
 
 impl<'a> Emitter<'a> {
+    /// Whether `v` is computed from a value held in registers (`registers`), so it can't be read at another index.
+    fn in_registers(&self, v: Var) -> bool {
+        self.registers.contains(&v)
+            || self.producer.get(&v).is_some_and(|&i| {
+                let node = &self.body.nodes()[i];
+                node.inputs.iter().any(|&u| self.in_registers(u))
+            })
+    }
+
     /// Fresh local name with `prefix`.
     fn fresh(&mut self, prefix: &str) -> String {
         self.locals += 1;
@@ -513,6 +525,7 @@ impl<'a> Emit<'a> for Emitter<'a> {
             mask: "mask".into(),
             reduced: HashMap::new(),
             tile: None,
+            registers: HashSet::new(),
         }
     }
 
@@ -622,6 +635,18 @@ impl<'a> Emit<'a> for Emitter<'a> {
                     Reshape { .. } | BroadcastInDim { .. } | Transpose { .. } | Slice { .. } => {
                         let i = self.operand_index(node, idx);
                         return self.value(node.inputs[0], i);
+                    }
+                    // Each element's partner: read at `idx ^ 1`, or, for a value computed from a register tile
+                    // (which can't be read elsewhere), the tile's adjacent lanes swapped.
+                    SwapPairs => {
+                        let x = node.inputs[0];
+
+                        if !self.in_registers(x) {
+                            let i = self.index(format!("({idx}) ^ 1"));
+                            return self.value(x, i);
+                        }
+
+                        format!("swap_pairs({})", self.value(x, idx))
                     }
                     Full { fill_value, .. } => constant(ty.dtype, *fill_value),
                     Iota { dimension, .. } => {

@@ -37,24 +37,25 @@ pass or the identity pass, which the pipeline skips.
 9. `linear_cross_entropy` - replace `cross_entropy(h @ w, target)` with one `LinearCrossEntropy` op [mps, triton].
 10. `fold_dot_reshapes` - fold a reshape flattening leading dims into a 2-D dot's lhs [tpu].
 11. `simplify` (`matched: true`) - full simplification, including structural rewrites [every device, CPU too].
-12. `dot_strength` - vector-vector dots become multiply plus reduce-sum [mps, triton, tpu].
-13. `merge_dots` (`MergeDotsLate`) - dot merging after simplification, packing whole vector lanes [tpu].
-14. `neural_engine` - offload float16 GEMM regions over fixed weights to the Apple Neural Engine [mps].
-15. `linear_reordering` - move a per-row or per-column factor of a matmul operand to its output [mps, triton].
-16. `split_k` - split long-K, few-tile matmuls into partial products over K chunks [mps, triton].
-17. `canonicalize_dots` - transpose dot operands into the layout the matmul kernels read [mps, tpu].
-18. `normalization_diamonds` (`FusedDiamonds`) - replace normalization rows with `row` fusions [tpu].
-19. `dot_rows` - fuse a matmul into the `row` fusion that reads its whole rows [tpu].
-20. `dynamic_update_slices` (`Updates`) - chains of `dynamic_update_slice` become one in-place fusion [mps, triton, tpu].
-21. `normalization_diamonds` (`Diamonds`) - find normalization rows and keep them for fusion [mps, triton].
-22. `fuse_dots` - fuse TPU matmuls with their slices, stacked lhs and epilogues [tpu].
-23. `place_concats` - let producers write directly into their concatenation slot [mps, triton, tpu].
-24. `fusion` - group elementwise chains, reductions, rows and epilogues into `Fusion` kernels [cuda, mps, triton, tpu].
-25. `wide_rows` - GEMMs feeding rows wider than a tile also write the row's partial reductions [triton].
-26. `place_views` - slices read only by GEMMs become strided views [mps, triton].
-27. `alone` - wrap leftover nodes that only a generated kernel can compute into one-node fusions [cuda, mps, triton].
-28. `concats` - copy the concatenations fusion could not place in place [mps].
-29. `horizontal_fusion` - merge independent small kernels of the same kind into one launch [triton, tpu].
+12. `swap_pairs` - pair swaps written as slices and a concatenation become `SwapPairs` (an interleaved rotary's partners, read at `j ^ 1` or swapped in a GEMM accumulator's registers) [mps, triton].
+13. `dot_strength` - vector-vector dots become multiply plus reduce-sum [mps, triton, tpu].
+14. `merge_dots` (`MergeDotsLate`) - dot merging after simplification, packing whole vector lanes [tpu].
+15. `neural_engine` - offload float16 GEMM regions over fixed weights to the Apple Neural Engine [mps].
+16. `linear_reordering` - move a per-row or per-column factor of a matmul operand to its output [mps, triton].
+17. `split_k` - split long-K, few-tile matmuls into partial products over K chunks [mps, triton].
+18. `canonicalize_dots` - transpose dot operands into the layout the matmul kernels read [mps, tpu].
+19. `normalization_diamonds` (`FusedDiamonds`) - replace normalization rows with `row` fusions [tpu].
+20. `dot_rows` - fuse a matmul into the `row` fusion that reads its whole rows [tpu].
+21. `dynamic_update_slices` (`Updates`) - chains of `dynamic_update_slice` become one in-place fusion [mps, triton, tpu].
+22. `normalization_diamonds` (`Diamonds`) - find normalization rows and keep them for fusion [mps, triton].
+23. `fuse_dots` - fuse TPU matmuls with their slices, stacked lhs and epilogues [tpu].
+24. `place_concats` - let producers write directly into their concatenation slot [mps, triton, tpu].
+25. `fusion` - group elementwise chains, reductions, rows and epilogues into `Fusion` kernels [cuda, mps, triton, tpu].
+26. `wide_rows` - GEMMs feeding rows wider than a tile also write the row's partial reductions [triton].
+27. `place_views` - slices read only by GEMMs become strided views [mps, triton].
+28. `alone` - wrap leftover nodes that only a generated kernel can compute into one-node fusions [cuda, mps, triton].
+29. `concats` - copy the concatenations fusion could not place in place [mps].
+30. `horizontal_fusion` - merge independent small kernels of the same kind into one launch [triton, tpu].
 
 ## Other files
 

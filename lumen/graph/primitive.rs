@@ -325,6 +325,9 @@ pub enum Primitive {
     Transpose {
         permutation: Vec<usize>,
     },
+    /// Swaps each adjacent pair of last-axis elements, element `2i` with `2i + 1` (an even-length last axis): an
+    /// interleaved rotary embedding's pairing, which a kernel holding the pair in registers does in place.
+    SwapPairs,
     /// Static slice `[start, limit)` per dimension; `view` aliases the input's buffer.
     Slice {
         start_indices: Vec<usize>,
@@ -492,6 +495,7 @@ impl Primitive {
             Reshape { .. } => "reshape",
             BroadcastInDim { .. } => "broadcast_in_dim",
             Transpose { .. } => "transpose",
+            SwapPairs => "swap_pairs",
             Slice { .. } => "slice",
             DynamicSlice { .. } => "dynamic_slice",
             DynamicUpdateSlice => "dynamic_update_slice",
@@ -800,6 +804,14 @@ impl Primitive {
                 let rhs_free = free_dims(rhs.shape.len(), &rhs_dims).map(|d| rhs.shape[d]);
                 let shape: Vec<usize> = batch.chain(lhs_free).chain(rhs_free).collect();
                 Ok(TensorType::new(*output_dtype, &shape))
+            }
+            SwapPairs => {
+                let x = args[0];
+
+                match x.shape.last() {
+                    Some(n) if n % 2 == 0 => Ok(x.clone()),
+                    _ => err(format!("needs an even-length last axis, got {x}")),
+                }
             }
             Reshape { new_sizes } => {
                 let x = args[0];

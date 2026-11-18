@@ -41,6 +41,9 @@ pub(crate) struct Backend {
     pub expansion: fn(&Graph, &Node, &Node) -> bool,
     /// Whether a fusion body of a GEMM and the normalization row reading it runs as one kernel.
     pub row_dot: fn(&Graph) -> bool,
+    /// Whether a GEMM epilogue can swap adjacent pairs of its accumulator (`SwapPairs`, an interleaved rotary's
+    /// partners), which each thread holds side by side.
+    pub swap_epilogues: bool,
 }
 
 /// Whether `node` is a sum or max reduction.

@@ -39,6 +39,7 @@ pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
             | Reshape { .. }
             | BroadcastInDim { .. }
             | Transpose { .. }
+            | SwapPairs
             | Slice { .. }
             | Full { .. }
             | Iota { .. }
@@ -85,6 +86,7 @@ fn backend(m: &DeviceModule<'_, Triton>) -> Backend {
         dot_epilogue: |_, _| true,
         expansion: |graph, dot, concat| expansion(graph, dot, concat).is_some(),
         row_dot: dot_row_fits,
+        swap_epilogues: true,
     }
 }
 

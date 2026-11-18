@@ -411,6 +411,7 @@ pub(crate) fn epilogue(
         emitter.mask = format!("r{r}_keep");
 
         for (v, tile) in seeds {
+            emitter.registers.insert(v);
             emitter.values.insert((v, "j".into()), tile);
         }
 

@@ -216,6 +216,11 @@ macro_rules! pipeline {
             .add(Simplify { matched: true })
             .push($crate::graph_compiler::pipeline::pick!(
                 $device,
+                $crate::graph_compiler::passes::swap_pairs::SwapPairs,
+                config
+            ))
+            .push($crate::graph_compiler::pipeline::pick!(
+                $device,
                 $crate::graph_compiler::passes::dot::strength::DotStrength,
                 config
             ))

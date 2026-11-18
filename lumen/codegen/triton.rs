@@ -457,3 +457,6 @@ impl crate::codegen::Supports for Triton {
         Ok(())
     }
 }
+
+/// Triton kernels read each element's partner at `j ^ 1`, or swap a GEMM accumulator tile's adjacent lanes.
+impl crate::codegen::SwapsPairs for Triton {}

@@ -504,6 +504,65 @@ fn host_stages_wait_for_copies_at_their_first_reader() {
     }
 }
 
+/// A pair swap written as two slices and a concatenation (an interleaved rotary's `cat([x[.., 1:], x[.., :1]])`)
+/// becomes one `SwapPairs` computing the same values; a concatenation of other slices is left alone.
+#[test]
+fn pair_swaps_become_swap_pairs() {
+    let mut g = Graph::new();
+    let x = g.input(ty(&[2, 8]));
+
+    let pairs = Reshape {
+        new_sizes: vec![2, 4, 2],
+    };
+
+    let p = apply(&mut g, pairs, &[x]);
+
+    let slice = |from: usize| Slice {
+        start_indices: vec![0, 0, from],
+        limit_indices: vec![2, 4, from + 1],
+        view: false,
+    };
+
+    let odd = apply(&mut g, slice(1), &[p]);
+    let even = apply(&mut g, slice(0), &[p]);
+
+    let concat = |inputs| Concatenate {
+        dimension: inputs,
+        in_place: false,
+    };
+
+    let swapped = apply(&mut g, concat(2), &[odd, even]);
+    let kept = apply(&mut g, concat(2), &[even, odd]);
+    g.set_outputs(&[swapped, kept]).unwrap();
+
+    let rewritten = super::passes::swap_pairs::swapped(&g).expect("a pair swap");
+    let names: Vec<&str> = rewritten
+        .nodes()
+        .iter()
+        .map(|n| n.primitive.name())
+        .collect();
+    assert_eq!(
+        names.iter().filter(|&&n| n == "swap_pairs").count(),
+        1,
+        "{names:?}"
+    );
+    assert_eq!(
+        names.iter().filter(|&&n| n == "concatenate").count(),
+        1,
+        "{names:?}"
+    );
+
+    let input = [data(&[2, 8], 1)];
+    let (want, got) = (
+        reference::run(&g, &input).unwrap(),
+        reference::run(&rewritten, &input).unwrap(),
+    );
+
+    for (w, r) in want.iter().zip(&got) {
+        assert_eq!(w.to_vec::<f32>(), r.to_vec::<f32>());
+    }
+}
+
 /// A value copied to the host and straight back splits the plan into device, host and device stages.
 #[test]
 fn values_copied_back_at_once_pass_through_a_host_stage() {
@@ -1231,6 +1290,7 @@ fn devices_run_the_passes_they_implement() {
             "flash_attention_backward",
             "linear_cross_entropy",
             "simplify",
+            "swap_pairs",
             "dot_strength",
             "split_k",
             "dynamic_update_slices",

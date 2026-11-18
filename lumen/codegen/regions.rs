@@ -173,14 +173,14 @@ fn regions_along<'a>(body: &'a Graph, dot: &Node, axis: usize) -> Option<Vec<Col
                 let (start, limit) = along(top, shape, axis)?;
                 let width = limit - start;
 
+                // A slice reshaped into tuples is a group of interleaved members; reshaped otherwise (a
+                // projection's heads), the slice is a plain region the reshape follows in its epilogue.
                 let region = match readers_of(body, top.output).as_slice() {
-                    [r] if matches!(r.primitive, Primitive::Reshape { .. }) => {
-                        if outputs.contains(&top.output) {
-                            return None;
-                        }
-
-                        group(r, width)?
-                    }
+                    [r] if matches!(r.primitive, Primitive::Reshape { .. }) => match group(r, width) {
+                        Some(_) if outputs.contains(&top.output) => return None,
+                        Some(group) => group,
+                        None => Region::Plain(top),
+                    },
                     _ => Region::Plain(top),
                 };
 
@@ -205,8 +205,16 @@ fn regions_along<'a>(body: &'a Graph, dot: &Node, axis: usize) -> Option<Vec<Col
             .all(|w| w[0].offset + w[0].width == w[1].offset)
         && regions.last().is_some_and(|c| c.offset + c.width == n);
 
-    // only worth a split when some region interleaves members or writes a graph output directly
-    let grouped = regions.iter().any(|c| c.k() > 1);
+    // only worth a split when some region interleaves members, writes a graph output directly, or the output
+    // splits into several regions (merged projections) some of which have an epilogue to run (a rotary
+    // embedding); two halves are a gated pair, whose epilogue reads both (`halves`), and regions read only by
+    // other kernels (attention reading its projections as views of one buffer) stay unsplit
+    let several = regions.len() > 1
+        && halves(body, dot, axis).is_none()
+        && regions
+            .iter()
+            .any(|c| c.members().iter().any(|&v| epilogue_read(body, v)));
+    let grouped = regions.iter().any(|c| c.k() > 1) || several;
 
     let returned = axis + 1 == rank
         && regions
@@ -216,6 +224,14 @@ fn regions_along<'a>(body: &'a Graph, dot: &Node, axis: usize) -> Option<Vec<Col
     let one_pair = axis + 1 == rank && regions.len() == 1 && regions[0].k() == 2;
     let windows = one_pair || regions.iter().all(|c| c.width % ROW_COLUMNS == 0);
     (covers && (grouped || returned) && windows).then_some(regions)
+}
+
+/// Whether an elementwise op or a pair swap reads `v`, directly or through reshapes: work a GEMM epilogue would run.
+fn epilogue_read(body: &Graph, v: Var) -> bool {
+    readers_of(body, v).iter().any(|r| match r.primitive {
+        Primitive::Reshape { .. } => epilogue_read(body, r.output),
+        ref p => crate::graph_compiler::elementwise(p) || matches!(p, Primitive::SwapPairs),
+    })
 }
 
 /// Returns every node in `body` that reads `v`.

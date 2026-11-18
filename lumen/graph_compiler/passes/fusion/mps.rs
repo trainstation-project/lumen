@@ -39,6 +39,7 @@ pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
             | Reshape { .. }
             | BroadcastInDim { .. }
             | Transpose { .. }
+            | SwapPairs
             | Slice { .. }
             | Concatenate { .. }
             | Full { .. }
@@ -86,6 +87,8 @@ fn backend(config: &CompilerConfig) -> Backend {
             crate::codegen::regions::expansion(graph, dot, concat).is_some()
         },
         row_dot,
+        // The Metal GEMM's epilogue functor sees one element, not a thread's pair.
+        swap_epilogues: false,
     }
 }
 

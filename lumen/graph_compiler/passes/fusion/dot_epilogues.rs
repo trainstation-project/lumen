@@ -179,8 +179,9 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], backend: &Backend) -> Do
 
                 let earlier = |v: Var| last_dot[v].is_none_or(|d| d < i);
 
-                let steps =
-                    elementwise(&un.primitive) || matches!(un.primitive, Primitive::Reshape { .. });
+                let steps = elementwise(&un.primitive)
+                    || matches!(un.primitive, Primitive::Reshape { .. })
+                    || (backend.swap_epilogues && matches!(un.primitive, Primitive::SwapPairs));
 
                 let reads = un
                     .inputs
@@ -239,6 +240,7 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], backend: &Backend) -> Do
 
             let step = elementwise(&un.primitive)
                 || matches!(un.primitive, Primitive::Reshape { .. })
+                || (backend.swap_epilogues && matches!(un.primitive, Primitive::SwapPairs))
                 || pair.is_some_and(|p| p.contains(&u))
                 || expands;
 

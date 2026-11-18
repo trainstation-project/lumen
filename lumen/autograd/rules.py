@@ -84,6 +84,14 @@ def _transpose_transpose(ct, x, permutation):
 deflinear(prims.transpose, _transpose_transpose)
 
 
+def _swap_pairs_transpose(ct, x):
+    """The cotangent's pairs swapped back: a swap is its own inverse."""
+    return [prims.swap_pairs(ct)]
+
+
+deflinear(prims.swap_pairs, _swap_pairs_transpose)
+
+
 def _reduce_sum_transpose(ct, x, axes, accum_dtype):
     """Broadcasts ``ct`` back over the summed ``axes`` in ``x``'s dtype."""
     ct = prims.cast(ct, x.dtype) if ct.dtype != x.dtype else ct

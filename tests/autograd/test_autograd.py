@@ -539,7 +539,8 @@ def test_merged_dots_backward_plan(device):
     labels = [s["label"] for s in plan.steps()]
     assert plan.packed == [([1, 2, 3], 1)]
     if device == "mps":
-        assert labels.count("3x dot_general") == 2 and "concatenate" not in labels, labels
+        merged = [label for label in labels if label.startswith("3x dot_general")]
+        assert len(merged) == 2 and "concatenate" not in labels, labels
         assert any(label.endswith("→ concatenate") for label in labels), labels
 
 
@@ -598,7 +599,7 @@ def test_projections_backward_writes_cotangents_side_by_side(device):
                 labels = [s["label"] for s in plan.steps()]
                 assert plan.packed == [([1, 2, 3], 1)]
                 if device == "mps":
-                    assert labels.count("3x dot_general") == 2, labels
+                    assert sum(label.startswith("3x dot_general") for label in labels) == 2, labels
                     (side_by_side,) = [label for label in labels if "concatenate" in label]
                     assert side_by_side != "concatenate" and "mul" in side_by_side, labels
                     assert not any("transpose" in label for label in labels), labels
