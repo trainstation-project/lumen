@@ -128,7 +128,7 @@ fn build_mps_shim() {
     println!("cargo:rerun-if-changed=lumen/runtime/stream/mps/mps.mm");
     println!("cargo:rerun-if-changed=lumen/runtime/stream/mps/mps.h");
     println!("cargo:rerun-if-changed=lumen/runtime/kernel/mps.mm");
-    println!("cargo:rerun-if-changed=lumen/graph_compiler/passes/ane/coreml.mm");
+    println!("cargo:rerun-if-changed=lumen/graph_compiler/passes/apple_neural_engine/coreml.mm");
 
     for source in PRIMITIVE_KERNELS {
         println!("cargo:rerun-if-changed={source}");
@@ -144,7 +144,7 @@ fn build_mps_shim() {
         .file("lumen/allocator/mps/mps_shim.mm")
         .file("lumen/runtime/stream/mps/mps.mm")
         .file("lumen/runtime/kernel/mps.mm")
-        .file("lumen/graph_compiler/passes/ane/coreml.mm")
+        .file("lumen/graph_compiler/passes/apple_neural_engine/coreml.mm")
         .include(PathBuf::from(
             env::var_os("OUT_DIR").expect("OUT_DIR not set"),
         ))

@@ -18,10 +18,26 @@ pub(crate) trait Slots: Module {
     fn writes(&self, concat: &Node, k: usize, producer: &Node, index: usize) -> bool;
 
     /// Whether writing operand `k` into its slot is worth placing `concat` for; a concatenation is placed
-    /// when some operand is. Any is, by default.
-    fn worth(&self, _concat: &Node, _k: usize, _producer: &Node, _index: usize) -> bool {
-        true
+    /// when some operand is. By default, `worth`'s rule (MPS's and Triton's).
+    fn worth(&self, _concat: &Node, _k: usize, producer: &Node, _index: usize) -> bool {
+        worth(producer)
     }
+}
+
+/// Whether an operand `producer` makes is worth placing its concatenation for: when `producer` is a kernel of its
+/// own (a matmul, attention's backward, a fusion), whose output written into its slot needs no copy. A cheap
+/// elementwise or layout producer is not: fusion builds the concatenation inside a kernel that runs anyway, its
+/// readers' (rotary's `cat([-x2, x1])` before `* sin`) or its other operands'.
+pub(crate) fn worth(producer: &Node) -> bool {
+    let layout = matches!(
+        producer.primitive,
+        Primitive::Reshape { .. }
+            | Primitive::Transpose { .. }
+            | Primitive::BroadcastInDim { .. }
+            | Primitive::Slice { .. }
+    );
+
+    !(layout || crate::graph_compiler::elementwise(&producer.primitive))
 }
 
 /// Live concatenations each of whose operands is read only there, once, is no program output and is made

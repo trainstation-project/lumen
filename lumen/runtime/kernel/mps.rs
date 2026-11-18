@@ -17,7 +17,7 @@ use crate::codegen::store::mps::strided_load;
 use crate::codegen::utils::mps::Mps;
 pub(crate) use crate::custom_op::mps::Grid;
 use crate::graph::{Graph, Primitive, TensorType, Var, View};
-use crate::graph_compiler::passes::ane::mps as ane;
+use crate::graph_compiler::passes::apple_neural_engine::mps as ane;
 use crate::graph_compiler::passes::attention;
 use crate::graph_compiler::passes::horizontal::segments;
 use crate::plan::{Buffer, StepBase};

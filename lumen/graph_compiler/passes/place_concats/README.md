@@ -7,17 +7,14 @@ after `fusion`, `place_views` and `alone` and unmarks the ones fusion made inval
 
 ## Files
 
-- `mod.rs` — the `Slots` trait, `in_place_concats`, the `PlaceConcats` pass, and `Concats`, the slot type
-  of the post-fusion check.
-- `mps.rs` — MPS: `PlaceConcats` with `fuse`; `Concats` always; the slot rules `slot_writes` and
-  `slot_worth`. Built only when MPS is linked.
+- `mod.rs` — the `Slots` trait, `worth` (the rule MPS and Triton share), `in_place_concats`, the `PlaceConcats`
+  pass, and `Concats`, the slot type of the post-fusion check.
+- `mps.rs` — MPS: `PlaceConcats` with `fuse`; `Concats` always; its slot rule `slot_writes`. Built only when
+  MPS is linked.
 - `triton.rs` — Triton: `PlaceConcats` with `fuse`; a slot is writable when `fusion::triton::slot_writes`
-  accepts the producer (a matmul, or a fusible elementwise or copying layout op). Placing is worth it when an
-  operand's producer is a matmul or something but a fusible elementwise op or reshape reads the result; a
-  concatenation of cheap operands read only elementwise is left to fusion, which builds it in registers inside
-  its readers' kernel (rotary's `cat([-x2, x1])` before `* sin`).
+  accepts the producer (a matmul, or a fusible elementwise or copying layout op).
 - `tpu.rs` — TPU: `PlaceConcats` always, with `fusion::tpu::slot_writes` (the concat joins its last axis,
-  the operand fills whole lanes, and its producer writes a strided slice).
+  the operand fills whole lanes, and its producer writes a strided slice), and every operand worth placing.
 
 CPU and CUDA get the identity pass in both slots; Triton and TPU have no `Concats`.
 
@@ -30,13 +27,18 @@ CPU and CUDA get the identity pass in both slots; Triton and TPU have no `Concat
 - is made by a kernel `writes(concat, k, producer, index)` accepts; for an operand that is output `index`
   of a fusion, the producer is that fusion;
 
-and at least one operand is `worth` placing. `Slots::worth` defaults to always.
+and at least one operand is `worth` placing. `Slots::worth` defaults to `worth`, which MPS and Triton share
+(only `writes`, what each backend's kernels can write through a slot's strides, differs): an operand is worth
+placing when a kernel of its own makes it (a matmul, attention's backward, a fusion), whose output written into
+its slot needs no copy. A cheap elementwise or layout producer is not: fusion builds the concatenation inside a
+kernel that runs anyway, its readers' (rotary's `cat([-x2, x1])` before `* sin`) or its other operands'. TPU
+places whenever it can.
 
 ## MPS rules
 
 `slot_writes` accepts the attention backward kernel (except its atomically accumulated dQ), a fusion whose
-body writes views, and, before fusion, a fusible layout or elementwise node. `slot_worth` accepts only
-attention backward outputs, so on MPS a concatenation is placed only when it gathers attention gradients.
+body writes views, and, before fusion, a fusible layout or elementwise node. Since a matmul writes no slot on
+MPS, its concatenations placed are those gathering attention gradients.
 
 `Concats` re-runs `in_place_concats` with the post-fusion rules, clears `in_place` on concatenations no
 longer valid, and wraps each such concatenate in its own elementwise fusion kernel (`alone::wrapped`).

@@ -14,6 +14,11 @@ impl Slots for DeviceModule<'_, Tpu> {
     fn writes(&self, concat: &Node, k: usize, producer: &Node, _: usize) -> bool {
         fusion::slot_writes(&self.graph, concat, k, producer)
     }
+
+    /// Any operand: on TPU's tiled layout a concatenation fusion would build is a copy of its own.
+    fn worth(&self, _: &Node, _: usize, _: &Node, _: usize) -> bool {
+        true
+    }
 }
 
 /// Always.
