@@ -575,7 +575,14 @@ pub(crate) const UNTUNED: usize = 2;
 /// and normalized by a row kernel. On an H100 (bf16, autotuned) the fused kernel matches a GEMM and a
 /// row kernel at 256 but is slower at 512 (121 vs 112 µs) and 1024 (252 vs 132 µs): a tile of whole
 /// wide rows leaves too few programs.
-pub(crate) const MOST_GEMM_ROW: usize = 256;
+pub(crate) const ROW_TILE: usize = 256;
+
+/// Triton's GEMM tile holds rows up to `ROW_TILE` whole (`linear_reordering`).
+impl crate::graph_compiler::passes::linear_reordering::RowTile
+    for crate::codegen::utils::triton::Triton
+{
+    const ROW_TILE: usize = ROW_TILE;
+}
 
 /// Most accumulator elements a row-epilogue GEMM tile holds (`BLOCK_SIZE_M x BLOCK_SIZE_N`).
 const ROW_TILE_ELEMENTS: usize = 32 << 10;
@@ -631,11 +638,11 @@ const PARTIAL_WIDTH: usize = 32;
 const LEAST_PARTIAL_WIDTH: usize = 8;
 
 /// The partial width for a GEMM whose product rows are `n` wide and normalized after it, rows too wide
-/// for one tile (past `MOST_GEMM_ROW`): the widest power of two up to `PARTIAL_WIDTH` dividing `n`, so
+/// for one tile (past `ROW_TILE`): the widest power of two up to `PARTIAL_WIDTH` dividing `n`, so
 /// rows of any width MPS splits are split too (1000 in partials of 8).
 pub(crate) fn partial_tile(n: usize) -> Option<usize> {
     let tile = (1 << n.trailing_zeros()).min(PARTIAL_WIDTH);
-    (n > MOST_GEMM_ROW && tile >= LEAST_PARTIAL_WIDTH).then_some(tile)
+    (n > ROW_TILE && tile >= LEAST_PARTIAL_WIDTH).then_some(tile)
 }
 
 #[cfg(feature = "python")]

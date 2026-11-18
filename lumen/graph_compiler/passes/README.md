@@ -13,6 +13,9 @@ pass or the identity pass, which the pipeline skips.
   `pipeline::when`. Without such an impl, `pick!` returns `identity::Identity`.
 - Shared matching and rewriting live in the pass's `mod.rs`. Device answers (what is fusible, kernel
   names, limits) come in through a trait the pass defines and `DeviceModule<D>` implements.
+- A pass whose devices differ only in a value their codegen knows is one file, `passes/<pass>.rs`: a generic
+  `impl<D: Trait> DevicePass<D>` reads it through a small trait each backend's codegen implements, so every
+  device implementing the trait runs the same pass (`linear_reordering.rs`, `RowTile`).
 
 ## Frontend (every device, before staging)
 

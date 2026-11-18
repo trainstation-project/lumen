@@ -4,15 +4,54 @@
 //! rhs column (a weight's per-channel dequantization scale), scales the matmul's output rows or columns
 //! instead, in its epilogue, so the scaled operand is never needed whole. The rounding moves with it: a
 //! cast between the factor and the matmul then rounds the unscaled value, so results differ from the
-//! traced program's in the last bits; `linear_reordering` (off by default) turns it on.
-
-#[cfg(lumen_mps_linked)]
-mod mps;
-mod triton;
+//! traced program's in the last bits; `linear_reordering` (off by default) turns it on. It runs after
+//! `neural_engine` and before `split_k`, so the later fusion passes see the factor after the matmul.
+//!
+//! Devices: it runs on each device whose GEMM codegen implements `RowTile` (the widest row one GEMM tile holds
+//! whole), taking that as its `tile`: MPS (`codegen/dot_general/mps/row.rs`, `ROW_TILE`) and Triton
+//! (`codegen/dot_general/triton`, `ROW_TILE`). CPU, CUDA and TPU get the identity pass.
+//!
+//! The rewrite:
+//! - Matmuls considered (`plain`): unbatched float matmuls of a rank-2+ lhs contracted on its last axis (or a
+//!   2-D lhs on either axis) with a 2-D rhs contracted on one axis.
+//! - `strip` walks an operand back through `Mul`, `Div` by the factor, float `Cast`s and `Neg` to find one
+//!   factor that broadcasts along every axis but the operand's kept ones, and rebuilds the operand without it
+//!   as an `Expr` (each op keeps the origin of the node it rebuilds, so a norm's rows stay in its profiler
+//!   range).
+//! - An operand is stripped only when every reader of it is a matmul reading it on the same side with the same
+//!   kept axes, so the scaled operand is no longer computed at all.
+//! - With `tile = Some(t)`, only a factor that depends on a last-axis reduction over rows wider than `t` moves
+//!   (`crosses_tiles`): a reduction the GEMM's tiles don't hold whole; `tile = None` moves every factor.
+//! - The new matmul reads the stripped operands and outputs its accumulation dtype; each factor is broadcast
+//!   over the output (`spread`), applied with `Mul` or `Div` in the accumulation dtype, and one `Cast` rounds
+//!   to the original output dtype. The graph is pruned afterwards.
 
 use crate::DType;
 use crate::graph::{Graph, Node, Primitive, Var};
-use crate::graph_compiler::passes::{CompilerPass, Module};
+use crate::graph_compiler::CompilerConfig;
+use crate::graph_compiler::device::DeviceModule;
+use crate::graph_compiler::passes::{CompilerPass, DevicePass, Module};
+use crate::graph_compiler::pipeline::{Pass, when};
+
+/// A device whose GEMM codegen holds whole rows in a tile, so a factor of those rows can move into its epilogue:
+/// the widest such row. Each backend's GEMM codegen implements it (MPS and Triton); a device without it runs the
+/// identity pass.
+pub(crate) trait RowTile {
+    /// The widest row one GEMM tile holds whole.
+    const ROW_TILE: usize;
+}
+
+/// With `linear_reordering`, on every device whose GEMM has a `RowTile`: a matmul operand's factor along the
+/// kept axes (a norm's 1 / rms, a weight's per-channel scale) moves to its output, for its epilogue.
+impl<D: RowTile> DevicePass<D> for LinearReordering {
+    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
+        let reordering = LinearReordering {
+            tile: Some(D::ROW_TILE),
+        };
+
+        when(config.linear_reordering, reordering)
+    }
+}
 
 /// How an operand is rebuilt without its factor: the original value, or an op of the rebuilt value and an
 /// original operand; each op carries the index of the node it rebuilds, whose scope and source lines it
