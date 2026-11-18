@@ -12,7 +12,10 @@ after `fusion`, `place_views` and `alone` and unmarks the ones fusion made inval
 - `mps.rs` — MPS: `PlaceConcats` with `fuse`; `Concats` always; the slot rules `slot_writes` and
   `slot_worth`. Built only when MPS is linked.
 - `triton.rs` — Triton: `PlaceConcats` with `fuse`; a slot is writable when `fusion::triton::slot_writes`
-  accepts the producer (a matmul, or a fusible elementwise or copying layout op).
+  accepts the producer (a matmul, or a fusible elementwise or copying layout op). Placing is worth it when an
+  operand's producer is a matmul or something but a fusible elementwise op or reshape reads the result; a
+  concatenation of cheap operands read only elementwise is left to fusion, which builds it in registers inside
+  its readers' kernel (rotary's `cat([-x2, x1])` before `* sin`).
 - `tpu.rs` — TPU: `PlaceConcats` always, with `fusion::tpu::slot_writes` (the concat joins its last axis,
   the operand fills whole lanes, and its producer writes a strided slice).
 

@@ -53,3 +53,29 @@ def test_concatenated_operands_are_written_in_place(device, f, shapes, steps):
     got = lumen.to_numpy(lumen.compile(f)(*args))
     want = lumen.to_numpy(lumen.compile(f)(*(lumen.from_numpy(v) for v in arrays)))
     np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-5 * np.abs(want).max())
+
+
+def _rotary(x, cos, sin):
+    """Rotary embedding's rotate-half and multiply-add: its concatenate is read only by elementwise ops."""
+    half = x.shape[-1] // 2
+    rotated = F.cat([-x[..., half:], x[..., :half]], -1)
+    return x * cos + rotated * sin
+
+
+@pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
+def test_concatenates_read_elementwise_fuse_into_their_readers(device):
+    """A concatenate of cheap operands (slices, a negation) read only by
+    elementwise ops is not placed: fusion builds it in registers inside its
+    readers' kernel, so rotary's rotate-half and multiply-add are one kernel
+    with no concatenate step and no buffer for it. The CPU's values."""
+    arrays = [rand(4, 8, 64, seed=k) for k in range(3)]
+    try:
+        args = [lumen.from_numpy(v).to(device) for v in arrays]
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    plan = lumen.graph_compiler.Plan(lumen.make_graph(_rotary)(*args), device)
+    (label,) = [s["label"] for s in plan.steps()]
+    assert "concatenate" in label and "neg" in label and label.endswith("add"), label
+    got = lumen.to_numpy(lumen.compile(_rotary)(*args))
+    want = lumen.to_numpy(lumen.compile(_rotary)(*(lumen.from_numpy(v) for v in arrays)))
+    np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-5)
