@@ -345,7 +345,10 @@ pub(crate) fn loop_kernel(step: &StepBase, deterministic: bool) -> Result<Option
             })
         }
         Primitive::Fusion { name, body, .. }
-            if name != UPDATES && name != ROW && name != COMBINE && reduction_root(body).is_none() =>
+            if name != UPDATES
+                && name != ROW
+                && name != COMBINE
+                && reduction_root(body).is_none() =>
         {
             match transpose_tiling(body) {
                 Some(tiling) => Some(Template::Transpose {

@@ -218,11 +218,13 @@ fn regions_along<'a>(
                 // A slice reshaped into tuples is a group of interleaved members; reshaped otherwise (a
                 // projection's heads), the slice is a plain region the reshape follows in its epilogue.
                 let region = match readers_of(body, top.output).as_slice() {
-                    [r] if matches!(r.primitive, Primitive::Reshape { .. }) => match group(r, width) {
-                        Some(_) if outputs.contains(&top.output) => return None,
-                        Some(group) => group,
-                        None => Region::Plain(top),
-                    },
+                    [r] if matches!(r.primitive, Primitive::Reshape { .. }) => {
+                        match group(r, width) {
+                            Some(_) if outputs.contains(&top.output) => return None,
+                            Some(group) => group,
+                            None => Region::Plain(top),
+                        }
+                    }
                     _ => Region::Plain(top),
                 };
 

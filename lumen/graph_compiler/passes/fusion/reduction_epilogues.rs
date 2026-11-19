@@ -49,7 +49,13 @@ pub(super) fn reduction_epilogues(
 
         let combine = dots.end[i].is_some();
 
-        if !backend.reduction_epilogues || !live[i] || !fusible[i] || !reduction || in_row || combine {
+        if !backend.reduction_epilogues
+            || !live[i]
+            || !fusible[i]
+            || !reduction
+            || in_row
+            || combine
+        {
             continue;
         }
 

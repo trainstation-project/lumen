@@ -149,8 +149,8 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], backend: &Backend) -> Do
                 let mut ends = Vec::new();
 
                 for (c, set) in regions.iter().zip(sets) {
-                    let size =
-                        graph.type_of(value).numel() / graph.type_of(value).shape[c.axis] * c.size();
+                    let size = graph.type_of(value).numel() / graph.type_of(value).shape[c.axis]
+                        * c.size();
 
                     let outside = set.iter().copied().filter(|&k| {
                         let v = nodes[k].output;

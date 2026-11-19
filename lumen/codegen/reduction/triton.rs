@@ -271,7 +271,10 @@ pub(crate) fn split_k_combine(
 
     let element = match products.dtype == a {
         true => format!("LOAD{k}(in{k}, c * {} + m * {cols} + n, mask)", rows * cols),
-        false => format!("LOAD{k}(in{k}, c * {} + m * {cols} + n, mask).to({acc})", rows * cols),
+        false => format!(
+            "LOAD{k}(in{k}, c * {} + m * {cols} + n, mask).to({acc})",
+            rows * cols
+        ),
     };
 
     let value = combine_value(body, root);

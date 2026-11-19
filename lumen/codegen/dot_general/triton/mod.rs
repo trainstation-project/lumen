@@ -263,8 +263,14 @@ pub(crate) fn updated(body: &Graph, v: Var) -> Option<&Node> {
 /// `j`'s coordinates plus the start indices, each clamped so the update stays in bounds, as a flat index of the
 /// operand.
 fn slot(emitter: &mut Emitter, body: &Graph, update: &Node) -> (String, String) {
-    let (x, written) = (body.type_of(update.inputs[0]), body.type_of(update.inputs[1]));
-    let (spans, strides) = (contiguous_strides(&written.shape), contiguous_strides(&x.shape));
+    let (x, written) = (
+        body.type_of(update.inputs[0]),
+        body.type_of(update.inputs[1]),
+    );
+    let (spans, strides) = (
+        contiguous_strides(&written.shape),
+        contiguous_strides(&x.shape),
+    );
     let value = emitter.value(update.inputs[1], "j".into());
 
     let terms: Vec<String> = (0..x.shape.len())
@@ -446,7 +452,12 @@ impl Product<'_> {
 
         // The value itself, when an output besides its regions (a split-K combine's sum read whole), stored once.
         if self.regions.is_some() && !flags.halves() {
-            for (o, _) in body.outputs().iter().enumerate().filter(|&(_, &v)| v == self.value) {
+            for (o, _) in body
+                .outputs()
+                .iter()
+                .enumerate()
+                .filter(|&(_, &v)| v == self.value)
+            {
                 let index = format!("l * {} + m * {cols} + n", rows * cols);
                 let value = format!("value.to({t})");
                 writeln!(code, "    {}", store(o, &index, &value, "mask")).unwrap();
@@ -542,7 +553,8 @@ impl Product<'_> {
                         };
 
                         let product = &body.type_of(self.value).shape;
-                        let width: usize = product[(*dimension).min(product.len())..].iter().product();
+                        let width: usize =
+                            product[(*dimension).min(product.len())..].iter().product();
 
                         writeln!(
                             stores,
@@ -700,7 +712,9 @@ pub(crate) fn gemv_configs(m: usize) -> Vec<Config> {
     for block_n in [8, 16, 32, 64] {
         for block_k in [64, 128, 256, 512] {
             for warps in [2, 4, 8] {
-                if block_m * block_n * block_k <= GEMV_ELEMENTS && block_n * block_k >= 32 * warps * 8 {
+                if block_m * block_n * block_k <= GEMV_ELEMENTS
+                    && block_n * block_k >= 32 * warps * 8
+                {
                     out.push(Config {
                         block_m,
                         block_n,
@@ -727,7 +741,15 @@ fn gemv_rows(step: &TritonStep) -> Option<usize> {
         p => (p.clone(), step.inputs.first()?.1.clone()),
     };
 
-    let (Primitive::DotGeneral { lhs_contracting, lhs_batch, .. }, lhs) = &dot else {
+    let (
+        Primitive::DotGeneral {
+            lhs_contracting,
+            lhs_batch,
+            ..
+        },
+        lhs,
+    ) = &dot
+    else {
         return None;
     };
 
