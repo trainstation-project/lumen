@@ -130,7 +130,6 @@ pub(crate) fn run(
         &prepared.functions,
         &prepared.launches,
         &epilogue,
-        None,
     )?;
 
     if !out.is_contiguous() {

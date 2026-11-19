@@ -44,6 +44,9 @@ pub(crate) struct Backend {
     /// Whether a GEMM epilogue can swap adjacent pairs of its accumulator (`SwapPairs`, an interleaved rotary's
     /// partners), which each thread holds side by side.
     pub swap_epilogues: bool,
+    /// Whether a split-K combine (the sum of a dot's chunk products) runs a GEMM's epilogue after it, column
+    /// regions included, as the dot would unsplit.
+    pub combine_epilogues: bool,
 }
 
 /// Whether `node` is a sum or max reduction.
@@ -76,8 +79,8 @@ pub(crate) fn fuse(
 ) -> Graph {
     let a = analysis::Analysis::new(graph, backend.fusible);
     let rows = rows::extended(&a, rows);
-    let reductions = reduction_epilogues::reduction_epilogues(&a, &rows, backend);
     let dots = dot_epilogues::dot_epilogues(&a, &rows, backend);
+    let reductions = reduction_epilogues::reduction_epilogues(&a, &rows, backend, &dots);
     let mut root = hosts::roots(&a, &rows, &reductions, &dots);
     let mut host = hosts::hosts(&a, &rows, backend, &root, &reductions, &dots);
     let mut fusions = emit::fusions(&a, backend, &mut root, &mut host);

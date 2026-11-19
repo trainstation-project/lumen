@@ -50,6 +50,45 @@ pub(crate) fn reduction_root(body: &Graph) -> Option<&Node> {
     found.filter(|_| reductions == 1).map(|i| &nodes[i])
 }
 
+/// The body's split-K combine: its only reduction, a sum over axis 0 (at most `MAX_SPLIT` K chunks) of a
+/// body input (the chunks' products), which every body output is computed from; else `None`.
+pub(crate) fn combine_root(body: &Graph) -> Option<&Node> {
+    use crate::graph_compiler::passes::dot::split_k::MAX_SPLIT;
+
+    let mut reductions = body.nodes().iter().filter(|n| {
+        matches!(
+            n.primitive,
+            Primitive::ReduceSum { .. } | Primitive::ReduceMax { .. }
+        )
+    });
+
+    let root = match (reductions.next(), reductions.next()) {
+        (Some(root), None) => root,
+        _ => return None,
+    };
+
+    let Primitive::ReduceSum { axes, .. } = &root.primitive else {
+        return None;
+    };
+
+    let products = body.type_of(root.inputs[0]);
+
+    // Every output is the sum or computed from it, through the body's nodes.
+    let mut from = vec![false; body.types.len()];
+    from[root.output] = true;
+
+    for node in body.nodes() {
+        from[node.output] |= node.inputs.iter().any(|&v| from[v]);
+    }
+
+    (*axes == [0]
+        && body.inputs().contains(&root.inputs[0])
+        && products.shape.len() >= 2
+        && products.shape[0] <= MAX_SPLIT
+        && body.outputs().iter().all(|&v| from[v]))
+    .then_some(root)
+}
+
 /// Body reductions over the last axis, excluding the first output; empty for plain reductions.
 pub(crate) fn row_reductions(body: &Graph) -> Vec<&Node> {
     reductions_of_rows(body, true)

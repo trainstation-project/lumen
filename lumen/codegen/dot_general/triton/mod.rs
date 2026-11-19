@@ -314,8 +314,6 @@ pub(crate) fn epilogue(
     outputs: &[Layout],
     [rows, cols]: [usize; 2],
 ) -> (String, String) {
-    let t = triton_type(body.type_of(dot.output).dtype).expect("a Triton dtype");
-
     let loads: String = inputs
         .iter()
         .enumerate()
@@ -341,144 +339,23 @@ pub(crate) fn epilogue(
         })
         .collect();
 
-    let rank = body.type_of(dot.output).shape.len();
-    let flags = gemm_flags(body, dot);
-    let regions = gemm_regions(body, dot);
-
-    let regions: Vec<(usize, usize, usize, Vec<Var>, bool)> = match &regions {
-        Some(regions) => regions
-            .iter()
-            .map(|c| {
-                let interleaved = c.k() > 1 && !flags.halves();
-                (c.axis, c.offset, c.width, c.members(), interleaved)
-            })
-            .collect(),
-        None => vec![(rank - 1, 0, cols, vec![dot.output], false)],
+    let store = |o: usize, index: &str, value: &str, mask: &str| {
+        let (shape, strides) = outputs[o];
+        format!(
+            "tl.store({} + {}, {value}, mask={mask})",
+            pointers[o],
+            stored_at(index, shape, strides)
+        )
     };
 
-    let mut locals = 0;
+    let product = Product {
+        value: dot.output,
+        regions: gemm_regions(body, dot),
+        flags: gemm_flags(body, dot),
+        expanded: gemm_expanded(body, dot),
+    };
 
-    for (r, (axis, offset, width, members, interleaved)) in regions.into_iter().enumerate() {
-        let columns = axis + 1 == rank;
-        let k = members.len();
-        let (coord, end) = (if columns { "n" } else { "m" }, offset + width);
-        let size = width / k;
-        let mut seeds = Vec::new();
-
-        if flags.halves() {
-            writeln!(code, "    r{r}_c = {coord}\n    r{r}_keep = mask").unwrap();
-
-            for (member, &v) in members.iter().enumerate() {
-                writeln!(code, "    r{r}_a{member} = value[{member}].to({t})").unwrap();
-                seeds.push((v, format!("r{r}_a{member}")));
-            }
-
-            writeln!(code, "    r{r}_local = r{r}_c").unwrap();
-        } else if interleaved {
-            let tiles = split(&mut code, "value", k, columns, &format!("r{r}_value"));
-            let c = split(&mut code, coord, k, columns, &format!("r{r}_coord"));
-            let keep = split(&mut code, "mask", k, columns, &format!("r{r}_mask"));
-
-            writeln!(
-                code,
-                "    r{r}_c = {}\n    r{r}_keep = {} & (r{r}_c >= {offset}) & (r{r}_c < {end})\n    r{r}_local = (r{r}_c - {offset}) // {k}",
-                c[0], keep[0]
-            )
-            .unwrap();
-
-            for (member, &v) in members.iter().enumerate() {
-                writeln!(code, "    r{r}_a{member} = {}.to({t})", tiles[member]).unwrap();
-                seeds.push((v, format!("r{r}_a{member}")));
-            }
-        } else {
-            writeln!(
-                code,
-                "    r{r}_c = {coord}\n    r{r}_keep = mask & (r{r}_c >= {offset}) & (r{r}_c < {end})\n    r{r}_local = r{r}_c - {offset}\n    r{r}_a0 = value.to({t})"
-            )
-            .unwrap();
-
-            seeds.push((members[0], format!("r{r}_a0")));
-        }
-
-        // Flat index of the tile within the region's own (narrower) output.
-        let index = match columns {
-            true => format!("l * {} + m * {size} + r{r}_local", rows * size),
-            false => format!("l * {} + r{r}_local * {cols} + n", size * cols),
-        };
-
-        let mut emitter = Emitter::new(body, by_value);
-        emitter.locals = locals;
-        emitter.mask = format!("r{r}_keep");
-
-        for (v, tile) in seeds {
-            emitter.registers.insert(v);
-            emitter.values.insert((v, "j".into()), tile);
-        }
-
-        writeln!(emitter.lines, "    j = {index}").unwrap();
-        let mut stores = String::new();
-
-        for (o, &v) in body.outputs().iter().enumerate() {
-            if !depends(body, v, &members) {
-                continue;
-            }
-
-            let (shape, strides) = outputs[o];
-
-            // An expansion (as on MPS) stores its two dot-shaped operands into their slots of the
-            // concatenation, `width` elements apart in runs of `width`.
-            let parts = match (o, gemm_expanded(body, dot)) {
-                (0, Some(([a, b], _))) => {
-                    let concat = body.nodes().iter().find(|n| n.output == v);
-
-                    let Some(Primitive::Concatenate { dimension, .. }) =
-                        concat.map(|n| &n.primitive)
-                    else {
-                        unreachable!("an expansion's concatenation")
-                    };
-
-                    let product = &body.type_of(dot.output).shape;
-                    let width: usize = product[(*dimension).min(product.len())..].iter().product();
-
-                    writeln!(
-                        stores,
-                        "    jx0 = (j // {width}) * {} + j % {width}\n    jx1 = jx0 + {width}",
-                        2 * width
-                    )
-                    .unwrap();
-
-                    vec![(a, "jx0"), (b, "jx1")]
-                }
-                _ => vec![(v, "j")],
-            };
-
-            for (v, index) in parts {
-                let value = emitter.value(v, "j".into());
-
-                writeln!(
-                    stores,
-                    "    tl.store({} + {}, {value}, mask=r{r}_keep)",
-                    pointers[o],
-                    stored_at(index, shape, strides)
-                )
-                .unwrap();
-            }
-        }
-
-        locals = emitter.locals;
-        let block = format!("{}{stores}", emitter.lines);
-
-        // Skip regions the tile doesn't overlap; in halves mode each tile covers every part.
-        match flags.halves() {
-            false => write!(
-                code,
-                "    if (tl.max(r{r}_c) >= {offset}) & (tl.min(r{r}_c) < {end}):\n{}",
-                indented(&block)
-            ),
-            true => write!(code, "{block}"),
-        }
-        .unwrap();
-    }
+    code += &product.stores(body, by_value, [rows, cols], &store);
 
     named(
         "epilogue",
@@ -489,6 +366,163 @@ pub(crate) fn epilogue(
             {code}"
         ),
     )
+}
+
+/// What a GEMM-style epilogue starts from: the `value` its accumulator tile holds (a dot's product, or a
+/// split-K combine's sum through its rounding cast), the column `regions` its readers split it into, how the
+/// accumulator is shaped for them (`flags`), and an expansion's two concatenated operands.
+pub(crate) struct Product<'a> {
+    pub(crate) value: Var,
+    pub(crate) regions: Option<Vec<Columns<'a>>>,
+    pub(crate) flags: EpilogueFlags,
+    pub(crate) expanded: Option<([Var; 2], crate::codegen::regions::Expansion)>,
+}
+
+impl Product<'_> {
+    /// Lines computing `body`'s outputs from the accumulator tile `value` (rows `m`, columns `n` of batch `l`
+    /// of a `[rows, cols]` product, `mask` its valid elements, `in{k}` the inputs) and storing each through
+    /// `store(output, index, value, mask)`, one guarded block per output column region.
+    pub(crate) fn stores(
+        &self,
+        body: &Graph,
+        by_value: &[bool],
+        [rows, cols]: [usize; 2],
+        store: &dyn Fn(usize, &str, &str, &str) -> String,
+    ) -> String {
+        let t = triton_type(body.type_of(self.value).dtype).expect("a Triton dtype");
+        let rank = body.type_of(self.value).shape.len();
+        let flags = self.flags;
+        let mut code = String::new();
+
+        let regions: Vec<(usize, usize, usize, Vec<Var>, bool)> = match &self.regions {
+            Some(regions) => regions
+                .iter()
+                .map(|c| {
+                    let interleaved = c.k() > 1 && !flags.halves();
+                    (c.axis, c.offset, c.width, c.members(), interleaved)
+                })
+                .collect(),
+            None => vec![(rank - 1, 0, cols, vec![self.value], false)],
+        };
+
+        let mut locals = 0;
+
+        for (r, (axis, offset, width, members, interleaved)) in regions.into_iter().enumerate() {
+            let columns = axis + 1 == rank;
+            let k = members.len();
+            let (coord, end) = (if columns { "n" } else { "m" }, offset + width);
+            let size = width / k;
+            let mut seeds = Vec::new();
+
+            if flags.halves() {
+                writeln!(code, "    r{r}_c = {coord}\n    r{r}_keep = mask").unwrap();
+
+                for (member, &v) in members.iter().enumerate() {
+                    writeln!(code, "    r{r}_a{member} = value[{member}].to({t})").unwrap();
+                    seeds.push((v, format!("r{r}_a{member}")));
+                }
+
+                writeln!(code, "    r{r}_local = r{r}_c").unwrap();
+            } else if interleaved {
+                let tiles = split(&mut code, "value", k, columns, &format!("r{r}_value"));
+                let c = split(&mut code, coord, k, columns, &format!("r{r}_coord"));
+                let keep = split(&mut code, "mask", k, columns, &format!("r{r}_mask"));
+
+                writeln!(
+                    code,
+                    "    r{r}_c = {}\n    r{r}_keep = {} & (r{r}_c >= {offset}) & (r{r}_c < {end})\n    r{r}_local = (r{r}_c - {offset}) // {k}",
+                    c[0], keep[0]
+                )
+                .unwrap();
+
+                for (member, &v) in members.iter().enumerate() {
+                    writeln!(code, "    r{r}_a{member} = {}.to({t})", tiles[member]).unwrap();
+                    seeds.push((v, format!("r{r}_a{member}")));
+                }
+            } else {
+                writeln!(
+                    code,
+                    "    r{r}_c = {coord}\n    r{r}_keep = mask & (r{r}_c >= {offset}) & (r{r}_c < {end})\n    r{r}_local = r{r}_c - {offset}\n    r{r}_a0 = value.to({t})"
+                )
+                .unwrap();
+
+                seeds.push((members[0], format!("r{r}_a0")));
+            }
+
+            // Flat index of the tile within the region's own (narrower) output.
+            let index = match columns {
+                true => format!("l * {} + m * {size} + r{r}_local", rows * size),
+                false => format!("l * {} + r{r}_local * {cols} + n", size * cols),
+            };
+
+            let mut emitter = Emitter::new(body, by_value);
+            emitter.locals = locals;
+            emitter.mask = format!("r{r}_keep");
+
+            for (v, tile) in seeds {
+                emitter.registers.insert(v);
+                emitter.values.insert((v, "j".into()), tile);
+            }
+
+            writeln!(emitter.lines, "    j = {index}").unwrap();
+            let mut stores = String::new();
+
+            for (o, &v) in body.outputs().iter().enumerate() {
+                if !depends(body, v, &members) {
+                    continue;
+                }
+
+                // An expansion (as on MPS) stores its two dot-shaped operands into their slots of the
+                // concatenation, `width` elements apart in runs of `width`.
+                let parts = match (o, self.expanded) {
+                    (0, Some(([a, b], _))) => {
+                        let concat = body.nodes().iter().find(|n| n.output == v);
+
+                        let Some(Primitive::Concatenate { dimension, .. }) =
+                            concat.map(|n| &n.primitive)
+                        else {
+                            unreachable!("an expansion's concatenation")
+                        };
+
+                        let product = &body.type_of(self.value).shape;
+                        let width: usize = product[(*dimension).min(product.len())..].iter().product();
+
+                        writeln!(
+                            stores,
+                            "    jx0 = (j // {width}) * {} + j % {width}\n    jx1 = jx0 + {width}",
+                            2 * width
+                        )
+                        .unwrap();
+
+                        vec![(a, "jx0"), (b, "jx1")]
+                    }
+                    _ => vec![(v, "j")],
+                };
+
+                for (v, index) in parts {
+                    let value = emitter.value(v, "j".into());
+                    let keep = format!("r{r}_keep");
+                    writeln!(stores, "    {}", store(o, index, &value, &keep)).unwrap();
+                }
+            }
+
+            locals = emitter.locals;
+            let block = format!("{}{stores}", emitter.lines);
+
+            // Skip regions the tile doesn't overlap; in halves mode each tile covers every part.
+            match flags.halves() {
+                false => write!(
+                    code,
+                    "    if (tl.max(r{r}_c) >= {offset}) & (tl.min(r{r}_c) < {end}):\n{}",
+                    indented(&block)
+                ),
+                true => write!(code, "{block}"),
+            }
+            .unwrap();
+        }
+
+        code
+    }
 }
 
 /// Tile shape and launch parameters for one Triton GEMM candidate.
@@ -571,61 +605,6 @@ pub(crate) const CONFIGS: [Config; 7] = [
 
 /// Index into `CONFIGS` used when autotuning is off.
 pub(crate) const UNTUNED: usize = 2;
-
-/// Tiles a split-K GEMM aims for: on an H100, outputs of 64 or more 128x128 tiles already keep the
-/// GPU busy (a 1024x1024 bfloat16 matmul is slower split), while 16 tiles gain about 2x.
-const SPLIT_TARGET: usize = 128;
-
-/// K chunks the GEMM of `[batch, m, k, n]` sizes runs split into (`split_k_kernel.py`), counting tiles of the
-/// untuned config whatever tile it runs with, so the chunks (and the sum's rounding) don't depend on tuning:
-/// unbatched products of few tiles and a long K only (`passes::dot::split_k`'s `chunks`).
-pub(crate) fn split_k([l, m, k, n]: [usize; 4]) -> Option<usize> {
-    let tile = CONFIGS[UNTUNED];
-    let tiles = m.div_ceil(tile.block_m) * n.div_ceil(tile.block_n);
-    (l == 1).then(|| crate::graph_compiler::passes::dot::split_k::chunks(tiles, SPLIT_TARGET, k))?
-}
-
-/// Whether `body`'s GEMM runs split over K (`split_k`, when the compiler's `split_k` is on): its
-/// `[batch, m, k, n]` sizes read from its dot's types.
-pub(crate) fn splits(body: &Graph) -> bool {
-    let Some(Node {
-        primitive:
-            Primitive::DotGeneral {
-                lhs_batch,
-                lhs_contracting,
-                ..
-            },
-        inputs,
-        ..
-    }) = gemm_dot(body)
-    else {
-        return false;
-    };
-
-    let (lhs, rhs) = (body.type_of(inputs[0]), body.type_of(inputs[1]));
-    let product = |dims: &[usize]| dims.iter().map(|&d| lhs.shape[d]).product::<usize>();
-    let (l, k) = (product(lhs_batch), product(lhs_contracting));
-
-    split_k([l, lhs.numel() / (l * k), k, rhs.numel() / (l * k)]).is_some()
-}
-
-/// Columns of a split-K combine's block.
-const COMBINE_COLUMNS: usize = 128;
-
-/// Fewest rows of a combine's block whose epilogue splits rows into interleaved members: whole tuples.
-const LEAST_COMBINE_ROWS: usize = 16;
-
-/// Most rows of a combine's block.
-const COMBINE_ROWS: usize = 32;
-
-/// The `[rows, columns]` block a split-K combine sums and runs the epilogue on, for a product (or each of
-/// its halves) of `rows` rows: as many rows as it has, up to `COMBINE_ROWS`, so a decode step's single row
-/// computes its epilogue (a rotary's cos and sin) once, not for masked rows too. An epilogue splitting
-/// rows into interleaved members (`interleaved_rows`) takes at least `LEAST_COMBINE_ROWS`.
-pub(crate) fn combine_block(rows: usize, interleaved_rows: bool) -> [usize; 2] {
-    let least = if interleaved_rows { LEAST_COMBINE_ROWS } else { 1 };
-    [rows.next_power_of_two().clamp(least, COMBINE_ROWS), COMBINE_COLUMNS]
-}
 
 /// Widest row a GEMM's tile holds whole for a row epilogue (`BLOCK_SIZE_N`); wider products are written
 /// and normalized by a row kernel. On an H100 (bf16, autotuned) the fused kernel matches a GEMM and a
@@ -726,10 +705,8 @@ crate::autotune::python::config_class! {
 }
 
 /// The Triton GEMM, running a matmul, a GEMM fusion (with its epilogue, or a row epilogue) or a linear
-/// cross-entropy; a GEMM of few tiles and a long K split over K chunks with `split_k` (the compiler's flag).
-pub(crate) struct Gemm {
-    pub(crate) split_k: bool,
-}
+/// cross-entropy.
+pub(crate) struct Gemm;
 
 impl crate::codegen::kernel::Kernel for Gemm {
     type Step = TritonStep;
@@ -754,6 +731,6 @@ impl crate::codegen::kernel::Kernel for Gemm {
         config: Option<&Config>,
         (inputs, out, outs): &Tensors,
     ) -> Result<(), String> {
-        launch::gemm(step, inputs, out, outs, config, self.split_k)
+        launch::gemm(step, inputs, out, outs, config)
     }
 }

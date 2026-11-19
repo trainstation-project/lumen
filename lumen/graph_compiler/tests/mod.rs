@@ -1256,19 +1256,6 @@ fn preserve_precision_drops_forward_round_trips() {
     );
 }
 
-/// The Triton GEMM splits K itself: an unbatched product of few tiles and a long K into power-of-two chunks
-/// (8 at most, as the MPS pass), counted on the untuned tile; many tiles, a short K or a batch run whole.
-#[test]
-fn triton_gemm_splits_long_k_of_few_tiles() {
-    use crate::codegen::dot_general::triton::split_k;
-
-    assert_eq!(split_k([1, 8, 4096, 256]), Some(8));
-    assert_eq!(split_k([1, 1, 2048, 3072]), Some(8));
-    assert_eq!(split_k([1, 1024, 4096, 1024]), None);
-    assert_eq!(split_k([1, 8, 1024, 256]), None);
-    assert_eq!(split_k([2, 8, 4096, 256]), None);
-}
-
 /// Each device's default pass list is the passes it implements (picked over the identity pass), in the one order:
 /// the CPU only simplifies, CuTe merges dots and fuses attention, elementwise work and GEMM epilogues, Triton and TPU run their own versions.
 #[test]
@@ -1305,6 +1292,7 @@ fn devices_run_the_passes_they_implement() {
             "simplify",
             "swap_pairs",
             "dot_strength",
+            "split_k",
             "dynamic_update_slices",
             "normalization_diamonds",
             "place_concats",

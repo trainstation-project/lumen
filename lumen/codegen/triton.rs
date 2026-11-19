@@ -7,7 +7,7 @@ use crate::codegen::attention::triton::FlashAttention;
 use crate::codegen::dot_general::triton::Gemm;
 use crate::codegen::elementwise::triton::Loop;
 use crate::codegen::kernel::Runner;
-use crate::codegen::kinds::{gemm_dot, reduction_root};
+use crate::codegen::kinds::{combine_root, gemm_dot, reduction_root};
 use crate::codegen::layout::{TILE, transpose_tiling};
 use crate::codegen::reduction::ReductionCodegen;
 use crate::codegen::row::RowCodegen;
@@ -17,7 +17,7 @@ use crate::codegen::scatter_add::triton::launch::Scatter;
 use crate::codegen::utils::triton as codegen;
 use crate::graph::{Graph, Node, Primitive, UPDATES};
 use crate::graph_compiler::device::{Device, DeviceModule, Triton};
-use crate::graph_compiler::passes::fusion::triton::{fusible, named};
+use crate::graph_compiler::passes::fusion::triton::{COMBINE, fusible, named};
 use crate::graph_compiler::passes::horizontal::segments;
 use crate::graph_compiler::{Options, plan_options, positions};
 use crate::plan::step::Tensors;
@@ -167,22 +167,21 @@ pub(crate) const ROW: &str = "row";
 /// Triton's plan of `plan`: each step with its loop kernel (none for a step another kernel runs).
 pub(crate) fn codegen(plan: CpuPlan, options: &Options) -> Result<TritonPlan, String> {
     let deterministic = options.config.deterministic;
-    let split_k = options.config.split_k;
 
     plan.map(|step| {
         let code = loop_kernel(&step, deterministic)?;
         let base = step.into_base();
-        let kernel = kernel_of(&base, code.is_some(), split_k);
+        let kernel = kernel_of(&base, code.is_some());
         Ok(TritonStep::new(base, code, kernel))
     })
 }
 
-/// The kernel `step` runs: flash attention, the GEMM (split over K with `split_k`), a collective or a wait, else
-/// its generated loop kernel (when codegen generated one: `looped`), else none (it fails when it runs).
-fn kernel_of(step: &StepBase, looped: bool, split_k: bool) -> Arc<dyn Runner<TritonStep, Tensors>> {
+/// The kernel `step` runs: flash attention, the GEMM, a collective or a wait, else its generated loop kernel (when
+/// codegen generated one: `looped`), else none (it fails when it runs).
+fn kernel_of(step: &StepBase, looped: bool) -> Arc<dyn Runner<TritonStep, Tensors>> {
     match &step.primitive {
         p if crate::codegen::attention::triton::launch::is_attention(p) => Arc::new(FlashAttention),
-        _ if crate::codegen::dot_general::triton::launch::is_gemm(step) => Arc::new(Gemm { split_k }),
+        _ if crate::codegen::dot_general::triton::launch::is_gemm(step) => Arc::new(Gemm),
         p if p.is_collective() => Arc::new(Collective),
         Primitive::DeviceWait | Primitive::HostWait => Arc::new(Wait),
         Primitive::Fusion { .. }
@@ -251,6 +250,13 @@ pub(crate) fn loop_kernel(step: &StepBase, deterministic: bool) -> Result<Option
 
             (r.name, r.source, r.lanes, r.splits)
         }
+        Primitive::Fusion { name, body, .. } if name == COMBINE => {
+            let root = combine_root(body).expect("a split-K combine's sum");
+            let r = crate::codegen::reduction::triton::split_k_combine(body, &by_value, root)
+                .map_err(|e| format!("{}: {e}", step.label))?;
+
+            (r.name, r.source, r.lanes, r.splits)
+        }
         Primitive::Fusion { body, .. } => match reduction_root(body) {
             Some(root) => {
                 let r = codegen::Triton::reduction(body, &by_value, root)
@@ -306,7 +312,9 @@ pub(crate) fn loop_kernel(step: &StepBase, deterministic: bool) -> Result<Option
 
     // Only an elementwise fusion's outputs (a horizontal fusion's) split the grid; a row's are one row each.
     let segments = match &step.primitive {
-        Primitive::Fusion { name, body, .. } if name != ROW && reduction_root(body).is_none() => {
+        Primitive::Fusion { name, body, .. }
+            if name != ROW && name != COMBINE && reduction_root(body).is_none() =>
+        {
             segments(body)
         }
         _ => Vec::new(),
@@ -337,7 +345,7 @@ pub(crate) fn loop_kernel(step: &StepBase, deterministic: bool) -> Result<Option
             })
         }
         Primitive::Fusion { name, body, .. }
-            if name != UPDATES && name != ROW && reduction_root(body).is_none() =>
+            if name != UPDATES && name != ROW && name != COMBINE && reduction_root(body).is_none() =>
         {
             match transpose_tiling(body) {
                 Some(tiling) => Some(Template::Transpose {

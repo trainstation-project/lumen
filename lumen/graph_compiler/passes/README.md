@@ -42,7 +42,7 @@ pass or the identity pass, which the pipeline skips.
 14. `merge_dots` (`MergeDotsLate`) - dot merging after simplification, packing whole vector lanes [tpu].
 15. `neural_engine` - offload float16 GEMM regions over fixed weights to the Apple Neural Engine [mps].
 16. `linear_reordering` - move a per-row or per-column factor of a matmul operand to its output [mps, triton].
-17. `split_k` - split long-K, few-tile matmuls into partial products over K chunks [mps].
+17. `split_k` - split long-K, few-tile matmuls into partial products over K chunks [mps, triton].
 18. `canonicalize_dots` - transpose dot operands into the layout the matmul kernels read [mps, tpu].
 19. `normalization_diamonds` (`FusedDiamonds`) - replace normalization rows with `row` fusions [tpu].
 20. `dot_rows` - fuse a matmul into the `row` fusion that reads its whole rows [tpu].

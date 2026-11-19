@@ -18,7 +18,8 @@ pub(super) struct DotEpilogues {
     pub(super) aux: Vec<Option<usize>>,
 }
 
-/// Assigns each float GEMM the longest elementwise chain after it that can run in its epilogue.
+/// Assigns each float GEMM the longest elementwise chain after it that can run in its epilogue; with
+/// `combine_epilogues`, a split-K combine (`combine`) too, as its dot's GEMM would unsplit.
 pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], backend: &Backend) -> DotEpilogues {
     let (graph, nodes, n) = (a.graph, a.nodes, a.n);
 
@@ -53,15 +54,25 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], backend: &Backend) -> Do
 
         let dot = matches!(node.primitive, Primitive::DotGeneral { .. })
             && node.inputs.iter().all(|&v| float(v))
-            && float(node.output);
+            && float(node.output)
+            && (backend.dot_epilogue)(graph, node);
 
-        if !backend.contraction_epilogues
-            || !live[i]
-            || !dot
-            || !(backend.dot_epilogue)(graph, node)
-        {
+        let combine = backend.combine_epilogues && combine(a, i);
+
+        if !backend.contraction_epilogues || !live[i] || !(dot || combine) {
             continue;
         }
+
+        // The value the epilogue starts from and the host's own nodes: a dot's product, or a combine's sum
+        // through the cast rounding it (its dot's output dtype, unsplit).
+        let (value, own) = match combine {
+            true => {
+                let value = crate::codegen::regions::combine_value(graph, node);
+                let cast = producer[value].filter(|&c| c != i);
+                (value, std::iter::once(i).chain(cast).collect::<Vec<_>>())
+            }
+            false => (node.output, vec![i]),
+        };
 
         let in_row = |u: usize| rows.iter().any(|r| r.root == u || r.inner.contains(&u));
 
@@ -75,11 +86,14 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], backend: &Backend) -> Do
 
         let pair = crate::codegen::regions::gemm_pair(graph, node);
 
+        let regions = match combine {
+            true => crate::codegen::regions::combine_regions(graph, value),
+            false => crate::codegen::regions::gemm_regions(graph, node).filter(|_| pair.is_none()),
+        };
+
         // When readers split the output into column regions, grow each region separately and
         // keep the largest assignment whose region outputs all fit.
-        if let Some(regions) =
-            crate::codegen::regions::gemm_regions(graph, node).filter(|_| pair.is_none())
-        {
+        if let Some(regions) = regions {
             let index_of = |v: Var| producer[v].expect("a node's value");
 
             // Seed each region with its slicing nodes back to the dot.
@@ -97,7 +111,7 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], backend: &Backend) -> Do
                             }
 
                             match producer[nodes[k].inputs[0]] {
-                                Some(p) if p != i => k = p,
+                                Some(p) if !own.contains(&p) => k = p,
                                 _ => break,
                             }
                         }
@@ -121,9 +135,8 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], backend: &Backend) -> Do
                 let mut ends = Vec::new();
 
                 for (c, set) in regions.iter().zip(sets) {
-                    let size = graph.type_of(node.output).numel()
-                        / graph.type_of(node.output).shape[c.axis]
-                        * c.size();
+                    let size =
+                        graph.type_of(value).numel() / graph.type_of(value).shape[c.axis] * c.size();
 
                     let outside = set.iter().copied().filter(|&k| {
                         let v = nodes[k].output;
@@ -159,6 +172,7 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], backend: &Backend) -> Do
             let mut best = fused(&sets).map(|f| (sets.clone(), f));
             let mut depends = vec![false; n];
             depends[node.output] = true;
+            depends[value] = true;
 
             for (u, un) in nodes.iter().enumerate().skip(i + 1) {
                 depends[un.output] = un.inputs.iter().any(|&v| depends[v]);
@@ -202,7 +216,11 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], backend: &Backend) -> Do
 
             if let Some((sets, (ends, main))) = best {
                 (dot_end[i], dot_of[main]) = (Some(main), Some(i));
-                claimed[i] = true;
+
+                for &k in &own {
+                    claimed[k] = true;
+                    in_epilogue[k] = k != i;
+                }
 
                 for &k in sets.iter().flatten() {
                     claimed[k] = true;
@@ -224,15 +242,16 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], backend: &Backend) -> Do
         let pair: Option<[usize; 2]> = pair
             .map(|(a, b)| [a.output, b.output].map(|v| producer[v].expect("a slice of the dot")));
 
-        let mut taken = vec![i];
+        let mut taken = own.clone();
         let (mut after, mut depends) = (vec![false; n], vec![false; n]);
         (after[node.output], depends[node.output]) = (true, true);
+        (after[value], depends[value]) = (true, true);
         let mut end = None;
 
         for (u, un) in nodes.iter().enumerate().skip(i + 1) {
             depends[un.output] = un.inputs.iter().any(|&v| depends[v]);
 
-            if !live[u] || !un.inputs.iter().any(|&v| after[v]) {
+            if !live[u] || !un.inputs.iter().any(|&v| after[v]) || own.contains(&u) {
                 continue;
             }
 
@@ -375,4 +394,27 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], backend: &Backend) -> Do
         inside: in_epilogue,
         aux: dot_aux,
     }
+}
+
+/// Whether node `i` is a split-K combine: a float sum over axis 0 (the K chunks, the dot's leading batch dim) of
+/// a batched dot's products that only it reads.
+fn combine(a: &Analysis, i: usize) -> bool {
+    let (graph, node) = (a.graph, &a.nodes[i]);
+
+    let Primitive::ReduceSum { axes, .. } = &node.primitive else {
+        return false;
+    };
+
+    let products = node.inputs[0];
+
+    let batched = a.producer[products].is_some_and(|d| {
+        matches!(&a.nodes[d].primitive, Primitive::DotGeneral { lhs_batch, .. } if !lhs_batch.is_empty())
+    });
+
+    *axes == [0]
+        && batched
+        && a.users[products] == [i]
+        && !a.is_output[products]
+        && graph.type_of(node.output).dtype.is_float()
+        && a.fusible[i]
 }

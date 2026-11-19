@@ -13,10 +13,12 @@ and the autotuner (`lumen/autotune`) picks a config for each tuned kernel.
 - `triton.rs`: Triton codegen, the generated loop kernel type (`Kernel`, `Template`, `Constexpr`) and its `Device` impl.
 - `mps.rs`: Metal codegen, the kernel shape each fused body lowers to, and MPS's `Device` lowering.
 - `tpu.rs`: TPU (Pallas) codegen: the per-step `Kernel` spec and the `Pallas`, `Gather` and `Nothing` kernels.
-- `kinds.rs`: tells fused bodies apart from the body alone: `gemm_dot`, `reduction_root`, `row_reductions`,
-  `row_partials`.
+- `kinds.rs`: tells fused bodies apart from the body alone: `gemm_dot`, `reduction_root`, `combine_root` (a
+  split-K combine: the only reduction, a sum over at most `MAX_SPLIT` chunks of a body input, every output
+  computed from it), `row_reductions`, `row_partials`.
 - `regions.rs`: splits a GEMM's output into column regions by its readers so each region's epilogue fuses into the
-  GEMM (`gemm_regions`, `gemm_pair`, `gemm_expanded`, `ROW_COLUMNS`).
+  GEMM (`gemm_regions`, `gemm_pair`, `gemm_expanded`, `ROW_COLUMNS`); a split-K combine's value
+  (`combine_value`, its sum through the rounding cast) splits the same way (`combine_regions`).
 
 ## Subfolders
 

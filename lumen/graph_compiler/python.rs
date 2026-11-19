@@ -421,9 +421,7 @@ fn current(t: &crate::Tensor) {
     }
 }
 
-/// Launches lumen's Triton GEMM on `[a, b, out]` with `sizes`, the tile `config`, and the fused epilogue; with
-/// `split`, one of the split-K kernels (`split_k_kernel.py`): the chunks' products, or their combine.
-#[allow(clippy::too_many_arguments)]
+/// Launches lumen's Triton GEMM on `[a, b, out]` with `sizes`, the tile `config`, and the fused epilogue.
 fn triton_gemm(
     tensors: [&crate::Tensor; 3],
     sizes: [usize; 4],
@@ -432,17 +430,10 @@ fn triton_gemm(
     functions: &[crate::runtime::kernel::triton::Function],
     launches: &crate::runtime::kernel::triton::Launches,
     epilogue: &crate::codegen::dot_general::triton::launch::Epilogue,
-    split: Option<&crate::codegen::dot_general::triton::launch::Split>,
 ) -> Result<(), String> {
-    let (module, function, kernel) = match split {
-        None => ("gemm_kernel", "dot_general", "gemm_kernel"),
-        Some(s) if s.combine.is_none() => ("split_k_kernel", "split_k", "partials_kernel"),
-        Some(_) => ("split_k_kernel", "split_k", "combine_kernel"),
-    };
-
     crate::profiler::launched::launched("dot_general", || {
         let template = format!(
-            "# @triton.jit: lumen/codegen/dot_general/triton/{module}.py's {kernel}, BLOCK_SIZE_M={} BLOCK_SIZE_N={} BLOCK_SIZE_K={} GROUP_SIZE_M={} stages={} warps={}\n",
+            "# @triton.jit: lumen/codegen/dot_general/triton/gemm_kernel.py's kernel, BLOCK_SIZE_M={} BLOCK_SIZE_N={} BLOCK_SIZE_K={} GROUP_SIZE_M={} stages={} warps={}\n",
             config.block_m,
             config.block_n,
             config.block_k,
@@ -466,47 +457,37 @@ fn triton_gemm(
             .iter()
             .map(|t| PyTensor::wrap(t.clone()))
             .collect();
-        let config = (
-            config.block_m,
-            config.block_n,
-            config.block_k,
-            config.group_m,
-            config.stages,
-            config.warps,
-        );
-        let flags = (
-            epilogue.flags.group,
-            epilogue.flags.interleaved,
-            epilogue.flags.rows,
-        );
-        let module = py.import(format!("lumen.codegen.dot_general.triton.{module}"))?;
-        let common = (
-            tensors,
-            sizes,
-            dtype_name(accum_dtype),
-            config,
-            triton_functions(functions),
-            extra,
-            epilogue.scalars,
-            flags,
-        );
-
-        match split {
-            None => module.getattr(function)?.call(common, kwargs.as_ref()),
-            Some(s) => {
-                let (t, si, a, c, f, e, sc, fl) = common;
-                let split = (s.chunks, PyTensor::wrap(s.partials.clone()), s.combine);
-                module
-                    .getattr(function)?
-                    .call((t, si, a, c, f, e, sc, fl, split), kwargs.as_ref())
-            }
-        }
-        .map(Bound::unbind)
+        py.import("lumen.codegen.dot_general.triton.gemm_kernel")?
+            .getattr("dot_general")?
+            .call(
+                (
+                    tensors,
+                    sizes,
+                    dtype_name(accum_dtype),
+                    (
+                        config.block_m,
+                        config.block_n,
+                        config.block_k,
+                        config.group_m,
+                        config.stages,
+                        config.warps,
+                    ),
+                    triton_functions(functions),
+                    extra,
+                    epilogue.scalars,
+                    (
+                        epilogue.flags.group,
+                        epilogue.flags.interleaved,
+                        epilogue.flags.rows,
+                    ),
+                ),
+                kwargs.as_ref(),
+            )
+            .map(Bound::unbind)
     };
 
     #[cfg(lumen_cuda_linked)]
     {
-        use crate::codegen::triton::Constexpr;
         use crate::runtime::kernel::cuda::driver::Value;
         let [l, m, _, n] = sizes;
         let flags = epilogue.flags;
@@ -521,6 +502,7 @@ fn triton_gemm(
         } else {
             n
         };
+        let programs = grid_m.div_ceil(config.block_m) * grid_n.div_ceil(config.block_n);
         let extra =
             epilogue
                 .tensors
@@ -530,59 +512,18 @@ fn triton_gemm(
                     true => Value::scalar(t),
                     false => Value::of(t),
                 });
-        // Each kernel's runtime parameters in declaration order, and its grid.
-        let (values, grid): (Vec<Value>, [usize; 3]) = match split {
-            None => (
-                tensors
-                    .iter()
-                    .map(|t| Value::of(t))
-                    .chain(extra)
-                    .chain(sizes[1..].iter().map(|&s| Value::Int(s as i128)))
-                    .collect(),
-                [
-                    l,
-                    grid_m.div_ceil(config.block_m) * grid_n.div_ceil(config.block_n),
-                    1,
-                ],
-            ),
-            Some(s) => match s.combine {
-                None => (
-                    [tensors[0], tensors[1], s.partials]
-                        .iter()
-                        .map(|t| Value::of(t))
-                        .chain(sizes[1..].iter().map(|&s| Value::Int(s as i128)))
-                        .collect(),
-                    [
-                        l * s.chunks,
-                        grid_m.div_ceil(config.block_m) * grid_n.div_ceil(config.block_n),
-                        1,
-                    ],
-                ),
-                Some([rows, columns]) => (
-                    [s.partials, tensors[2]]
-                        .iter()
-                        .map(|t| Value::of(t))
-                        .chain(extra)
-                        .chain([m, n].map(|s| Value::Int(s as i128)))
-                        .collect(),
-                    [l, grid_m.div_ceil(rows) * grid_n.div_ceil(columns), 1],
-                ),
-            },
-        };
-        let constexprs: Vec<(&'static str, Constexpr)> = match split {
-            None => Vec::new(),
-            Some(s) => vec![
-                ("SPLIT", Constexpr::Int(s.chunks)),
-                ("COMBINE", Constexpr::Ints(s.combine.map_or(Vec::new(), Vec::from))),
-            ],
-        };
+        let values: Vec<Value> = tensors
+            .iter()
+            .map(|t| Value::of(t))
+            .chain(extra)
+            .chain(sizes[1..].iter().map(|&s| Value::Int(s as i128)))
+            .collect();
         let identity = || {
             format!(
-                "{kernel}|{accum_dtype}|{config:?}|{:?}|{:?}|{}|{:?}",
+                "gemm|{accum_dtype}|{config:?}|{:?}|{:?}|{}",
                 (flags.group, flags.interleaved, flags.rows),
                 epilogue.scalars,
-                names(functions),
-                split.map(|s| (s.chunks, s.combine)),
+                names(functions)
             )
         };
         let tiles = [
@@ -593,11 +534,12 @@ fn triton_gemm(
             config.stages,
             config.warps,
         ];
+        let grid = [l, programs, 1];
         if direct(
             launches,
-            kernel,
+            "gemm",
             tiles,
-            &constexprs,
+            &[],
             identity,
             tensors[2],
             &values,

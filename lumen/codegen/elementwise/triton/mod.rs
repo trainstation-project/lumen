@@ -16,12 +16,14 @@ use crate::TensorOptions;
 use crate::codegen::dynamic_slice::DynamicSliceCodegen;
 use crate::codegen::emitter::Emit;
 use crate::codegen::emitter::triton::Emitter;
-use crate::codegen::kinds::reduction_root;
+use crate::codegen::kinds::{combine_root, reduction_root};
+use crate::codegen::reduction::triton::combine_blocks;
 use crate::codegen::layout::{LayoutCodegen, transpose_tiling};
 use crate::codegen::row::triton::{row_count, row_groups, row_looped};
 use crate::codegen::store::triton::load;
 use crate::codegen::store::triton::store;
 use crate::codegen::triton::ROW;
+use crate::graph_compiler::passes::fusion::triton::COMBINE;
 use crate::codegen::triton::{Kernel, Template};
 use crate::codegen::utils::triton as codegen;
 use crate::codegen::utils::triton::*;
@@ -378,6 +380,7 @@ impl crate::codegen::kernel::Kernel for Loop {
         let kernel = match &step.primitive {
             Primitive::Fusion { name, body, .. }
                 if name == ROW && (row_looped(body) || row_groups(body).is_some())
+                    || name == COMBINE
                     || name != ROW && transpose_tiling(body).is_some() =>
             {
                 looped = Kernel {
@@ -391,8 +394,12 @@ impl crate::codegen::kernel::Kernel for Loop {
         };
 
         // Grid size: outputs, or a row fusion's rows (its row groups with partials), or a tiled
-        // transpose's tiles, or lines for a scan (a scatter-add sizes its own launches).
+        // transpose's tiles, or a split-K combine's blocks, or lines for a scan (a scatter-add sizes its own
+        // launches).
         let n = match &step.primitive {
+            Primitive::Fusion { name, body, .. } if name == COMBINE => {
+                combine_root(body).map(|root| combine_blocks(body, root))
+            }
             Primitive::Fusion { name, body, .. } if name == ROW => {
                 Some(row_groups(body).unwrap_or(row_count(body)))
             }

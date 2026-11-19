@@ -89,6 +89,7 @@ fn backend(config: &CompilerConfig) -> Backend {
         row_dot,
         // The Metal GEMM's epilogue functor sees one element, not a thread's pair.
         swap_epilogues: false,
+        combine_epilogues: false,
     }
 }
 

@@ -6,17 +6,17 @@ use crate::codegen::dot_general::GemmCodegen;
 use crate::codegen::dot_general::triton::cross_entropy;
 use crate::codegen::dot_general::triton::{self as codegen, CONFIGS, Config, UNTUNED};
 use crate::codegen::utils::triton::Triton;
-use crate::graph::{Graph, Node, Primitive, intern};
+use crate::graph::{Graph, Node, Primitive};
 use crate::plan::Buffer;
 use crate::plan::StepBase;
-use crate::plan::step::triton::{layouts, traced_as};
+use crate::plan::step::triton::layouts;
 use crate::runtime::kernel::triton::{Function, Launches};
 use crate::tensor::contiguous_strides;
-use crate::{DType, Tensor, TensorOptions};
+use crate::{DType, Tensor};
 
 /// Launches the Triton GEMM on `[lhs, rhs, out]` with `[batch, m, k, n]` sizes, the tile config, the
-/// generated prologue/epilogue jit functions (their compiled kernels kept in the launches), the
-/// epilogue's extra operands and, split-K, which of its two launches.
+/// generated prologue/epilogue jit functions (their compiled kernels kept in the launches) and the
+/// epilogue's extra operands.
 pub type Gemm = fn(
     tensors: [&Tensor; 3],
     sizes: [usize; 4],
@@ -25,18 +25,7 @@ pub type Gemm = fn(
     functions: &[Function],
     launches: &Launches,
     epilogue: &Epilogue,
-    split: Option<&Split>,
 ) -> Result<(), String>;
-
-/// One launch of a split-K GEMM (`split_k_kernel.py`): each of `chunks` K chunks' products written to
-/// `partials` (`[chunks, batch, m, n]` in the accumulator dtype), or, with a `combine` block (`[rows,
-/// columns]`), summed from them in chunk order and run through the epilogue.
-#[cfg_attr(not(feature = "python"), allow(dead_code))]
-pub struct Split<'a> {
-    pub chunks: usize,
-    pub partials: &'a Tensor,
-    pub combine: Option<[usize; 2]>,
-}
 
 /// Extra operands of a fused epilogue.
 #[cfg_attr(not(feature = "python"), allow(dead_code))]
@@ -80,9 +69,6 @@ struct Prepared {
     scalars: Vec<usize>,
     accum: DType,
     launches: Launches,
-    /// What a split's partials and combine are traced as: `dot_general (split-K)`, then the step's label with
-    /// its dot as the chunks' sum, `reduce_sum (split-K)`.
-    split_labels: [&'static str; 2],
 }
 
 /// Generates a GEMM step's prologues and epilogue for the layouts of `inputs`, `out` and `outs`.
@@ -109,7 +95,6 @@ fn prepare(step: &StepBase, inputs: &[Tensor], out: &Tensor, outs: &[Tensor]) ->
             scalars: Vec::new(),
             accum: accum_dtype(&step.primitive),
             launches: Launches::default(),
-            split_labels: split_labels(step.label),
         };
     };
 
@@ -199,17 +184,7 @@ fn prepare(step: &StepBase, inputs: &[Tensor], out: &Tensor, outs: &[Tensor]) ->
         scalars: (0..inputs.len()).filter(|&k| by_value[k]).collect(),
         accum: accum_dtype(&dot.primitive),
         launches: Launches::default(),
-        split_labels: split_labels(step.label),
     }
-}
-
-/// A split-K GEMM step's launch labels from the step's `label`: `dot_general (split-K)` for the chunks'
-/// products, and `label` with its leading `dot_general` read as `reduce_sum (split-K)` for their combine.
-fn split_labels(label: &str) -> [&'static str; 2] {
-    [
-        "dot_general (split-K)",
-        intern(label.replacen("dot_general", "reduce_sum (split-K)", 1)),
-    ]
 }
 
 /// The dot's lhs and rhs among a GEMM fusion's `inputs`.
@@ -224,15 +199,13 @@ fn operands<'a>(body: &Graph, dot: &Node, inputs: &'a [Tensor]) -> (&'a Tensor, 
 
 /// Runs a dot, GEMM-epilogue fusion or linear cross entropy `step` with tile `config` (the untuned one
 /// when `None`), its strided prologues and epilogue generated once per layout of its tensors; secondary
-/// fusion outputs go in `outs`. With `split_k`, a GEMM of few tiles and a long K runs split
-/// (`codegen::split_k`): its chunks' products, then their sum through the epilogue.
+/// fusion outputs go in `outs`.
 pub(crate) fn gemm(
     step: &StepBase,
     inputs: &[Tensor],
     out: &Tensor,
     outs: &[Tensor],
     tuned: Option<&Config>,
-    split_k: bool,
 ) -> Result<(), String> {
     let launch = GEMM
         .get()
@@ -260,66 +233,45 @@ pub(crate) fn gemm(
         _ => CONFIGS[UNTUNED],
     };
 
-    let (tensors, extra) = match &step.primitive {
-        Primitive::Fusion { body, .. } => {
-            let dot = codegen::gemm_dot(body).expect("a GEMM epilogue's dot");
-            let (lhs, rhs) = operands(body, dot, inputs);
-            ([lhs, rhs, out], inputs.iter().chain(outs).cloned().collect())
-        }
-        _ => ([&inputs[0], &inputs[1], out], Vec::new()),
-    };
+    let Primitive::Fusion { body, .. } = &step.primitive else {
+        let tensors = [&inputs[0], &inputs[1], out];
 
-    let epilogue = Epilogue {
-        tensors: &extra,
-        scalars: &prepared.scalars,
-        flags: prepared.flags,
-    };
+        let plain = Epilogue {
+            tensors: &[],
+            scalars: &[],
+            flags: prepared.flags,
+        };
 
-    // A row epilogue reads whole rows of the GEMM's tile, so it runs unsplit.
-    let row = matches!(&step.primitive, Primitive::Fusion { name, .. } if name == DOT_ROW || name == DOT_PARTIALS);
-    let chunks = codegen::split_k(prepared.sizes).filter(|_| split_k && !row);
-
-    let run = |split: Option<&Split>| {
-        launch(
+        return launch(
             tensors,
             prepared.sizes,
             prepared.accum,
             &config,
             &prepared.functions,
             &prepared.launches,
-            &epilogue,
-            split,
-        )
+            &plain,
+        );
     };
 
-    let Some(chunks) = chunks else {
-        return run(None);
+    let dot = codegen::gemm_dot(body).expect("a GEMM epilogue's dot");
+    let (lhs, rhs) = operands(body, dot, inputs);
+    let extra: Vec<Tensor> = inputs.iter().chain(outs).cloned().collect();
+
+    let fused = Epilogue {
+        tensors: &extra,
+        scalars: &prepared.scalars,
+        flags: prepared.flags,
     };
 
-    let [l, m, _, n] = prepared.sizes;
-    let options = TensorOptions::new().dtype(prepared.accum).device(out.device());
-    let partials = unsafe { Tensor::empty(&[chunks * l * m * n], options) };
-
-    // With row halves, the combine's blocks cover the first half's rows.
-    let flags = prepared.flags;
-    let rows = match flags.group > 1 && !flags.interleaved && flags.rows {
-        true => m / flags.group,
-        false => m,
-    };
-
-    let block = codegen::combine_block(rows, flags.interleaved && flags.rows);
-
-    for (combine, label) in [None, Some(block)].into_iter().zip(prepared.split_labels) {
-        let split = Split {
-            chunks,
-            partials: &partials,
-            combine,
-        };
-
-        traced_as(step, label, out, || run(Some(&split)))?;
-    }
-
-    Ok(())
+    launch(
+        [lhs, rhs, out],
+        prepared.sizes,
+        prepared.accum,
+        &config,
+        &prepared.functions,
+        &prepared.launches,
+        &fused,
+    )
 }
 
 /// Accumulator dtype of a `dot_general`.

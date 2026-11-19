@@ -10,7 +10,7 @@ slot in the one pass list (`graph_compiler::pipeline::pipeline!`).
 - `fold_reshapes/` — `FoldDotReshapes`: `dot(reshape(x), w)` becomes `reshape(dot(x, w))`. TPU only.
 - `strength/` — `DotStrength`: dots between vectors become `reduce_sum(x * y)`. MPS, Triton, TPU.
 - `split_k/` — `SplitK`: long-K matmuls with few output tiles become a batched dot over K chunks plus a
-  sum. MPS only, behind `split_k` (Triton's GEMM step splits K itself).
+  sum. MPS and Triton, behind `split_k`.
 - `canonicalize/` — `CanonicalizeDots`: transposes operands a backend's matmul kernel can't read as laid
   out. MPS and TPU. Also exports `matmul_order`, used by MPS's GEMM codegen.
 - `rows/` — fuses a matmul into the normalization `row` fusion that reads its output: `tpu::DotRows`

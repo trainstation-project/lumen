@@ -1,6 +1,7 @@
 //! Finds elementwise epilogues that can run inside the kernel of the reduction feeding them.
 
 use super::analysis::Analysis;
+use super::dot_epilogues::DotEpilogues;
 use super::{Backend, constant, elementwise};
 use crate::graph::Primitive;
 use crate::graph_compiler::passes::diamonds::Row;
@@ -15,12 +16,14 @@ pub(super) struct ReductionEpilogues {
     pub(super) inside: Vec<bool>,
 }
 
-/// For each fusible reduction outside normalization rows, takes the longest following chain of
-/// elementwise ops and reshapes over its result and constants whose intermediates nobody else reads.
+/// For each fusible reduction outside normalization rows and not hosting a GEMM's epilogue (a split-K combine
+/// in `dots`), takes the longest following chain of elementwise ops and reshapes over its result and
+/// constants whose intermediates nobody else reads.
 pub(super) fn reduction_epilogues(
     a: &Analysis,
     rows: &[Row],
     backend: &Backend,
+    dots: &DotEpilogues,
 ) -> ReductionEpilogues {
     let (graph, nodes, n) = (a.graph, a.nodes, a.n);
 
@@ -44,7 +47,9 @@ pub(super) fn reduction_epilogues(
                 .any(|r| r.root == u || r.inner.contains(&u) || r.reductions.contains(&u))
         };
 
-        if !backend.reduction_epilogues || !live[i] || !fusible[i] || !reduction || in_row {
+        let combine = dots.end[i].is_some();
+
+        if !backend.reduction_epilogues || !live[i] || !fusible[i] || !reduction || in_row || combine {
             continue;
         }
 

@@ -76,6 +76,7 @@ fn backend(m: &DeviceModule<'_, Cuda>) -> Backend {
         expansion: |graph, dot, concat| expansion(graph, dot, concat).is_some(),
         row_dot: |_| false,
         swap_epilogues: false,
+        combine_epilogues: false,
     }
 }
 

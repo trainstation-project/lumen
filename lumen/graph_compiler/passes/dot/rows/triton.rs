@@ -3,7 +3,7 @@
 //! reductions' partials over each `tile`-column block of a row as well (`dot_partials`); those are
 //! reduced and the row reads them instead of reducing its rows again, so the product is read once less.
 
-use crate::codegen::dot_general::triton::{partial_tile, splits};
+use crate::codegen::dot_general::triton::partial_tile;
 use crate::codegen::kinds::gemm_dot;
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
 use crate::graph_compiler::device::{DeviceModule, Triton};
@@ -317,13 +317,8 @@ impl CompilerPass<DeviceModule<'_, Triton>> for WideRows {
         let mut wide_of: Vec<Option<Wide>> = (0..nodes.len()).map(|_| None).collect();
         let mut taken = vec![false; nodes.len()];
 
-        // A GEMM running split over K writes its product in its combine, which takes no row partials.
-        let split_k = m.options.config.split_k;
-
         for (r, row) in nodes.iter().enumerate() {
-            let free = |w: &Wide| !taken[w.producer] && !(split_k && splits(&w.gemm));
-
-            if let Some(w) = wide(graph, &producer, (r, row)).filter(free) {
+            if let Some(w) = wide(graph, &producer, (r, row)).filter(|w| !taken[w.producer]) {
                 taken[w.producer] = true;
                 wide_of[r] = Some(w);
             }

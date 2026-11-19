@@ -6,15 +6,16 @@ and before `canonicalize_dots`, behind the `split_k` config flag.
 
 ## Files
 
-- `mod.rs` — the rewrite `split_k(graph, &Rules)` and the `Rules` a backend supplies (built only when MPS is
-  linked, its only user), the `chunks` and `divides` helpers, and `SplitK`, the slot type the pipeline picks
-  per device.
+- `mod.rs` — the shared rewrite `split_k(graph, &Rules)`, the `Rules` a backend supplies, the
+  `divides` helper, and `SplitK`, the slot type the pipeline picks per device.
 - `mps.rs` — MPS rules: tiles counted with the GEMM's `float_groups`, a target of 256 threadgroups, GEMV
   and skinny products of at most 4 rows kept whole, and an MLX-style preferred chunk count for small
   outputs with long K. Exposes `mps::split_k(graph)`, which tests call. Built only when MPS is linked.
-CPU, CUDA, Triton and TPU get the identity pass; MPS runs it only when `config.split_k` is on. Triton's GEMM
-step splits K itself (`codegen::dot_general::triton::split_k`, by `chunks`), so the dot stays whole in the
-graph and its fused epilogue runs in the split's combine.
+- `triton.rs` — Triton rules: tiles of the untuned GEMM config (`CONFIGS[UNTUNED]`), a target of 128
+  tiles, nothing kept whole, no preferred count. Partials are always summed by a reduction, not atomics,
+  so results stay deterministic.
+
+CPU, CUDA and TPU get the identity pass. Both MPS and Triton run it only when `config.split_k` is on.
 
 ## Rewrite
 

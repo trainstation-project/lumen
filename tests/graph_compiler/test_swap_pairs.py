@@ -104,9 +104,9 @@ def compiled_projections(device, weights, args):
 @pytest.mark.parametrize("split_k", [False, True])
 def test_merged_projections_rotate_in_their_gemm_epilogue(device, split_k):
     """Merged query, key and value projections (each member sliced from the product, then rounded) are column
-    regions of one GEMM, so on Triton the queries' and keys' rotary runs in its epilogue: one kernel, also when
-    its long K (a decode step's) runs split, the epilogue then the combine's. On MPS the rotary is its own kernel.
-    The CPU's values on both."""
+    regions of one GEMM, so on Triton the queries' and keys' rotary runs in its epilogue: one kernel. Split over
+    its long K (a decode step's), the chunks' sum (the combine) runs that epilogue instead, regions and all. On
+    MPS the rotary is its own kernel. The CPU's values on both."""
     bf16 = lambda *s, seed, scale=1.0: lumen.from_numpy(rand(*s, seed=seed) * scale).to(dtype="bfloat16")  # noqa: E731
     weights = dict(wq=bf16(512, 2048, seed=0), wk=bf16(128, 2048, seed=1), wv=bf16(128, 2048, seed=2))
     # An input scaled by 1/sqrt(2048) keeps the projections near 1, where 2e-2 is a few bfloat16 ulps (the GEMM's
@@ -122,7 +122,11 @@ def test_merged_projections_rotate_in_their_gemm_epilogue(device, split_k):
         g, w = (lumen.to_numpy(t.to("cpu").to(dtype="float32")) for t in (g, w))
         np.testing.assert_allclose(g, w, rtol=2e-2, atol=2e-2)
     steps = [s["label"] for s in list(f._plans.values())[-1][6][0][0].steps()]
-    if device == "cuda":
+    if device == "cuda" and split_k:
+        partials, combine = steps
+        assert partials == "dot_general (split-K)", steps
+        assert combine.startswith("reduce_sum (split-K)") and combine.count("swap_pairs") == 2, combine
+    elif device == "cuda":
         (label,) = steps
         assert label.startswith("dot_general") and label.count("swap_pairs") == 2, label
     else:

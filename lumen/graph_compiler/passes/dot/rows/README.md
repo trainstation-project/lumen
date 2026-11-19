@@ -36,8 +36,8 @@ inputs the TPU row kernel reads as `Kind::Full` rows, `fits` always true and `th
 Slot right after `fusion`. Enabled when `fuse`, `normalization_diamonds` and `linear_reordering` are all
 on. It handles rows too wide for one GEMM tile (`partial_tile(n)` gives the column tile):
 
-- Matches a `row` fusion fed by a GEMM (a plain dot or a GEMM fusion with its epilogue; with `split_k`, one
-  that runs unsplit) whose output is read whole by the row, with tile-splittable last-axis reductions over the rows' shape
+- Matches a `row` fusion fed by a GEMM (a plain dot or a GEMM fusion with its epilogue) whose output is
+  read whole by the row, with tile-splittable last-axis reductions over the rows' shape
   (`diamonds::tile_reductions`).
 - Replaces the GEMM with a `dot_partials` fusion that writes the row's operand plus each split
   reduction's partials over `tile`-column blocks (`[rows, n / tile]`), then the GEMM's own extra outputs.

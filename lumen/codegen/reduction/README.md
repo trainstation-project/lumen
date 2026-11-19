@@ -25,6 +25,13 @@ generic `Loop` kernel (`elementwise/triton`). The shared helpers are `Tile` (a 2
 outputs on one axis and reduced lanes on the other), `combine`, `reduce_along` and `lowest`.
 `row/triton.rs`, `scan/triton` and `dot_general/triton/row.rs` use them.
 
+`split_k_combine` generates a split-K combine (a `combine` fusion, `kinds::combine_root`): each program
+(`combine_blocks` of them) sums one block of the product over its K chunks, in chunk order so the result is
+deterministic, then runs the epilogue the unsplit GEMM would (`dot_general::triton::Product::stores`): the
+rounding cast, column regions such as a merged projection's members, pair swaps, every output through its
+`STORE` helper. Blocks take as many rows as the product has, up to `COMBINE_ROWS`, and `COMBINE_COLUMNS`
+columns, so a decode step's single row computes its epilogue once.
+
 **MPS (`mps/`).** `kernel.metal` holds the hand-written templates. `reduce` uses one thread per output
 over any strides. `reduce_grouped` uses power-of-two lanes per output and combines them with SIMD
 shuffles or threadgroup memory. `reduce_rows` and `reduce_cols` reduce chunks of contiguous rows or

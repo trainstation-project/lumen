@@ -69,7 +69,8 @@ pub(crate) fn gemm_regions<'a>(body: &'a Graph, dot: &Node) -> Option<Vec<Column
     }
 
     // prefer the column axis when the rhs contributes exactly one free dimension, otherwise try the row axis
-    let along = |axis: usize| regions_along(body, dot, axis).or_else(|| halves(body, dot, axis));
+    let along =
+        |axis: usize| regions_along(body, dot.output, axis).or_else(|| halves(body, dot.output, axis));
 
     let columns = one_free(1, rhs_contracting)
         .then(|| along(rank - 1))
@@ -82,9 +83,33 @@ pub(crate) fn gemm_regions<'a>(body: &'a Graph, dot: &Node) -> Option<Vec<Column
     })
 }
 
-/// Matches exactly two readers that slice the first and second halves of `dot`'s output along `axis`.
-fn halves<'a>(body: &'a Graph, dot: &Node, axis: usize) -> Option<Vec<Columns<'a>>> {
-    let shape = &body.type_of(dot.output).shape;
+/// The column regions of a split-K combine's `value` (`combine_value`): as a GEMM's product's
+/// (`regions_along`), along its last axis, without the gated pair's two halves.
+pub(crate) fn combine_regions(body: &Graph, value: Var) -> Option<Vec<Columns<'_>>> {
+    let rank = body.type_of(value).shape.len();
+    (rank > 0 && !body.outputs().contains(&value)).then(|| regions_along(body, value, rank - 1))?
+}
+
+/// The value a split-K combine (`reduce`, a sum over its chunks) hands its epilogue as a GEMM hands its
+/// product: the rounding cast reading it, when that is its only reader, else the sum itself.
+pub(crate) fn combine_value(body: &Graph, reduce: &Node) -> Var {
+    match readers_of(body, reduce.output).as_slice() {
+        [cast]
+            if matches!(cast.primitive, Primitive::Cast { .. })
+                && body.type_of(cast.output).dtype.is_float()
+                && body.type_of(cast.output).dtype.size_of()
+                    < body.type_of(reduce.output).dtype.size_of()
+                && !body.outputs().contains(&reduce.output) =>
+        {
+            cast.output
+        }
+        _ => reduce.output,
+    }
+}
+
+/// Matches exactly two readers that slice the first and second halves of `product` along `axis`.
+fn halves<'a>(body: &'a Graph, product: Var, axis: usize) -> Option<Vec<Columns<'a>>> {
+    let shape = &body.type_of(product).shape;
     let n = shape[axis];
 
     let half = |node: &Node, start: usize| match &node.primitive {
@@ -99,7 +124,7 @@ fn halves<'a>(body: &'a Graph, dot: &Node, axis: usize) -> Option<Vec<Columns<'a
         _ => false,
     };
 
-    let (a, b) = match readers_of(body, dot.output).as_slice() {
+    let (a, b) = match readers_of(body, product).as_slice() {
         [a, b] if half(a, 0) && half(b, n / 2) => (*a, *b),
         [a, b] if half(b, 0) && half(a, n / 2) => (*b, *a),
         _ => return None,
@@ -115,10 +140,10 @@ fn halves<'a>(body: &'a Graph, dot: &Node, axis: usize) -> Option<Vec<Columns<'a
     })
 }
 
-/// Collects the readers of `dot`'s output that slice disjoint ranges along `axis`, each possibly reshaped into
+/// Collects the readers of `product` that slice disjoint ranges along `axis`, each possibly reshaped into
 /// interleaved `k`-tuples, and returns them when they cover the axis and some region is worth fusing.
-fn regions_along<'a>(body: &'a Graph, dot: &Node, axis: usize) -> Option<Vec<Columns<'a>>> {
-    let shape = &body.type_of(dot.output).shape;
+fn regions_along<'a>(body: &'a Graph, product: Var, axis: usize) -> Option<Vec<Columns<'a>>> {
+    let shape = &body.type_of(product).shape;
     let (rank, n) = (shape.len(), shape[axis]);
     let outputs = body.outputs();
 
@@ -166,7 +191,7 @@ fn regions_along<'a>(body: &'a Graph, dot: &Node, axis: usize) -> Option<Vec<Col
 
     let mut regions: Vec<Columns> = Vec::new();
 
-    for top in readers_of(body, dot.output) {
+    for top in readers_of(body, product) {
         let (start, width, region) = match &top.primitive {
             Primitive::Reshape { .. } => (0, n, group(top, n)?),
             _ => {
@@ -210,7 +235,7 @@ fn regions_along<'a>(body: &'a Graph, dot: &Node, axis: usize) -> Option<Vec<Col
     // embedding); two halves are a gated pair, whose epilogue reads both (`halves`), and regions read only by
     // other kernels (attention reading its projections as views of one buffer) stay unsplit
     let several = regions.len() > 1
-        && halves(body, dot, axis).is_none()
+        && halves(body, product, axis).is_none()
         && regions
             .iter()
             .any(|c| c.members().iter().any(|&v| epilogue_read(body, v)));
