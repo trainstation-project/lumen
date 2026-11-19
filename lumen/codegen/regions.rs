@@ -69,8 +69,9 @@ pub(crate) fn gemm_regions<'a>(body: &'a Graph, dot: &Node) -> Option<Vec<Column
     }
 
     // prefer the column axis when the rhs contributes exactly one free dimension, otherwise try the row axis
-    let along =
-        |axis: usize| regions_along(body, dot.output, axis).or_else(|| halves(body, dot.output, axis));
+    let along = |axis: usize| {
+        regions_along(body, dot.output, axis, false).or_else(|| halves(body, dot.output, axis))
+    };
 
     let columns = one_free(1, rhs_contracting)
         .then(|| along(rank - 1))
@@ -84,10 +85,12 @@ pub(crate) fn gemm_regions<'a>(body: &'a Graph, dot: &Node) -> Option<Vec<Column
 }
 
 /// The column regions of a split-K combine's `value` (`combine_value`): as a GEMM's product's
-/// (`regions_along`), along its last axis, without the gated pair's two halves.
+/// (`regions_along`), along its last axis, without the gated pair's two halves. Readers of the whole value
+/// (prefill attention reading a merged projection's values as a view of it) may remain: the epilogue then
+/// stores the value too.
 pub(crate) fn combine_regions(body: &Graph, value: Var) -> Option<Vec<Columns<'_>>> {
     let rank = body.type_of(value).shape.len();
-    (rank > 0 && !body.outputs().contains(&value)).then(|| regions_along(body, value, rank - 1))?
+    (rank > 0).then(|| regions_along(body, value, rank - 1, true))?
 }
 
 /// The value a split-K combine (`reduce`, a sum over its chunks) hands its epilogue as a GEMM hands its
@@ -141,8 +144,14 @@ fn halves<'a>(body: &'a Graph, product: Var, axis: usize) -> Option<Vec<Columns<
 }
 
 /// Collects the readers of `product` that slice disjoint ranges along `axis`, each possibly reshaped into
-/// interleaved `k`-tuples, and returns them when they cover the axis and some region is worth fusing.
-fn regions_along<'a>(body: &'a Graph, product: Var, axis: usize) -> Option<Vec<Columns<'a>>> {
+/// interleaved `k`-tuples, and returns them when they cover the axis and some region is worth fusing. With
+/// `whole`, readers of the whole product (no such slice) are left to read it as stored.
+fn regions_along<'a>(
+    body: &'a Graph,
+    product: Var,
+    axis: usize,
+    whole: bool,
+) -> Option<Vec<Columns<'a>>> {
     let shape = &body.type_of(product).shape;
     let (rank, n) = (shape.len(), shape[axis]);
     let outputs = body.outputs();
@@ -193,9 +202,17 @@ fn regions_along<'a>(body: &'a Graph, product: Var, axis: usize) -> Option<Vec<C
 
     for top in readers_of(body, product) {
         let (start, width, region) = match &top.primitive {
-            Primitive::Reshape { .. } => (0, n, group(top, n)?),
+            Primitive::Reshape { .. } => match group(top, n) {
+                Some(group) => (0, n, group),
+                None if whole => continue,
+                None => return None,
+            },
             _ => {
-                let (start, limit) = along(top, shape, axis)?;
+                let (start, limit) = match along(top, shape, axis) {
+                    Some(range) => range,
+                    None if whole => continue,
+                    None => return None,
+                };
                 let width = limit - start;
 
                 // A slice reshaped into tuples is a group of interleaved members; reshaped otherwise (a

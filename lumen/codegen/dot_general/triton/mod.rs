@@ -444,6 +444,15 @@ impl Product<'_> {
             None => vec![(rank - 1, 0, cols, vec![self.value], false)],
         };
 
+        // The value itself, when an output besides its regions (a split-K combine's sum read whole), stored once.
+        if self.regions.is_some() && !flags.halves() {
+            for (o, _) in body.outputs().iter().enumerate().filter(|&(_, &v)| v == self.value) {
+                let index = format!("l * {} + m * {cols} + n", rows * cols);
+                let value = format!("value.to({t})");
+                writeln!(code, "    {}", store(o, &index, &value, "mask")).unwrap();
+            }
+        }
+
         let mut locals = 0;
 
         for (r, (axis, offset, width, members, interleaved)) in regions.into_iter().enumerate() {

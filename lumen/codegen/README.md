@@ -18,7 +18,8 @@ and the autotuner (`lumen/autotune`) picks a config for each tuned kernel.
   computed from it), `row_reductions`, `row_partials`.
 - `regions.rs`: splits a GEMM's output into column regions by its readers so each region's epilogue fuses into the
   GEMM (`gemm_regions`, `gemm_pair`, `gemm_expanded`, `ROW_COLUMNS`); a split-K combine's value
-  (`combine_value`, its sum through the rounding cast) splits the same way (`combine_regions`).
+  (`combine_value`, its sum through the rounding cast) splits the same way (`combine_regions`), readers of
+  the whole value allowed besides its slices.
 
 ## Subfolders
 

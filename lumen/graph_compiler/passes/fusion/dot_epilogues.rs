@@ -178,6 +178,17 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], backend: &Backend) -> Do
                     }
                 }
 
+                // A combine's value read whole besides its regions (prefill attention reading a merged
+                // projection's values as a view) is stored too, by its own node (the rounding cast).
+                let whole = is_output[value]
+                    || users[value]
+                        .iter()
+                        .any(|w| !sets.iter().any(|set| set.contains(w)));
+
+                if whole {
+                    ends.push(producer[value].filter(|&c| combine && c != i)?);
+                }
+
                 let main = *ends.iter().max()?;
 
                 let read_after = ends.iter().all(|&k| {

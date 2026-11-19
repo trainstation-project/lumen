@@ -40,7 +40,8 @@ steps, and the autotuner times its configs.
   elementwise ops, column regions included). The epilogue's body is `Product::stores`: from a value (a dot's
   product, or a split-K combine's sum), its regions, accumulator flags and expansion, it emits the per-region
   code with a caller's store, so `reduction::triton::split_k_combine` runs the same epilogue through its loop
-  `STORE` helpers. An output an update makes (`updated`: a `dynamic_update_slice` of a body input, a KV cache)
+  `STORE` helpers. The value itself, when it is an output besides its regions (a combine's sum read whole),
+  is stored once before them. An output an update makes (`updated`: a `dynamic_update_slice` of a body input, a KV cache)
   is stored at the region values' slot (`slot`: their coordinates plus the clamped starts), the rest of the
   operand left as it is. `Config` (block_m/n/k, group_m, stages, warps), `CONFIGS` (7) with
   `UNTUNED` index; `row_gemm_configs` / `untuned_row_gemm` for whole-row tiles; `ROW_TILE` (256) caps a

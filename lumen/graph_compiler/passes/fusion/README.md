@@ -24,7 +24,9 @@ before `wide_rows`, `place_views`, `alone`, `concats` and `horizontal`; it consu
   With `combine_epilogues`, a split-K combine (a sum over axis 0 of a batched dot's products only it reads)
   hosts the same epilogue its GEMM would unsplit, column regions included: its value is the sum through the
   cast rounding it (`regions::combine_value`, as a dot's output dtype), and that cast is one of the host's
-  own nodes. No pairs or expansions there. With `update_epilogues`, an epilogue (a region's, or a chain's) may
+  own nodes. No pairs or expansions there. Its value may also be read whole besides its regions (prefill
+  attention reading a merged projection's values as a view of the product): the cast is then one more end,
+  so the epilogue stores the value too. With `update_epilogues`, an epilogue (a region's, or a chain's) may
   end in a `dynamic_update_slice` writing its value into another operand's slot (a KV cache at `pos`): the
   update joins the fusion (`DotEpilogues::updates`, made fusible after the fact; any other update stays a
   kernel of its own), and counts at its update's size.

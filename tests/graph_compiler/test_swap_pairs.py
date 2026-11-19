@@ -173,3 +173,46 @@ def test_cache_writes_run_in_the_projections_epilogue(device, split_k):
         plan = list(f._plans.values())[-1][6][0][0]
         steps = [s["label"] for s in plan.steps()]
         assert len(steps) == 1 + split_k and steps[-1].endswith("dynamic_update_slice"), steps
+
+
+def prefill(m, x, cos, sin, pos, cache_k, cache_v):
+    """Llama's prefill attention over `x`'s tokens: rotary queries and keys and values of merged projections,
+    the keys and values written into the caches at `pos`, then causal attention reading them."""
+    seq = x.shape[1]
+    project = lambda w, heads: F.matmul(x, w.t(), "float32", "bfloat16").reshape(1, seq, heads, 64)  # noqa: E731
+    q, k, v = rotary(project(m.wq, 8), cos, sin), rotary(project(m.wk, 2), cos, sin), project(m.wv, 2)
+    cache_k.narrow(1, pos, seq).copy_(k)
+    cache_v.narrow(1, pos, seq).copy_(v)
+    return F.flash_attention(q, k, v, is_causal=True)
+
+
+@pytest.mark.parametrize("device", [CPU, TRITON_CUDA], indirect=True)
+def test_prefill_rotates_and_caches_in_the_combine(device):
+    """Prefill attention reads the merged projections' values as a view of their product, besides the rotary and
+    the cache writes: split over K, the combine still runs the rotary and writes the caches, and stores the
+    product for attention. The CPU's attention and caches."""
+    bf16 = lambda *s, seed, scale=1.0: lumen.from_numpy(rand(*s, seed=seed) * scale).to(dtype="bfloat16")  # noqa: E731
+    weights = dict(wq=bf16(512, 2048, seed=0), wk=bf16(128, 2048, seed=1), wv=bf16(128, 2048, seed=2))
+    args = [bf16(1, 4, 2048, seed=3, scale=2048**-0.5), bf16(1, 4, 1, 64, seed=4), bf16(1, 4, 1, 64, seed=5)]
+
+    def run(device):
+        """The attention and both caches of one call on `device` (its module traced on meta tensors first, as a
+        module's weights are), and the compiled function."""
+        m = Projections(**{k: meta(*v.shape, dtype="bfloat16") for k, v in weights.items()})
+        caches = [bf16(1, 16, 2, 64, seed=6).to(device), bf16(1, 16, 2, 64, seed=7).to(device)]
+        f = lumen.compile(prefill, device=device)
+        traced = [meta(*a.shape, dtype=a.dtype) for a in args + caches]
+        f(m, *traced[:3], meta(dtype="int32"), *traced[3:])
+        m.load_state_dict(weights)
+        out = f(m, *(a.to(device) for a in args), lumen.tensor(3, dtype=lumen.int32, device=device), *caches)
+        return f, [lumen.to_numpy(t.to("cpu").to(dtype="float32")) for t in (out, *caches)]
+
+    _, want = run("cpu")
+    f, got = run(device)
+    for g, w in zip(got, want, strict=True):
+        np.testing.assert_allclose(g, w, rtol=2e-2, atol=2e-2)
+    if device == "cuda":
+        steps = [s["label"] for s in list(f._plans.values())[-1][6][0][0].steps()]
+        (combine,) = [s for s in steps if s.startswith("reduce_sum (split-K)")]
+        assert combine.count("swap_pairs") == 2 and combine.endswith("dynamic_update_slice"), steps
+        assert len(steps) == 3, steps
