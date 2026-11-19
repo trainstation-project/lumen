@@ -170,6 +170,6 @@ def test_cache_writes_run_in_the_projections_epilogue(device, split_k):
     for g, w in zip(got, want, strict=True):
         np.testing.assert_allclose(g, w, rtol=2e-2, atol=2e-2)
     if device == "cuda":
-        steps = [s["label"] for s in list(f._plans.values())[-1][6][0][0].steps()]
-        assert not any("dynamic_update_slice" in s for s in steps), steps
-        assert len(steps) == 1 + split_k, steps
+        plan = list(f._plans.values())[-1][6][0][0]
+        steps = [s["label"] for s in plan.steps()]
+        assert len(steps) == 1 + split_k and steps[-1].endswith("dynamic_update_slice"), steps

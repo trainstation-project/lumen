@@ -617,29 +617,53 @@ fn reads_in_place(graph: &Graph, node: &Node, out: Var, r: Var, root: &[Var]) ->
 
     match &node.primitive {
         p if updates_operand(p) => node.inputs[1..].iter().all(|&v| root[v] != r),
-        Fusion { body, .. } => node
-            .inputs
-            .iter()
-            .zip(body.inputs())
-            .filter(|&(&v, _)| root[v] == r)
-            // Every use of the operand inside the body must be elementwise.
-            .all(|(_, &b)| {
-                let (mut stack, mut seen) = (vec![b], vec![false; body.types.len()]);
+        Fusion { body, .. } => {
+            // The body output `out` is: the first, or a `FusionOutput`'s.
+            let k = graph.nodes().iter().find_map(|n| match n.primitive {
+                FusionOutput { index, .. } if n.output == out && n.inputs[0] == node.output => {
+                    Some(index)
+                }
+                _ => None,
+            });
 
-                while let Some(v) = stack.pop() {
-                    for n in body.nodes().iter().filter(|n| n.inputs.contains(&v)) {
-                        if !elementwise(&n.primitive) {
-                            return false;
-                        }
+            let written = body.outputs()[k.unwrap_or(0)];
 
-                        if !std::mem::replace(&mut seen[n.output], true) {
-                            stack.push(n.output);
+            // An update making `out` from the operand (an epilogue writing a KV cache's slot) leaves the
+            // rest of it as it is.
+            let updates = |n: &Node, v: Var| {
+                matches!(n.primitive, DynamicUpdateSlice)
+                    && n.output == written
+                    && n.inputs[0] == v
+                    && !n.inputs[1..].contains(&v)
+            };
+
+            node.inputs
+                .iter()
+                .zip(body.inputs())
+                .filter(|&(&v, _)| root[v] == r)
+                // Every use of the operand inside the body must be elementwise, or that update.
+                .all(|(_, &b)| {
+                    let (mut stack, mut seen) = (vec![b], vec![false; body.types.len()]);
+
+                    while let Some(v) = stack.pop() {
+                        for n in body.nodes().iter().filter(|n| n.inputs.contains(&v)) {
+                            if updates(n, v) {
+                                continue;
+                            }
+
+                            if !elementwise(&n.primitive) {
+                                return false;
+                            }
+
+                            if !std::mem::replace(&mut seen[n.output], true) {
+                                stack.push(n.output);
+                            }
                         }
                     }
-                }
 
-                true
-            }),
+                    true
+                })
+        }
         CustomCall { mutated, .. } => {
             let k = graph.nodes().iter().find_map(|n| match n.primitive {
                 FusionOutput { index, .. } if n.output == out && n.inputs[0] == node.output => {
