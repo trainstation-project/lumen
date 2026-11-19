@@ -22,7 +22,7 @@ use crate::codegen::emitter::triton::Emitter;
 use crate::codegen::regions::{Columns, Region, gemm_expanded, gemm_regions};
 use crate::codegen::store::triton::{gather_index, load, stored_at};
 use crate::codegen::utils::triton::{Triton, indented, named, triton_type};
-use crate::graph::{Graph, Node, Primitive, Var};
+use crate::graph::{Graph, Node, Primitive, TensorType, Var};
 use crate::tensor::contiguous_strides;
 
 /// Generated pieces of one GEMM kernel.
@@ -663,6 +663,100 @@ pub(crate) const CONFIGS: [Config; 7] = [
 /// Index into `CONFIGS` used when autotuning is off.
 pub(crate) const UNTUNED: usize = 2;
 
+/// Most rows a matrix-vector product (GEMV) has: as MPS's `GEMV_VECTORS`.
+pub(crate) const GEMV_ROWS: usize = 8;
+
+/// Whether `dot` of `lhs` and `rhs` is a matrix-vector product the GEMV kernel (`gemv_kernel.py`) runs, by MPS's
+/// rule (`dot_general::mps::gemv`, its vector-lhs side): float accumulation, at most `GEMV_ROWS` rows, and a
+/// matrix contracted along its last (contiguous) dim, as a decode step's `x @ W.t()`.
+pub(crate) fn gemv(dot: &Primitive, lhs: &TensorType, rhs: &TensorType) -> bool {
+    let Primitive::DotGeneral {
+        lhs_contracting,
+        rhs_contracting,
+        lhs_batch,
+        accum_dtype,
+        ..
+    } = dot
+    else {
+        return false;
+    };
+
+    let free: usize = (0..lhs.shape.len())
+        .filter(|d| !lhs_contracting.contains(d) && !lhs_batch.contains(d))
+        .map(|d| lhs.shape[d])
+        .product();
+
+    accum_dtype.is_float()
+        && free <= GEMV_ROWS
+        && rhs_contracting.as_slice() == [rhs.shape.len().saturating_sub(1)]
+}
+
+/// GEMV candidates for `m` rows: every program holds the rows (`block_m`, a power of two) and `block_n` matrix rows,
+/// streaming `block_k` of K at a time, at most `GEMV_ELEMENTS` products a step.
+pub(crate) fn gemv_configs(m: usize) -> Vec<Config> {
+    let block_m = m.next_power_of_two();
+    let mut out = Vec::new();
+
+    for block_n in [8, 16, 32, 64] {
+        for block_k in [64, 128, 256, 512] {
+            for warps in [2, 4, 8] {
+                if block_m * block_n * block_k <= GEMV_ELEMENTS && block_n * block_k >= 32 * warps * 8 {
+                    out.push(Config {
+                        block_m,
+                        block_n,
+                        block_k,
+                        group_m: 1,
+                        stages: 1,
+                        warps,
+                    });
+                }
+            }
+        }
+    }
+
+    out
+}
+
+/// The rows of a GEMV step's product: its dot's lhs elements outside its contracting and batch dims.
+fn gemv_rows(step: &TritonStep) -> Option<usize> {
+    let dot = match &step.primitive {
+        Primitive::Fusion { body, .. } => {
+            let dot = gemm_dot(body)?;
+            (dot.primitive.clone(), body.type_of(dot.inputs[0]).clone())
+        }
+        p => (p.clone(), step.inputs.first()?.1.clone()),
+    };
+
+    let (Primitive::DotGeneral { lhs_contracting, lhs_batch, .. }, lhs) = &dot else {
+        return None;
+    };
+
+    Some(
+        (0..lhs.shape.len())
+            .filter(|d| !lhs_contracting.contains(d) && !lhs_batch.contains(d))
+            .map(|d| lhs.shape[d])
+            .product(),
+    )
+}
+
+/// Most products a GEMV program accumulates per step (`block_m x block_n x block_k`).
+const GEMV_ELEMENTS: usize = 16 << 10;
+
+/// The GEMV config used when autotuning is off: 16 rows of the matrix, up to 256 of K a step (fewer with more
+/// rows, within `GEMV_ELEMENTS`), 4 warps.
+pub(crate) fn untuned_gemv(m: usize) -> Config {
+    let (block_m, block_n) = (m.next_power_of_two(), 16);
+
+    Config {
+        block_m,
+        block_n,
+        block_k: (GEMV_ELEMENTS / (block_m * block_n)).min(256),
+        group_m: 1,
+        stages: 1,
+        warps: 4,
+    }
+}
+
 /// Widest row a GEMM's tile holds whole for a row epilogue (`BLOCK_SIZE_N`); wider products are written
 /// and normalized by a row kernel. On an H100 (bf16, autotuned) the fused kernel matches a GEMM and a
 /// row kernel at 256 but is slower at 512 (121 vs 112 µs) and 1024 (252 vs 132 µs): a tile of whole
@@ -776,6 +870,7 @@ impl crate::codegen::kernel::Kernel for Gemm {
             Primitive::Fusion { name, .. } if name == DOT_ROW => {
                 row_gemm_configs(step.output.1.shape.last().copied().unwrap_or(1))
             }
+            _ if launch::runs_gemv(step) => gemv_configs(gemv_rows(step).unwrap_or(1)),
             _ if is_gemm(step) => CONFIGS.to_vec(),
             _ => Vec::new(),
         }

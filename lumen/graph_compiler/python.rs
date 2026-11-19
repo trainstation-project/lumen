@@ -421,7 +421,9 @@ fn current(t: &crate::Tensor) {
     }
 }
 
-/// Launches lumen's Triton GEMM on `[a, b, out]` with `sizes`, the tile `config`, and the fused epilogue.
+/// Launches lumen's Triton GEMM on `[a, b, out]` with `sizes`, the tile `config`, and the fused epilogue; with
+/// `gemv`, its matrix-vector kernel.
+#[allow(clippy::too_many_arguments)]
 fn triton_gemm(
     tensors: [&crate::Tensor; 3],
     sizes: [usize; 4],
@@ -430,10 +432,17 @@ fn triton_gemm(
     functions: &[crate::runtime::kernel::triton::Function],
     launches: &crate::runtime::kernel::triton::Launches,
     epilogue: &crate::codegen::dot_general::triton::launch::Epilogue,
+    gemv: bool,
 ) -> Result<(), String> {
+    // The GEMM, or for a matrix-vector product the GEMV: the same arguments, another kernel and grid.
+    let (module, kernel) = match gemv {
+        true => ("gemv_kernel", "gemv"),
+        false => ("gemm_kernel", "gemm"),
+    };
+
     crate::profiler::launched::launched("dot_general", || {
         let template = format!(
-            "# @triton.jit: lumen/codegen/dot_general/triton/gemm_kernel.py's kernel, BLOCK_SIZE_M={} BLOCK_SIZE_N={} BLOCK_SIZE_K={} GROUP_SIZE_M={} stages={} warps={}\n",
+            "# @triton.jit: lumen/codegen/dot_general/triton/{module}.py's kernel, BLOCK_SIZE_M={} BLOCK_SIZE_N={} BLOCK_SIZE_K={} GROUP_SIZE_M={} stages={} warps={}\n",
             config.block_m,
             config.block_n,
             config.block_k,
@@ -446,7 +455,7 @@ fn triton_gemm(
     });
 
     #[cfg(not(lumen_cuda_linked))]
-    let _ = launches;
+    let _ = (launches, kernel);
 
     current(tensors[2]);
 
@@ -457,7 +466,7 @@ fn triton_gemm(
             .iter()
             .map(|t| PyTensor::wrap(t.clone()))
             .collect();
-        py.import("lumen.codegen.dot_general.triton.gemm_kernel")?
+        py.import(format!("lumen.codegen.dot_general.triton.{module}"))?
             .getattr("dot_general")?
             .call(
                 (
@@ -502,7 +511,11 @@ fn triton_gemm(
         } else {
             n
         };
-        let programs = grid_m.div_ceil(config.block_m) * grid_n.div_ceil(config.block_n);
+        // The GEMV's programs each hold every row.
+        let programs = match gemv {
+            true => grid_n.div_ceil(config.block_n),
+            false => grid_m.div_ceil(config.block_m) * grid_n.div_ceil(config.block_n),
+        };
         let extra =
             epilogue
                 .tensors
@@ -520,7 +533,7 @@ fn triton_gemm(
             .collect();
         let identity = || {
             format!(
-                "gemm|{accum_dtype}|{config:?}|{:?}|{:?}|{}",
+                "{kernel}|{accum_dtype}|{config:?}|{:?}|{:?}|{}",
                 (flags.group, flags.interleaved, flags.rows),
                 epilogue.scalars,
                 names(functions)
@@ -537,7 +550,7 @@ fn triton_gemm(
         let grid = [l, programs, 1];
         if direct(
             launches,
-            "gemm",
+            kernel,
             tiles,
             &[],
             identity,

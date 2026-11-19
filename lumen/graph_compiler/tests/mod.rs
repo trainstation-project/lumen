@@ -1256,6 +1256,29 @@ fn preserve_precision_drops_forward_round_trips() {
     );
 }
 
+/// Triton runs a matrix-vector product (MPS's GEMV rule: at most 8 rows, the matrix contracted along its last dim)
+/// on its GEMV kernel and keeps it whole over K; more rows, or a matrix read across K, take the GEMM.
+#[test]
+fn triton_gemv_rule_follows_mps() {
+    use crate::codegen::dot_general::triton::gemv;
+
+    let dot = |rhs_contracting: usize| Primitive::DotGeneral {
+        lhs_contracting: vec![1],
+        rhs_contracting: vec![rhs_contracting],
+        lhs_batch: vec![],
+        rhs_batch: vec![],
+        accum_dtype: DType::F32,
+        output_dtype: DType::BF16,
+    };
+
+    let ty = |shape: &[usize]| TensorType::new(DType::BF16, shape);
+
+    assert!(gemv(&dot(1), &ty(&[1, 2048]), &ty(&[3072, 2048])));
+    assert!(gemv(&dot(1), &ty(&[8, 2048]), &ty(&[3072, 2048])));
+    assert!(!gemv(&dot(1), &ty(&[16, 2048]), &ty(&[3072, 2048])));
+    assert!(!gemv(&dot(0), &ty(&[1, 2048]), &ty(&[2048, 3072])));
+}
+
 /// Each device's default pass list is the passes it implements (picked over the identity pass), in the one order:
 /// the CPU only simplifies, CuTe merges dots and fuses attention, elementwise work and GEMM epilogues, Triton and TPU run their own versions.
 #[test]

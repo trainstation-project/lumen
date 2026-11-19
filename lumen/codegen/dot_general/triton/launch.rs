@@ -16,7 +16,7 @@ use crate::{DType, Tensor};
 
 /// Launches the Triton GEMM on `[lhs, rhs, out]` with `[batch, m, k, n]` sizes, the tile config, the
 /// generated prologue/epilogue jit functions (their compiled kernels kept in the launches) and the
-/// epilogue's extra operands.
+/// epilogue's extra operands; with `gemv`, the matrix-vector kernel (`gemv_kernel.py`) instead.
 pub type Gemm = fn(
     tensors: [&Tensor; 3],
     sizes: [usize; 4],
@@ -25,6 +25,7 @@ pub type Gemm = fn(
     functions: &[Function],
     launches: &Launches,
     epilogue: &Epilogue,
+    gemv: bool,
 ) -> Result<(), String>;
 
 /// Extra operands of a fused epilogue.
@@ -223,10 +224,12 @@ pub(crate) fn gemm(
         .get(key, || Ok(prepare(step, inputs, out, outs)))?;
 
     let cols = prepared.sizes[3];
+    let gemv = runs_gemv(step);
 
     // A row epilogue needs whole rows in each program's tile.
     let config = match (&step.primitive, tuned) {
         (_, Some(c)) => *c,
+        _ if gemv => codegen::untuned_gemv(prepared.sizes[1]),
         (Primitive::Fusion { name, .. }, None) if name == DOT_ROW => {
             codegen::untuned_row_gemm(cols)
         }
@@ -250,6 +253,7 @@ pub(crate) fn gemm(
             &prepared.functions,
             &prepared.launches,
             &plain,
+            gemv,
         );
     };
 
@@ -272,7 +276,31 @@ pub(crate) fn gemm(
         &prepared.functions,
         &prepared.launches,
         &fused,
+        gemv,
     )
+}
+
+/// Whether `step` runs on the GEMV kernel: a matrix-vector product (`codegen::gemv`, as MPS picks its GEMV),
+/// unless a row epilogue needs the GEMM's whole-row tiles or its accumulator splits into row halves.
+pub(crate) fn runs_gemv(step: &StepBase) -> bool {
+    let (body, dot) = match &step.primitive {
+        Primitive::Fusion { name, .. } if name == DOT_ROW || name == DOT_PARTIALS => return false,
+        Primitive::Fusion { body, .. } => match codegen::gemm_dot(body) {
+            Some(dot) => (body, dot),
+            None => return false,
+        },
+        p @ Primitive::DotGeneral { .. } => {
+            let [lhs, rhs] = [&step.inputs[0].1, &step.inputs[1].1];
+            return codegen::gemv(p, lhs, rhs);
+        }
+        _ => return false,
+    };
+
+    let flags = codegen::gemm_flags(body, dot);
+    let row_halves = flags.group > 1 && !flags.interleaved && flags.rows;
+    let ty = |v| body.type_of(v);
+
+    codegen::gemv(&dot.primitive, ty(dot.inputs[0]), ty(dot.inputs[1])) && !row_halves
 }
 
 /// Starts each output of fusion `body` that an epilogue updates in place (`codegen::updated`, a KV cache) from

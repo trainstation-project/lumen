@@ -84,8 +84,9 @@ class Projections(lumen.nn.Module):
 
 
 def attention_inputs(m, x, cos, sin):
-    """Rotary-embedded queries and keys, and values, each projection rounded to bfloat16 (as Llama's)."""
-    project = lambda w, heads: F.matmul(x, w.t(), "float32", "bfloat16").reshape(1, heads, 64)  # noqa: E731
+    """Rotary-embedded queries and keys, and values of `x`'s rows, each projection rounded to bfloat16 (as
+    Llama's)."""
+    project = lambda w, heads: F.matmul(x, w.t(), "float32", "bfloat16").reshape(x.shape[0], heads, 64)  # noqa: E731
     q, k, v = project(m.wq, 8), project(m.wk, 2), project(m.wv, 2)
     return rotary(q, cos, sin), rotary(k, cos[:, :2], sin[:, :2]), v
 
@@ -101,28 +102,27 @@ def compiled_projections(device, weights, args):
 
 
 @pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
-@pytest.mark.parametrize("split_k", [False, True])
-def test_merged_projections_rotate_in_their_gemm_epilogue(device, split_k):
+@pytest.mark.parametrize("rows", [1, 16])
+def test_merged_projections_rotate_in_their_gemm_epilogue(device, rows):
     """Merged query, key and value projections (each member sliced from the product, then rounded) are column
-    regions of one GEMM, so on Triton the queries' and keys' rotary runs in its epilogue: one kernel. Split over
-    its long K (a decode step's), the chunks' sum (the combine) runs that epilogue instead, regions and all. On
-    MPS the rotary is its own kernel. The CPU's values on both."""
+    regions of one GEMM, so on Triton the queries' and keys' rotary runs in its epilogue: one kernel (a decode
+    step's single row, the GEMV's). Split over its long K (16 rows), the chunks' sum (the combine) runs that
+    epilogue instead, regions and all. On MPS the rotary is its own kernel. The CPU's values on both."""
     bf16 = lambda *s, seed, scale=1.0: lumen.from_numpy(rand(*s, seed=seed) * scale).to(dtype="bfloat16")  # noqa: E731
     weights = dict(wq=bf16(512, 2048, seed=0), wk=bf16(128, 2048, seed=1), wv=bf16(128, 2048, seed=2))
     # An input scaled by 1/sqrt(2048) keeps the projections near 1, where 2e-2 is a few bfloat16 ulps (the GEMM's
     # epilogue may round `x * cos + rotated * sin` once, as an FMA).
-    args = [bf16(1, 2048, seed=3, scale=2048**-0.5), bf16(1, 8, 64, seed=4), bf16(1, 8, 64, seed=5)]
+    args = [bf16(rows, 2048, seed=3, scale=2048**-0.5), bf16(1, 8, 64, seed=4), bf16(1, 8, 64, seed=5)]
     _, want = compiled_projections("cpu", weights, args)
     try:
-        with lumen.config.compiler.patch(split_k=split_k):
-            f, got = compiled_projections(device, weights, args)
+        f, got = compiled_projections(device, weights, args)
     except RuntimeError as e:
         pytest.skip(str(e))
     for g, w in zip(got, want, strict=True):
         g, w = (lumen.to_numpy(t.to("cpu").to(dtype="float32")) for t in (g, w))
         np.testing.assert_allclose(g, w, rtol=2e-2, atol=2e-2)
     steps = [s["label"] for s in list(f._plans.values())[-1][6][0][0].steps()]
-    if device == "cuda" and split_k:
+    if device == "cuda" and rows > 1:
         partials, combine = steps
         assert partials == "dot_general (split-K)", steps
         assert combine.startswith("reduce_sum (split-K)") and combine.count("swap_pairs") == 2, combine
@@ -130,33 +130,33 @@ def test_merged_projections_rotate_in_their_gemm_epilogue(device, split_k):
         (label,) = steps
         assert label.startswith("dot_general") and label.count("swap_pairs") == 2, label
     else:
-        assert any(s.startswith("3x dot_general") for s in steps) or split_k, steps
+        assert any(s.startswith("3x dot_general") for s in steps) or rows > 1, steps
         assert any("swap_pairs" in s for s in steps), steps
 
 
 def cached_attention_inputs(m, x, cos, sin, pos, cache_k, cache_v):
     """`attention_inputs`, its keys and values written into the caches at `pos` (as Llama's decode); the queries."""
     q, k, v = attention_inputs(m, x, cos, sin)
-    cache_k.narrow(0, pos, 1).copy_(k)
-    cache_v.narrow(0, pos, 1).copy_(v)
+    cache_k.narrow(0, pos, x.shape[0]).copy_(k)
+    cache_v.narrow(0, pos, x.shape[0]).copy_(v)
     return q
 
 
 @pytest.mark.parametrize("device", [CPU, TRITON_CUDA], indirect=True)
-@pytest.mark.parametrize("split_k", [False, True])
-def test_cache_writes_run_in_the_projections_epilogue(device, split_k):
+@pytest.mark.parametrize("rows", [1, 16])
+def test_cache_writes_run_in_the_projections_epilogue(device, rows):
     """Keys and values written into caches at a runtime position are stored there by the merged projections'
-    epilogue on Triton (the GEMM's, or split over K the combine's): no update kernels. The CPU's queries and
-    caches."""
+    epilogue on Triton (the GEMV's for a decode step's row, or split over K the combine's): no update kernels.
+    The CPU's queries and caches."""
     bf16 = lambda *s, seed, scale=1.0: lumen.from_numpy(rand(*s, seed=seed) * scale).to(dtype="bfloat16")  # noqa: E731
     weights = dict(wq=bf16(512, 2048, seed=0), wk=bf16(128, 2048, seed=1), wv=bf16(128, 2048, seed=2))
-    args = [bf16(1, 2048, seed=3, scale=2048**-0.5), bf16(1, 8, 64, seed=4), bf16(1, 8, 64, seed=5)]
+    args = [bf16(rows, 2048, seed=3, scale=2048**-0.5), bf16(1, 8, 64, seed=4), bf16(1, 8, 64, seed=5)]
 
     def run(device):
         """The queries and both caches of one call on `device` (its module traced on meta tensors first, as a
         module's weights are), and the compiled function."""
         m = Projections(**{k: meta(*v.shape, dtype="bfloat16") for k, v in weights.items()})
-        caches = [bf16(16, 2, 64, seed=6).to(device), bf16(16, 2, 64, seed=7).to(device)]
+        caches = [bf16(32, 2, 64, seed=6).to(device), bf16(32, 2, 64, seed=7).to(device)]
         f = lumen.compile(cached_attention_inputs, device=device)
         traced = [meta(*a.shape, dtype=a.dtype) for a in args + caches]
         f(m, *traced[:3], meta(dtype="int32"), *traced[3:])
@@ -165,14 +165,12 @@ def test_cache_writes_run_in_the_projections_epilogue(device, split_k):
         return f, [lumen.to_numpy(t.to("cpu").to(dtype="float32")) for t in (q, *caches)]
 
     _, want = run("cpu")
-    with lumen.config.compiler.patch(split_k=split_k):
-        f, got = run(device)
+    f, got = run(device)
     for g, w in zip(got, want, strict=True):
         np.testing.assert_allclose(g, w, rtol=2e-2, atol=2e-2)
     if device == "cuda":
-        plan = list(f._plans.values())[-1][6][0][0]
-        steps = [s["label"] for s in plan.steps()]
-        assert len(steps) == 1 + split_k and steps[-1].endswith("dynamic_update_slice"), steps
+        steps = [s["label"] for s in list(f._plans.values())[-1][6][0][0].steps()]
+        assert len(steps) == 1 + (rows > 1) and steps[-1].endswith("dynamic_update_slice"), steps
 
 
 def prefill(m, x, cos, sin, pos, cache_k, cache_v):
@@ -193,13 +191,14 @@ def test_prefill_rotates_and_caches_in_the_combine(device):
     product for attention. The CPU's attention and caches."""
     bf16 = lambda *s, seed, scale=1.0: lumen.from_numpy(rand(*s, seed=seed) * scale).to(dtype="bfloat16")  # noqa: E731
     weights = dict(wq=bf16(512, 2048, seed=0), wk=bf16(128, 2048, seed=1), wv=bf16(128, 2048, seed=2))
-    args = [bf16(1, 4, 2048, seed=3, scale=2048**-0.5), bf16(1, 4, 1, 64, seed=4), bf16(1, 4, 1, 64, seed=5)]
+    # 16 tokens: more than a GEMV's rows, so the projections split over K.
+    args = [bf16(1, 16, 2048, seed=3, scale=2048**-0.5), bf16(1, 16, 1, 64, seed=4), bf16(1, 16, 1, 64, seed=5)]
 
     def run(device):
         """The attention and both caches of one call on `device` (its module traced on meta tensors first, as a
         module's weights are), and the compiled function."""
         m = Projections(**{k: meta(*v.shape, dtype="bfloat16") for k, v in weights.items()})
-        caches = [bf16(1, 16, 2, 64, seed=6).to(device), bf16(1, 16, 2, 64, seed=7).to(device)]
+        caches = [bf16(1, 32, 2, 64, seed=6).to(device), bf16(1, 32, 2, 64, seed=7).to(device)]
         f = lumen.compile(prefill, device=device)
         traced = [meta(*a.shape, dtype=a.dtype) for a in args + caches]
         f(m, *traced[:3], meta(dtype="int32"), *traced[3:])
