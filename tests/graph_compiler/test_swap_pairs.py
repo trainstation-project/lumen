@@ -132,3 +132,44 @@ def test_merged_projections_rotate_in_their_gemm_epilogue(device, split_k):
     else:
         assert any(s.startswith("3x dot_general") for s in steps) or split_k, steps
         assert any("swap_pairs" in s for s in steps), steps
+
+
+def cached_attention_inputs(m, x, cos, sin, pos, cache_k, cache_v):
+    """`attention_inputs`, its keys and values written into the caches at `pos` (as Llama's decode); the queries."""
+    q, k, v = attention_inputs(m, x, cos, sin)
+    cache_k.narrow(0, pos, 1).copy_(k)
+    cache_v.narrow(0, pos, 1).copy_(v)
+    return q
+
+
+@pytest.mark.parametrize("device", [CPU, TRITON_CUDA], indirect=True)
+@pytest.mark.parametrize("split_k", [False, True])
+def test_cache_writes_run_in_the_projections_epilogue(device, split_k):
+    """Keys and values written into caches at a runtime position are stored there by the merged projections'
+    epilogue on Triton (the GEMM's, or split over K the combine's): no update kernels. The CPU's queries and
+    caches."""
+    bf16 = lambda *s, seed, scale=1.0: lumen.from_numpy(rand(*s, seed=seed) * scale).to(dtype="bfloat16")  # noqa: E731
+    weights = dict(wq=bf16(512, 2048, seed=0), wk=bf16(128, 2048, seed=1), wv=bf16(128, 2048, seed=2))
+    args = [bf16(1, 2048, seed=3, scale=2048**-0.5), bf16(1, 8, 64, seed=4), bf16(1, 8, 64, seed=5)]
+
+    def run(device):
+        """The queries and both caches of one call on `device` (its module traced on meta tensors first, as a
+        module's weights are), and the compiled function."""
+        m = Projections(**{k: meta(*v.shape, dtype="bfloat16") for k, v in weights.items()})
+        caches = [bf16(16, 2, 64, seed=6).to(device), bf16(16, 2, 64, seed=7).to(device)]
+        f = lumen.compile(cached_attention_inputs, device=device)
+        traced = [meta(*a.shape, dtype=a.dtype) for a in args + caches]
+        f(m, *traced[:3], meta(dtype="int32"), *traced[3:])
+        m.load_state_dict(weights)
+        q = f(m, *(a.to(device) for a in args), lumen.tensor(5, dtype=lumen.int32, device=device), *caches)
+        return f, [lumen.to_numpy(t.to("cpu").to(dtype="float32")) for t in (q, *caches)]
+
+    _, want = run("cpu")
+    with lumen.config.compiler.patch(split_k=split_k):
+        f, got = run(device)
+    for g, w in zip(got, want, strict=True):
+        np.testing.assert_allclose(g, w, rtol=2e-2, atol=2e-2)
+    if device == "cuda":
+        steps = [s["label"] for s in list(f._plans.values())[-1][6][0][0].steps()]
+        assert not any("dynamic_update_slice" in s for s in steps), steps
+        assert len(steps) == 1 + split_k, steps

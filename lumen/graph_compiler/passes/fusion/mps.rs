@@ -90,6 +90,7 @@ fn backend(config: &CompilerConfig) -> Backend {
         // The Metal GEMM's epilogue functor sees one element, not a thread's pair.
         swap_epilogues: false,
         combine_epilogues: false,
+        update_epilogues: false,
     }
 }
 

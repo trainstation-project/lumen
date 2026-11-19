@@ -40,13 +40,16 @@ steps, and the autotuner times its configs.
   elementwise ops, column regions included). The epilogue's body is `Product::stores`: from a value (a dot's
   product, or a split-K combine's sum), its regions, accumulator flags and expansion, it emits the per-region
   code with a caller's store, so `reduction::triton::split_k_combine` runs the same epilogue through its loop
-  `STORE` helpers. `Config` (block_m/n/k, group_m, stages, warps), `CONFIGS` (7) with
+  `STORE` helpers. An output an update makes (`updated`: a `dynamic_update_slice` of a body input, a KV cache)
+  is stored at the region values' slot (`slot`: their coordinates plus the clamped starts), the rest of the
+  operand left as it is. `Config` (block_m/n/k, group_m, stages, warps), `CONFIGS` (7) with
   `UNTUNED` index; `row_gemm_configs` / `untuned_row_gemm` for whole-row tiles; `ROW_TILE` (256) caps a
   row held in one tile and `partial_tile` picks partial widths for wider rows. Python class
   `lumen.autotune.TritonGemmConfig`. `Gemm` (`Kernel`) runs dots, GEMM fusions, `dot_row` fusions and linear
   cross entropy.
 - `launch.rs`: `gemm` generates prologues/epilogue once per tensor layout and calls the Python launcher set by
-  `set_gemm`; `is_gemm` decides which steps run here; `DOT_ROW` / `dot_partials` fusion names.
+  `set_gemm`; `hold_operands` starts an updated output from its operand unless it already lives in the
+  operand's buffer (planned in place), for GEMM fusions and split-K combines alike; `is_gemm` decides which steps run here; `DOT_ROW` / `dot_partials` fusion names.
 - `row.rs`: `row_epilogue` (a tile holds whole rows, so row reductions run on the accumulator and the product
   never reaches memory), `dot_row_fits`, and `partials_epilogue` (column partials for wider rows).
 - `cross_entropy.rs`: runs `linear_cross_entropy` as the GEMM with a fixed per-tile max/sum epilogue, then a

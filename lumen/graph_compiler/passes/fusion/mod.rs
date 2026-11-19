@@ -47,6 +47,9 @@ pub(crate) struct Backend {
     /// Whether a split-K combine (the sum of a dot's chunk products) runs a GEMM's epilogue after it, column
     /// regions included, as the dot would unsplit.
     pub combine_epilogues: bool,
+    /// Whether a GEMM epilogue (or a combine's) can write a value straight into the slot of the operand a
+    /// `dynamic_update_slice` updates (a KV cache), instead of a kernel of its own copying it there.
+    pub update_epilogues: bool,
 }
 
 /// Whether `node` is a sum or max reduction.
@@ -77,9 +80,15 @@ pub(crate) fn fuse(
     backend: &Backend,
     kernel: impl FnMut(&Graph, &[bool]) -> String,
 ) -> Graph {
-    let a = analysis::Analysis::new(graph, backend.fusible);
+    let mut a = analysis::Analysis::new(graph, backend.fusible);
     let rows = rows::extended(&a, rows);
     let dots = dot_epilogues::dot_epilogues(&a, &rows, backend);
+
+    // An update an epilogue writes through joins its fusion; any other stays a kernel of its own.
+    for &u in &dots.updates {
+        a.fusible[u] = true;
+    }
+
     let reductions = reduction_epilogues::reduction_epilogues(&a, &rows, backend, &dots);
     let mut root = hosts::roots(&a, &rows, &reductions, &dots);
     let mut host = hosts::hosts(&a, &rows, backend, &root, &reductions, &dots);

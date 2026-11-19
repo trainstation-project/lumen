@@ -16,6 +16,9 @@ pub(super) struct DotEpilogues {
     pub(super) inside: Vec<bool>,
     /// For an extra value the epilogue writes, the epilogue end hosting it.
     pub(super) aux: Vec<Option<usize>>,
+    /// Updates (`dynamic_update_slice`s) an epilogue writes its region's values through, into the slot of the
+    /// operand they update: fusible only as an epilogue's.
+    pub(super) updates: Vec<usize>,
 }
 
 /// Assigns each float GEMM the longest elementwise chain after it that can run in its epilogue; with
@@ -31,6 +34,17 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], backend: &Backend) -> Do
     let mut in_epilogue = vec![false; nodes.len()];
     let mut dot_aux: Vec<Option<usize>> = vec![None; nodes.len()];
     let mut claimed = vec![false; nodes.len()];
+    let mut updates = Vec::new();
+
+    // Whether `un` writes `v` (an epilogue's value) into the slot of an operand computed apart from it: an
+    // update the epilogue stores straight into that operand, with `update_epilogues`.
+    let update = |un: &Node, v: Var| {
+        backend.update_epilogues
+            && matches!(un.primitive, Primitive::DynamicUpdateSlice)
+            && un.inputs[1] == v
+            && un.inputs[0] != v
+    };
+
     // Latest dot each value depends on, so epilogues only read operands finished before their dot.
     let mut last_dot: Vec<Option<usize>> = vec![None; n];
 
@@ -146,7 +160,13 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], backend: &Backend) -> Do
                     let before = ends.len();
 
                     for k in outside {
-                        if graph.type_of(nodes[k].output).numel() != size {
+                        // An update writes the region's values into its operand's slot.
+                        let written = match nodes[k].primitive {
+                            Primitive::DynamicUpdateSlice => nodes[k].inputs[1],
+                            _ => nodes[k].output,
+                        };
+
+                        if graph.type_of(written).numel() != size {
                             return None;
                         }
 
@@ -193,16 +213,20 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], backend: &Backend) -> Do
 
                 let earlier = |v: Var| last_dot[v].is_none_or(|d| d < i);
 
+                let updates_slot =
+                    (un.inputs.get(1)).is_some_and(|&v| region_of[v] == Some(*r) && update(un, v));
+
                 let steps = elementwise(&un.primitive)
                     || matches!(un.primitive, Primitive::Reshape { .. })
-                    || (backend.swap_epilogues && matches!(un.primitive, Primitive::SwapPairs));
+                    || (backend.swap_epilogues && matches!(un.primitive, Primitive::SwapPairs))
+                    || updates_slot;
 
                 let reads = un
                     .inputs
                     .iter()
                     .all(|&v| region_of[v] == Some(*r) || (!depends[v] && earlier(v)));
 
-                if !(fusible[u] && steps && reads && !in_row(u) && !claimed[u]) {
+                if !((fusible[u] || updates_slot) && steps && reads && !in_row(u) && !claimed[u]) {
                     break;
                 }
 
@@ -221,6 +245,12 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], backend: &Backend) -> Do
                     claimed[k] = true;
                     in_epilogue[k] = k != i;
                 }
+
+                updates.extend(
+                    sets.iter()
+                        .flatten()
+                        .filter(|&&k| matches!(nodes[k].primitive, Primitive::DynamicUpdateSlice)),
+                );
 
                 for &k in sets.iter().flatten() {
                     claimed[k] = true;
@@ -257,13 +287,16 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], backend: &Backend) -> Do
 
             let expands = pair.is_none() && (backend.expansion)(graph, node, un);
 
+            let updates_slot = (un.inputs.get(1)).is_some_and(|&v| after[v] && update(un, v));
+
             let step = elementwise(&un.primitive)
                 || matches!(un.primitive, Primitive::Reshape { .. })
                 || (backend.swap_epilogues && matches!(un.primitive, Primitive::SwapPairs))
                 || pair.is_some_and(|p| p.contains(&u))
-                || expands;
+                || expands
+                || updates_slot;
 
-            let fuses = fusible[u] && step && !in_row(u) && !claimed[u];
+            let fuses = (fusible[u] || updates_slot) && step && !in_row(u) && !claimed[u];
             let earlier = |v: Var| last_dot[v].is_none_or(|d| d < i);
 
             let reads = un
@@ -382,6 +415,12 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], backend: &Backend) -> Do
 
             taken.iter().for_each(|&k| claimed[k] = true);
 
+            updates.extend(
+                taken
+                    .iter()
+                    .filter(|&&k| matches!(nodes[k].primitive, Primitive::DynamicUpdateSlice)),
+            );
+
             for k in aux {
                 (dot_aux[k], claimed[k]) = (Some(end), true);
             }
@@ -393,6 +432,7 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], backend: &Backend) -> Do
         of: dot_of,
         inside: in_epilogue,
         aux: dot_aux,
+        updates,
     }
 }
 

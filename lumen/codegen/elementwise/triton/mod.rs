@@ -370,6 +370,14 @@ impl crate::codegen::kernel::Kernel for Loop {
             .get(key, || Ok(loop_helpers(step, kernel, inputs, out, outs)))?;
 
         let (functions, launches) = (&helpers.functions, &helpers.launches);
+
+        // A split-K combine's epilogue may update operands (KV caches) in place.
+        if let Primitive::Fusion { name, body, .. } = &step.primitive
+            && name == COMBINE
+        {
+            crate::codegen::dot_general::triton::launch::hold_operands(body, inputs, out, outs)?;
+        }
+
         let inputs: &[Tensor] = &[inputs, outs].concat();
         let untuned = untuned_loop(kernel.lanes);
         let config = config.unwrap_or(&untuned);

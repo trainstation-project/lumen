@@ -249,6 +249,45 @@ pub(crate) fn gemm_flags(body: &Graph, dot: &Node) -> EpilogueFlags {
     }
 }
 
+/// The `dynamic_update_slice` making `v` in `body` from an operand that is a body input, if any: an update an
+/// epilogue writes into the operand's slot.
+pub(crate) fn updated(body: &Graph, v: Var) -> Option<&Node> {
+    body.nodes().iter().find(|n| {
+        n.output == v
+            && matches!(n.primitive, Primitive::DynamicUpdateSlice)
+            && body.inputs().contains(&n.inputs[0])
+    })
+}
+
+/// The value `update` writes at the region's flat index `j` (of its update operand) and where in its operand:
+/// `j`'s coordinates plus the start indices, each clamped so the update stays in bounds, as a flat index of the
+/// operand.
+fn slot(emitter: &mut Emitter, body: &Graph, update: &Node) -> (String, String) {
+    let (x, written) = (body.type_of(update.inputs[0]), body.type_of(update.inputs[1]));
+    let (spans, strides) = (contiguous_strides(&written.shape), contiguous_strides(&x.shape));
+    let value = emitter.value(update.inputs[1], "j".into());
+
+    let terms: Vec<String> = (0..x.shape.len())
+        .filter(|&d| x.shape[d] != 1)
+        .map(|d| {
+            let start = emitter.value(update.inputs[2 + d], "0".into());
+            let most = x.shape[d] - written.shape[d];
+
+            format!(
+                "((j // {}) % {} + tl.minimum(tl.maximum(({start}).to(tl.int64), 0), {most})) * {}",
+                spans[d], written.shape[d], strides[d]
+            )
+        })
+        .collect();
+
+    let at = match terms.is_empty() {
+        true => "j".to_string(),
+        false => terms.join(" + "),
+    };
+
+    (value, at)
+}
+
 /// Whether `v` is one of `on` or is computed from any of them in `body`.
 fn depends(body: &Graph, v: Var, on: &[Var]) -> bool {
     let producer = body.nodes().iter().find(|n| n.output == v);
@@ -469,6 +508,15 @@ impl Product<'_> {
 
             for (o, &v) in body.outputs().iter().enumerate() {
                 if !depends(body, v, &members) {
+                    continue;
+                }
+
+                // An update writes the region's values into its operand's slot (`pos` of a KV cache), the
+                // operand's other elements left as they are (the output holds the operand).
+                if let Some(update) = updated(body, v) {
+                    let (value, at) = slot(&mut emitter, body, update);
+                    let keep = format!("r{r}_keep");
+                    writeln!(stores, "    {}", store(o, &at, &value, &keep)).unwrap();
                     continue;
                 }
 

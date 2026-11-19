@@ -24,7 +24,10 @@ before `wide_rows`, `place_views`, `alone`, `concats` and `horizontal`; it consu
   With `combine_epilogues`, a split-K combine (a sum over axis 0 of a batched dot's products only it reads)
   hosts the same epilogue its GEMM would unsplit, column regions included: its value is the sum through the
   cast rounding it (`regions::combine_value`, as a dot's output dtype), and that cast is one of the host's
-  own nodes. No pairs or expansions there.
+  own nodes. No pairs or expansions there. With `update_epilogues`, an epilogue (a region's, or a chain's) may
+  end in a `dynamic_update_slice` writing its value into another operand's slot (a KV cache at `pos`): the
+  update joins the fusion (`DotEpilogues::updates`, made fusible after the fact; any other update stays a
+  kernel of its own), and counts at its update's size.
 - `hosts.rs` — `roots`: the nodes that end a fusion (unfusible nodes, reductions outside epilogues, epilogue
   ends, row roots, outputs, values read by unfusible nodes, expensive ops read more than once); `hosts`:
   a later fusion that can also write a root's value as an extra output (multi-output fusion), plus GEMM
@@ -49,8 +52,9 @@ A backend fills `Backend`: `fusible` (which nodes may join a fusion), `max_input
 epilogue), `expansion` (whether a GEMM epilogue may write into a concatenation's slot), `row_dot`
 (whether a GEMM plus row body runs as one kernel), `swap_epilogues` (whether a GEMM epilogue may take a
 `SwapPairs`, swapping the accumulator's adjacent lanes in registers: Triton yes, MPS not, its epilogue functor
-seeing one element) and `combine_epilogues` (whether a split-K combine runs its GEMM's epilogue: Triton yes,
-MPS and CUDA not).
+seeing one element), `combine_epilogues` (whether a split-K combine runs its GEMM's epilogue: Triton yes,
+MPS and CUDA not) and `update_epilogues` (whether an epilogue writes straight into an update's slot: Triton
+yes, MPS and CUDA not).
 
 - MPS: with `fuse`. Elementwise, layout, gather and reduction ops under 2^32 elements, never float64; 29
   input buffers; flags from config; `row_dot` limited to rows of at most `ROW_TILE` unless

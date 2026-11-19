@@ -91,6 +91,7 @@ fn backend(m: &DeviceModule<'_, Triton>) -> Backend {
         row_dot: dot_row_fits,
         swap_epilogues: true,
         combine_epilogues: true,
+        update_epilogues: true,
     }
 }
 

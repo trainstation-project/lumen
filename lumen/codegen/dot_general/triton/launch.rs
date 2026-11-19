@@ -256,6 +256,7 @@ pub(crate) fn gemm(
     let dot = codegen::gemm_dot(body).expect("a GEMM epilogue's dot");
     let (lhs, rhs) = operands(body, dot, inputs);
     let extra: Vec<Tensor> = inputs.iter().chain(outs).cloned().collect();
+    hold_operands(body, inputs, out, outs)?;
 
     let fused = Epilogue {
         tensors: &extra,
@@ -272,6 +273,31 @@ pub(crate) fn gemm(
         &prepared.launches,
         &fused,
     )
+}
+
+/// Starts each output of fusion `body` that an epilogue updates in place (`codegen::updated`, a KV cache) from
+/// its operand, as a lone update does, unless it already lives in the operand's buffer (planned in place).
+pub(crate) fn hold_operands(
+    body: &Graph,
+    inputs: &[Tensor],
+    out: &Tensor,
+    outs: &[Tensor],
+) -> Result<(), String> {
+    for (o, &v) in body.outputs().iter().enumerate() {
+        let Some(update) = codegen::updated(body, v) else {
+            continue;
+        };
+
+        let at = body.inputs().iter().position(|&u| u == update.inputs[0]);
+        let operand = &inputs[at.expect("the operand is a body input")];
+        let output = if o == 0 { out } else { &outs[o - 1] };
+
+        if output.data_ptr() != operand.data_ptr() {
+            crate::codegen::elementwise::triton::copy(output, operand)?;
+        }
+    }
+
+    Ok(())
 }
 
 /// Accumulator dtype of a `dot_general`.

@@ -77,6 +77,7 @@ fn backend(m: &DeviceModule<'_, Cuda>) -> Backend {
         row_dot: |_| false,
         swap_epilogues: false,
         combine_epilogues: false,
+        update_epilogues: false,
     }
 }
 
