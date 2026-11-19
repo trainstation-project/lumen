@@ -10,13 +10,6 @@ use crate::graph::{Graph, Primitive, TensorType};
 use crate::plan::StepBase;
 use crate::tensor::scalar::Scalar;
 
-/// TPU fuses chains of 1 or more updates, always: even one update runs as an `updates` kernel.
-impl crate::codegen::dynamic_slice::UpdateChains for Tpu {
-    const LEAST: usize = 1;
-    const MOST: usize = usize::MAX;
-    const WITH_FUSE: bool = false;
-}
-
 /// Lane width of a TPU tile.
 const LANES: usize = 128;
 /// Element budget for one staged `bm` x `bn` piece of an aligned update.
