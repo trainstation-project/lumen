@@ -27,9 +27,10 @@ def test_split_k_agrees(device, dtype):
     """With ``split_k`` (the default) a matmul launching few tiles and of a
     long contraction (a decode step's) is one dot of the chunks' partials,
     then their sum (each labelled split-K), rounded to bfloat16 once, after
-    it. Each agrees with the dot as traced (off) to rounding. One of many
-    tiles is not split. Partials costing more than the operands split the
-    same way: a product, then a sum."""
+    it, on MPS; on Triton the GEMM step splits K itself, its plan the dot's
+    (and the rounding its epilogue). Each agrees with the dot as traced (off)
+    to rounding. One of many tiles is not split. On MPS, partials costing more
+    than the operands split the same way: a product, then a sum."""
     rng = np.random.default_rng(0)
     a, b = rng.standard_normal((8, 4096)).astype(np.float32), rng.standard_normal((4096, 256)).astype(np.float32)
     x, w = _placed(device, dtype, a, b)
@@ -37,7 +38,10 @@ def test_split_k_agrees(device, dtype):
     want = lumen.to_numpy(x.to(dtype="float32")).astype(np.float64) @ lumen.to_numpy(w.to(dtype="float32"))
     cast = "cast(float32 -> bfloat16)"
     rounded = {"float32": "", "bfloat16": " → " + cast}[dtype]
-    split_plan = ["dot_general (split-K)", "reduce_sum (split-K)" + rounded]
+    split_plan = {
+        "mps": ["dot_general (split-K)", "reduce_sum (split-K)" + rounded],
+        "cuda": ["dot_general" + rounded],
+    }[device]
     assert _labels(f, device, x, w) == split_plan
     results = [lumen.to_numpy(lumen.compile(f)(x, w).to(dtype="float32"))]
     with lumen.config.compiler.patch(split_k=False):
@@ -63,9 +67,10 @@ def test_split_k_agrees(device, dtype):
 def test_split_k_then_silu(device, dtype):
     """SiLU after a matmul of few output tiles and a long contraction: not
     split, it is the matmul's epilogue (one kernel); split, it needs every
-    chunk's products: the epilogue of the ``reduce_sum`` of the dot's
-    partials (reading the sum twice), deterministic or not on MPS. Each
-    agrees with SiLU of the exact product to rounding."""
+    chunk's products: on MPS the epilogue of the ``reduce_sum`` of the dot's
+    partials (reading the sum twice), deterministic or not; on Triton still
+    the GEMM step's epilogue, run by its combine. Each agrees with SiLU of the
+    exact product to rounding."""
     rng = np.random.default_rng(0)
     a, b = rng.standard_normal((8, 4096)).astype(np.float32), rng.standard_normal((4096, 256)).astype(np.float32)
     x, w = _placed(device, dtype, a, b)
@@ -80,7 +85,10 @@ def test_split_k_then_silu(device, dtype):
     silu = "logistic → mul" + {"float32": "", "bfloat16": " → cast(float32 -> bfloat16)"}[dtype]
     plans = {
         "unsplit": ["dot_general → " + silu],
-        "split": ["dot_general (split-K)", "reduce_sum (split-K) → " + silu],
+        "split": {
+            "mps": ["dot_general (split-K)", "reduce_sum (split-K) → " + silu],
+            "cuda": ["dot_general → " + silu],
+        }[device],
     }
     if device == "mps":
         plans["deterministic"] = plans["split"]

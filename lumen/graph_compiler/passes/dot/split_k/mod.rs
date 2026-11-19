@@ -1,11 +1,11 @@
 //! Split-K shared by the backends: long-K matmuls with too few output tiles become partial products
 //! over K chunks summed over the chunks.
 
+#[cfg(lumen_mps_linked)]
 use crate::graph::{Graph, Primitive, TensorType, Var};
 
 #[cfg(lumen_mps_linked)]
 pub(crate) mod mps;
-pub(crate) mod triton;
 
 /// Most K chunks a matmul is split into.
 const MAX_SPLIT: usize = 8;
@@ -18,6 +18,7 @@ const MIN_K: usize = 2048;
 const CHUNK_ALIGN: usize = 8;
 
 /// A backend's rules for splitting K.
+#[cfg(lumen_mps_linked)]
 pub(crate) struct Rules<'a> {
     /// Output tiles an `m` x `n` matmul runs as, each one kernel instance.
     pub(crate) tiles: &'a dyn Fn(usize, usize) -> usize,
@@ -32,6 +33,7 @@ pub(crate) struct Rules<'a> {
 
 /// Rewrites eligible unbatched float matmuls into a batched dot over K chunks plus a sum over chunks,
 /// by the backend's `rules`.
+#[cfg(lumen_mps_linked)]
 pub(crate) fn split_k(graph: &Graph, rules: &Rules) -> Graph {
     let nodes = graph.nodes();
 
@@ -150,8 +152,8 @@ pub(crate) fn split_k(graph: &Graph, rules: &Rules) -> Graph {
 
 /// Number of K chunks for an output of `groups` tiles with contraction `k`, aiming at `target` tiles,
 /// or `None` when there are already enough tiles, K is short, or no power-of-two split leaves chunks
-/// of at least `MIN_CHUNK`.
-fn chunks(groups: usize, target: usize, k: usize) -> Option<usize> {
+/// of at least `MIN_CHUNK`. Triton's GEMM splits by it too (`codegen::dot_general::triton::split_k`).
+pub(crate) fn chunks(groups: usize, target: usize, k: usize) -> Option<usize> {
     if groups == 0 || 2 * groups >= target || k < MIN_K {
         return None;
     }

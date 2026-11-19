@@ -3,6 +3,7 @@
 
 use super::{Backend, fuse};
 use crate::codegen::dot_general::triton::row::dot_row_fits;
+use crate::codegen::dot_general::triton::splits;
 use crate::codegen::kinds::{gemm_dot, reduction_root, row_reductions};
 use crate::codegen::regions::expansion;
 use crate::codegen::utils::triton::triton_type;
@@ -72,7 +73,8 @@ const ELEMENTWISE: &str = "elementwise";
 
 /// The shared fusion's view of Triton: kernels take any number of tensors, a GEMM epilogue
 /// writes at most 4 extra outputs and its two results into a concatenation's slots (as on MPS), and
-/// a GEMM joins the row reading it when one tile holds whole rows (`dot_row_fits`).
+/// a GEMM joins the row reading it when one tile holds whole rows (`dot_row_fits`) and, with `split_k`, it runs
+/// unsplit.
 fn backend(m: &DeviceModule<'_, Triton>) -> Backend {
     let config = &m.options.config;
 
@@ -85,7 +87,11 @@ fn backend(m: &DeviceModule<'_, Triton>) -> Backend {
         contraction_epilogues: true,
         dot_epilogue: |_, _| true,
         expansion: |graph, dot, concat| expansion(graph, dot, concat).is_some(),
-        row_dot: dot_row_fits,
+        // A GEMM running split over K writes its product in its combine, which reads no whole rows.
+        row_dot: match config.split_k {
+            true => |body| dot_row_fits(body) && !splits(body),
+            false => dot_row_fits,
+        },
         swap_epilogues: true,
     }
 }

@@ -350,8 +350,13 @@ fn captured_nodes() -> Option<usize> {
 }
 
 /// Runs `run`, `step`'s launches; while a CUDA graph captures, records that each node they add to it is
-/// `step`'s, so a profiled replay names its kernels and gives them its types.
-pub(crate) fn counted<R>(step: &crate::plan::StepBase, run: impl FnOnce() -> R) -> R {
+/// `step`'s, named `label` (its own, or one of its launches'), so a profiled replay names its kernels and gives
+/// them its types.
+pub(crate) fn counted<R>(
+    step: &crate::plan::StepBase,
+    label: &'static str,
+    run: impl FnOnce() -> R,
+) -> R {
     let Some(before) = captured_nodes() else {
         return run();
     };
@@ -359,7 +364,7 @@ pub(crate) fn counted<R>(step: &crate::plan::StepBase, run: impl FnOnce() -> R) 
     let result = run();
     let after = captured_nodes().unwrap_or(before);
 
-    crate::runtime::stream::cuda::captured(step.label, step.io_types(), before..after);
+    crate::runtime::stream::cuda::captured(label, step.io_types(), before..after);
     result
 }
 

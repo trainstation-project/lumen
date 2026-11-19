@@ -183,9 +183,10 @@ impl CudaGraph {
         unsafe { ffi::cudaGraphGetNodes(graph, std::ptr::null_mut(), &mut nodes) };
         self.labels = vec![None; nodes];
 
+        // A launch traced inside its step (recorded first) keeps its own label.
         for (labelled, at) in steps {
             for node in at.filter(|&n| n < nodes) {
-                self.labels[node] = Some(labelled.clone());
+                self.labels[node].get_or_insert_with(|| labelled.clone());
             }
         }
 

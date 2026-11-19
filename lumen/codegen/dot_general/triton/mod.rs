@@ -572,6 +572,61 @@ pub(crate) const CONFIGS: [Config; 7] = [
 /// Index into `CONFIGS` used when autotuning is off.
 pub(crate) const UNTUNED: usize = 2;
 
+/// Tiles a split-K GEMM aims for: on an H100, outputs of 64 or more 128x128 tiles already keep the
+/// GPU busy (a 1024x1024 bfloat16 matmul is slower split), while 16 tiles gain about 2x.
+const SPLIT_TARGET: usize = 128;
+
+/// K chunks the GEMM of `[batch, m, k, n]` sizes runs split into (`split_k_kernel.py`), counting tiles of the
+/// untuned config whatever tile it runs with, so the chunks (and the sum's rounding) don't depend on tuning:
+/// unbatched products of few tiles and a long K only (`passes::dot::split_k`'s `chunks`).
+pub(crate) fn split_k([l, m, k, n]: [usize; 4]) -> Option<usize> {
+    let tile = CONFIGS[UNTUNED];
+    let tiles = m.div_ceil(tile.block_m) * n.div_ceil(tile.block_n);
+    (l == 1).then(|| crate::graph_compiler::passes::dot::split_k::chunks(tiles, SPLIT_TARGET, k))?
+}
+
+/// Whether `body`'s GEMM runs split over K (`split_k`, when the compiler's `split_k` is on): its
+/// `[batch, m, k, n]` sizes read from its dot's types.
+pub(crate) fn splits(body: &Graph) -> bool {
+    let Some(Node {
+        primitive:
+            Primitive::DotGeneral {
+                lhs_batch,
+                lhs_contracting,
+                ..
+            },
+        inputs,
+        ..
+    }) = gemm_dot(body)
+    else {
+        return false;
+    };
+
+    let (lhs, rhs) = (body.type_of(inputs[0]), body.type_of(inputs[1]));
+    let product = |dims: &[usize]| dims.iter().map(|&d| lhs.shape[d]).product::<usize>();
+    let (l, k) = (product(lhs_batch), product(lhs_contracting));
+
+    split_k([l, lhs.numel() / (l * k), k, rhs.numel() / (l * k)]).is_some()
+}
+
+/// Columns of a split-K combine's block.
+const COMBINE_COLUMNS: usize = 128;
+
+/// Fewest rows of a combine's block whose epilogue splits rows into interleaved members: whole tuples.
+const LEAST_COMBINE_ROWS: usize = 16;
+
+/// Most rows of a combine's block.
+const COMBINE_ROWS: usize = 32;
+
+/// The `[rows, columns]` block a split-K combine sums and runs the epilogue on, for a product (or each of
+/// its halves) of `rows` rows: as many rows as it has, up to `COMBINE_ROWS`, so a decode step's single row
+/// computes its epilogue (a rotary's cos and sin) once, not for masked rows too. An epilogue splitting
+/// rows into interleaved members (`interleaved_rows`) takes at least `LEAST_COMBINE_ROWS`.
+pub(crate) fn combine_block(rows: usize, interleaved_rows: bool) -> [usize; 2] {
+    let least = if interleaved_rows { LEAST_COMBINE_ROWS } else { 1 };
+    [rows.next_power_of_two().clamp(least, COMBINE_ROWS), COMBINE_COLUMNS]
+}
+
 /// Widest row a GEMM's tile holds whole for a row epilogue (`BLOCK_SIZE_N`); wider products are written
 /// and normalized by a row kernel. On an H100 (bf16, autotuned) the fused kernel matches a GEMM and a
 /// row kernel at 256 but is slower at 512 (121 vs 112 µs) and 1024 (252 vs 132 µs): a tile of whole
@@ -671,8 +726,10 @@ crate::autotune::python::config_class! {
 }
 
 /// The Triton GEMM, running a matmul, a GEMM fusion (with its epilogue, or a row epilogue) or a linear
-/// cross-entropy.
-pub(crate) struct Gemm;
+/// cross-entropy; a GEMM of few tiles and a long K split over K chunks with `split_k` (the compiler's flag).
+pub(crate) struct Gemm {
+    pub(crate) split_k: bool,
+}
 
 impl crate::codegen::kernel::Kernel for Gemm {
     type Step = TritonStep;
@@ -697,6 +754,6 @@ impl crate::codegen::kernel::Kernel for Gemm {
         config: Option<&Config>,
         (inputs, out, outs): &Tensors,
     ) -> Result<(), String> {
-        launch::gemm(step, inputs, out, outs, config)
+        launch::gemm(step, inputs, out, outs, config, self.split_k)
     }
 }

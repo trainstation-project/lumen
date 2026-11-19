@@ -59,16 +59,27 @@ pub(crate) fn traced(
     out: &Tensor,
     run: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
+    traced_as(step, step.label, out, run)
+}
+
+/// `traced`, its kernels named `label`: one of several launches of `step` (a split-K GEMM's partials or
+/// combine), traced inside the step's own, whose name it overrides.
+pub(crate) fn traced_as(
+    step: &StepBase,
+    label: &'static str,
+    out: &Tensor,
+    run: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
     #[cfg(all(feature = "python", lumen_cuda_linked))]
-    let run = || crate::runtime::kernel::cuda::driver::counted(step, run);
+    let run = || crate::runtime::kernel::cuda::driver::counted(step, label, run);
 
     #[cfg(lumen_cupti_linked)]
     let run = || {
-        crate::profiler::next_launch(step.label, || step.io_types());
+        crate::profiler::next_launch(label, || step.io_types());
         crate::profiler::cupti::correlated(out.device(), run)
     };
 
-    let _ = (step, out);
+    let _ = (step, label, out);
     run()
 }
 

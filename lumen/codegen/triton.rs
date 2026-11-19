@@ -167,21 +167,22 @@ pub(crate) const ROW: &str = "row";
 /// Triton's plan of `plan`: each step with its loop kernel (none for a step another kernel runs).
 pub(crate) fn codegen(plan: CpuPlan, options: &Options) -> Result<TritonPlan, String> {
     let deterministic = options.config.deterministic;
+    let split_k = options.config.split_k;
 
     plan.map(|step| {
         let code = loop_kernel(&step, deterministic)?;
         let base = step.into_base();
-        let kernel = kernel_of(&base, code.is_some());
+        let kernel = kernel_of(&base, code.is_some(), split_k);
         Ok(TritonStep::new(base, code, kernel))
     })
 }
 
-/// The kernel `step` runs: flash attention, the GEMM, a collective or a wait, else its generated loop kernel (when
-/// codegen generated one: `looped`), else none (it fails when it runs).
-fn kernel_of(step: &StepBase, looped: bool) -> Arc<dyn Runner<TritonStep, Tensors>> {
+/// The kernel `step` runs: flash attention, the GEMM (split over K with `split_k`), a collective or a wait, else
+/// its generated loop kernel (when codegen generated one: `looped`), else none (it fails when it runs).
+fn kernel_of(step: &StepBase, looped: bool, split_k: bool) -> Arc<dyn Runner<TritonStep, Tensors>> {
     match &step.primitive {
         p if crate::codegen::attention::triton::launch::is_attention(p) => Arc::new(FlashAttention),
-        _ if crate::codegen::dot_general::triton::launch::is_gemm(step) => Arc::new(Gemm),
+        _ if crate::codegen::dot_general::triton::launch::is_gemm(step) => Arc::new(Gemm { split_k }),
         p if p.is_collective() => Arc::new(Collective),
         Primitive::DeviceWait | Primitive::HostWait => Arc::new(Wait),
         Primitive::Fusion { .. }

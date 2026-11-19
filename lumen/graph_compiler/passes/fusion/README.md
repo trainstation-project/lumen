@@ -52,7 +52,7 @@ seeing one element).
   fusion inside this pass when `horizontal_fusion` is on (MPS has no separate horizontal slot), and repeats
   from scratch until every by-value scalar is read only by fusions.
 - Triton: with `fuse`. Ops with Triton dtypes (adds `DynamicSlice`), any number of inputs, reduction and
-  contraction epilogues always on, `row_dot` = `dot_row_fits`. Fusions are named by kind (`named`):
+  contraction epilogues always on, `row_dot` = `dot_row_fits` (and, with `split_k`, a GEMM that runs unsplit). Fusions are named by kind (`named`):
   `dot_row`, `row`, `dot_general`, `reduction`, `elementwise`. Exposes `fusible`, `named`,
   `horizontal_candidate`, `HORIZONTAL_BUFFERS` and `slot_writes` to other passes.
 - CUDA: with `fuse`. Elementwise and layout ops with CuTe dtypes only; no reduction epilogues and no rows;

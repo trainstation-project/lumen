@@ -39,17 +39,25 @@ steps, and the autotuner times its configs.
   `prologue_b` jit loaders for the operands' strides, and an `epilogue` storing the tile with the fusion's
   elementwise ops, column regions included). `Config` (block_m/n/k, group_m, stages, warps), `CONFIGS` (7) with
   `UNTUNED` index; `row_gemm_configs` / `untuned_row_gemm` for whole-row tiles; `ROW_TILE` (256) caps a
-  row held in one tile and `partial_tile` picks partial widths for wider rows. Python class
-  `lumen.autotune.TritonGemmConfig`. `Gemm` (`Kernel`) runs dots, GEMM fusions, `dot_row` fusions and linear
-  cross entropy.
+  row held in one tile and `partial_tile` picks partial widths for wider rows. `split_k` gives the K chunks a
+  GEMM runs split into (unbatched, few tiles of the untuned config, a long K: `passes::dot::split_k`'s
+  `chunks`), `splits` whether a GEMM body's dot does, and `combine_block` the split's combine block. Python
+  class `lumen.autotune.TritonGemmConfig`. `Gemm` (`Kernel`, holding the compiler's `split_k`) runs dots, GEMM
+  fusions, `dot_row` fusions and linear cross entropy.
 - `launch.rs`: `gemm` generates prologues/epilogue once per tensor layout and calls the Python launcher set by
-  `set_gemm`; `is_gemm` decides which steps run here; `DOT_ROW` / `dot_partials` fusion names.
+  `set_gemm`; a split GEMM (not a row epilogue's) launches twice, `Split` saying which: the chunks' products
+  into scratch partials, then their combine. `is_gemm` decides which steps run here; `DOT_ROW` /
+  `dot_partials` fusion names.
 - `row.rs`: `row_epilogue` (a tile holds whole rows, so row reductions run on the accumulator and the product
   never reaches memory), `dot_row_fits`, and `partials_epilogue` (column partials for wider rows).
 - `cross_entropy.rs`: runs `linear_cross_entropy` as the GEMM with a fixed per-tile max/sum epilogue, then a
   combine kernel.
 - `gemm_kernel.py`: `gemm_kernel`, the fixed GEMM taking `PROLOGUE_A`/`PROLOGUE_B`/`EPILOGUE` as constexpr jit
   functions, and `dot_general`, its launcher.
+- `split_k_kernel.py`: split-K. `partials_kernel` stores one K chunk's product of a block (blocks ordered as
+  `gemm_kernel`'s, halves included); `combine_kernel` sums a block's chunks in chunk order (deterministic) and
+  hands the sum to the same `EPILOGUE`, so every GEMM epilogue (column regions, `swap_pairs`, auxiliary
+  outputs, expansions) runs split too. `split_k` launches either.
 - `linear_cross_entropy_kernel.py`: `cross_entropy_epilogue` and `cross_entropy_combine_kernel`.
 
 ## mps
