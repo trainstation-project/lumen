@@ -703,6 +703,18 @@ pub(crate) fn gemv(dot: &Primitive, lhs: &TensorType, rhs: &TensorType) -> bool 
         && rhs_contracting.as_slice() == [rhs.shape.len().saturating_sub(1)]
 }
 
+/// Whether GEMM body `body`'s dot is a matrix-vector product (`gemv`), which runs on the GEMV kernel and so
+/// joins no row fusion (as MPS keeps its GEMVs out of row reductions with a matrix lhs).
+pub(crate) fn gemv_body(body: &Graph) -> bool {
+    gemm_dot(body).is_some_and(|d| {
+        gemv(
+            &d.primitive,
+            body.type_of(d.inputs[0]),
+            body.type_of(d.inputs[1]),
+        )
+    })
+}
+
 /// GEMV candidates for `m` rows: every program holds the rows (`block_m`, a power of two) and `block_n` matrix rows,
 /// streaming `block_k` of K at a time, at most `GEMV_ELEMENTS` products a step.
 pub(crate) fn gemv_configs(m: usize) -> Vec<Config> {

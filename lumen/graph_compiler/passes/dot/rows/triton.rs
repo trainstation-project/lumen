@@ -3,7 +3,7 @@
 //! reductions' partials over each `tile`-column block of a row as well (`dot_partials`); those are
 //! reduced and the row reads them instead of reducing its rows again, so the product is read once less.
 
-use crate::codegen::dot_general::triton::partial_tile;
+use crate::codegen::dot_general::triton::{gemv_body, partial_tile};
 use crate::codegen::kinds::gemm_dot;
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
 use crate::graph_compiler::device::{DeviceModule, Triton};
@@ -164,7 +164,9 @@ fn wide(graph: &Graph, producer: &[Option<usize>], (r, row): (usize, &Node)) -> 
 
     row.inputs.iter().enumerate().find_map(|(at, &v)| {
         let g = producer[v]?;
-        let gemm = gemm(graph, &nodes[g]).filter(|_| joins(rows, at) && only(v))?;
+        // A matrix-vector product stays on the GEMV kernel, which writes no row partials.
+        let gemm =
+            gemm(graph, &nodes[g]).filter(|g| joins(rows, at) && only(v) && !gemv_body(g))?;
 
         Some(Wide {
             producer: g,

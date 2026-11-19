@@ -2,6 +2,7 @@
 //! kernels' limits and shapes, and which nodes left outside any fusion need one-node kernels.
 
 use super::{Backend, fuse};
+use crate::codegen::dot_general::triton::gemv_body;
 use crate::codegen::dot_general::triton::row::dot_row_fits;
 use crate::codegen::kinds::{combine_root, gemm_dot, reduction_root, row_reductions};
 use crate::codegen::regions::expansion;
@@ -88,7 +89,8 @@ fn backend(m: &DeviceModule<'_, Triton>) -> Backend {
         contraction_epilogues: true,
         dot_epilogue: |_, _| true,
         expansion: |graph, dot, concat| expansion(graph, dot, concat).is_some(),
-        row_dot: dot_row_fits,
+        // A matrix-vector product runs on the GEMV kernel, not a row kernel's GEMM.
+        row_dot: |body| dot_row_fits(body) && !gemv_body(body),
         swap_epilogues: true,
         combine_epilogues: true,
         update_epilogues: true,
