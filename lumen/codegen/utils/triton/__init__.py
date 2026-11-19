@@ -14,6 +14,14 @@ from lumen.codegen.random.triton.philox import philox_bits
 kernels = {}
 
 
+@triton.jit
+def swap_pairs(x):
+    """`x` with each adjacent pair of its row-major elements swapped (element 2i with 2i + 1): `SwapPairs` of a GEMM
+    accumulator tile, whose adjacent columns each thread holds side by side."""
+    a, b = tl.split(tl.reshape(x, (x.numel // 2, 2)))
+    return tl.reshape(tl.join(b, a), x.shape)
+
+
 def compiled(name, source):
     """Returns the Triton kernel `name` defined by `source`, compiling and caching it on first use."""
     if name not in kernels:
@@ -26,6 +34,7 @@ def compiled(name, source):
             "tl": tl,
             "libdevice": libdevice,
             "philox_bits": philox_bits,
+            "swap_pairs": swap_pairs,
         }
         exec(compile(source, filename, "exec"), scope)
         kernels[name] = scope[name]

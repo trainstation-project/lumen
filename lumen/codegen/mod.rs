@@ -24,6 +24,10 @@ pub(crate) mod tpu;
 pub(crate) mod triton;
 pub(crate) mod utils;
 
+/// A backend whose kernels compute `SwapPairs` (reading each element's partner at `j ^ 1`, or swapping a register
+/// tile's adjacent lanes): the graph compiler's `swap_pairs` pass rewrites pair swaps into it on these devices.
+pub(crate) trait SwapsPairs {}
+
 /// A backend's codegen telling the graph compiler's `unsupported` pass which graphs it has no kernels for. A device
 /// implementing it runs the pass.
 pub(crate) trait Supports {

@@ -130,6 +130,7 @@ pub(crate) fn primitive(name: &str, params: &Bound<'_, PyDict>) -> PyResult<Prim
             shape: dims("shape")?,
             broadcast_dimensions: dims("broadcast_dimensions")?,
         },
+        "swap_pairs" => SwapPairs,
         "transpose" => Transpose {
             permutation: dims("permutation")?,
         },

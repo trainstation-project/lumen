@@ -12,7 +12,8 @@ and before `canonicalize_dots`, behind the `split_k` config flag.
   and skinny products of at most 4 rows kept whole, and an MLX-style preferred chunk count for small
   outputs with long K. Exposes `mps::split_k(graph)`, which tests call. Built only when MPS is linked.
 - `triton.rs` — Triton rules: tiles of the untuned GEMM config (`CONFIGS[UNTUNED]`), a target of 128
-  tiles, nothing kept whole, no preferred count. Partials are always summed by a reduction, not atomics,
+  tiles, matrix-vector products (`dot_general::triton::gemv`, MPS's rule) kept whole for the GEMV kernel, no
+  preferred count. Partials are always summed by a reduction, not atomics,
   so results stay deterministic.
 
 CPU, CUDA and TPU get the identity pass. Both MPS and Triton run it only when `config.split_k` is on.

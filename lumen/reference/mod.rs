@@ -1015,6 +1015,12 @@ fn eval(p: &Primitive, args: &[&Values], types: &[&TensorType], out: &TensorType
                 ravel(source, &x.shape)
             })
         }
+        SwapPairs => gather(args[0], out, |idx| {
+            let mut source = idx.to_vec();
+            let last = source.len() - 1;
+            source[last] ^= 1;
+            ravel(source, &out.shape)
+        }),
         Slice { start_indices, .. } => {
             let x = types[0];
 

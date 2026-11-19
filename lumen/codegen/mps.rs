@@ -559,3 +559,6 @@ impl crate::codegen::Supports for Mps {
         Ok(())
     }
 }
+
+/// Metal kernels read each element's partner at `j ^ 1`.
+impl crate::codegen::SwapsPairs for Mps {}

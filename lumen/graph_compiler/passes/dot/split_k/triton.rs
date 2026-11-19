@@ -1,8 +1,9 @@
 //! Triton split-K: the shared pass (`split_k`) with Triton's tiles, its partials always
-//! summed by a reduction (no atomics), so results stay deterministic.
+//! summed by a reduction (no atomics), so results stay deterministic; matrix-vector products (`gemv`) kept
+//! whole, as MPS keeps its GEMVs.
 
 use super::{Rules, split_k};
-use crate::codegen::dot_general::triton::{CONFIGS, UNTUNED};
+use crate::codegen::dot_general::triton::{CONFIGS, UNTUNED, gemv};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::{DeviceModule, Triton};
 use crate::graph_compiler::passes::DevicePass;
@@ -29,7 +30,8 @@ impl<M: Module> CompilerPass<M> for SplitK {
         let rules = Rules {
             tiles: &|m, n| m.div_ceil(tile.block_m) * n.div_ceil(tile.block_n),
             target: TARGET,
-            unsplit: &|_, _, _, _| false,
+            // A matrix-vector product runs whole on the GEMV kernel, its lanes already splitting K (as on MPS).
+            unsplit: &|dot, lhs, rhs, _| gemv(dot, lhs, rhs),
             chunks: None,
         };
 

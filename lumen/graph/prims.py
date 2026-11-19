@@ -39,6 +39,7 @@ __all__ = [
     "to_device",
     "broadcast_in_dim",
     "transpose",
+    "swap_pairs",
     "slice",
     "dynamic_slice",
     "dynamic_update_slice",
@@ -348,6 +349,11 @@ def broadcast_in_dim(x, shape, broadcast_dimensions):
 def transpose(x, permutation):
     """``x`` with result dimension ``i`` taken from operand dimension ``permutation[i]``."""
     return bind("transpose", x, permutation=tuple(permutation))
+
+
+def swap_pairs(x):
+    """``x`` with each adjacent pair along its last axis (even length) swapped: element ``2i`` with ``2i + 1``."""
+    return bind("swap_pairs", x)
 
 
 def slice(x, start_indices, limit_indices):

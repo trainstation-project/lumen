@@ -69,7 +69,9 @@ pub(crate) fn gemm_regions<'a>(body: &'a Graph, dot: &Node) -> Option<Vec<Column
     }
 
     // prefer the column axis when the rhs contributes exactly one free dimension, otherwise try the row axis
-    let along = |axis: usize| regions_along(body, dot, axis).or_else(|| halves(body, dot, axis));
+    let along = |axis: usize| {
+        regions_along(body, dot.output, axis, false).or_else(|| halves(body, dot.output, axis))
+    };
 
     let columns = one_free(1, rhs_contracting)
         .then(|| along(rank - 1))
@@ -82,9 +84,35 @@ pub(crate) fn gemm_regions<'a>(body: &'a Graph, dot: &Node) -> Option<Vec<Column
     })
 }
 
-/// Matches exactly two readers that slice the first and second halves of `dot`'s output along `axis`.
-fn halves<'a>(body: &'a Graph, dot: &Node, axis: usize) -> Option<Vec<Columns<'a>>> {
-    let shape = &body.type_of(dot.output).shape;
+/// The column regions of a split-K combine's `value` (`combine_value`): as a GEMM's product's
+/// (`regions_along`), along its last axis, without the gated pair's two halves. Readers of the whole value
+/// (prefill attention reading a merged projection's values as a view of it) may remain: the epilogue then
+/// stores the value too.
+pub(crate) fn combine_regions(body: &Graph, value: Var) -> Option<Vec<Columns<'_>>> {
+    let rank = body.type_of(value).shape.len();
+    (rank > 0).then(|| regions_along(body, value, rank - 1, true))?
+}
+
+/// The value a split-K combine (`reduce`, a sum over its chunks) hands its epilogue as a GEMM hands its
+/// product: the rounding cast reading it, when that is its only reader, else the sum itself.
+pub(crate) fn combine_value(body: &Graph, reduce: &Node) -> Var {
+    match readers_of(body, reduce.output).as_slice() {
+        [cast]
+            if matches!(cast.primitive, Primitive::Cast { .. })
+                && body.type_of(cast.output).dtype.is_float()
+                && body.type_of(cast.output).dtype.size_of()
+                    < body.type_of(reduce.output).dtype.size_of()
+                && !body.outputs().contains(&reduce.output) =>
+        {
+            cast.output
+        }
+        _ => reduce.output,
+    }
+}
+
+/// Matches exactly two readers that slice the first and second halves of `product` along `axis`.
+fn halves<'a>(body: &'a Graph, product: Var, axis: usize) -> Option<Vec<Columns<'a>>> {
+    let shape = &body.type_of(product).shape;
     let n = shape[axis];
 
     let half = |node: &Node, start: usize| match &node.primitive {
@@ -99,7 +127,7 @@ fn halves<'a>(body: &'a Graph, dot: &Node, axis: usize) -> Option<Vec<Columns<'a
         _ => false,
     };
 
-    let (a, b) = match readers_of(body, dot.output).as_slice() {
+    let (a, b) = match readers_of(body, product).as_slice() {
         [a, b] if half(a, 0) && half(b, n / 2) => (*a, *b),
         [a, b] if half(b, 0) && half(a, n / 2) => (*b, *a),
         _ => return None,
@@ -115,10 +143,16 @@ fn halves<'a>(body: &'a Graph, dot: &Node, axis: usize) -> Option<Vec<Columns<'a
     })
 }
 
-/// Collects the readers of `dot`'s output that slice disjoint ranges along `axis`, each possibly reshaped into
-/// interleaved `k`-tuples, and returns them when they cover the axis and some region is worth fusing.
-fn regions_along<'a>(body: &'a Graph, dot: &Node, axis: usize) -> Option<Vec<Columns<'a>>> {
-    let shape = &body.type_of(dot.output).shape;
+/// Collects the readers of `product` that slice disjoint ranges along `axis`, each possibly reshaped into
+/// interleaved `k`-tuples, and returns them when they cover the axis and some region is worth fusing. With
+/// `whole`, readers of the whole product (no such slice) are left to read it as stored.
+fn regions_along<'a>(
+    body: &'a Graph,
+    product: Var,
+    axis: usize,
+    whole: bool,
+) -> Option<Vec<Columns<'a>>> {
+    let shape = &body.type_of(product).shape;
     let (rank, n) = (shape.len(), shape[axis]);
     let outputs = body.outputs();
 
@@ -166,20 +200,30 @@ fn regions_along<'a>(body: &'a Graph, dot: &Node, axis: usize) -> Option<Vec<Col
 
     let mut regions: Vec<Columns> = Vec::new();
 
-    for top in readers_of(body, dot.output) {
+    for top in readers_of(body, product) {
         let (start, width, region) = match &top.primitive {
-            Primitive::Reshape { .. } => (0, n, group(top, n)?),
+            Primitive::Reshape { .. } => match group(top, n) {
+                Some(group) => (0, n, group),
+                None if whole => continue,
+                None => return None,
+            },
             _ => {
-                let (start, limit) = along(top, shape, axis)?;
+                let (start, limit) = match along(top, shape, axis) {
+                    Some(range) => range,
+                    None if whole => continue,
+                    None => return None,
+                };
                 let width = limit - start;
 
+                // A slice reshaped into tuples is a group of interleaved members; reshaped otherwise (a
+                // projection's heads), the slice is a plain region the reshape follows in its epilogue.
                 let region = match readers_of(body, top.output).as_slice() {
                     [r] if matches!(r.primitive, Primitive::Reshape { .. }) => {
-                        if outputs.contains(&top.output) {
-                            return None;
+                        match group(r, width) {
+                            Some(_) if outputs.contains(&top.output) => return None,
+                            Some(group) => group,
+                            None => Region::Plain(top),
                         }
-
-                        group(r, width)?
                     }
                     _ => Region::Plain(top),
                 };
@@ -205,8 +249,16 @@ fn regions_along<'a>(body: &'a Graph, dot: &Node, axis: usize) -> Option<Vec<Col
             .all(|w| w[0].offset + w[0].width == w[1].offset)
         && regions.last().is_some_and(|c| c.offset + c.width == n);
 
-    // only worth a split when some region interleaves members or writes a graph output directly
-    let grouped = regions.iter().any(|c| c.k() > 1);
+    // only worth a split when some region interleaves members, writes a graph output directly, or the output
+    // splits into several regions (merged projections) some of which have an epilogue to run (a rotary
+    // embedding); two halves are a gated pair, whose epilogue reads both (`halves`), and regions read only by
+    // other kernels (attention reading its projections as views of one buffer) stay unsplit
+    let several = regions.len() > 1
+        && halves(body, product, axis).is_none()
+        && regions
+            .iter()
+            .any(|c| c.members().iter().any(|&v| epilogue_read(body, v)));
+    let grouped = regions.iter().any(|c| c.k() > 1) || several;
 
     let returned = axis + 1 == rank
         && regions
@@ -216,6 +268,14 @@ fn regions_along<'a>(body: &'a Graph, dot: &Node, axis: usize) -> Option<Vec<Col
     let one_pair = axis + 1 == rank && regions.len() == 1 && regions[0].k() == 2;
     let windows = one_pair || regions.iter().all(|c| c.width % ROW_COLUMNS == 0);
     (covers && (grouped || returned) && windows).then_some(regions)
+}
+
+/// Whether an elementwise op or a pair swap reads `v`, directly or through reshapes: work a GEMM epilogue would run.
+fn epilogue_read(body: &Graph, v: Var) -> bool {
+    readers_of(body, v).iter().any(|r| match r.primitive {
+        Primitive::Reshape { .. } => epilogue_read(body, r.output),
+        ref p => crate::graph_compiler::elementwise(p) || matches!(p, Primitive::SwapPairs),
+    })
 }
 
 /// Returns every node in `body` that reads `v`.

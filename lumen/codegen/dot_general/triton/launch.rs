@@ -16,7 +16,7 @@ use crate::{DType, Tensor};
 
 /// Launches the Triton GEMM on `[lhs, rhs, out]` with `[batch, m, k, n]` sizes, the tile config, the
 /// generated prologue/epilogue jit functions (their compiled kernels kept in the launches) and the
-/// epilogue's extra operands.
+/// epilogue's extra operands; with `gemv`, the matrix-vector kernel (`gemv_kernel.py`) instead.
 pub type Gemm = fn(
     tensors: [&Tensor; 3],
     sizes: [usize; 4],
@@ -25,6 +25,7 @@ pub type Gemm = fn(
     functions: &[Function],
     launches: &Launches,
     epilogue: &Epilogue,
+    gemv: bool,
 ) -> Result<(), String>;
 
 /// Extra operands of a fused epilogue.
@@ -223,10 +224,12 @@ pub(crate) fn gemm(
         .get(key, || Ok(prepare(step, inputs, out, outs)))?;
 
     let cols = prepared.sizes[3];
+    let gemv = runs_gemv(step);
 
     // A row epilogue needs whole rows in each program's tile.
     let config = match (&step.primitive, tuned) {
         (_, Some(c)) => *c,
+        _ if gemv => codegen::untuned_gemv(prepared.sizes[1]),
         (Primitive::Fusion { name, .. }, None) if name == DOT_ROW => {
             codegen::untuned_row_gemm(cols)
         }
@@ -250,12 +253,14 @@ pub(crate) fn gemm(
             &prepared.functions,
             &prepared.launches,
             &plain,
+            gemv,
         );
     };
 
     let dot = codegen::gemm_dot(body).expect("a GEMM epilogue's dot");
     let (lhs, rhs) = operands(body, dot, inputs);
     let extra: Vec<Tensor> = inputs.iter().chain(outs).cloned().collect();
+    hold_operands(body, inputs, out, outs)?;
 
     let fused = Epilogue {
         tensors: &extra,
@@ -271,7 +276,56 @@ pub(crate) fn gemm(
         &prepared.functions,
         &prepared.launches,
         &fused,
+        gemv,
     )
+}
+
+/// Whether `step` runs on the GEMV kernel: a matrix-vector product (`codegen::gemv`, as MPS picks its GEMV),
+/// unless a row epilogue needs the GEMM's whole-row tiles or its accumulator splits into row halves.
+pub(crate) fn runs_gemv(step: &StepBase) -> bool {
+    let (body, dot) = match &step.primitive {
+        Primitive::Fusion { name, .. } if name == DOT_ROW || name == DOT_PARTIALS => return false,
+        Primitive::Fusion { body, .. } => match codegen::gemm_dot(body) {
+            Some(dot) => (body, dot),
+            None => return false,
+        },
+        p @ Primitive::DotGeneral { .. } => {
+            let [lhs, rhs] = [&step.inputs[0].1, &step.inputs[1].1];
+            return codegen::gemv(p, lhs, rhs);
+        }
+        _ => return false,
+    };
+
+    let flags = codegen::gemm_flags(body, dot);
+    let row_halves = flags.group > 1 && !flags.interleaved && flags.rows;
+    let ty = |v| body.type_of(v);
+
+    codegen::gemv(&dot.primitive, ty(dot.inputs[0]), ty(dot.inputs[1])) && !row_halves
+}
+
+/// Starts each output of fusion `body` that an epilogue updates in place (`codegen::updated`, a KV cache) from
+/// its operand, as a lone update does, unless it already lives in the operand's buffer (planned in place).
+pub(crate) fn hold_operands(
+    body: &Graph,
+    inputs: &[Tensor],
+    out: &Tensor,
+    outs: &[Tensor],
+) -> Result<(), String> {
+    for (o, &v) in body.outputs().iter().enumerate() {
+        let Some(update) = codegen::updated(body, v) else {
+            continue;
+        };
+
+        let at = body.inputs().iter().position(|&u| u == update.inputs[0]);
+        let operand = &inputs[at.expect("the operand is a body input")];
+        let output = if o == 0 { out } else { &outs[o - 1] };
+
+        if output.data_ptr() != operand.data_ptr() {
+            crate::codegen::elementwise::triton::copy(output, operand)?;
+        }
+    }
+
+    Ok(())
 }
 
 /// Accumulator dtype of a `dot_general`.

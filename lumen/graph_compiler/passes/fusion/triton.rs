@@ -2,8 +2,9 @@
 //! kernels' limits and shapes, and which nodes left outside any fusion need one-node kernels.
 
 use super::{Backend, fuse};
+use crate::codegen::dot_general::triton::gemv_body;
 use crate::codegen::dot_general::triton::row::dot_row_fits;
-use crate::codegen::kinds::{gemm_dot, reduction_root, row_reductions};
+use crate::codegen::kinds::{combine_root, gemm_dot, reduction_root, row_reductions};
 use crate::codegen::regions::expansion;
 use crate::codegen::utils::triton::triton_type;
 use crate::graph::{Graph, Node, Primitive, Var};
@@ -39,6 +40,7 @@ pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
             | Reshape { .. }
             | BroadcastInDim { .. }
             | Transpose { .. }
+            | SwapPairs
             | Slice { .. }
             | Full { .. }
             | Iota { .. }
@@ -66,6 +68,9 @@ const DOT_GENERAL: &str = "dot_general";
 /// Name of a reduction fusion with its prologue and epilogue.
 const REDUCTION: &str = "reduction";
 
+/// Name of a split-K combine running the epilogue its GEMM would unsplit (`kinds::combine_root`).
+pub(crate) const COMBINE: &str = "combine";
+
 /// Name of an elementwise fusion.
 const ELEMENTWISE: &str = "elementwise";
 
@@ -84,13 +89,17 @@ fn backend(m: &DeviceModule<'_, Triton>) -> Backend {
         contraction_epilogues: true,
         dot_epilogue: |_, _| true,
         expansion: |graph, dot, concat| expansion(graph, dot, concat).is_some(),
-        row_dot: dot_row_fits,
+        // A matrix-vector product runs on the GEMV kernel, not a row kernel's GEMM.
+        row_dot: |body| dot_row_fits(body) && !gemv_body(body),
+        swap_epilogues: true,
+        combine_epilogues: true,
+        update_epilogues: true,
     }
 }
 
 /// The name of a fused `body`, by its kind as MPS's codegen reads it (`codegen::kinds`): a GEMM and the
-/// row reading it, a normalization row, a GEMM with its epilogue, a reduction with its prologue and
-/// epilogue, or an elementwise fusion.
+/// row reading it, a normalization row, a GEMM with its epilogue, a split-K combine with the epilogue its GEMM
+/// would run, a reduction with its prologue and epilogue, or an elementwise fusion.
 pub(crate) fn named(body: &Graph) -> String {
     let row = !row_reductions(body).is_empty();
 
@@ -98,6 +107,7 @@ pub(crate) fn named(body: &Graph) -> String {
         (true, true) => DOT_ROW,
         (false, true) => ROW,
         (true, false) => DOT_GENERAL,
+        _ if combine_root(body).is_some() => COMBINE,
         _ if reduction_root(body).is_some() => REDUCTION,
         _ => ELEMENTWISE,
     }

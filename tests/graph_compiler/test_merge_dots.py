@@ -677,8 +677,9 @@ def test_projections_of_several_inputs_each_read_one_block(device, module):
         graph = lumen.make_graph(f)(model, meta(32, 64), meta(32, 64))
         steps = lumen.graph_compiler.Plan(graph, "mps", parameters=[2, 3, 4], packable=[2, 3, 4]).steps()
         labels = [s["label"] for s in steps]
-        assert labels.count("3x dot_general") == 2, labels
-        blocks = {i[0] for s in steps if s["label"] == "3x dot_general" for i in s["inputs"]}
+        # Each merged matmul runs its projections' relu in its epilogue, one region each.
+        assert sum(label.startswith("3x dot_general") for label in labels) == 2, labels
+        blocks = {i[0] for s in steps if s["label"].startswith("3x dot_general") for i in s["inputs"]}
         assert len(blocks) == 3, blocks
     values = rand(64, 64), rand(64, 64, seed=1), rand(64, 64, seed=2)
     xs = [lumen.from_numpy(rand(32, 64, seed=k)).to(device) for k in (3, 4)]

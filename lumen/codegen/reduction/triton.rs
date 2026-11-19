@@ -223,6 +223,116 @@ impl ReductionCodegen for Triton {
     }
 }
 
+/// Most rows of a split-K combine's block.
+const COMBINE_ROWS: usize = 32;
+
+/// Columns of a split-K combine's block.
+const COMBINE_COLUMNS: usize = 128;
+
+/// A split-K combine's sum (`root`'s, of `[chunks, ..]` products) viewed as the `[rows, columns]` product the
+/// unsplit GEMM's epilogue sees, and the `[rows, columns]` block each program sums: as many rows as the product
+/// has up to `COMBINE_ROWS`, so a decode step's single row runs its epilogue once, not for masked rows too.
+fn combine_shape(body: &Graph, root: &Node) -> ([usize; 2], [usize; 2]) {
+    let shape = &body.type_of(root.output).shape;
+    let cols = shape.last().copied().unwrap_or(1);
+    let rows = shape.iter().product::<usize>() / cols.max(1);
+    let block = [rows.next_power_of_two().min(COMBINE_ROWS), COMBINE_COLUMNS];
+    ([rows, cols], block)
+}
+
+/// Programs a split-K combine (`kinds::combine_root`) launches: one per block of its product.
+pub(crate) fn combine_blocks(body: &Graph, root: &Node) -> usize {
+    let ([rows, cols], [block_m, block_n]) = combine_shape(body, root);
+    rows.div_ceil(block_m) * cols.div_ceil(block_n)
+}
+
+/// Generates a split-K combine (`kinds::combine_root`): each program sums one block of the product over its K
+/// chunks, in chunk order (deterministic), then runs the epilogue the unsplit GEMM would (`Product::stores`):
+/// the rounding cast, column regions (a merged projection's members), pair swaps, its outputs.
+pub(crate) fn split_k_combine(
+    body: &Graph,
+    by_value: &[bool],
+    root: &Node,
+) -> Result<Reduction, String> {
+    use crate::codegen::dot_general::triton::{EpilogueFlags, Product};
+    use crate::codegen::regions::{combine_regions, combine_value};
+
+    let products = body.type_of(root.inputs[0]);
+    let a = body.type_of(root.output).dtype;
+    let acc = triton_type(a).expect("a Triton dtype");
+    let chunks = products.shape[0];
+    let ([rows, cols], [block_m, block_n]) = combine_shape(body, root);
+
+    let k = body
+        .inputs()
+        .iter()
+        .position(|&v| v == root.inputs[0])
+        .expect("the products are a body input");
+
+    let element = match products.dtype == a {
+        true => format!("LOAD{k}(in{k}, c * {} + m * {cols} + n, mask)", rows * cols),
+        false => format!(
+            "LOAD{k}(in{k}, c * {} + m * {cols} + n, mask).to({acc})",
+            rows * cols
+        ),
+    };
+
+    let value = combine_value(body, root);
+    let regions = combine_regions(body, value);
+
+    let flags = EpilogueFlags {
+        interleaved: regions.is_some(),
+        group: 1,
+        rows: false,
+    };
+
+    let product = Product {
+        value,
+        regions,
+        flags,
+        expanded: None,
+    };
+
+    // The fusion's first output through `STORE`, the others through their own.
+    let store = |o: usize, index: &str, value: &str, mask: &str| match o {
+        0 => format!("STORE(out, {index}, {value}, {mask})"),
+        o => format!("STORE{o}(out{o}, {index}, {value}, {mask})"),
+    };
+
+    let stores = product.stores(body, by_value, [rows, cols], &store);
+    let extras = body.outputs().len() - 1;
+    let outs: Vec<String> = (1..=extras).map(|o| format!("out{o}")).collect();
+    let extra = (extras > 0).then(|| outs.join(",\n    "));
+    let kernel_params = params(by_value, extra.as_deref(), 1 + extras);
+    let blocks_n = cols.div_ceil(block_n);
+
+    // `n` is rebound to the block's columns, as the epilogue reads them.
+    let source = formatdoc!(
+        "
+        @triton.jit
+        def NAME(
+        {kernel_params}):
+            block = tl.program_id(0)
+            l = 0
+            m = ((block // {blocks_n}) * {block_m} + tl.arange(0, {block_m})).to(tl.int64)[:, None]
+            n = ((block % {blocks_n}) * {block_n} + tl.arange(0, {block_n})).to(tl.int64)[None, :]
+            mask = (m < {rows}) & (n < {cols})
+            value = tl.zeros([{block_m}, {block_n}], {acc})
+            for c in range({chunks}):
+                value += {element}
+        {stores}"
+    );
+
+    let (name, source) = named("fusion", source);
+
+    Ok(Reduction {
+        name,
+        source,
+        lanes: 1,
+        splits: 1,
+    })
+}
+
 /// 2-D tile a reduction or scan program works on: outputs along one axis, reduced lanes along the other.
 pub(crate) struct Tile {
     pub(crate) lanes: usize,

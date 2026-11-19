@@ -49,12 +49,17 @@ class Rotary(lumen.nn.Module):
 
     def __call__(self, x, pos):
         """Rotates `x` of shape `(batch, seq, heads, head_dim)` for positions `pos..pos+seq`."""
-        # rotate-half form: pair element i with i + half instead of interleaving
+        # interleaved form: pair element 2i with 2i + 1 (the q and k weights are loaded in that order, `interleaved`),
+        # so each pair's partner is its neighbour, which a GEMM epilogue holds in the same thread
         seq, half = x.shape[1], x.shape[-1] // 2
         angles = (lumen.arange(seq, lumen.int32) + pos).float().reshape(seq, 1) * self.inv_freq
-        angles = F.cat([angles, angles], dim=-1).reshape(1, seq, 1, 2 * half)
-        cos, sin = F.cos(angles).to(dtype=x.dtype), F.sin(angles).to(dtype=x.dtype)
-        rotated = F.cat([-x[..., half:], x[..., :half]], dim=-1)
+        cos = F.cos(angles).reshape(seq, half, 1)
+        sin = F.sin(angles).reshape(seq, half, 1)
+        cos = F.cat([cos, cos], dim=-1).reshape(1, seq, 1, 2 * half).to(dtype=x.dtype)
+        # the rotation's sign rides on sin's even elements (exact: a sign flip), so `rotated` just swaps each pair
+        sin = F.cat([-sin, sin], dim=-1).reshape(1, seq, 1, 2 * half).to(dtype=x.dtype)
+        pairs = x.reshape(*x.shape[:-1], half, 2)
+        rotated = F.cat([pairs[..., 1:], pairs[..., :1]], dim=-1).reshape(*x.shape)
         return (x * cos + rotated * sin).bfloat16()
 
 
@@ -175,6 +180,28 @@ def inverse_frequencies(config):
     return frequencies
 
 
+def interleaved(weights, config):
+    """`weights` with each q and k projection's rows reordered within every head from rotate-half order (row i pairs
+    with i + head_dim / 2) to adjacent pairs (2i with 2i + 1), as `Rotary` pairs them: q and k reordered alike keep
+    every q . k, so attention is unchanged."""
+    heads, kv_heads = config["num_attention_heads"], config["num_key_value_heads"]
+    head_dim = config["hidden_size"] // heads
+
+    @lumen.compile
+    def pairs(w, heads):
+        """`w`'s rows, `heads` blocks of two halves each, reordered so the halves' rows alternate."""
+        rows, dim = w.shape
+        return w.reshape(heads, 2, head_dim // 2, dim).transpose(1, 2).reshape(rows, dim)
+
+    # A compiled call's result lives in its plan's workspace until the next call: each is copied out.
+    for name in list(weights):
+        if name.endswith("q_proj.weight"):
+            weights[name] = pairs(weights[name], heads).clone()
+        elif name.endswith("k_proj.weight"):
+            weights[name] = pairs(weights[name], kv_heads).clone()
+    return weights
+
+
 def meta(*shape, dtype=lumen.bfloat16):
     """Returns a meta-device placeholder tensor of `shape` used for tracing before weights load."""
     return lumen.empty(list(shape), dtype, device="meta")
@@ -257,7 +284,7 @@ step(model, cache, meta(1, 1, dtype=lumen.int32), meta(dtype=lumen.int32))
 
 model.load_state_dict(
     {
-        **lumen.safetensors.load_file(path / "model.safetensors"),
+        **interleaved(lumen.safetensors.load_file(path / "model.safetensors"), config),
         "rotary.inv_freq": lumen.tensor(inverse_frequencies(config), dtype=lumen.float32),
     }
 )

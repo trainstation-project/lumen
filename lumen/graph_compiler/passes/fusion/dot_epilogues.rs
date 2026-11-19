@@ -16,9 +16,13 @@ pub(super) struct DotEpilogues {
     pub(super) inside: Vec<bool>,
     /// For an extra value the epilogue writes, the epilogue end hosting it.
     pub(super) aux: Vec<Option<usize>>,
+    /// Updates (`dynamic_update_slice`s) an epilogue writes its region's values through, into the slot of the
+    /// operand they update: fusible only as an epilogue's.
+    pub(super) updates: Vec<usize>,
 }
 
-/// Assigns each float GEMM the longest elementwise chain after it that can run in its epilogue.
+/// Assigns each float GEMM the longest elementwise chain after it that can run in its epilogue; with
+/// `combine_epilogues`, a split-K combine (`combine`) too, as its dot's GEMM would unsplit.
 pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], backend: &Backend) -> DotEpilogues {
     let (graph, nodes, n) = (a.graph, a.nodes, a.n);
 
@@ -30,6 +34,17 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], backend: &Backend) -> Do
     let mut in_epilogue = vec![false; nodes.len()];
     let mut dot_aux: Vec<Option<usize>> = vec![None; nodes.len()];
     let mut claimed = vec![false; nodes.len()];
+    let mut updates = Vec::new();
+
+    // Whether `un` writes `v` (an epilogue's value) into the slot of an operand computed apart from it: an
+    // update the epilogue stores straight into that operand, with `update_epilogues`.
+    let update = |un: &Node, v: Var| {
+        backend.update_epilogues
+            && matches!(un.primitive, Primitive::DynamicUpdateSlice)
+            && un.inputs[1] == v
+            && un.inputs[0] != v
+    };
+
     // Latest dot each value depends on, so epilogues only read operands finished before their dot.
     let mut last_dot: Vec<Option<usize>> = vec![None; n];
 
@@ -53,15 +68,25 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], backend: &Backend) -> Do
 
         let dot = matches!(node.primitive, Primitive::DotGeneral { .. })
             && node.inputs.iter().all(|&v| float(v))
-            && float(node.output);
+            && float(node.output)
+            && (backend.dot_epilogue)(graph, node);
 
-        if !backend.contraction_epilogues
-            || !live[i]
-            || !dot
-            || !(backend.dot_epilogue)(graph, node)
-        {
+        let combine = backend.combine_epilogues && combine(a, i);
+
+        if !backend.contraction_epilogues || !live[i] || !(dot || combine) {
             continue;
         }
+
+        // The value the epilogue starts from and the host's own nodes: a dot's product, or a combine's sum
+        // through the cast rounding it (its dot's output dtype, unsplit).
+        let (value, own) = match combine {
+            true => {
+                let value = crate::codegen::regions::combine_value(graph, node);
+                let cast = producer[value].filter(|&c| c != i);
+                (value, std::iter::once(i).chain(cast).collect::<Vec<_>>())
+            }
+            false => (node.output, vec![i]),
+        };
 
         let in_row = |u: usize| rows.iter().any(|r| r.root == u || r.inner.contains(&u));
 
@@ -75,11 +100,14 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], backend: &Backend) -> Do
 
         let pair = crate::codegen::regions::gemm_pair(graph, node);
 
+        let regions = match combine {
+            true => crate::codegen::regions::combine_regions(graph, value),
+            false => crate::codegen::regions::gemm_regions(graph, node).filter(|_| pair.is_none()),
+        };
+
         // When readers split the output into column regions, grow each region separately and
         // keep the largest assignment whose region outputs all fit.
-        if let Some(regions) =
-            crate::codegen::regions::gemm_regions(graph, node).filter(|_| pair.is_none())
-        {
+        if let Some(regions) = regions {
             let index_of = |v: Var| producer[v].expect("a node's value");
 
             // Seed each region with its slicing nodes back to the dot.
@@ -97,7 +125,7 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], backend: &Backend) -> Do
                             }
 
                             match producer[nodes[k].inputs[0]] {
-                                Some(p) if p != i => k = p,
+                                Some(p) if !own.contains(&p) => k = p,
                                 _ => break,
                             }
                         }
@@ -121,8 +149,7 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], backend: &Backend) -> Do
                 let mut ends = Vec::new();
 
                 for (c, set) in regions.iter().zip(sets) {
-                    let size = graph.type_of(node.output).numel()
-                        / graph.type_of(node.output).shape[c.axis]
+                    let size = graph.type_of(value).numel() / graph.type_of(value).shape[c.axis]
                         * c.size();
 
                     let outside = set.iter().copied().filter(|&k| {
@@ -133,7 +160,13 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], backend: &Backend) -> Do
                     let before = ends.len();
 
                     for k in outside {
-                        if graph.type_of(nodes[k].output).numel() != size {
+                        // An update writes the region's values into its operand's slot.
+                        let written = match nodes[k].primitive {
+                            Primitive::DynamicUpdateSlice => nodes[k].inputs[1],
+                            _ => nodes[k].output,
+                        };
+
+                        if graph.type_of(written).numel() != size {
                             return None;
                         }
 
@@ -143,6 +176,17 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], backend: &Backend) -> Do
                     if ends.len() == before {
                         return None;
                     }
+                }
+
+                // A combine's value read whole besides its regions (prefill attention reading a merged
+                // projection's values as a view) is stored too, by its own node (the rounding cast).
+                let whole = is_output[value]
+                    || users[value]
+                        .iter()
+                        .any(|w| !sets.iter().any(|set| set.contains(w)));
+
+                if whole {
+                    ends.push(producer[value].filter(|&c| combine && c != i)?);
                 }
 
                 let main = *ends.iter().max()?;
@@ -159,6 +203,7 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], backend: &Backend) -> Do
             let mut best = fused(&sets).map(|f| (sets.clone(), f));
             let mut depends = vec![false; n];
             depends[node.output] = true;
+            depends[value] = true;
 
             for (u, un) in nodes.iter().enumerate().skip(i + 1) {
                 depends[un.output] = un.inputs.iter().any(|&v| depends[v]);
@@ -179,15 +224,20 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], backend: &Backend) -> Do
 
                 let earlier = |v: Var| last_dot[v].is_none_or(|d| d < i);
 
-                let steps =
-                    elementwise(&un.primitive) || matches!(un.primitive, Primitive::Reshape { .. });
+                let updates_slot =
+                    (un.inputs.get(1)).is_some_and(|&v| region_of[v] == Some(*r) && update(un, v));
+
+                let steps = elementwise(&un.primitive)
+                    || matches!(un.primitive, Primitive::Reshape { .. })
+                    || (backend.swap_epilogues && matches!(un.primitive, Primitive::SwapPairs))
+                    || updates_slot;
 
                 let reads = un
                     .inputs
                     .iter()
                     .all(|&v| region_of[v] == Some(*r) || (!depends[v] && earlier(v)));
 
-                if !(fusible[u] && steps && reads && !in_row(u) && !claimed[u]) {
+                if !((fusible[u] || updates_slot) && steps && reads && !in_row(u) && !claimed[u]) {
                     break;
                 }
 
@@ -201,7 +251,17 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], backend: &Backend) -> Do
 
             if let Some((sets, (ends, main))) = best {
                 (dot_end[i], dot_of[main]) = (Some(main), Some(i));
-                claimed[i] = true;
+
+                for &k in &own {
+                    claimed[k] = true;
+                    in_epilogue[k] = k != i;
+                }
+
+                updates.extend(
+                    sets.iter()
+                        .flatten()
+                        .filter(|&&k| matches!(nodes[k].primitive, Primitive::DynamicUpdateSlice)),
+                );
 
                 for &k in sets.iter().flatten() {
                     claimed[k] = true;
@@ -223,26 +283,31 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], backend: &Backend) -> Do
         let pair: Option<[usize; 2]> = pair
             .map(|(a, b)| [a.output, b.output].map(|v| producer[v].expect("a slice of the dot")));
 
-        let mut taken = vec![i];
+        let mut taken = own.clone();
         let (mut after, mut depends) = (vec![false; n], vec![false; n]);
         (after[node.output], depends[node.output]) = (true, true);
+        (after[value], depends[value]) = (true, true);
         let mut end = None;
 
         for (u, un) in nodes.iter().enumerate().skip(i + 1) {
             depends[un.output] = un.inputs.iter().any(|&v| depends[v]);
 
-            if !live[u] || !un.inputs.iter().any(|&v| after[v]) {
+            if !live[u] || !un.inputs.iter().any(|&v| after[v]) || own.contains(&u) {
                 continue;
             }
 
             let expands = pair.is_none() && (backend.expansion)(graph, node, un);
 
+            let updates_slot = (un.inputs.get(1)).is_some_and(|&v| after[v] && update(un, v));
+
             let step = elementwise(&un.primitive)
                 || matches!(un.primitive, Primitive::Reshape { .. })
+                || (backend.swap_epilogues && matches!(un.primitive, Primitive::SwapPairs))
                 || pair.is_some_and(|p| p.contains(&u))
-                || expands;
+                || expands
+                || updates_slot;
 
-            let fuses = fusible[u] && step && !in_row(u) && !claimed[u];
+            let fuses = (fusible[u] || updates_slot) && step && !in_row(u) && !claimed[u];
             let earlier = |v: Var| last_dot[v].is_none_or(|d| d < i);
 
             let reads = un
@@ -361,6 +426,12 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], backend: &Backend) -> Do
 
             taken.iter().for_each(|&k| claimed[k] = true);
 
+            updates.extend(
+                taken
+                    .iter()
+                    .filter(|&&k| matches!(nodes[k].primitive, Primitive::DynamicUpdateSlice)),
+            );
+
             for k in aux {
                 (dot_aux[k], claimed[k]) = (Some(end), true);
             }
@@ -372,5 +443,29 @@ pub(super) fn dot_epilogues(a: &Analysis, rows: &[Row], backend: &Backend) -> Do
         of: dot_of,
         inside: in_epilogue,
         aux: dot_aux,
+        updates,
     }
+}
+
+/// Whether node `i` is a split-K combine: a float sum over axis 0 (the K chunks, the dot's leading batch dim) of
+/// a batched dot's products that only it reads.
+fn combine(a: &Analysis, i: usize) -> bool {
+    let (graph, node) = (a.graph, &a.nodes[i]);
+
+    let Primitive::ReduceSum { axes, .. } = &node.primitive else {
+        return false;
+    };
+
+    let products = node.inputs[0];
+
+    let batched = a.producer[products].is_some_and(|d| {
+        matches!(&a.nodes[d].primitive, Primitive::DotGeneral { lhs_batch, .. } if !lhs_batch.is_empty())
+    });
+
+    *axes == [0]
+        && batched
+        && a.users[products] == [i]
+        && !a.is_output[products]
+        && graph.type_of(node.output).dtype.is_float()
+        && a.fusible[i]
 }

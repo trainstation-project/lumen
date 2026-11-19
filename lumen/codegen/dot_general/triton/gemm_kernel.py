@@ -131,6 +131,7 @@ def dot_general(tensors, sizes, accum_dtype, config, specs, extra, scalars, flag
         BLOCK_SIZE_N=block_n,
         num_stages=stages,
         num_warps=warps,
+        enable_fp_fusion=True,
     )
     if compile:
         return compiled_launch(gemm_kernel, grid, (), kwargs)

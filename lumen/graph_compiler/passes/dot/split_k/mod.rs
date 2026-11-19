@@ -8,7 +8,7 @@ pub(crate) mod mps;
 pub(crate) mod triton;
 
 /// Most K chunks a matmul is split into.
-const MAX_SPLIT: usize = 8;
+pub(crate) const MAX_SPLIT: usize = 8;
 /// Smallest K chunk length.
 const MIN_CHUNK: usize = 256;
 /// Smallest K worth splitting.
