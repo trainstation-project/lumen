@@ -1,12 +1,11 @@
 # runtime/dispatch
 
-Op dispatch: picks the kernel a runtime op (a wait, a host/device copy) runs on a given device. The code is
-`runtime/dispatch.rs`; this folder holds only its tests. Plan steps do not go through it: their kernels are chosen
-by codegen and held on the step.
+Op dispatch: picks the kernel a runtime op (a wait, a host/device copy) runs on a given device. Plan steps do not
+go through it: their kernels are chosen by codegen and held on the step.
 
 ## Files
 
-- `../dispatch.rs` — `DispatchKey`, `Op<K>` and the global registry of runtime-registered kernels.
+- `mod.rs` — `DispatchKey`, `Op<K>` and the global registry of runtime-registered kernels.
 - `tests.rs` — tests of key mapping, built-in before registered kernels, replacement, per-op registration and the
   missing-kernel panic.
 
