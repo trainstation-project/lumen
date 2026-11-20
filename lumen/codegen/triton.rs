@@ -473,6 +473,10 @@ impl crate::codegen::Supports for Triton {
 /// Triton kernels read each element's partner at `j ^ 1`, or swap a GEMM accumulator tile's adjacent lanes.
 impl crate::codegen::SwapsPairs for Triton {}
 
+/// Triton runs a linear cross entropy as its GEMM with a per-tile max/sum epilogue, then a combine
+/// (`dot_general::triton::cross_entropy`).
+impl crate::codegen::LinearCrossEntropies for Triton {}
+
 /// Triton merges with `fuse`.
 impl crate::codegen::MergesDots for Triton {
     /// What Triton fusion can fuse, read in place; views; lanes 1; 8 columns.

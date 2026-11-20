@@ -100,6 +100,10 @@ pub(crate) trait MergesDots {
     fn target() -> crate::graph_compiler::passes::merge_dots::Target;
 }
 
+/// A backend with a fused linear cross-entropy kernel (`Primitive::LinearCrossEntropy`, never writing the logits): the
+/// graph compiler's `linear_cross_entropy` pass rewrites a cross entropy over a matmul's logits into it.
+pub(crate) trait LinearCrossEntropies {}
+
 /// A backend's codegen telling the graph compiler's `unsupported` pass which graphs it has no kernels for. A device
 /// implementing it runs the pass.
 pub(crate) trait Supports {

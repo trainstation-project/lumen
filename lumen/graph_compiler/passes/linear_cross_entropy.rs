@@ -1,12 +1,36 @@
-//! Pass replacing an unfused `cross_entropy(h @ w, target)` with one `LinearCrossEntropy` op that
-//! never materializes the logits.
+//! Replacing an unfused cross entropy over logits `h @ w` with one `Primitive::LinearCrossEntropy` op that never
+//! materializes the `[b, v]` logits. It runs after the attention passes and before `fold_dot_reshapes`;
+//! `chunked_cross_entropy`, earlier in the list, reuses its matcher (`Found`, `matched` and `uses` are `pub(super)`).
+//!
+//! Devices: it runs, with `fuse` and `fused_linear_cross_entropy`, on each device whose codegen implements
+//! `codegen::LinearCrossEntropies` (a fused linear cross-entropy kernel): MPS and Triton. CPU, CUDA and TPU get the
+//! identity pass.
+//!
+//! The pattern, for an unbatched dot computing float32 logits (float32 accumulation and output) from 2-D hidden states
+//! `h` (`[b, d]`, contracted on dim 1) and a 2-D weight `w` of the same float dtype (`[v, d]`, or `[d, v]` when the dot
+//! contracts the weight's dim 0, `transposed`):
+//! - a max-shifted logsumexp along the classes: `ReduceMax` over axis 1, `Sub` of its broadcast, `Exp`, float32
+//!   `ReduceSum` over axis 1, `Log`, `Add` of the row max (`lse`). The logits may be read only by the row max, the
+//!   shift and a flattening reshape; each intermediate only by the next step.
+//! - for a loss, the flattened logits gathered (`Gather { axis: 0 }`) at `iota(b) * v + target`, with `target` an
+//!   int32/int64 `[b]` tensor defined before the fused op is emitted, and `lse - picked` as the per-row loss.
+//!
+//! The rewrite:
+//! - A full match emits, at the earliest of the lse and the gather, `LinearCrossEntropy(h, w, target)` (with `w`
+//!   transposed to `[v, d]` first when needed). Its `[2, b]` result holds the loss row (0) and the lse row (1); each
+//!   is sliced and reshaped to `[b]` and replaces the old loss and lse values.
+//! - A logsumexp whose logits nothing else reads (a gradient's, with the loss unused) is replaced by the same op with
+//!   all-zero int32 targets, using only its lse row.
+//!
+//! Every other node is copied with its label; replaced nodes pass their origins to the new ones.
 
-#[cfg(lumen_mps_linked)]
-mod mps;
-mod triton;
-
+use crate::codegen::LinearCrossEntropies;
 use crate::graph::{Graph, Node, Primitive, Var};
+use crate::graph_compiler::CompilerConfig;
+use crate::graph_compiler::device::DeviceModule;
+use crate::graph_compiler::passes::DevicePass;
 use crate::graph_compiler::passes::{CompilerPass, Module};
+use crate::graph_compiler::pipeline::{Pass, when};
 use crate::{DType, Scalar};
 
 /// A matched linear cross entropy.
@@ -315,6 +339,16 @@ fn row_offsets_plus(
 
 /// Compiler pass running [`linear_cross_entropy`].
 pub(crate) struct LinearCrossEntropy;
+
+/// With `fuse` and `fused_linear_cross_entropy`, on every device whose codegen implements `LinearCrossEntropies`.
+impl<D: LinearCrossEntropies> DevicePass<D> for LinearCrossEntropy {
+    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
+        when(
+            config.fuse && config.fused_linear_cross_entropy,
+            LinearCrossEntropy,
+        )
+    }
+}
 
 impl<M: Module> CompilerPass<M> for LinearCrossEntropy {
     /// Pass name used in profiler ranges and dumps.

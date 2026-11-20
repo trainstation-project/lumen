@@ -563,6 +563,9 @@ impl crate::codegen::Supports for Mps {
 /// Metal kernels read each element's partner at `j ^ 1`.
 impl crate::codegen::SwapsPairs for Mps {}
 
+/// Metal runs a linear cross entropy as one kernel (`dot_general::mps::linear_cross_entropy`).
+impl crate::codegen::LinearCrossEntropies for Mps {}
+
 /// MPS merges with `fuse`, its backward merge with `contraction_epilogues` too, packing for the GEMM epilogue's row
 /// columns.
 impl crate::codegen::MergesDots for Mps {
