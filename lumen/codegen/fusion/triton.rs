@@ -163,3 +163,24 @@ pub(crate) fn slot_writes(graph: &Graph, producer: &Node) -> bool {
 
     kernel || matches!(producer.primitive, Primitive::DotGeneral { .. })
 }
+
+/// Triton merges, with `fuse`, non-trivial `elementwise` fusions without reductions or matmuls, grouped by tiling.
+impl crate::codegen::HorizontallyFuses for Triton {
+    const GROUPING: crate::graph_compiler::passes::horizontal::Grouping =
+        crate::graph_compiler::passes::horizontal::Grouping::Tiling;
+    const BUFFERS: usize = crate::codegen::fusion::triton::HORIZONTAL_BUFFERS;
+
+    /// `fusion::triton::horizontal_candidate`.
+    fn candidate(graph: &Graph, node: &Node) -> bool {
+        crate::codegen::fusion::triton::horizontal_candidate(graph, node)
+    }
+}
+
+/// Triton's kernels writing a concatenation's operands into their slots, with `fuse`: kernels of their own writing
+/// fresh memory (`fusion::triton::slot_writes`).
+impl crate::codegen::Slots for DeviceModule<'_, Triton> {
+    /// What `fusion::triton::slot_writes` accepts.
+    fn writes(&self, _: &Node, _: usize, producer: &Node, _: usize) -> bool {
+        crate::codegen::fusion::triton::slot_writes(&self.graph, producer)
+    }
+}

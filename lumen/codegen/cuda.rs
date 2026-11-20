@@ -199,51 +199,6 @@ impl Device for Cuda {
     }
 }
 
-/// CUDA merges with `fuse`, packing for the GEMM epilogue's 16-byte vectors (8 columns of 16-bit products).
-impl crate::codegen::MergesDots for Cuda {
-    /// What CUDA fusion can fuse, read in place; views; lanes 1; 8 columns.
-    fn target() -> crate::graph_compiler::passes::merge_dots::Target {
-        crate::graph_compiler::passes::merge_dots::Target {
-            reads: crate::codegen::fusion::cuda::fusible,
-            views: true,
-            lanes: 1,
-            columns: 8,
-        }
-    }
-}
-
-/// Flash-attention matching for CUDA: no epilogues, a static causal diagonal, and only the attentions its SM80
-/// kernel runs (the rest stay unfused, and fail compiling as any op the backend has no kernel for).
-impl crate::graph_compiler::passes::attention::Attentions for DeviceModule<'_, Cuda> {
-    /// No: the kernel writes the attention alone.
-    fn contraction_epilogues(&self) -> bool {
-        false
-    }
-
-    /// None: the CUDA backend passes runtime scalars as 0-d device tensors.
-    fn scalars(&self) -> Vec<crate::graph::Var> {
-        Vec::new()
-    }
-
-    /// Every forward attention runs on the one forward kernel.
-    fn kernel(&mut self) -> String {
-        crate::graph_compiler::passes::attention::FORWARD.into()
-    }
-
-    /// No: the kernel's causal diagonal is fixed at compile time.
-    fn runtime_offsets(&self) -> bool {
-        false
-    }
-
-    /// The attentions `codegen::attention::cuda::supports` accepts.
-    fn supports(&self) -> crate::graph_compiler::passes::attention::Supports {
-        crate::codegen::attention::cuda::supports
-    }
-}
-
-/// CuTe kernels gather (a fused `Gather`, read through the emitter).
-impl crate::codegen::Gathers for Cuda {}
-
 impl crate::codegen::Lone for DeviceModule<'_, Cuda> {
     /// Whether lone `n` needs a one-node kernel: every fusible node but reshapes, which are views.
     fn alone(graph: &Graph, n: &Node) -> bool {

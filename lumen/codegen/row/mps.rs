@@ -800,3 +800,14 @@ impl RowCodegen for Mps {
         ))
     }
 }
+
+/// MPS fusion fuses rows of what it fuses, column sums riding along within `row::mps::ROW_PARTIALS`.
+impl crate::codegen::NormalizationRows for Mps {
+    const PARTIALS: crate::graph_compiler::passes::diamonds::Partials =
+        crate::codegen::row::mps::ROW_PARTIALS;
+
+    /// `fusion::mps::fusible`.
+    fn fusible(graph: &Graph, node: &Node) -> bool {
+        crate::codegen::fusion::mps::fusible(graph, node)
+    }
+}

@@ -536,3 +536,15 @@ impl RowCodegen for Triton {
         Ok(row(body, by_value))
     }
 }
+
+/// Triton's fusion fuses rows of what it fuses (the rows MPS finds), column sums riding along within
+/// `row::triton::ROW_PARTIALS`.
+impl crate::codegen::NormalizationRows for Triton {
+    const PARTIALS: crate::graph_compiler::passes::diamonds::Partials =
+        crate::codegen::row::triton::ROW_PARTIALS;
+
+    /// `fusion::triton::fusible`.
+    fn fusible(graph: &Graph, node: &Node) -> bool {
+        crate::codegen::fusion::triton::fusible(graph, node)
+    }
+}

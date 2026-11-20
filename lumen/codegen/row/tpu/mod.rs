@@ -11,7 +11,6 @@ use crate::codegen::dot_general::tpu::block;
 use crate::codegen::row::RowCodegen;
 #[cfg(lumen_tpu_linked)]
 use crate::codegen::tpu::{Kernel, Rows};
-#[cfg(lumen_tpu_linked)]
 use crate::codegen::utils::tpu::Tpu;
 use crate::device::tpu::layout::Layout;
 #[cfg(lumen_tpu_linked)]
@@ -390,4 +389,26 @@ pub(crate) fn kernel(step: &StepBase) -> Result<Kernel, String> {
         spec,
         Rows::Split,
     ))
+}
+
+/// TPU fuses each row its row kernel takes into a `row` fusion of its own.
+impl crate::codegen::FusedRows for Tpu {
+    /// `codegen::row::tpu::fusible`.
+    fn fusible(graph: &crate::graph::Graph, node: &crate::graph::Node) -> bool {
+        crate::codegen::row::tpu::fusible(graph, node)
+    }
+
+    /// `codegen::row::tpu::fits`.
+    fn fits(body: &crate::graph::Graph) -> bool {
+        crate::codegen::row::tpu::fits(body)
+    }
+}
+
+/// TPU's row kernel reads the inputs it classes `Kind::Full` as whole rows.
+impl crate::codegen::FullRows for Tpu {
+    /// Whether `codegen::row::tpu::kinds` classes input `at` of `body` as full rows.
+    fn full(body: &crate::graph::Graph, at: usize) -> bool {
+        use crate::codegen::row::tpu::{Kind, kinds};
+        kinds(body).is_some_and(|kinds| kinds[body.inputs()[at]] == Kind::Full)
+    }
 }

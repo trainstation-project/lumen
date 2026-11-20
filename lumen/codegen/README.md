@@ -29,6 +29,15 @@ One folder per kernel family, each with a device subfolder per backend that has 
 body's values at an index), `store` (strided load/store addressing) and `utils` (each backend's codegen type,
 prelude and helpers).
 
+Each backend implements the graph compiler's pass traits (`codegen/mod.rs`, plus `Attentions` and
+`AttentionBackwards` in `passes/attention`) in the family file they belong to: attention traits in
+`attention/<device>`; `SplitsK`, `DotLayouts`, `PartialRows`, `InnerProducts`, `MergesDots`,
+`LinearCrossEntropies` and `StridedOperands` in `dot_general/<device>`; `NormalizationRows`, `FusedRows` and
+`FullRows` in `row/<device>`; `Slots`, `Rechecks` and `HorizontallyFuses` in `fusion/<device>`; `SwapsPairs` and
+`Gathers` in `emitter/<device>`. TPU's dot and dynamic-slice ones (`InnerProducts`, `DotLayouts`,
+`FoldsDotReshapes`, `FusesDots`, `MergesDots`, `UpdateChains`) stay in `utils/tpu`, since `dot_general/tpu` and
+`dynamic_slice/tpu` build only with the TPU linked and the pipeline needs them without it.
+
 ## The Kernel trait
 
 A `Kernel` (in `kernel.rs`) has three associated types: the backend's `Step`, the `Buffers` it runs on (tensors,

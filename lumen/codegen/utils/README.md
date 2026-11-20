@@ -17,6 +17,8 @@ Code shared by each backend's generators across ops: the backend marker types th
   - `window`/`window_at`: an output written into a column window of a wider matrix.
   - `LANES` (128).
   The fusion and dot passes in `graph_compiler/passes` use these too.
+  It implements TPU's dot and dynamic-slice pass traits (`InnerProducts`, `DotLayouts`, `FoldsDotReshapes`,
+  `FusesDots`, `MergesDots`, `UpdateChains`) here, since those families' TPU modules need the TPU linked.
 - `tpu/lowering.rs` — lowers TPU kernels to Mosaic by calling `lumen.codegen.utils.tpu.pallas`, cached per (module, spec) and per device. It fails without Python.
 - `tpu/pallas.py` — `lower` and `lower_source` trace a kernel module's `program(spec)` or a generated `program(device)` on a device's memory. `view` gives a ref into device memory in its TPU layout.
 - `tpu/__init__.py` — `computed` and `per_row` replay an elementwise fusion's JSON nodes as primitives on kernel blocks. This is the only place where primitives are bound by name.
