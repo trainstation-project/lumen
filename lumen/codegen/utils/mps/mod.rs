@@ -13,9 +13,8 @@ use crate::codegen::dot_general::mps::Gemm;
 use crate::codegen::dot_general::mps::{gemm_kernel, gemm_row_kernel, gemv_config, row_dot};
 use crate::codegen::dynamic_slice::DynamicSliceCodegen;
 use crate::codegen::elementwise::ElementwiseCodegen;
-use crate::codegen::elementwise::mps::{
-    Elementwise, Tunable, Tuning, elementwise_tuning, elementwise_tunings,
-};
+use crate::codegen::elementwise::mps::tuning_of;
+use crate::codegen::elementwise::mps::{Elementwise, Tunable, Tuning, elementwise_tuning};
 use crate::codegen::kernel::Runner;
 use crate::codegen::kinds::{gemm_dot, reduction_root, row_reductions};
 use crate::codegen::layout::{LayoutCodegen, transpose_tiling};
@@ -25,7 +24,6 @@ use crate::codegen::store::mps::loads;
 use crate::graph::{Graph, Node, Primitive, TensorType, Var};
 use crate::graph_compiler::device::{Device, DeviceModule};
 use crate::graph_compiler::passes::attention::{self, Strides};
-use crate::graph_compiler::passes::place_views;
 use crate::graph_compiler::{CompilerConfig, Options};
 use crate::plan::step::mps::{Encoding, Unsupported};
 use crate::plan::{Buffer, CpuPlan, MpsPlan, MpsStep, Plan, PlanOptions, Step as _, StepBase};
@@ -366,28 +364,6 @@ fn kernel_of(
     }
 }
 
-/// Default launch tuning when `body` lowers to the elementwise kernel, else `None`.
-pub(crate) fn tuning_of(body: &Graph) -> Option<Tuning> {
-    is_elementwise(body).then(|| elementwise_tuning(body))
-}
-
-/// Candidate launch tunings to autotune when `body` lowers to the elementwise kernel.
-pub(crate) fn tunings_of(body: &Graph) -> Vec<Tuning> {
-    match is_elementwise(body) {
-        true => elementwise_tunings(body),
-        false => Vec::new(),
-    }
-}
-
-/// Whether `body` matches no specialized kernel shape and lowers to the elementwise kernel.
-fn is_elementwise(body: &Graph) -> bool {
-    row_dot(body).is_none()
-        && gemm_dot(body).is_none()
-        && row_reductions(body).is_empty()
-        && reduction_root(body).is_none()
-        && transpose_tiling(body).is_none()
-}
-
 /// Generates the kernel for a fused `body`, returning its name and Metal source.
 /// `by_value[k]` passes input `k` as a constant scalar; `views` maps output index to the
 /// (element offset, strides) it writes through. Fails on a body no Metal kernel takes.
@@ -426,60 +402,6 @@ pub(crate) fn kernel(
 
     let tuning = tuning.unwrap_or_else(|| elementwise_tuning(body));
     Mps::elementwise(body, by_value, views, &tuning)
-}
-
-/// Whether the kernel chosen for `body` can write its outputs through strided views.
-pub(crate) fn writes_views(body: &Graph) -> bool {
-    gemm_dot(body).is_none() && row_reductions(body).is_empty() && reduction_root(body).is_none()
-}
-
-/// Whether fusion input `k` may be bound as a strided view: it is not attention and no dot reads it.
-pub(crate) fn loads_strided(body: &Graph, k: usize) -> bool {
-    let Some(&v) = body.inputs().get(k) else {
-        return false;
-    };
-
-    let template = |p: &Primitive| matches!(p, Primitive::DotGeneral { .. });
-
-    attention::of_body(body).is_none()
-        && attention::backward_of_body(body).is_none()
-        && !body
-            .nodes()
-            .iter()
-            .any(|n| template(&n.primitive) && n.inputs.contains(&v))
-}
-
-/// Whether some input of `step` is a view its kernel loads element by element (a strided variant of the
-/// kernel), which tuned kernels don't; views a GEMM's dot strides through need none.
-pub(crate) fn loads_views(step: &StepBase) -> bool {
-    let Primitive::Fusion { body, .. } = &step.primitive else {
-        return step.views.iter().any(Option::is_some);
-    };
-
-    step.views
-        .iter()
-        .enumerate()
-        .any(|(k, view)| view.is_some() && loads_strided(body, k))
-}
-
-/// Whether an attention fusion reads its inputs at `strides`: any, with a contiguous last dim (its
-/// kernel is generated for the layout when it runs).
-pub(crate) fn attention_reads_strided(body: &Graph, strides: &[usize]) -> bool {
-    strides.last().is_none_or(|&s| s == 1)
-        && (attention::of_body(body).is_some() || attention::backward_of_body(body).is_some())
-}
-
-/// Whether GEMM fusion input `k` is read only by the dot, as one operand, in a layout MPS's matmul
-/// kernels stride through: an attention's dots are its kernel's, not a GEMM's.
-pub(crate) fn fusion_reads_strided(body: &Graph, k: usize, strides: &[usize]) -> bool {
-    attention::of_body(body).is_none()
-        && attention::backward_of_body(body).is_none()
-        && place_views::fusion_reads_strided(
-            body,
-            k,
-            strides,
-            crate::codegen::dot_general::mps::reads_strided,
-        )
 }
 
 /// Scratch bytes a step's kernels need beyond its output, for primitives that use any.

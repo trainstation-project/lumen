@@ -47,7 +47,8 @@ code generated per fusion so the fixed kernels can read and write its operands i
     `tuning` is the untuned choice, `tunings` the candidates (none for decode or below `TUNED_PAIRS` query-key pairs
     a head), `fits` / `mpp_fits` the constraints. `backward_block` and `backward_block_with_dq` size the backward's
     query blocks to threadgroup memory. `FlashAttention` is the forward Kernel: `prepare` generates and compiles a
-    variant per tuning. `runs` tells `codegen/utils/mps` which steps it takes; backward fusions run through the generic
+    variant per tuning. `runs` tells `codegen/utils/mps` which steps it takes, and `attention_reads_strided` which operands
+    it strides through; backward fusions run through the generic
     fusion encoder.
 - `tpu/` — Pallas flash attention, modeled on splash attention.
   - `forward_kernel.py`, `backward_kernel.py` (dQ, and dK with dV): Pallas programs taking a JSON spec;

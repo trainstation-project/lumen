@@ -24,8 +24,8 @@ is split or tiled.
     chunk's total carried into the next. It reads `in0` and writes `out` through the generated `LOAD0` and `STORE`
     helpers, so it works on any layout.
   - `mod.rs`: `ScanCodegen for Triton` returns a `Scan` tiling (line length, inner stride, lanes, whether lines are
-    rows, reverse, accumulator dtype), tiled the way a reduction over the axis is. `codegen/utils/triton` turns it into
-    the `Template::Scan` constexprs, and the step runs under the Triton `Loop` Kernel.
+    rows, reverse, accumulator dtype), tiled the way a reduction over the axis is. `scan(step)` gives a cumsum
+    step's tiling, which `codegen/utils/triton` turns into the `Template::Scan` constexprs, and the step runs under the Triton `Loop` Kernel.
 
 ## Conventions
 

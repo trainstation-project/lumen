@@ -22,7 +22,8 @@ One folder per kernel family, each with a device subfolder per backend that has 
 `attention`, `dot_general` (GEMMs), `dynamic_slice`, `elementwise`, `factory`, `gather`, `layout`, `random`,
 `reduction`, `row`, `scan`, `scatter_add`; and `fusion`, each backend's fusion (`Fuses`) for the graph compiler. Shared pieces live in `emitter` (per-backend statements computing a
 body's values at an index), `store` (strided load/store addressing) and `utils` (each backend's codegen type,
-prelude and helpers, plus each backend's `codegen` and `Device` impl).
+prelude and helpers, plus each backend's `codegen` and `Device` impl: the dispatcher picking every step's kernel
+across families; family-specific helpers live in their family).
 
 Each backend implements the graph compiler's pass traits (`codegen/mod.rs`, plus `Attentions` and
 `AttentionBackwards` in `passes/attention`) in the family file they belong to: attention traits in

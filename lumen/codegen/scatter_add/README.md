@@ -20,6 +20,7 @@ their launch.
     sizes the counts, starts and order (`2n + 1 + m` u32s) and is used by `codegen/utils/mps`. `ScatterAdd` is the
     Kernel (`Config = ()`).
 - `triton/` — Triton.
+  - `mod.rs`: `atomic_add(dtype)`, whether `tl.atomic_add` adds the dtype (else the sorted path runs).
   - `kernel.py`: views the operand as `[outer, LENGTH, AFTER]` and updates as `[outer, PICKS, AFTER]`, both
     contiguous. `scatter_add_atomic_kernel` adds each update element atomically; the deterministic path is
     `count`, `starts`, `place`, `sort` (a counting sort of picks by position) then `rows` (a program per block of a

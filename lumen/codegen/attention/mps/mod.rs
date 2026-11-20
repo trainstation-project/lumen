@@ -22,7 +22,7 @@ use crate::graph::Primitive;
 use crate::graph::{Graph, Var};
 use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::attention::{
-    Access, Attention, Backward, Dropout, Score, Strides, Term, grid_batch,
+    self, Access, Attention, Backward, Dropout, Score, Strides, Term, grid_batch,
 };
 use crate::plan::step::mps::Encoding;
 use crate::plan::{MpsStep, StepBase};
@@ -809,4 +809,11 @@ impl crate::graph_compiler::passes::attention::AttentionBackwards for DeviceModu
     fn backward_kernel(&mut self) -> String {
         request(Request::AttentionBackward)
     }
+}
+
+/// Whether an attention fusion reads its inputs at `strides`: any, with a contiguous last dim (its
+/// kernel is generated for the layout when it runs).
+pub(crate) fn attention_reads_strided(body: &Graph, strides: &[usize]) -> bool {
+    strides.last().is_none_or(|&s| s == 1)
+        && (attention::of_body(body).is_some() || attention::backward_of_body(body).is_some())
 }

@@ -15,8 +15,9 @@ use crate::codegen::kinds::{combine_root, gemm_dot, reduction_root};
 use crate::codegen::layout::{TILE, transpose_tiling};
 use crate::codegen::reduction::ReductionCodegen;
 use crate::codegen::row::RowCodegen;
-use crate::codegen::scan::ScanCodegen;
 use crate::codegen::scan::triton::Scan;
+use crate::codegen::scan::triton::scan;
+use crate::codegen::scatter_add::triton::atomic_add;
 use crate::codegen::scatter_add::triton::launch::Scatter;
 use crate::codegen::store::triton::{load, store};
 use crate::graph::{Graph, Node, Primitive, UPDATES};
@@ -395,22 +396,6 @@ fn templated(kind: &str, key: &str) -> String {
     format!("{kind}_{:016x}", hasher.finish())
 }
 
-/// Whether Triton's `tl.atomic_add` adds elements of `dtype`: floats from 16 to 64 bits and 32- or 64-bit
-/// integers, not bool, float8 or narrower integers.
-fn atomic_add(dtype: DType) -> bool {
-    matches!(
-        dtype,
-        DType::F16
-            | DType::BF16
-            | DType::F32
-            | DType::F64
-            | DType::I32
-            | DType::I64
-            | DType::U32
-            | DType::U64
-    )
-}
-
 /// Generates the loop kernel for `step`, or `None` for GEMMs and steps without a Triton loop kernel;
 /// unless `deterministic`, a scatter-add of a dtype with atomic adds adds each update element atomically,
 /// otherwise it sorts its picks by position and adds a row's in order. Fails on a body no kernel takes.
@@ -559,21 +544,6 @@ pub(crate) fn loop_kernel(step: &StepBase, deterministic: bool) -> Result<Option
         segments,
         template,
     }))
-}
-
-/// How the scan template tiles cumsum `step`.
-fn scan(step: &StepBase) -> Result<Scan, String> {
-    let Primitive::Cumsum {
-        axis,
-        reverse,
-        accum_dtype,
-    } = step.primitive
-    else {
-        unreachable!("a cumsum")
-    };
-
-    Triton::scan(&step.inputs[0].1, axis, reverse, accum_dtype)
-        .map_err(|e| format!("{}: {e}", step.label))
 }
 
 /// Triton rejects half-precision transcendentals; it plans the passed graph, generates its loop kernels and

@@ -5,22 +5,21 @@
 
 use crate::autotune::Autotuner;
 use crate::codegen::attention::cuda::FlashAttention;
-use crate::codegen::dot_general::GemmCodegen;
 use crate::codegen::dot_general::cuda::Gemm;
 use crate::codegen::dot_general::cuda::matmul;
-use crate::codegen::elementwise::ElementwiseCodegen;
 use crate::codegen::elementwise::cuda::{Elementwise, Layouts};
+use crate::codegen::elementwise::cuda::{extent, generated};
 use crate::codegen::fusion::cuda::{ELEMENTWISE, fusible};
 use crate::codegen::kernel::Runner;
 use crate::codegen::kinds::gemm_dot;
 use crate::codegen::utils::triton::bits;
-use crate::graph::{Graph, Node, Primitive, TensorType};
+use crate::graph::{Graph, Node, Primitive};
 use crate::graph_compiler::device::{Device, DeviceModule};
 use crate::graph_compiler::passes::attention::FORWARD;
 use crate::graph_compiler::{Options, plan_options};
 use crate::plan::step::Tensors;
 use crate::plan::step::cuda::CudaTimer;
-use crate::plan::{CpuPlan, CudaPlan, CudaStep, Plan, Step as _, StepBase};
+use crate::plan::{CpuPlan, CudaPlan, CudaStep, Plan, Step as _};
 use crate::{DType, Scalar};
 use std::sync::Arc;
 
@@ -84,61 +83,6 @@ fn signed_bits(dtype: DType, bits: u64) -> String {
     }
 }
 
-/// The kernel `step` runs as for tensors laid out as `layouts` (a GEMM fusion's epilogue), generated once per layout
-/// and kept in the step's memo.
-pub(crate) fn generated(
-    step: &StepBase,
-    layouts: Layouts,
-) -> Result<Arc<(String, String)>, String> {
-    let key = layouts
-        .inputs
-        .iter()
-        .chain(&layouts.outputs)
-        .chain(std::iter::once(&layouts.spans))
-        .fold(0u64, |h, s| {
-            use std::hash::{Hash, Hasher};
-
-            let mut hasher = std::collections::hash_map::DefaultHasher::new();
-            (h, s).hash(&mut hasher);
-            hasher.finish()
-        });
-
-    step.memo.get(key, || {
-        let by_value = vec![false; layouts.inputs.len()];
-
-        let body = match &step.primitive {
-            Primitive::Fusion { body, .. } => match gemm_dot(body) {
-                Some(dot) => return Cuda::gemm(body, dot, &by_value, &layouts),
-                None => body.clone(),
-            },
-            Primitive::Reshape { new_sizes } => copy_body(&step.inputs[0].1, new_sizes),
-            p => {
-                return Err(format!(
-                    "{}: the CUDA backend has no kernel for it yet",
-                    p.name()
-                ));
-            }
-        };
-
-        Cuda::elementwise(&body, &by_value, &Default::default(), &layouts)
-    })
-}
-
-/// Elements a tensor of `shape` laid out at `strides` spans, from its first to its last.
-fn extent(shape: &[usize], strides: &[usize]) -> usize {
-    match shape.contains(&0) {
-        true => 0,
-        false => {
-            shape
-                .iter()
-                .zip(strides)
-                .map(|(&n, &s)| (n - 1) * s)
-                .sum::<usize>()
-                + 1
-        }
-    }
-}
-
 /// The CUDA backend's plan of `plan`: each step's kernel generated for the layouts the plan gives its tensors,
 /// kept in the step's memo by layout so its launches find it; tensors laid out otherwise when it runs get theirs
 /// then. Fails on a step no CUDA kernel takes.
@@ -189,24 +133,6 @@ pub(crate) fn codegen(plan: CpuPlan, _: &Options) -> Result<CudaPlan, String> {
 
         Ok(CudaStep { base, kernel })
     })
-}
-
-/// The body of a copy of `x` reshaped to `shape`: its input, reshaped, its output.
-fn copy_body(x: &TensorType, shape: &[usize]) -> Graph {
-    let mut body = Graph::new();
-    let input = body.input(x.clone());
-
-    let output = body
-        .apply(
-            Primitive::Reshape {
-                new_sizes: shape.to_vec(),
-            },
-            &[input],
-        )
-        .expect("a reshape of the copied value");
-
-    body.set_outputs(&[output]).expect("the copied value");
-    body
 }
 
 /// The CUDA backend plans its fused graph, every runtime scalar a 0-d device input, and autotunes its GEMM tiles

@@ -4,7 +4,9 @@ use super::ScanCodegen;
 use crate::DType;
 use crate::codegen::reduction::triton::Tile;
 use crate::codegen::utils::triton::Triton;
+use crate::graph::Primitive;
 use crate::graph::TensorType;
+use crate::plan::StepBase;
 
 /// How `scan_kernel` tiles a cumsum: its lines, each `length` long with elements `inner` apart, scanned
 /// `lanes` elements at a time.
@@ -44,4 +46,19 @@ impl ScanCodegen for Triton {
             accum_dtype,
         })
     }
+}
+
+/// How the scan template tiles cumsum `step`.
+pub(crate) fn scan(step: &StepBase) -> Result<Scan, String> {
+    let Primitive::Cumsum {
+        axis,
+        reverse,
+        accum_dtype,
+    } = step.primitive
+    else {
+        unreachable!("a cumsum")
+    };
+
+    Triton::scan(&step.inputs[0].1, axis, reverse, accum_dtype)
+        .map_err(|e| format!("{}: {e}", step.label))
 }

@@ -11,7 +11,8 @@ a fusion of its own, how its fused bodies are named, and the helpers other passe
   2^32 elements, never float64), its `Backend` (29 input buffers, `row_dot` limited to `ROW_TILE` without
   `linear_reordering`), and its `Fuses`: the shared fusion, every fusion requested as a `Kernel::Fusion`, then
   horizontal fusion within the pass with `horizontal_fusion`, repeated until every by-value scalar is read only
-  by fusions. With `fuse`.
+  by fusions. With `fuse`. Also which inputs MPS kernels read through views: `writes_views`, `loads_strided`,
+  `loads_views` and `fusion_reads_strided` (a GEMM fusion input its matmul strides through).
 - `triton.rs` — Triton: `fusible` (ops with Triton dtypes), its `Backend` (any number of inputs, every epilogue
   kind on, `row_dot` = `dot_row_fits` but not GEMVs), `named` (`dot_row`, `row`, `dot_general`, `combine`,
   `reduction`, `elementwise`), `horizontal_candidate`, `HORIZONTAL_BUFFERS` and `slot_writes`. With `fuse`.

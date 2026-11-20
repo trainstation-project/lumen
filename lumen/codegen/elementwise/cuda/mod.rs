@@ -6,17 +6,22 @@ use std::fmt::Write;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 use super::ElementwiseCodegen;
+use crate::codegen::dot_general::GemmCodegen;
 use crate::codegen::emitter::Emit;
 use crate::codegen::emitter::cuda::Emitter;
 use crate::codegen::kernel::Kernel;
+use crate::codegen::kinds::gemm_dot;
 use crate::codegen::store::triton::gather_index;
 use crate::codegen::utils::cuda::{Cuda, cute_type, unsigned};
 use crate::graph::Graph;
+use crate::graph::{Primitive, TensorType};
 use crate::graph_compiler::passes::horizontal::segments;
 use crate::plan::CudaStep;
+use crate::plan::StepBase;
 use crate::plan::step::Tensors;
 use crate::runtime::kernel::cuda::LAUNCH;
 use crate::{DType, Tensor};
+use std::sync::Arc;
 
 /// The launch shape of an `ElementwiseKernel` (`kernel.py`): threads per block, and the bytes of its
 /// widest tensor each thread moves a step.
@@ -262,8 +267,81 @@ impl Kernel for Elementwise {
             spans: tensors.iter().map(Tensor::numel).collect(),
         };
 
-        let code = crate::codegen::utils::cuda::generated(step, layouts)?;
+        let code = crate::codegen::elementwise::cuda::generated(step, layouts)?;
         let (name, source) = code.as_ref();
         launch(name, source, &tensors, outputs.len(), n)
     }
+}
+
+/// The kernel `step` runs as for tensors laid out as `layouts` (a GEMM fusion's epilogue), generated once per layout
+/// and kept in the step's memo.
+pub(crate) fn generated(
+    step: &StepBase,
+    layouts: Layouts,
+) -> Result<Arc<(String, String)>, String> {
+    let key = layouts
+        .inputs
+        .iter()
+        .chain(&layouts.outputs)
+        .chain(std::iter::once(&layouts.spans))
+        .fold(0u64, |h, s| {
+            use std::hash::{Hash, Hasher};
+
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            (h, s).hash(&mut hasher);
+            hasher.finish()
+        });
+
+    step.memo.get(key, || {
+        let by_value = vec![false; layouts.inputs.len()];
+
+        let body = match &step.primitive {
+            Primitive::Fusion { body, .. } => match gemm_dot(body) {
+                Some(dot) => return Cuda::gemm(body, dot, &by_value, &layouts),
+                None => body.clone(),
+            },
+            Primitive::Reshape { new_sizes } => copy_body(&step.inputs[0].1, new_sizes),
+            p => {
+                return Err(format!(
+                    "{}: the CUDA backend has no kernel for it yet",
+                    p.name()
+                ));
+            }
+        };
+
+        Cuda::elementwise(&body, &by_value, &Default::default(), &layouts)
+    })
+}
+
+/// Elements a tensor of `shape` laid out at `strides` spans, from its first to its last.
+pub(crate) fn extent(shape: &[usize], strides: &[usize]) -> usize {
+    match shape.contains(&0) {
+        true => 0,
+        false => {
+            shape
+                .iter()
+                .zip(strides)
+                .map(|(&n, &s)| (n - 1) * s)
+                .sum::<usize>()
+                + 1
+        }
+    }
+}
+
+/// The body of a copy of `x` reshaped to `shape`: its input, reshaped, its output.
+pub(crate) fn copy_body(x: &TensorType, shape: &[usize]) -> Graph {
+    let mut body = Graph::new();
+    let input = body.input(x.clone());
+
+    let output = body
+        .apply(
+            Primitive::Reshape {
+                new_sizes: shape.to_vec(),
+            },
+            &[input],
+        )
+        .expect("a reshape of the copied value");
+
+    body.set_outputs(&[output]).expect("the copied value");
+    body
 }

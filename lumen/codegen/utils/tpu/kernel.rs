@@ -3,7 +3,8 @@
 
 use super::Tpu;
 use super::lowering::lowering;
-use crate::codegen::elementwise::ElementwiseCodegen;
+use crate::codegen::elementwise::tpu::elementwise;
+use crate::codegen::gather::tpu::Gather;
 use crate::codegen::kernel::Runner;
 use crate::graph::Primitive;
 use crate::graph_compiler::Options;
@@ -11,7 +12,6 @@ use crate::plan::step::tpu::Pointers;
 use crate::plan::{CpuPlan, Step as _, StepBase, TpuPlan, TpuStep};
 use crate::runtime::kernel::Launch as _;
 use crate::runtime::kernel::tpu::TpuLaunch;
-use std::collections::HashMap;
 use std::sync::Arc;
 
 /// The `module` of a launch whose `spec` is the generated source of its program rather than a spec for a
@@ -61,35 +61,6 @@ impl Kernel {
             context: None,
         }
     }
-}
-
-/// The elementwise fusion `step`'s kernel; `None` when it writes nothing.
-fn elementwise(step: &StepBase) -> Result<Option<Kernel>, String> {
-    let Primitive::Fusion { body, .. } = &step.primitive else {
-        unreachable!("an elementwise fusion")
-    };
-
-    if step.output.1.numel() == 0 {
-        return Ok(None);
-    }
-
-    let views: HashMap<usize, (usize, Vec<usize>)> = step
-        .output_views
-        .iter()
-        .enumerate()
-        .filter_map(|(k, v)| v.as_ref().map(|v| (k, (v.offset, v.strides.clone()))))
-        .collect();
-
-    let code =
-        Tpu::elementwise(body, &[], &views, &()).map_err(|e| format!("{}: {e}", step.label))?;
-
-    // An indexed elementwise kernel takes its inputs, then its output; a plain one its output after the step's own inputs.
-    let rows = match code.indexed {
-        true => Rows::Last,
-        false => Rows::Split,
-    };
-
-    Ok(Some(Kernel::new(GENERATED, code.kernel, code.source, rows)))
 }
 
 /// Plan `step`'s TPU kernel, by its primitive or fusion kind; `None` when it has nothing to launch.
@@ -226,28 +197,6 @@ impl crate::codegen::kernel::Kernel for Pallas {
             Some(context) => format!("{context}: {e}"),
             None => e,
         })
-    }
-}
-
-/// A gather: on the SparseCore when its buffers' rows allow (known only at launch), else its TensorCore kernel.
-pub(crate) struct Gather;
-
-impl crate::codegen::kernel::Kernel for Gather {
-    type Step = TpuStep;
-    type Buffers = Pointers;
-    type Config = ();
-
-    /// Runs the gather on the SparseCore if it takes it, else its Pallas kernel; with neither, fails with the
-    /// TensorCore kernel's error.
-    fn run(&self, step: &TpuStep, config: Option<&()>, p: &Pointers) -> Result<(), String> {
-        if crate::codegen::gather::tpu::sparse_core(p.index, step, &p.inputs, p.output)? {
-            return Ok(());
-        }
-
-        match step.code {
-            Some(_) => crate::codegen::kernel::Kernel::run(&Pallas, step, config, p),
-            None => kernel(step).map(|_| ()),
-        }
     }
 }
 

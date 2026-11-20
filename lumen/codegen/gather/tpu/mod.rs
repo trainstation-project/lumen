@@ -3,10 +3,12 @@
 use crate::DType;
 use crate::codegen::dot_general::tpu::block;
 use crate::codegen::utils::tpu::Tpu;
-use crate::codegen::utils::tpu::{Kernel, Rows};
+use crate::codegen::utils::tpu::{Kernel, Pallas, Rows};
 use crate::device::tpu::layout::Layout;
 use crate::graph::Primitive;
 use crate::plan::StepBase;
+use crate::plan::TpuStep;
+use crate::plan::step::tpu::Pointers;
 use crate::runtime::kernel::Launch as _;
 use crate::runtime::kernel::tpu::TpuLaunch;
 use crate::runtime::kernel::tpu::{Indices, SPARSE_CORE_MESH, SparseCore, Values};
@@ -200,4 +202,26 @@ pub(crate) fn sparse_core(
 
     Tpu::launch(launched).map_err(|e| format!("{}: {e}", step.label))?;
     Ok(true)
+}
+
+/// A gather: on the SparseCore when its buffers' rows allow (known only at launch), else its TensorCore kernel.
+pub(crate) struct Gather;
+
+impl crate::codegen::kernel::Kernel for Gather {
+    type Step = TpuStep;
+    type Buffers = Pointers;
+    type Config = ();
+
+    /// Runs the gather on the SparseCore if it takes it, else its Pallas kernel; with neither, fails with the
+    /// TensorCore kernel's error.
+    fn run(&self, step: &TpuStep, config: Option<&()>, p: &Pointers) -> Result<(), String> {
+        if sparse_core(p.index, step, &p.inputs, p.output)? {
+            return Ok(());
+        }
+
+        match step.code {
+            Some(_) => crate::codegen::kernel::Kernel::run(&Pallas, step, config, p),
+            None => kernel(step).map(|_| ()),
+        }
+    }
 }

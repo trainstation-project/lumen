@@ -1357,7 +1357,7 @@ fn tuned(
         const REPS: usize = 10;
 
         Cuda::launch(CudaLaunch {
-            kernel: kernel,
+            kernel,
             grid: [blocks, 1, 1],
             values: &values,
         })?;
@@ -1370,7 +1370,7 @@ fn tuned(
 
             for _ in 0..REPS {
                 Cuda::launch(CudaLaunch {
-                    kernel: kernel,
+                    kernel,
                     grid: [blocks, 1, 1],
                     values: &values,
                 })?;

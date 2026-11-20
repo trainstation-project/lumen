@@ -25,7 +25,7 @@ embedding lookup. MPS and Triton have no gather kernel; they gather inside their
 ## How it runs
 
 - The SparseCore or TensorCore choice depends on the buffers' layout, which is known only at launch. For that
-  reason `codegen/utils/tpu` gives every `Gather` step the `Gather` kernel (defined in `codegen/utils/tpu`, not here).
+  reason `codegen/utils/tpu` gives every `Gather` step the `Gather` kernel (in `tpu/mod.rs`).
 - At codegen, `codegen/utils/tpu` tries to build the TensorCore kernel. A gather that kernel rejects keeps no code
   rather than failing.
 - When the step runs, `Gather` tries `sparse_core` first. If that declines, it runs the TensorCore kernel

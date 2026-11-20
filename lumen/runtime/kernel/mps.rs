@@ -8,13 +8,13 @@ use crate::codegen::attention::mps::decodes;
 use crate::codegen::dot_general::mps as gemm;
 use crate::codegen::dot_general::mps::GemmConfig;
 use crate::codegen::elementwise::mps::Tuning;
+use crate::codegen::fusion::mps::loads_strided;
 use crate::codegen::kinds::{gemm_dot, reduction_root, row_reductions};
 use crate::codegen::layout::transpose_tiling;
 use crate::codegen::reduction::mps::{has_epilogue, split_launches};
 use crate::codegen::row::mps::row_groups;
 use crate::codegen::store::mps::strided_load;
 use crate::codegen::utils::mps::Mps;
-use crate::codegen::utils::mps::loads_strided;
 pub(crate) use crate::custom_op::mps::Grid;
 use crate::graph::{Graph, Primitive, TensorType, Var, View};
 use crate::graph_compiler::passes::apple_neural_engine::mps as ane;
@@ -627,7 +627,7 @@ fn launch_kind(name: &str, body: &Graph) -> (Launch, Option<Tuning>) {
     }
 
     let launch = launch_of(body);
-    let tuning = crate::codegen::utils::mps::tuning_of(body);
+    let tuning = crate::codegen::elementwise::mps::tuning_of(body);
     launches.insert(name.to_owned(), (launch, tuning));
     (launch, tuning)
 }
@@ -712,7 +712,11 @@ fn run_loop(
 
     if !compiled {
         compile_kernels(BTreeMap::from([(name.clone(), source)]))?;
-        record_launch(&name, &body, crate::codegen::utils::mps::tuning_of(&body));
+        record_launch(
+            &name,
+            &body,
+            crate::codegen::elementwise::mps::tuning_of(&body),
+        );
     }
 
     let strided = !by_value && !src.is_contiguous();
