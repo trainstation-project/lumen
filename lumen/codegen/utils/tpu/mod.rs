@@ -63,6 +63,20 @@ impl crate::codegen::MergesDots for Tpu {
     }
 }
 
+/// TPU merges non-scalar `elementwise` fusions grouped by output shape, without `fuse` too. Here, where `Tpu` is built
+/// without the TPU linked too.
+impl crate::codegen::HorizontallyFuses for Tpu {
+    const WITH_FUSE: bool = false;
+    const GROUPING: crate::graph_compiler::passes::horizontal::Grouping =
+        crate::graph_compiler::passes::horizontal::Grouping::Shape;
+    const BUFFERS: usize = crate::graph_compiler::passes::fusion::tpu::HORIZONTAL_BUFFERS;
+
+    /// `fusion::tpu::horizontal_candidate`.
+    fn candidate(graph: &crate::graph::Graph, node: &crate::graph::Node) -> bool {
+        crate::graph_compiler::passes::fusion::tpu::horizontal_candidate(graph, node)
+    }
+}
+
 /// Whether `p` can run inside a plain elementwise TPU kernel (only scalar broadcasts among layout ops).
 pub(crate) fn fusible(p: &Primitive) -> bool {
     use Primitive::*;
