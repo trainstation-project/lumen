@@ -8,10 +8,10 @@ distributed code use its streams, events and copies.
 ## Files and folders
 
 - `mod.rs` — declares the submodules; only `stream` is public outside the crate.
-- `dispatch.rs` — `DispatchKey` and `Op<K>`: an op's built-in kernel per device plus kernels registered at
-  runtime (see `dispatch/README.md`).
 - `wait.rs` — the `lumen::wait` op (`WAIT`) and `wait(t)`, which blocks until the device holding `t` is idle:
   nothing on CPU and meta, a stream synchronize on CUDA and MPS, the allocator's wait on TPU.
+- `dispatch/` — `DispatchKey` and `Op<K>`: an op's built-in kernel per device plus kernels registered at
+  runtime.
 - `device_transfer/` — the `copy_h2d` / `copy_d2h` ops and each backend's copy.
 - `event/` — the `Event` trait and per-backend events for synchronizing and timing.
 - `kernel/` — the `Launch` trait and each backend's launcher (CUDA, Triton, Metal, TPU).
