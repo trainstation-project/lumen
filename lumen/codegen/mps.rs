@@ -562,3 +562,6 @@ impl crate::codegen::Supports for Mps {
 
 /// Metal kernels read each element's partner at `j ^ 1`.
 impl crate::codegen::SwapsPairs for Mps {}
+
+/// Metal kernels gather (a fused `Gather`).
+impl crate::codegen::Gathers for Mps {}

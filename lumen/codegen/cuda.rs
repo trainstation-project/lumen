@@ -199,6 +199,9 @@ impl Device for Cuda {
     }
 }
 
+/// CuTe kernels gather (a fused `Gather`, read through the emitter).
+impl crate::codegen::Gathers for Cuda {}
+
 impl crate::codegen::Lone for DeviceModule<'_, Cuda> {
     /// Whether lone `n` needs a one-node kernel: every fusible node but reshapes, which are views.
     fn alone(graph: &Graph, n: &Node) -> bool {

@@ -568,6 +568,25 @@ impl<'a> Emit<'a> for Emitter<'a> {
                         return self.value(node.inputs[0], i);
                     }
                     Full { fill_value, .. } => constant(ty.dtype, *fill_value),
+                    // The output is `[outer, picks, after]`: read the pick, then the operand's row it names.
+                    Gather { axis } => {
+                        let (x, indices) =
+                            (body.type_of(node.inputs[0]), body.type_of(node.inputs[1]));
+
+                        let after: usize = x.shape[axis + 1..].iter().product();
+                        let picks = indices.numel();
+                        let at = self.index(format!("({idx} // {after}) % {picks}"));
+                        let k = self.value(node.inputs[1], at);
+                        self.scattered = true;
+
+                        let i = self.index(format!(
+                            "{idx} // {} * {} + {k} * {after} + {idx} % {after}",
+                            picks * after,
+                            x.shape[*axis] * after
+                        ));
+
+                        return self.value(node.inputs[0], i);
+                    }
                     Iota { dimension, .. } => {
                         let mut strides = vec![0; ty.shape.len()];
                         strides[*dimension] = 1;

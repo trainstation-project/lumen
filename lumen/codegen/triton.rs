@@ -472,3 +472,6 @@ impl crate::codegen::Supports for Triton {
 
 /// Triton kernels read each element's partner at `j ^ 1`, or swap a GEMM accumulator tile's adjacent lanes.
 impl crate::codegen::SwapsPairs for Triton {}
+
+/// Triton kernels gather (a fused `Gather`).
+impl crate::codegen::Gathers for Triton {}

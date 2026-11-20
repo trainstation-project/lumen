@@ -68,7 +68,7 @@ yes, MPS and CUDA not).
   `dot_row`, `row`, `dot_general`, `combine` (a split-K combine, `kinds::combine_root`), `reduction`,
   `elementwise`. Exposes `fusible`, `named`,
   `horizontal_candidate`, `HORIZONTAL_BUFFERS` and `slot_writes` to other passes.
-- CUDA: with `fuse`. Elementwise and layout ops with CuTe dtypes only; no reduction epilogues and no rows;
+- CUDA: with `fuse`. Elementwise and layout ops (and gathers) with CuTe dtypes only; no reduction epilogues and no rows;
   `dot_epilogue` from `codegen::dot_general::cuda::epilogue`; fusions named `dot_general` or `elementwise`.
 - TPU: always. Exposes `horizontal_candidate`, `HORIZONTAL_BUFFERS` and `slot_writes` (used by
   `place_concats` and `dot/fuse`). TPU's dot fusions live in `passes/dot`.

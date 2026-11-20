@@ -1292,6 +1292,7 @@ fn devices_run_the_passes_they_implement() {
     assert_eq!(
         pipeline!(Cuda, &config).names(),
         [
+            "take_along_axis",
             "merge_dots_backward",
             "merge_dots",
             "flash_attention",

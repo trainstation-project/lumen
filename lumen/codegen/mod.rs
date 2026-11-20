@@ -28,6 +28,10 @@ pub(crate) mod utils;
 /// tile's adjacent lanes): the graph compiler's `swap_pairs` pass rewrites pair swaps into it on these devices.
 pub(crate) trait SwapsPairs {}
 
+/// A backend whose kernels compute `Gather`: the graph compiler's `take_along_axis` pass lowers `take_along_axis` to a
+/// flat gather on these devices.
+pub(crate) trait Gathers {}
+
 /// A backend's codegen telling the graph compiler's `unsupported` pass which graphs it has no kernels for. A device
 /// implementing it runs the pass.
 pub(crate) trait Supports {
