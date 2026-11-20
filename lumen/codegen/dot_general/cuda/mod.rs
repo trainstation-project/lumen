@@ -781,3 +781,16 @@ fn macs(step: &CudaStep) -> Option<usize> {
 
     Some(product * lhs.shape[lhs_contracting[0]])
 }
+
+/// CUDA merges with `fuse`, packing for the GEMM epilogue's 16-byte vectors (8 columns of 16-bit products).
+impl crate::codegen::MergesDots for Cuda {
+    /// What CUDA fusion can fuse, read in place; views; lanes 1; 8 columns.
+    fn target() -> crate::graph_compiler::passes::merge_dots::Target {
+        crate::graph_compiler::passes::merge_dots::Target {
+            reads: crate::codegen::fusion::cuda::fusible,
+            views: true,
+            lanes: 1,
+            columns: 8,
+        }
+    }
+}

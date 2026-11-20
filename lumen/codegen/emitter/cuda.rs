@@ -649,3 +649,6 @@ impl<'a> Emit<'a> for Emitter<'a> {
         name
     }
 }
+
+/// CuTe kernels gather (a fused `Gather`, read through the emitter).
+impl crate::codegen::Gathers for Cuda {}

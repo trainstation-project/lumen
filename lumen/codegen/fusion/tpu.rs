@@ -64,3 +64,39 @@ pub(crate) fn slot_writes(graph: &Graph, concat: &Node, k: usize, producer: &Nod
         && graph.type_of(concat.inputs[k]).shape[dimension].is_multiple_of(LANES)
         && writes
 }
+
+/// TPU's kernels writing a concatenation's operands into their slots, always (here, where `Tpu` is built without the
+/// TPU linked too): what `fusion::tpu::slot_writes` accepts, every operand worth placing.
+impl crate::codegen::Slots for DeviceModule<'_, Tpu> {
+    const WITH_FUSE: bool = false;
+
+    /// What `fusion::tpu::slot_writes` accepts.
+    fn writes(
+        &self,
+        concat: &crate::graph::Node,
+        k: usize,
+        producer: &crate::graph::Node,
+        _: usize,
+    ) -> bool {
+        crate::codegen::fusion::tpu::slot_writes(&self.graph, concat, k, producer)
+    }
+
+    /// Any operand: on TPU's tiled layout a concatenation fusion would build is a copy of its own.
+    fn worth(&self, _: &crate::graph::Node, _: usize, _: &crate::graph::Node, _: usize) -> bool {
+        true
+    }
+}
+
+/// TPU merges non-scalar `elementwise` fusions grouped by output shape, without `fuse` too. Here, where `Tpu` is built
+/// without the TPU linked too.
+impl crate::codegen::HorizontallyFuses for Tpu {
+    const WITH_FUSE: bool = false;
+    const GROUPING: crate::graph_compiler::passes::horizontal::Grouping =
+        crate::graph_compiler::passes::horizontal::Grouping::Shape;
+    const BUFFERS: usize = crate::codegen::fusion::tpu::HORIZONTAL_BUFFERS;
+
+    /// `fusion::tpu::horizontal_candidate`.
+    fn candidate(graph: &crate::graph::Graph, node: &crate::graph::Node) -> bool {
+        crate::codegen::fusion::tpu::horizontal_candidate(graph, node)
+    }
+}

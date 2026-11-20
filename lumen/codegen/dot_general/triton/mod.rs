@@ -920,3 +920,77 @@ impl crate::codegen::kernel::Kernel for Gemm {
         launch::gemm(step, inputs, out, outs, config)
     }
 }
+
+/// Triton runs batched inner products as elementwise and reduction fusions.
+impl crate::codegen::InnerProducts for Triton {}
+
+/// Tiles a Triton split aims for: on an H100, outputs of 64 or more 128x128 tiles already keep the GPU busy (a
+/// 1024x1024 bfloat16 matmul is slower split), while 16 tiles gain about 2x.
+const SPLIT_TARGET: usize = 128;
+
+/// Triton splits with the untuned GEMM config's tiles, aiming at `SPLIT_TARGET`, keeping matrix-vector products whole
+/// for the GEMV kernel (its lanes already split K, as MPS keeps its GEMVs). Its partials are always summed by a
+/// reduction (no atomics), so results stay deterministic.
+impl crate::codegen::SplitsK for Triton {
+    const TARGET: usize = SPLIT_TARGET;
+
+    /// Tiles of the untuned GEMM config.
+    fn tiles(m: usize, n: usize) -> usize {
+        use crate::codegen::dot_general::triton::{CONFIGS, UNTUNED};
+        let tile = CONFIGS[UNTUNED];
+        m.div_ceil(tile.block_m) * n.div_ceil(tile.block_n)
+    }
+
+    /// Matrix-vector products (`dot_general::triton::gemv`).
+    fn unsplit(
+        dot: &Primitive,
+        lhs: &crate::graph::TensorType,
+        rhs: &crate::graph::TensorType,
+        _: &crate::graph::TensorType,
+    ) -> bool {
+        crate::codegen::dot_general::triton::gemv(dot, lhs, rhs)
+    }
+}
+
+/// Triton's GEMM writes a wide row's partials over `partial_tile`-column blocks, except on the GEMV kernel.
+impl crate::codegen::PartialRows for Triton {
+    /// `dot_general::triton::partial_tile`.
+    fn partial_tile(n: usize) -> Option<usize> {
+        crate::codegen::dot_general::triton::partial_tile(n)
+    }
+
+    /// `dot_general::triton::gemv_body`.
+    fn gemv(body: &Graph) -> bool {
+        crate::codegen::dot_general::triton::gemv_body(body)
+    }
+}
+
+/// Triton runs a linear cross entropy as its GEMM with a per-tile max/sum epilogue, then a combine
+/// (`dot_general::triton::cross_entropy`).
+impl crate::codegen::LinearCrossEntropies for Triton {}
+
+/// Triton merges with `fuse`.
+impl crate::codegen::MergesDots for Triton {
+    /// What Triton fusion can fuse, read in place; views; lanes 1; 8 columns.
+    fn target() -> crate::graph_compiler::passes::merge_dots::Target {
+        crate::graph_compiler::passes::merge_dots::Target {
+            reads: crate::codegen::fusion::triton::fusible,
+            views: true,
+            lanes: 1,
+            columns: 8,
+        }
+    }
+}
+
+/// Triton's GEMM reads its operands at any strides (its prologues are generated for their layouts).
+impl crate::codegen::StridedOperands for Triton {
+    /// Any layout.
+    fn reads_strided(
+        _: &Primitive,
+        _: [&crate::graph::TensorType; 2],
+        _: usize,
+        _: &[usize],
+    ) -> bool {
+        true
+    }
+}

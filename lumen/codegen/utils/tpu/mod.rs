@@ -24,28 +24,6 @@ impl crate::codegen::dynamic_slice::UpdateChains for Tpu {
     const WITH_FUSE: bool = false;
 }
 
-/// TPU's kernels writing a concatenation's operands into their slots, always (here, where `Tpu` is built without the
-/// TPU linked too): what `fusion::tpu::slot_writes` accepts, every operand worth placing.
-impl crate::codegen::Slots for DeviceModule<'_, Tpu> {
-    const WITH_FUSE: bool = false;
-
-    /// What `fusion::tpu::slot_writes` accepts.
-    fn writes(
-        &self,
-        concat: &crate::graph::Node,
-        k: usize,
-        producer: &crate::graph::Node,
-        _: usize,
-    ) -> bool {
-        crate::codegen::fusion::tpu::slot_writes(&self.graph, concat, k, producer)
-    }
-
-    /// Any operand: on TPU's tiled layout a concatenation fusion would build is a copy of its own.
-    fn worth(&self, _: &crate::graph::Node, _: usize, _: &crate::graph::Node, _: usize) -> bool {
-        true
-    }
-}
-
 /// TPU merges without `fuse`, late (once the graph is simplified), packing whole vector lanes: everything read in place,
 /// no views, `LANES` lanes, 1 column. Here, where `Tpu` is built without the TPU linked too.
 impl crate::codegen::MergesDots for Tpu {
@@ -63,95 +41,8 @@ impl crate::codegen::MergesDots for Tpu {
     }
 }
 
-/// TPU merges non-scalar `elementwise` fusions grouped by output shape, without `fuse` too. Here, where `Tpu` is built
-/// without the TPU linked too.
-impl crate::codegen::HorizontallyFuses for Tpu {
-    const WITH_FUSE: bool = false;
-    const GROUPING: crate::graph_compiler::passes::horizontal::Grouping =
-        crate::graph_compiler::passes::horizontal::Grouping::Shape;
-    const BUFFERS: usize = crate::codegen::fusion::tpu::HORIZONTAL_BUFFERS;
-
-    /// `fusion::tpu::horizontal_candidate`.
-    fn candidate(graph: &crate::graph::Graph, node: &crate::graph::Node) -> bool {
-        crate::codegen::fusion::tpu::horizontal_candidate(graph, node)
-    }
-}
-
-/// Flash-attention matching for TPU: scalar epilogue leaves, no extra scalars, static offsets.
-impl crate::graph_compiler::passes::attention::Attentions for DeviceModule<'_, Tpu> {
-    const WITH_FUSE: bool = false;
-
-    /// Whether attention may absorb elementwise epilogues.
-    fn contraction_epilogues(&self) -> bool {
-        self.options.config.contraction_epilogues
-    }
-
-    /// Epilogues reading only scalar leaves, through reshapes but not transposes.
-    fn epilogues(&self) -> crate::graph_compiler::passes::attention::Epilogues {
-        crate::graph_compiler::passes::attention::Epilogues {
-            leaves: |graph, v| graph.type_of(v).shape.is_empty(),
-            reshaped: true,
-            transposed: false,
-        }
-    }
-
-    /// None: TPU kernels take no by-value scalars.
-    fn scalars(&self) -> Vec<crate::graph::Var> {
-        Vec::new()
-    }
-
-    /// Names the forward fusion `flash_attention`.
-    fn kernel(&mut self) -> String {
-        "flash_attention".into()
-    }
-
-    /// No: the TPU kernel's causal diagonal is fixed at compile time.
-    fn runtime_offsets(&self) -> bool {
-        false
-    }
-}
-
-/// Each attention backward runs as a dK/dV kernel and a dQ kernel.
-impl crate::graph_compiler::passes::attention::AttentionBackwards for DeviceModule<'_, Tpu> {
-    const WITH_FUSE: bool = false;
-
-    /// None: the TPU backward runs dK/dV and dQ as separate kernels.
-    fn together(
-        &self,
-    ) -> impl Fn(&crate::graph_compiler::passes::attention::Backward) -> bool + 'static {
-        |_| false
-    }
-
-    /// Names the backward fusion `flash_attention_backward`.
-    fn backward_kernel(&mut self) -> String {
-        "flash_attention_backward".into()
-    }
-}
-
-/// TPU's attention kernels read and write whole tiles: `attention_layouts` adapts its attention fusions, checking
-/// each against `codegen::attention::tpu::kernel`.
-impl crate::codegen::TiledAttentions for Tpu {
-    /// What `codegen::attention::tpu::kernel` makes of the fusion.
-    fn check(name: &str, body: &crate::graph::Graph) -> Result<(), String> {
-        crate::codegen::attention::tpu::kernel(name, body).map(|_| ())
-    }
-}
-
 /// TPU runs batched inner products as elementwise and reduction fusions.
 impl crate::codegen::InnerProducts for Tpu {}
-
-/// TPU fuses each row its row kernel takes into a `row` fusion of its own.
-impl crate::codegen::FusedRows for Tpu {
-    /// `codegen::row::tpu::fusible`.
-    fn fusible(graph: &crate::graph::Graph, node: &crate::graph::Node) -> bool {
-        crate::codegen::row::tpu::fusible(graph, node)
-    }
-
-    /// `codegen::row::tpu::fits`.
-    fn fits(body: &crate::graph::Graph) -> bool {
-        crate::codegen::row::tpu::fits(body)
-    }
-}
 
 /// TPU's matmul kernel takes dots with their operands' reshapes folded in.
 impl crate::codegen::FoldsDotReshapes for Tpu {}
@@ -188,15 +79,6 @@ impl crate::codegen::DotLayouts for Tpu {
             }
             _ => leads(rhs_batch) && rank == nb + 2 && rhs_contracting.len() == 1,
         }
-    }
-}
-
-/// TPU's row kernel reads the inputs it classes `Kind::Full` as whole rows.
-impl crate::codegen::FullRows for Tpu {
-    /// Whether `codegen::row::tpu::kinds` classes input `at` of `body` as full rows.
-    fn full(body: &crate::graph::Graph, at: usize) -> bool {
-        use crate::codegen::row::tpu::{Kind, kinds};
-        kinds(body).is_some_and(|kinds| kinds[body.inputs()[at]] == Kind::Full)
     }
 }
 
