@@ -28,6 +28,18 @@ pub(crate) mod utils;
 /// tile's adjacent lanes): the graph compiler's `swap_pairs` pass rewrites pair swaps into it on these devices.
 pub(crate) trait SwapsPairs {}
 
+/// A backend's GEMM telling the graph compiler's `place_views` pass which operand layouts it reads in place: slices
+/// only such GEMMs read become strided views instead of copies on these devices.
+pub(crate) trait StridedOperands {
+    /// Whether the GEMM reads `dot`'s operand `k` (of the two `operands`' types) laid out with `strides`.
+    fn reads_strided(
+        dot: &crate::graph::Primitive,
+        operands: [&crate::graph::TensorType; 2],
+        k: usize,
+        strides: &[usize],
+    ) -> bool;
+}
+
 /// A backend whose kernels compute `Gather`: the graph compiler's `take_along_axis` pass lowers `take_along_axis` to a
 /// flat gather on these devices.
 pub(crate) trait Gathers {}

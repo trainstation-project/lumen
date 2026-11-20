@@ -1,12 +1,25 @@
-//! Slices read only by GEMMs, turned into strided views of their operand instead of copies.
+//! Slices read only by GEMMs, turned into strided views of their operand (`Slice { view: true }`) instead of copies,
+//! when the GEMM kernel can read the operand at the parent's strides. It runs after `fusion` and `wide_rows` and before
+//! `alone`, so the lone layout ops `alone` turns into elementwise fusions no longer include these slices.
+//!
+//! Devices: it runs on each device whose codegen implements `codegen::StridedOperands` (its GEMM's rule for the
+//! operand layouts it reads in place): MPS (`dot_general::mps::reads_strided`) and Triton (any strides). CPU, CUDA and
+//! TPU get the identity pass.
+//!
+//! The rule: a `Slice` of one value is marked a view when its output is not a graph output, its input is not itself a
+//! slice already marked a view, and it has at least one reader, every reader being a `DotGeneral` whose rule accepts
+//! each operand slot reading the slice at the sliced input's contiguous strides, or a GEMM fusion where
+//! `fusion_reads_strided` holds: fusion input `k` read only by the body's GEMM dot (`codegen::kinds::gemm_dot`), as
+//! exactly one of its operands, in a layout the rule accepts. MPS codegen calls `fusion_reads_strided` too
+//! (`codegen::mps::fusion_reads_strided`, planning MPS steps).
 
-#[cfg(lumen_mps_linked)]
-mod mps;
-mod triton;
-
+use crate::codegen::StridedOperands;
 use crate::codegen::kinds::gemm_dot;
 use crate::graph::{Graph, Primitive, TensorType, Var};
-use crate::graph_compiler::passes::{CompilerPass, Module};
+use crate::graph_compiler::CompilerConfig;
+use crate::graph_compiler::device::DeviceModule;
+use crate::graph_compiler::passes::{CompilerPass, DevicePass, Module};
+use crate::graph_compiler::pipeline::Pass;
 use crate::tensor::contiguous_strides;
 
 /// Whether a dot (`Primitive`, its two operands' types) reads operand `k` laid out with `strides`.
@@ -93,6 +106,16 @@ pub(crate) fn fusion_reads_strided(
 /// matmul kernels' rule) a view.
 pub(crate) struct PlaceViews {
     pub reads: ReadsStrided,
+}
+
+/// Always, on every device whose codegen implements `StridedOperands`: slices a GEMM reads in place become views
+/// before the lone layout ops left become elementwise fusions.
+impl<D: StridedOperands> DevicePass<D> for PlaceViews {
+    fn pass<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
+        Box::new(PlaceViews {
+            reads: D::reads_strided,
+        })
+    }
 }
 
 impl<M: Module> CompilerPass<M> for PlaceViews {

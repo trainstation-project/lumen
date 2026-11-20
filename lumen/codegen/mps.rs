@@ -563,5 +563,18 @@ impl crate::codegen::Supports for Mps {
 /// Metal kernels read each element's partner at `j ^ 1`.
 impl crate::codegen::SwapsPairs for Mps {}
 
+/// Metal GEMMs read the operand layouts `dot_general::mps::reads_strided` accepts in place.
+impl crate::codegen::StridedOperands for Mps {
+    /// The MPS GEMM's rule.
+    fn reads_strided(
+        dot: &Primitive,
+        operands: [&crate::graph::TensorType; 2],
+        k: usize,
+        strides: &[usize],
+    ) -> bool {
+        crate::codegen::dot_general::mps::reads_strided(dot, operands, k, strides)
+    }
+}
+
 /// Metal kernels gather (a fused `Gather`).
 impl crate::codegen::Gathers for Mps {}
