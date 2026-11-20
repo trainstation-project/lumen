@@ -24,6 +24,28 @@ impl crate::codegen::dynamic_slice::UpdateChains for Tpu {
     const WITH_FUSE: bool = false;
 }
 
+/// TPU's kernels writing a concatenation's operands into their slots, always (here, where `Tpu` is built without the
+/// TPU linked too): what `fusion::tpu::slot_writes` accepts, every operand worth placing.
+impl crate::codegen::Slots for DeviceModule<'_, Tpu> {
+    const WITH_FUSE: bool = false;
+
+    /// What `fusion::tpu::slot_writes` accepts.
+    fn writes(
+        &self,
+        concat: &crate::graph::Node,
+        k: usize,
+        producer: &crate::graph::Node,
+        _: usize,
+    ) -> bool {
+        crate::graph_compiler::passes::fusion::tpu::slot_writes(&self.graph, concat, k, producer)
+    }
+
+    /// Any operand: on TPU's tiled layout a concatenation fusion would build is a copy of its own.
+    fn worth(&self, _: &crate::graph::Node, _: usize, _: &crate::graph::Node, _: usize) -> bool {
+        true
+    }
+}
+
 /// Whether `p` can run inside a plain elementwise TPU kernel (only scalar broadcasts among layout ops).
 pub(crate) fn fusible(p: &Primitive) -> bool {
     use Primitive::*;

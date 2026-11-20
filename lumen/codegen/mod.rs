@@ -44,6 +44,49 @@ pub(crate) trait StridedOperands {
 /// flat gather on these devices.
 pub(crate) trait Gathers {}
 
+/// A module whose backend's kernels may write a concatenation's operands into their slots: the graph compiler's
+/// `place_concats` pass marks concatenations in place on these devices. Operand `k` of
+/// `concat` is made by `producer`, the fusion itself when the operand is its output `index`.
+pub(crate) trait Slots: crate::graph_compiler::passes::Module {
+    /// Whether it places concatenations only with `fuse` (the fusion that writes the slots); else always.
+    const WITH_FUSE: bool = true;
+
+    /// Whether the kernel making operand `k` of `concat` can write it into its slot.
+    fn writes(
+        &self,
+        concat: &crate::graph::Node,
+        k: usize,
+        producer: &crate::graph::Node,
+        index: usize,
+    ) -> bool;
+
+    /// Whether writing operand `k` into its slot is worth placing `concat` for; a concatenation is placed
+    /// when some operand is. By default, `worth`'s rule (MPS's and Triton's).
+    fn worth(
+        &self,
+        _concat: &crate::graph::Node,
+        _k: usize,
+        producer: &crate::graph::Node,
+        _index: usize,
+    ) -> bool {
+        crate::graph_compiler::passes::place_concats::worth(producer)
+    }
+}
+
+/// A module whose fusion may leave a concatenation it was to write in place unable to be (the graph compiler's
+/// `concats` pass, after fusion): `written` is the slot rule then; each concatenation unmarked gets a kernel of its own,
+/// named as `Lone::kernel` names one-node fusions.
+pub(crate) trait Rechecks: Slots + Lone {
+    /// Whether, after fusion, the kernel making operand `k` of `concat` writes it into its slot.
+    fn written(
+        &self,
+        concat: &crate::graph::Node,
+        k: usize,
+        producer: &crate::graph::Node,
+        index: usize,
+    ) -> bool;
+}
+
 /// A backend's codegen telling the graph compiler's `unsupported` pass which graphs it has no kernels for. A device
 /// implementing it runs the pass.
 pub(crate) trait Supports {
