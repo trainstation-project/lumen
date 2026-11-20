@@ -6,6 +6,7 @@ pub(crate) mod dynamic_slice;
 pub(crate) mod elementwise;
 pub(crate) mod emitter;
 pub(crate) mod factory;
+pub(crate) mod fusion;
 pub(crate) mod gather;
 pub(crate) mod kernel;
 pub(crate) mod kinds;
@@ -211,6 +212,15 @@ pub(crate) trait FusedRows {
     fn fusible(graph: &crate::graph::Graph, node: &crate::graph::Node) -> bool;
     /// Whether a row body fits the row kernel.
     fn fits(body: &crate::graph::Graph) -> bool;
+}
+
+/// A backend's fusion (the graph compiler's `fusion` pass): the shared fusion with its limits and kernel names (MPS,
+/// Triton, CUDA) or a fusion of its own (TPU's planned groups).
+pub(crate) trait Fuses: Sized {
+    /// Whether it fuses only with `fuse`; else always.
+    const WITH_FUSE: bool = true;
+    /// Fuses module `m`'s graph.
+    fn fuse(m: &mut crate::graph_compiler::device::DeviceModule<'_, Self>) -> Result<(), String>;
 }
 
 /// A backend's codegen telling the graph compiler's `unsupported` pass which graphs it has no kernels for. A device

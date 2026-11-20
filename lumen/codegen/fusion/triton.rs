@@ -1,18 +1,14 @@
 //! Triton fusion: the shared fusion (`passes::fusion`, as MPS runs it) with the Triton
 //! kernels' limits and shapes, and which nodes left outside any fusion need one-node kernels.
 
-use super::{Backend, fuse};
 use crate::codegen::dot_general::triton::gemv_body;
 use crate::codegen::dot_general::triton::row::dot_row_fits;
 use crate::codegen::kinds::{combine_root, gemm_dot, reduction_root, row_reductions};
 use crate::codegen::regions::expansion;
 use crate::codegen::utils::triton::triton_type;
 use crate::graph::{Graph, Node, Primitive, Var};
-use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::{DeviceModule, Triton};
-use crate::graph_compiler::passes::CompilerPass;
-use crate::graph_compiler::passes::DevicePass;
-use crate::graph_compiler::pipeline::{Pass, when};
+use crate::graph_compiler::passes::fusion::{Backend, fuse};
 
 /// Whether `node` can be emitted inside a Triton fusion kernel: a supported primitive whose
 /// inputs and output all have Triton dtypes.
@@ -114,17 +110,11 @@ pub(crate) fn named(body: &Graph) -> String {
     .into()
 }
 
-/// Compiler pass running the shared fusion for Triton.
-pub(crate) struct Fusion;
-
-impl CompilerPass<DeviceModule<'_, Triton>> for Fusion {
-    /// Pass name used in profiler ranges and dumps.
-    fn name(&self) -> &'static str {
-        "fusion"
-    }
-
+/// Triton's fusion (the graph compiler's `fusion` pass): the shared fusion with Triton's limits, each fusion named by
+/// its kind (`named`), with `fuse`.
+impl crate::codegen::Fuses for Triton {
     /// Fuses the graph around the normalization rows the diamonds pass found.
-    fn apply(&mut self, m: &mut DeviceModule<'_, Triton>) -> Result<(), String> {
+    fn fuse(m: &mut DeviceModule<'_, Triton>) -> Result<(), String> {
         let scalars: Vec<Var> = crate::graph_compiler::positions(&m.options.scalars)
             .into_iter()
             .map(|i| m.graph.inputs()[i])
@@ -172,11 +162,4 @@ pub(crate) fn slot_writes(graph: &Graph, producer: &Node) -> bool {
         && (crate::graph_compiler::elementwise(&producer.primitive) || copies);
 
     kernel || matches!(producer.primitive, Primitive::DotGeneral { .. })
-}
-
-/// With `fuse`.
-impl DevicePass<Triton> for super::Fusion {
-    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, Triton>> {
-        when(config.fuse, Fusion)
-    }
 }

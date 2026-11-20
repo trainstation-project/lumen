@@ -37,7 +37,7 @@ impl crate::codegen::Slots for DeviceModule<'_, Tpu> {
         producer: &crate::graph::Node,
         _: usize,
     ) -> bool {
-        crate::graph_compiler::passes::fusion::tpu::slot_writes(&self.graph, concat, k, producer)
+        crate::codegen::fusion::tpu::slot_writes(&self.graph, concat, k, producer)
     }
 
     /// Any operand: on TPU's tiled layout a concatenation fusion would build is a copy of its own.
@@ -69,11 +69,11 @@ impl crate::codegen::HorizontallyFuses for Tpu {
     const WITH_FUSE: bool = false;
     const GROUPING: crate::graph_compiler::passes::horizontal::Grouping =
         crate::graph_compiler::passes::horizontal::Grouping::Shape;
-    const BUFFERS: usize = crate::graph_compiler::passes::fusion::tpu::HORIZONTAL_BUFFERS;
+    const BUFFERS: usize = crate::codegen::fusion::tpu::HORIZONTAL_BUFFERS;
 
     /// `fusion::tpu::horizontal_candidate`.
     fn candidate(graph: &crate::graph::Graph, node: &crate::graph::Node) -> bool {
-        crate::graph_compiler::passes::fusion::tpu::horizontal_candidate(graph, node)
+        crate::codegen::fusion::tpu::horizontal_candidate(graph, node)
     }
 }
 
@@ -212,7 +212,7 @@ impl crate::codegen::FusesDots for Tpu {
         k: usize,
         producer: &crate::graph::Node,
     ) -> bool {
-        crate::graph_compiler::passes::fusion::tpu::slot_writes(graph, concat, k, producer)
+        crate::codegen::fusion::tpu::slot_writes(graph, concat, k, producer)
     }
 }
 

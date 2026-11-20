@@ -6,6 +6,7 @@ use crate::autotune::Autotuner;
 use crate::codegen::attention::triton::FlashAttention;
 use crate::codegen::dot_general::triton::Gemm;
 use crate::codegen::elementwise::triton::Loop;
+use crate::codegen::fusion::triton::{COMBINE, fusible, named};
 use crate::codegen::kernel::Runner;
 use crate::codegen::kinds::{combine_root, gemm_dot, reduction_root};
 use crate::codegen::layout::{TILE, transpose_tiling};
@@ -17,7 +18,6 @@ use crate::codegen::scatter_add::triton::launch::Scatter;
 use crate::codegen::utils::triton as codegen;
 use crate::graph::{Graph, Node, Primitive, UPDATES};
 use crate::graph_compiler::device::{Device, DeviceModule, Triton};
-use crate::graph_compiler::passes::fusion::triton::{COMBINE, fusible, named};
 use crate::graph_compiler::passes::horizontal::segments;
 use crate::graph_compiler::{Options, plan_options, positions};
 use crate::plan::step::Tensors;
@@ -484,7 +484,7 @@ impl crate::codegen::NormalizationRows for Triton {
 
     /// `fusion::triton::fusible`.
     fn fusible(graph: &Graph, node: &Node) -> bool {
-        crate::graph_compiler::passes::fusion::triton::fusible(graph, node)
+        crate::codegen::fusion::triton::fusible(graph, node)
     }
 }
 
@@ -572,11 +572,11 @@ impl crate::graph_compiler::passes::attention::AttentionBackwards for DeviceModu
 impl crate::codegen::HorizontallyFuses for Triton {
     const GROUPING: crate::graph_compiler::passes::horizontal::Grouping =
         crate::graph_compiler::passes::horizontal::Grouping::Tiling;
-    const BUFFERS: usize = crate::graph_compiler::passes::fusion::triton::HORIZONTAL_BUFFERS;
+    const BUFFERS: usize = crate::codegen::fusion::triton::HORIZONTAL_BUFFERS;
 
     /// `fusion::triton::horizontal_candidate`.
     fn candidate(graph: &Graph, node: &Node) -> bool {
-        crate::graph_compiler::passes::fusion::triton::horizontal_candidate(graph, node)
+        crate::codegen::fusion::triton::horizontal_candidate(graph, node)
     }
 }
 
@@ -589,7 +589,7 @@ impl crate::codegen::MergesDots for Triton {
     /// What Triton fusion can fuse, read in place; views; lanes 1; 8 columns.
     fn target() -> crate::graph_compiler::passes::merge_dots::Target {
         crate::graph_compiler::passes::merge_dots::Target {
-            reads: crate::graph_compiler::passes::fusion::triton::fusible,
+            reads: crate::codegen::fusion::triton::fusible,
             views: true,
             lanes: 1,
             columns: 8,
@@ -602,7 +602,7 @@ impl crate::codegen::MergesDots for Triton {
 impl crate::codegen::Slots for DeviceModule<'_, Triton> {
     /// What `fusion::triton::slot_writes` accepts.
     fn writes(&self, _: &Node, _: usize, producer: &Node, _: usize) -> bool {
-        crate::graph_compiler::passes::fusion::triton::slot_writes(&self.graph, producer)
+        crate::codegen::fusion::triton::slot_writes(&self.graph, producer)
     }
 }
 

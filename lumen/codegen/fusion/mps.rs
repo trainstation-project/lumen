@@ -1,16 +1,13 @@
 //! MPS fusion: the shared fusion (`passes::fusion`) with Metal's kernels' limits and shapes,
 //! each fusion compiled to one Metal kernel.
 
-use super::{self as shared, Backend};
 use crate::DType;
 use crate::codegen::mps::{Kernel, request};
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::{DeviceModule, Mps};
-use crate::graph_compiler::passes::CompilerPass;
-use crate::graph_compiler::passes::DevicePass;
 use crate::graph_compiler::passes::diamonds::Row;
-use crate::graph_compiler::pipeline::{Pass, when};
+use crate::graph_compiler::passes::fusion::{self as shared, Backend};
 pub(crate) use crate::graph_compiler::{elementwise, label};
 
 /// Whether `node` can live inside a fusion kernel: elementwise ops, gathers and reductions under
@@ -106,16 +103,11 @@ pub(crate) fn fuse(
     shared::fuse(graph, rows, scalars, &backend(config), kernel)
 }
 
-/// Compiler pass running fusion, then optional horizontal fusion.
-pub(crate) struct Fusion;
-
-impl<'a> CompilerPass<DeviceModule<'a, Mps>> for Fusion {
-    fn name(&self) -> &'static str {
-        "fusion"
-    }
-
+/// MPS's fusion (the graph compiler's `fusion` pass): the shared fusion with Metal's limits, then horizontal fusion
+/// within this pass, with `horizontal_fusion`. MPS fuses only with `fuse`.
+impl crate::codegen::Fuses for Mps {
     /// Fuses the graph, repeating until every by-value scalar is read only by fusions.
-    fn apply(&mut self, m: &mut DeviceModule<'a, Mps>) -> Result<(), String> {
+    fn fuse(m: &mut DeviceModule<'_, Mps>) -> Result<(), String> {
         let config = &m.options.config;
 
         // Dropping a scalar that some unfused node reads changes kernel signatures, so fuse again from scratch.
@@ -188,12 +180,5 @@ fn horizontal_candidate(graph: &Graph, node: &Node) -> bool {
                 && crate::codegen::kinds::gemm_dot(body).is_none()
         }
         p => elementwise(p) && fusible(graph, node),
-    }
-}
-
-/// With `fuse`; it also fuses horizontally, with `horizontal_fusion`.
-impl DevicePass<Mps> for super::Fusion {
-    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, Mps>> {
-        when(config.fuse, Fusion)
     }
 }

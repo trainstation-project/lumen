@@ -11,7 +11,7 @@
 //!   slices are rebuilt inside the body.
 //! - A stacked lhs: when the lhs is a `Concatenate` along one of its last two axes of lane-aligned parts,
 //!   read only by dots as their lhs, not a graph output, and not an in-place concatenation (checked with
-//!   `place_concats::in_place_concats` and `fusion::tpu::slot_writes`). The fusion reads the concat's parts.
+//!   `place_concats::in_place_concats` and `codegen::fusion::tpu::slot_writes`). The fusion reads the concat's parts.
 //! - Elementwise epilogues, only with `contraction_epilogues`: later elementwise readers of the dot (or of a
 //!   slice, or of an earlier epilogue), claimed greedily in node order. Each must have its part's shape; its
 //!   other operands must be constants (rebuilt in the body), scalar broadcasts, or scalar or same-shape

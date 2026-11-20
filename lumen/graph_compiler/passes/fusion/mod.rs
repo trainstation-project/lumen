@@ -2,8 +2,6 @@
 //! and GEMM epilogues into `Fusion` nodes, each compiled by the backend to one kernel. `mps` and `triton`
 //! run it with their kernels' limits; `tpu` groups nodes into the TPU's elementwise and reduction kernels.
 
-pub(crate) mod cuda;
-
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::passes::diamonds::Row;
 pub(crate) use crate::graph_compiler::{constant, elementwise, label};
@@ -11,13 +9,10 @@ pub(crate) use crate::graph_compiler::{constant, elementwise, label};
 mod analysis;
 mod dot_epilogues;
 mod emit;
+pub(crate) mod groups;
 mod hosts;
-#[cfg(lumen_mps_linked)]
-pub(crate) mod mps;
 mod reduction_epilogues;
 mod rows;
-pub(crate) mod tpu;
-pub(crate) mod triton;
 
 /// What a backend brings to fusion: the nodes its kernels compute, their limits, the fusions it
 /// turns on, and the GEMM shapes its kernels take.
@@ -116,5 +111,35 @@ pub(crate) fn fuse(
     )
 }
 
-/// The fusion pass's slot (each device runs its own `Fusion`).
+/// The fusion pass: each device's fusion (`codegen::Fuses::fuse`, in its codegen), on every device whose codegen
+/// implements `Fuses`.
 pub(crate) struct Fusion;
+
+impl<D: crate::codegen::Fuses>
+    crate::graph_compiler::passes::CompilerPass<crate::graph_compiler::device::DeviceModule<'_, D>>
+    for Fusion
+{
+    /// Pass name used in profiler ranges and dumps.
+    fn name(&self) -> &'static str {
+        "fusion"
+    }
+
+    /// Fuses the module's graph as the device does.
+    fn apply(
+        &mut self,
+        m: &mut crate::graph_compiler::device::DeviceModule<'_, D>,
+    ) -> Result<(), String> {
+        D::fuse(m)
+    }
+}
+
+/// With `fuse` (always on a device fusing without it, `Fuses::WITH_FUSE`), on every device whose codegen implements
+/// `Fuses`.
+impl<D: crate::codegen::Fuses> crate::graph_compiler::passes::DevicePass<D> for Fusion {
+    fn pass<'a>(
+        config: &crate::graph_compiler::CompilerConfig,
+    ) -> crate::graph_compiler::pipeline::Pass<crate::graph_compiler::device::DeviceModule<'a, D>>
+    {
+        crate::graph_compiler::pipeline::when(config.fuse || !D::WITH_FUSE, Fusion)
+    }
+}

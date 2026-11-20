@@ -2,6 +2,7 @@
 //! checked against the reference interpreter and, when a GPU is present, on device.
 
 use crate::codegen::dot_general::mps as gemm;
+use crate::codegen::fusion::mps as fusion;
 use crate::codegen::kinds::{gemm_dot, row_reductions};
 use crate::codegen::layout::transpose_tiling;
 use crate::codegen::reduction::mps::has_epilogue;
@@ -9,7 +10,6 @@ use crate::codegen::utils::mps::metal_type;
 use crate::graph::Primitive::*;
 use crate::graph::{Graph, Primitive, TensorType, Var};
 use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::passes::fusion::mps as fusion;
 use crate::graph_compiler::passes::merge_dots::{Target, merge_dots};
 use crate::plan::Plan as _;
 use crate::plan::tests::mps::{available, check, check_within, exact_values, values};

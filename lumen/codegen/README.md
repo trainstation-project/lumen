@@ -25,7 +25,7 @@ and the autotuner (`lumen/autotune`) picks a config for each tuned kernel.
 
 One folder per kernel family, each with a device subfolder per backend that has the family:
 `attention`, `dot_general` (GEMMs), `dynamic_slice`, `elementwise`, `factory`, `gather`, `layout`, `random`,
-`reduction`, `row`, `scan`, `scatter_add`. Shared pieces live in `emitter` (per-backend statements computing a
+`reduction`, `row`, `scan`, `scatter_add`; and `fusion`, each backend's fusion (`Fuses`) for the graph compiler. Shared pieces live in `emitter` (per-backend statements computing a
 body's values at an index), `store` (strided load/store addressing) and `utils` (each backend's codegen type,
 prelude and helpers).
 

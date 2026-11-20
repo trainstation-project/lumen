@@ -38,14 +38,14 @@ before `wide_rows`, `place_views`, `alone`, `concats` and `horizontal`; it consu
   `row_dots` moves a GEMM and its epilogue into the row fusion reading it when `row_dot` accepts the body
   (reverting otherwise); `emitted` rebuilds the graph with `Fusion` nodes and `FusionOutput`s for hosted
   values, each step after the values it reads.
-- `mps.rs` — MPS backend (built only when MPS is linked).
-- `triton.rs` — Triton backend.
-- `cuda.rs` — CUDA (CuTe DSL) backend.
-- `tpu/` — TPU's own fusion, not the shared driver: `groups.rs` plans groups back to front, splitting off
-  layout ops until every group's indexing can be planned; `emit.rs` turns groups into `elementwise` or
-  `reduction` fusions (a reducing member leads).
+- `groups.rs` — fusion by planned groups (TPU's own, not the shared driver): plans groups back to front,
+  splitting off layout ops until every group's indexing can be planned, and turns the groups into
+  `elementwise` or `reduction` fusions (a reducing member leads).
 
-CPU gets the identity pass.
+The `Fusion` pass (in `mod.rs`) runs each device's fusion, `codegen::Fuses::fuse`, on every device whose codegen
+implements `Fuses`: MPS, Triton and CUDA (with `fuse`) and TPU (always, `WITH_FUSE` off). Each backend's fusion,
+`Backend` and helpers live in `codegen/fusion` (`mps.rs`, `triton.rs`, `cuda.rs`, `tpu.rs`). CPU gets the identity
+pass.
 
 ## Backend
 
@@ -66,11 +66,11 @@ yes, MPS and CUDA not).
 - Triton: with `fuse`. Ops with Triton dtypes (adds `DynamicSlice`), any number of inputs, reduction and
   contraction epilogues always on, `row_dot` = `dot_row_fits`. Fusions are named by kind (`named`):
   `dot_row`, `row`, `dot_general`, `combine` (a split-K combine, `kinds::combine_root`), `reduction`,
-  `elementwise`. Exposes `fusible`, `named`,
-  `horizontal_candidate`, `HORIZONTAL_BUFFERS` and `slot_writes` to other passes.
+  `elementwise`. `codegen::fusion::triton` exposes `fusible`, `named`, `horizontal_candidate`, `HORIZONTAL_BUFFERS`
+  and `slot_writes` to other passes.
 - CUDA: with `fuse`. Elementwise and layout ops (and gathers) with CuTe dtypes only; no reduction epilogues and no rows;
   `dot_epilogue` from `codegen::dot_general::cuda::epilogue`; fusions named `dot_general` or `elementwise`.
-- TPU: always. Exposes `horizontal_candidate`, `HORIZONTAL_BUFFERS` and `slot_writes` (used by
-  `place_concats` and `dot/fuse`). TPU's dot fusions live in `passes/dot`.
+- TPU: always, by planned groups (`groups.rs`). `codegen::fusion::tpu` exposes `horizontal_candidate`,
+  `HORIZONTAL_BUFFERS` and `slot_writes` (used by `place_concats` and `dot/fuse`). TPU's dot fusions live in `passes/dot`.
 
 In-place concatenations are not fusible (`Analysis::fusible`), so `place_concats` must run first.
