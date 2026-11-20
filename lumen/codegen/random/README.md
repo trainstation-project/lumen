@@ -12,7 +12,7 @@ a shared `philox_bits` function; on MPS, a lone `random_bits` step also has its 
   generator uses it for dropout.
 - `mps/` (built only with `lumen_mps_linked`):
   - `mod.rs` implements the trait for Metal as a call to `philox_bits`. It also defines the `RandomBits`
-    kernel: no config, never tuned, picked by `codegen/mps.rs` for a lone `RandomBits` step. That kernel
+    kernel: no config, never tuned, picked by `codegen/utils/mps` for a lone `RandomBits` step. That kernel
     launches `random_bits` over the output's words, binding the step's inputs and then its output.
   - `philox.metal` holds the `philox_bits(key, counter)` inline function. It is part of the prelude that every
     Metal source is compiled with: both the primitive-kernel library in `build.rs` and the generated kernels'

@@ -8,7 +8,12 @@ use crate::graph_compiler::{plan_options, positions};
 use crate::plan::{CpuPlan, DeviceLayout, Plan, PlanOptions};
 
 #[cfg(lumen_tpu_linked)]
+mod kernel;
+#[cfg(lumen_tpu_linked)]
 pub(crate) mod lowering;
+
+#[cfg(lumen_tpu_linked)]
+pub(crate) use kernel::*;
 
 #[cfg(lumen_tpu_linked)]
 use crate::plan::StepBase;
@@ -231,7 +236,9 @@ impl Device for Tpu {
 
         // Each step's kernel is generated now, so running the plan only launches them.
         #[cfg(lumen_tpu_linked)]
-        return Ok(Box::new(crate::codegen::tpu::codegen(plan, options)?));
+        return Ok(Box::new(crate::codegen::utils::tpu::codegen(
+            plan, options,
+        )?));
 
         #[cfg(not(lumen_tpu_linked))]
         Ok(Box::new(plan))

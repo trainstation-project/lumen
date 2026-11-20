@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::codegen::tpu::GENERATED;
+use crate::codegen::utils::tpu::GENERATED;
 
 /// Mosaic source of `module`'s kernel for JSON `spec`, lowered by `lumen.codegen.utils.tpu.pallas`.
 #[cfg(feature = "python")]

@@ -11,7 +11,7 @@ use crate::codegen::dot_general::tpu::block;
 #[cfg(lumen_tpu_linked)]
 use crate::codegen::reduction::ReductionCodegen;
 #[cfg(lumen_tpu_linked)]
-use crate::codegen::tpu::{Kernel, Rows};
+use crate::codegen::utils::tpu::{Kernel, Rows};
 #[cfg(lumen_tpu_linked)]
 use crate::codegen::utils::tpu::{Tpu, node};
 #[cfg(lumen_tpu_linked)]

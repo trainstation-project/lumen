@@ -17,7 +17,7 @@ on the generic per-backend kernels:
 
 - MPS: `runtime::kernel::mps::Fusion`.
 - Triton: `Loop` (`elementwise/triton`).
-- TPU: `Pallas` (`codegen/tpu.rs`).
+- TPU: `Pallas` (`codegen/utils/tpu`).
 
 ## Backends
 
@@ -28,7 +28,7 @@ reductions), each row gets one SIMD group, with `SIMD_ROWS` rows per threadgroup
 gets a threadgroup. `row_kernel` takes an optional GEMM `tile` so `dot_general/mps/row.rs` can reuse it
 for rows fed by a fused matmul. `row_shape` and `row_groups` give the launch shape:
 `graph_compiler/passes/fusion/mps.rs` reads `row_shape`, and `runtime::kernel::mps` reads `row_groups`.
-`RowCodegen for Mps` takes the `CompilerConfig` as options. `codegen/mps.rs::kernel` calls it when a
+`RowCodegen for Mps` takes the `CompilerConfig` as options. `codegen/utils/mps::kernel` calls it when a
 body has row reductions.
 
 **Triton (`triton.rs`).** `row` generates the kernel as a `reduction::triton::Reduction`:

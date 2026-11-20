@@ -411,7 +411,7 @@ pub(crate) fn matmul_of(
 /// operands (read through their strides).
 fn tiled_gemm(step: &StepBase) -> bool {
     let float = step.output.1.dtype.is_float();
-    let views = !crate::codegen::mps::loads_views(step);
+    let views = !crate::codegen::utils::mps::loads_views(step);
 
     let tiled = match &step.primitive {
         Primitive::Fusion { name, body, .. } => {

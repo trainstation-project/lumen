@@ -3,8 +3,8 @@
 //! exactly as traced.
 //!
 //! Devices: it runs on each device whose codegen implements `codegen::Supports` (its check of the graph): MPS
-//! (`codegen/mps.rs`: float64 and float8 values, bfloat16 transcendentals, dots of two dtypes) and Triton
-//! (`codegen/triton.rs`: float16 and bfloat16 transcendentals, which libdevice lacks). CPU, CUDA and TPU get the
+//! (`codegen/utils/mps`: float64 and float8 values, bfloat16 transcendentals, dots of two dtypes) and Triton
+//! (`codegen/utils/triton`: float16 and bfloat16 transcendentals, which libdevice lacks). CPU, CUDA and TPU get the
 //! identity pass. "Transcendental" is `Primitive::is_transcendental`; the operand checked is a node's first
 //! input (or its output when it has none).
 

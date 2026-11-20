@@ -2,7 +2,7 @@
 //! each fusion compiled to one Metal kernel.
 
 use crate::DType;
-use crate::codegen::mps::{Kernel, request, writes_views};
+use crate::codegen::utils::mps::{Kernel, request, writes_views};
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::{DeviceModule, Mps};

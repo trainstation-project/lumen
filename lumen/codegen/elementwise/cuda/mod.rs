@@ -262,7 +262,7 @@ impl Kernel for Elementwise {
             spans: tensors.iter().map(Tensor::numel).collect(),
         };
 
-        let code = crate::codegen::cuda::generated(step, layouts)?;
+        let code = crate::codegen::utils::cuda::generated(step, layouts)?;
         let (name, source) = code.as_ref();
         launch(name, source, &tensors, outputs.len(), n)
     }

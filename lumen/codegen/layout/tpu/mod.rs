@@ -2,8 +2,8 @@
 
 use crate::codegen::dot_general::tpu::block;
 use crate::codegen::layout::LayoutCodegen;
-use crate::codegen::tpu::{Kernel, Rows};
 use crate::codegen::utils::tpu::Tpu;
+use crate::codegen::utils::tpu::{Kernel, Rows};
 use crate::device::tpu::layout::Layout;
 use crate::graph::{Graph, TensorType};
 use crate::plan::StepBase;

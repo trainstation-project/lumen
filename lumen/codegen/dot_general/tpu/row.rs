@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use crate::DType;
 use crate::codegen::dot_general::tpu::{block, caps};
 use crate::codegen::row::tpu::{Kind, kinds, readable, row_node, rows};
-use crate::codegen::tpu::{Kernel, Rows};
+use crate::codegen::utils::tpu::{Kernel, Rows};
 use crate::device::tpu::layout::Layout;
 use crate::graph::{Graph, Primitive, Var};
 use crate::plan::StepBase;

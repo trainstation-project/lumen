@@ -6,13 +6,8 @@ and the autotuner (`lumen/autotune`) picks a config for each tuned kernel.
 
 ## Files
 
-- `mod.rs`: declares the kernel families and backends. `mps` and `tpu` compile only when their runtimes are
-  linked (`lumen_mps_linked`, `lumen_tpu_linked`).
+- `mod.rs`: declares the kernel families.
 - `kernel.rs`: the `Kernel` trait every plan step runs, and `Runner`, the same kernel behind its config type.
-- `cuda.rs`: CUDA (CuTe DSL) codegen and its `Device` impl.
-- `triton.rs`: Triton codegen, the generated loop kernel type (`Kernel`, `Template`, `Constexpr`) and its `Device` impl.
-- `mps.rs`: Metal codegen, the kernel shape each fused body lowers to, and MPS's `Device` lowering.
-- `tpu.rs`: TPU (Pallas) codegen: the per-step `Kernel` spec and the `Pallas`, `Gather` and `Nothing` kernels.
 - `kinds.rs`: tells fused bodies apart from the body alone: `gemm_dot`, `reduction_root`, `combine_root` (a
   split-K combine: the only reduction, a sum over at most `MAX_SPLIT` chunks of a body input, every output
   computed from it), `row_reductions`, `row_partials`.
@@ -27,7 +22,7 @@ One folder per kernel family, each with a device subfolder per backend that has 
 `attention`, `dot_general` (GEMMs), `dynamic_slice`, `elementwise`, `factory`, `gather`, `layout`, `random`,
 `reduction`, `row`, `scan`, `scatter_add`; and `fusion`, each backend's fusion (`Fuses`) for the graph compiler. Shared pieces live in `emitter` (per-backend statements computing a
 body's values at an index), `store` (strided load/store addressing) and `utils` (each backend's codegen type,
-prelude and helpers).
+prelude and helpers, plus each backend's `codegen` and `Device` impl).
 
 Each backend implements the graph compiler's pass traits (`codegen/mod.rs`, plus `Attentions` and
 `AttentionBackwards` in `passes/attention`) in the family file they belong to: attention traits in
@@ -57,18 +52,18 @@ forced through `lumen.autotune.use` is honoured only when `accepts` allows it. S
 
 Each backend's `codegen(plan, options)` runs once per compiled plan and gives every step its kernel:
 
-- CUDA (`cuda.rs`): a `DotGeneral` or GEMM fusion runs `Gemm`, the flash-attention forward fusion runs
+- CUDA (`utils/cuda.rs`): a `DotGeneral` or GEMM fusion runs `Gemm`, the flash-attention forward fusion runs
   `FlashAttention`, everything else runs `Elementwise` (a reshape runs as a copy body). Elementwise and GEMM-fusion
   sources are generated per tensor layout and kept in the step's memo; any other op is an error.
-- Triton (`triton.rs`): `loop_kernel` generates each step's loop kernel first; then attention runs
+- Triton (`utils/triton`): `loop_kernel` generates each step's loop kernel first; then attention runs
   `FlashAttention`, GEMMs `Gemm`, collectives `Collective`, waits `Wait`, fusions, cumsums, dynamic update slices
   and scatter-adds with a generated kernel `Loop`, and the rest `Unsupported`.
-- MPS (`mps.rs`): generates and compiles Metal source for every pending fusion first, then picks `Gemm`,
+- MPS (`utils/mps`): generates and compiles Metal source for every pending fusion first, then picks `Gemm`,
   `FlashAttention` or the tunable `Elementwise` when they take the step, the generic fusion encoder for other
   fusions, else one kernel per primitive (`Reduction`, `Cumsum`, `ScatterAdd`, `LinearCrossEntropy`, `Matmul`,
   `Copy`, `DynamicSlice`, `Factory`, `RandomBits`, `HostWait`, `Unsupported`). `Gemm`, `FlashAttention` and
   `Elementwise` are shared by all steps of the plan.
-- TPU (`tpu.rs`): `kernel(step)` builds a Pallas spec by fusion name (`flash_attention*`, `reduction`, `dot_row`,
+- TPU (`utils/tpu/kernel.rs`): `kernel(step)` builds a Pallas spec by fusion name (`flash_attention*`, `reduction`, `dot_row`,
   `row`, updates, `elementwise`) or primitive; the step then runs `Pallas`, `Gather` (SparseCore when possible,
   else its TensorCore kernel) or `Nothing` (custom calls).
 

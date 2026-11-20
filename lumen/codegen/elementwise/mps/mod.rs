@@ -350,7 +350,7 @@ impl Kernel for Elementwise {
         };
 
         match step.code.is_some() && TUNED_ELEMENTS.contains(&step.output.1.numel()) {
-            true => crate::codegen::mps::tunings_of(body),
+            true => crate::codegen::utils::mps::tunings_of(body),
             false => Vec::new(),
         }
     }
@@ -398,7 +398,7 @@ impl Elementwise {
         let t = step.code.as_ref().expect("a tunable fusion");
 
         let generate = |&tuning: &Tuning| {
-            let (kernel, source) = crate::codegen::mps::kernel(
+            let (kernel, source) = crate::codegen::utils::mps::kernel(
                 body,
                 &t.by_value,
                 &self.config,
@@ -422,5 +422,5 @@ pub(crate) fn runs(step: &StepBase, tunable: bool) -> bool {
         return false;
     };
 
-    tunable && !crate::codegen::mps::tunings_of(body).is_empty()
+    tunable && !crate::codegen::utils::mps::tunings_of(body).is_empty()
 }

@@ -744,7 +744,7 @@ impl Kernel for Gemm {
             spans: tensors.iter().map(Tensor::numel).collect(),
         };
 
-        let code = crate::codegen::cuda::generated(step, layouts)?;
+        let code = crate::codegen::utils::cuda::generated(step, layouts)?;
 
         let output = Output::Epilogue {
             code: code.as_ref(),

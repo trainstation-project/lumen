@@ -1,10 +1,10 @@
 //! TPU codegen: each planned step's kernel, generated once when the plan compiles and kept in the step's
 //! memo; the runtime lowers it once per device and launches it.
 
+use super::Tpu;
+use super::lowering::lowering;
 use crate::codegen::elementwise::ElementwiseCodegen;
 use crate::codegen::kernel::Runner;
-use crate::codegen::utils::tpu::Tpu;
-use crate::codegen::utils::tpu::lowering::lowering;
 use crate::graph::Primitive;
 use crate::graph_compiler::Options;
 use crate::plan::step::tpu::Pointers;

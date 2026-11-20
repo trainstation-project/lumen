@@ -7,7 +7,7 @@ use std::sync::Arc;
 use super::{unsupported, viewed};
 use crate::Device;
 use crate::codegen::kernel::Runner;
-use crate::codegen::tpu::Kernel;
+use crate::codegen::utils::tpu::Kernel;
 use crate::graph::Primitive;
 use crate::plan::run::Buffers;
 use crate::plan::{Buffer, Step, StepBase};

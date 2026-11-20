@@ -11,7 +11,7 @@
 //! each operand slot reading the slice at the sliced input's contiguous strides, or a GEMM fusion where
 //! `fusion_reads_strided` holds: fusion input `k` read only by the body's GEMM dot (`codegen::kinds::gemm_dot`), as
 //! exactly one of its operands, in a layout the rule accepts. MPS codegen calls `fusion_reads_strided` too
-//! (`codegen::mps::fusion_reads_strided`, planning MPS steps).
+//! (`codegen::utils::mps::fusion_reads_strided`, planning MPS steps).
 
 use crate::codegen::StridedOperands;
 use crate::codegen::kinds::gemm_dot;
