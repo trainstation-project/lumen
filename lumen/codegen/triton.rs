@@ -473,6 +473,19 @@ impl crate::codegen::Supports for Triton {
 /// Triton kernels read each element's partner at `j ^ 1`, or swap a GEMM accumulator tile's adjacent lanes.
 impl crate::codegen::SwapsPairs for Triton {}
 
+/// Triton merges with `fuse`.
+impl crate::codegen::MergesDots for Triton {
+    /// What Triton fusion can fuse, read in place; views; lanes 1; 8 columns.
+    fn target() -> crate::graph_compiler::passes::merge_dots::Target {
+        crate::graph_compiler::passes::merge_dots::Target {
+            reads: crate::graph_compiler::passes::fusion::triton::fusible,
+            views: true,
+            lanes: 1,
+            columns: 8,
+        }
+    }
+}
+
 /// Triton's kernels writing a concatenation's operands into their slots, with `fuse`: kernels of their own writing
 /// fresh memory (`fusion::triton::slot_writes`).
 impl crate::codegen::Slots for DeviceModule<'_, Triton> {

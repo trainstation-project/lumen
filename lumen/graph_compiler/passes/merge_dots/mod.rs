@@ -1,12 +1,6 @@
 //! Merging dots that share an operand into one dot against a packed block: `forward` merges the forward
 //! dots (e.g. the Q, K and V projections of one activation), `backward` their gradients' dots.
 
-mod cuda;
-#[cfg(lumen_mps_linked)]
-mod mps;
-mod tpu;
-mod triton;
-
 pub(crate) use backward::MergeDotsBackward;
 pub(crate) use forward::{Blocks, MergeDots, Packs, Target};
 

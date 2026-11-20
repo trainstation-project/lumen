@@ -46,6 +46,23 @@ impl crate::codegen::Slots for DeviceModule<'_, Tpu> {
     }
 }
 
+/// TPU merges without `fuse`, late (once the graph is simplified), packing whole vector lanes: everything read in place,
+/// no views, `LANES` lanes, 1 column. Here, where `Tpu` is built without the TPU linked too.
+impl crate::codegen::MergesDots for Tpu {
+    const WITH_FUSE: bool = false;
+    const LATE: bool = true;
+
+    /// Everything read in place; no views; `LANES` lanes; 1 column.
+    fn target() -> crate::graph_compiler::passes::merge_dots::Target {
+        crate::graph_compiler::passes::merge_dots::Target {
+            reads: |_, _| true,
+            views: false,
+            lanes: LANES,
+            columns: 1,
+        }
+    }
+}
+
 /// Whether `p` can run inside a plain elementwise TPU kernel (only scalar broadcasts among layout ops).
 pub(crate) fn fusible(p: &Primitive) -> bool {
     use Primitive::*;
