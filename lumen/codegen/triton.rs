@@ -473,6 +473,18 @@ impl crate::codegen::Supports for Triton {
 /// Triton kernels read each element's partner at `j ^ 1`, or swap a GEMM accumulator tile's adjacent lanes.
 impl crate::codegen::SwapsPairs for Triton {}
 
+/// Triton merges, with `fuse`, non-trivial `elementwise` fusions without reductions or matmuls, grouped by tiling.
+impl crate::codegen::HorizontallyFuses for Triton {
+    const GROUPING: crate::graph_compiler::passes::horizontal::Grouping =
+        crate::graph_compiler::passes::horizontal::Grouping::Tiling;
+    const BUFFERS: usize = crate::graph_compiler::passes::fusion::triton::HORIZONTAL_BUFFERS;
+
+    /// `fusion::triton::horizontal_candidate`.
+    fn candidate(graph: &Graph, node: &Node) -> bool {
+        crate::graph_compiler::passes::fusion::triton::horizontal_candidate(graph, node)
+    }
+}
+
 /// Triton runs a linear cross entropy as its GEMM with a per-tile max/sum epilogue, then a combine
 /// (`dot_general::triton::cross_entropy`).
 impl crate::codegen::LinearCrossEntropies for Triton {}

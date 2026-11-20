@@ -1,11 +1,40 @@
-//! Horizontal fusion: merges independent kernels of the same kind into one launch.
+//! Horizontal fusion: merges small, independent kernels of the same kind into one launch, a multi-output `Fusion` whose
+//! outputs each come from one member. The `horizontal_fusion` slot is the last pass in the pass list.
+//!
+//! Devices: it runs on each device whose codegen implements `codegen::HorizontallyFuses` (its candidates, grouping and
+//! buffer limit): Triton with `fuse` and `horizontal_fusion` (candidates from `fusion::triton::horizontal_candidate`,
+//! non-trivial `elementwise` fusions without reductions or matmuls; `Grouping::Tiling`; at most 64 buffers) and TPU
+//! with `horizontal_fusion` (`fusion::tpu::horizontal_candidate`, non-scalar `elementwise` fusions of TPU-fusible nodes
+//! not written in place into a concat; `Grouping::Shape`; at most 32 buffers). MPS calls `fuse` from inside its own
+//! `fusion` pass instead, with a `Kernels` target of its own (`Grouping::Tiling`, 30 buffers, each merged kernel a
+//! requested `Kernel::Fusion`), so its slot is the identity, as CPU's and CUDA's are.
+//!
+//! Grouping: `fuse(graph, scalars, target)` walks the graph and puts candidate nodes with equal keys into groups.
+//! - Only nodes whose output has at most `MAX_ELEMENTS` (2^20) elements are candidates; larger kernels fill the
+//!   device alone.
+//! - A group holds at most 32 members and must fit the target's buffer limit; at most 4 groups per key stay open, the
+//!   oldest closing when another opens.
+//! - A node joins only when this keeps the graph acyclic (no path from members' readers back into the group) and
+//!   moving reads later or writes earlier extends buffer lifetimes by at most 16 MiB.
+//! - Member fusions are inlined into one body; a fusion's extra outputs (its `FusionOutput` readers) carry over. Nodes
+//!   are then re-emitted so each group runs once all its reads are ready.
+//!
+//! `Grouping::Tiling` keys kernels that stage transposes through tiles (`tiled`) by exact shape and puts every other
+//! kernel in one key, limiting tiled groups to few staged transposes (`heroes_fit`) and checking the merged body keeps
+//! the tiling (`keeps_tiling`). `Grouping::Shape` keys by output shape. `HorizontalFusion` names every merged fusion
+//! `elementwise`.
+//!
+//! Used elsewhere: `segments(body)` groups a fused body's outputs by element count; a kernel runs each group on its own
+//! range of the grid, so one launch can cover several sizes. The MPS, Triton and CUDA elementwise codegen,
+//! `codegen::triton` and the MPS kernel runtime read it.
 
-mod tpu;
-mod triton;
-
+use crate::codegen::HorizontallyFuses;
 use crate::codegen::layout::{MAX_HEROES, transpose_tiling};
 use crate::graph::{Graph, Node, Primitive, Scope, Var, intern};
-use crate::graph_compiler::passes::{CompilerPass, Module};
+use crate::graph_compiler::CompilerConfig;
+use crate::graph_compiler::device::DeviceModule;
+use crate::graph_compiler::passes::{CompilerPass, DevicePass, Module};
+use crate::graph_compiler::pipeline::{Pass, when};
 use std::collections::HashMap;
 
 /// Most nodes in one horizontal group.
@@ -561,5 +590,23 @@ impl<M: Module> CompilerPass<M> for HorizontalFusion {
 
         *m.graph_mut() = fuse(m.graph(), &[], &mut target);
         Ok(())
+    }
+}
+
+/// With `horizontal_fusion` (and `fuse` where `WITH_FUSE`), on every device whose codegen implements
+/// `HorizontallyFuses`: its candidates, grouping and buffer limit, every merged kernel an `elementwise` fusion.
+impl<D: HorizontallyFuses> DevicePass<D> for HorizontalFusion {
+    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
+        let horizontal = HorizontalFusion {
+            candidate: D::candidate,
+            grouping: D::GROUPING,
+            buffers: D::BUFFERS,
+            name: "elementwise",
+        };
+
+        when(
+            config.horizontal_fusion && (config.fuse || !D::WITH_FUSE),
+            horizontal,
+        )
     }
 }

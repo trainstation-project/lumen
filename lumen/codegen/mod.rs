@@ -104,6 +104,19 @@ pub(crate) trait MergesDots {
 /// graph compiler's `linear_cross_entropy` pass rewrites a cross entropy over a matmul's logits into it.
 pub(crate) trait LinearCrossEntropies {}
 
+/// A backend merging small independent kernels into one launch (the graph compiler's `horizontal_fusion` pass): which
+/// kernels, grouped how, binding at most how many buffers.
+pub(crate) trait HorizontallyFuses {
+    /// Whether it merges only with `fuse` (merging the fusions that pass makes); else whenever `horizontal_fusion` is on.
+    const WITH_FUSE: bool = true;
+    /// How it groups the kernels it merges.
+    const GROUPING: crate::graph_compiler::passes::horizontal::Grouping;
+    /// Most buffers one merged kernel binds.
+    const BUFFERS: usize;
+    /// Whether `node` of `graph` may be merged.
+    fn candidate(graph: &crate::graph::Graph, node: &crate::graph::Node) -> bool;
+}
+
 /// A backend's codegen telling the graph compiler's `unsupported` pass which graphs it has no kernels for. A device
 /// implementing it runs the pass.
 pub(crate) trait Supports {
