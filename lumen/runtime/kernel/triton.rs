@@ -11,9 +11,9 @@ use super::Launch;
 use super::cuda::CudaLaunch;
 use crate::Tensor;
 use crate::codegen::elementwise::triton::LoopConfig;
-use crate::codegen::triton::Kernel;
 #[cfg(all(feature = "python", lumen_cuda_linked))]
 use crate::codegen::utils::cuda::Cuda;
+use crate::codegen::utils::triton::Kernel;
 #[cfg(all(feature = "python", lumen_cuda_linked))]
 use crate::codegen::utils::triton::Triton;
 

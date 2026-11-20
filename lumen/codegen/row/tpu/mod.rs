@@ -9,9 +9,9 @@ use std::collections::HashMap;
 use crate::codegen::dot_general::tpu::block;
 #[cfg(lumen_tpu_linked)]
 use crate::codegen::row::RowCodegen;
-#[cfg(lumen_tpu_linked)]
-use crate::codegen::tpu::{Kernel, Rows};
 use crate::codegen::utils::tpu::Tpu;
+#[cfg(lumen_tpu_linked)]
+use crate::codegen::utils::tpu::{Kernel, Rows};
 use crate::device::tpu::layout::Layout;
 #[cfg(lumen_tpu_linked)]
 use crate::graph::Var;

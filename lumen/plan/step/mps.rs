@@ -196,9 +196,9 @@ impl Step for MpsStep {
             Primitive::Fusion { body, .. } => {
                 view.is_none()
                     && self.inputs[k].1.shape == shape
-                    && (crate::codegen::mps::fusion_reads_strided(body, k, strides)
-                        || crate::codegen::mps::loads_strided(body, k)
-                        || crate::codegen::mps::attention_reads_strided(body, strides))
+                    && (crate::codegen::fusion::mps::fusion_reads_strided(body, k, strides)
+                        || crate::codegen::fusion::mps::loads_strided(body, k)
+                        || crate::codegen::attention::mps::attention_reads_strided(body, strides))
             }
             _ => false,
         }
@@ -291,7 +291,7 @@ impl MpsStep {
         let tuned = self
             .tuned
             .as_ref()
-            .filter(|t| t.views == self.views && !crate::codegen::mps::loads_views(self));
+            .filter(|t| t.views == self.views && !crate::codegen::fusion::mps::loads_views(self));
 
         let encoding = Encoding {
             inputs: inputs.to_vec(),

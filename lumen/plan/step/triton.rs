@@ -8,7 +8,7 @@ use super::{Tensors, unsupported};
 use crate::autotune::{KernelStep, Timer};
 use crate::codegen::elementwise::triton::copy;
 use crate::codegen::kernel::Runner;
-use crate::codegen::triton::Kernel;
+use crate::codegen::utils::triton::Kernel;
 use crate::graph::{Primitive, TensorType};
 use crate::plan::run::Buffers;
 use crate::plan::{Buffer, Step, StepBase};

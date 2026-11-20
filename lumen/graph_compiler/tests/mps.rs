@@ -39,7 +39,7 @@ fn fuse(g: &Graph) -> Graph {
         &[],
         &config,
         |body, by_value| {
-            crate::codegen::mps::kernel(body, by_value, &config, &Default::default(), None)
+            crate::codegen::utils::mps::kernel(body, by_value, &config, &Default::default(), None)
                 .unwrap()
                 .0
         },
@@ -84,7 +84,7 @@ fn gathers_from_tables_past_u32_index_in_ulong() {
         let index = g.input(ty(DType::I32, &[8]));
         let out = apply(&mut g, Gather { axis: 0 }, &[table, index]);
         g.set_outputs(&[out]).unwrap();
-        crate::codegen::mps::kernel(
+        crate::codegen::utils::mps::kernel(
             &g,
             &[],
             &CompilerConfig::default(),
@@ -570,7 +570,7 @@ fn transposes_in_fusions_are_tiled() {
 
             assert_eq!(fused.nodes().len(), 1, "{fused}");
 
-            let source = crate::codegen::mps::kernel(
+            let source = crate::codegen::utils::mps::kernel(
                 body,
                 &[],
                 &CompilerConfig::default(),
@@ -626,7 +626,7 @@ fn reductions_are_normalized() {
             panic!("{fused}")
         };
 
-        let source = crate::codegen::mps::kernel(
+        let source = crate::codegen::utils::mps::kernel(
             body,
             &[],
             &CompilerConfig::default(),
@@ -693,7 +693,7 @@ fn hierarchical_reductions_keep_their_dtype() {
                     panic!("{fused}")
                 };
 
-                let source = crate::codegen::mps::kernel(
+                let source = crate::codegen::utils::mps::kernel(
                     body,
                     &[],
                     &CompilerConfig::default(),
@@ -760,7 +760,7 @@ fn hierarchical_reductions_keep_their_dtype() {
 
     for node in fused.nodes() {
         if let Fusion { body, .. } = &node.primitive {
-            let source = crate::codegen::mps::kernel(
+            let source = crate::codegen::utils::mps::kernel(
                 body,
                 &[],
                 &CompilerConfig::default(),
@@ -1312,7 +1312,7 @@ fn dots_fuse_their_epilogue() {
     };
 
     assert!(label.starts_with("dot_general"), "{label}");
-    let source = crate::codegen::mps::kernel(
+    let source = crate::codegen::utils::mps::kernel(
         body,
         &[],
         &CompilerConfig::default(),
@@ -1343,7 +1343,7 @@ fn dots_fuse_their_epilogue() {
         &[],
         &config,
         |body, by_value| {
-            crate::codegen::mps::kernel(body, by_value, &config, &Default::default(), None)
+            crate::codegen::utils::mps::kernel(body, by_value, &config, &Default::default(), None)
                 .unwrap()
                 .0
         },
@@ -1555,7 +1555,7 @@ fn reductions_apply_their_epilogue() {
 
             assert!(has_epilogue(body));
 
-            let source = crate::codegen::mps::kernel(
+            let source = crate::codegen::utils::mps::kernel(
                 body,
                 &[],
                 &CompilerConfig::default(),
@@ -1599,7 +1599,7 @@ fn reductions_apply_an_epilogue_reading_them_twice() {
         };
 
         assert!(has_epilogue(body));
-        let source = crate::codegen::mps::kernel(
+        let source = crate::codegen::utils::mps::kernel(
             body,
             &[],
             &CompilerConfig::default(),
@@ -1943,7 +1943,7 @@ fn division_by_sqrt_is_as_traced() {
         panic!("{fused}")
     };
 
-    let source = crate::codegen::mps::kernel(
+    let source = crate::codegen::utils::mps::kernel(
         body,
         &[],
         &CompilerConfig::default(),
@@ -1984,7 +1984,7 @@ fn division_by_sqrt_is_as_traced() {
         panic!("{fused}")
     };
 
-    let source = crate::codegen::mps::kernel(
+    let source = crate::codegen::utils::mps::kernel(
         body,
         &[],
         &CompilerConfig::default(),
@@ -2354,7 +2354,7 @@ fn every_gemm_candidate_matches_the_reference() {
                 let scale = expected.iter().fold(0f32, |m, v| m.max(v.abs()));
                 let on_mps: Vec<Tensor> = inputs.iter().map(|t| t.to(Device::Mps(0))).collect();
 
-                let mut plan = crate::codegen::mps::compile(
+                let mut plan = crate::codegen::utils::mps::compile(
                     &crate::graph_compiler::frontend(&g, &options).unwrap(),
                     &options,
                 )
@@ -2572,7 +2572,7 @@ fn every_tiled_gemm_stores_regions_halves_and_expansions_along_rows_and_columns(
             .collect();
 
         let on_mps: Vec<Tensor> = inputs.iter().map(|t| t.to(Device::Mps(0))).collect();
-        let mut plan = crate::codegen::mps::compile(
+        let mut plan = crate::codegen::utils::mps::compile(
             &crate::graph_compiler::frontend(&g, &options).unwrap(),
             &options,
         )
@@ -2771,7 +2771,7 @@ fn every_tuned_paired_and_wide_norm_gemm_matches_the_reference() {
 
             let on_mps: Vec<Tensor> = inputs.iter().map(|t| t.to(Device::Mps(0))).collect();
 
-            let mut plan = crate::codegen::mps::compile(
+            let mut plan = crate::codegen::utils::mps::compile(
                 &crate::graph_compiler::frontend(&g, &options).unwrap(),
                 &options,
             )
@@ -3091,7 +3091,7 @@ fn every_tuned_gemm_kernel_stores_every_epilogue() {
 
             let on_mps: Vec<Tensor> = inputs.iter().map(|t| t.to(Device::Mps(0))).collect();
 
-            let mut plan = crate::codegen::mps::compile(
+            let mut plan = crate::codegen::utils::mps::compile(
                 &crate::graph_compiler::frontend(&g, &options).unwrap(),
                 &options,
             )
@@ -3207,7 +3207,7 @@ fn every_gemm_candidate_accumulates_in_the_accum_dtype() {
 
             let on_mps = [ones(&[m, k]), ones(&[k, n])];
 
-            let mut plan = crate::codegen::mps::compile(
+            let mut plan = crate::codegen::utils::mps::compile(
                 &crate::graph_compiler::frontend(&g, &options).unwrap(),
                 &options,
             )
@@ -3300,7 +3300,7 @@ fn gemv_lanes_sum_in_a_bfloat_accumulator() {
         Tensor::ones(&[n, k], options_on.dtype(DType::BF16)),
     ];
 
-    let mut plan = crate::codegen::mps::compile(
+    let mut plan = crate::codegen::utils::mps::compile(
         &crate::graph_compiler::frontend(&g, &options).unwrap(),
         &options,
     )
@@ -3399,7 +3399,7 @@ fn strided_gemms_tune_mpp() {
 
     let mut options = crate::graph_compiler::Options::default();
     options.config.autotune = false;
-    let mut plan = crate::codegen::mps::compile(
+    let mut plan = crate::codegen::utils::mps::compile(
         &crate::graph_compiler::frontend(&g, &options).unwrap(),
         &options,
     )
@@ -3831,7 +3831,7 @@ fn every_gemv_candidate_stores_every_epilogue() {
             .collect();
 
         let on_mps: Vec<Tensor> = inputs.iter().map(|t| t.to(Device::Mps(0))).collect();
-        let mut plan = crate::codegen::mps::compile(
+        let mut plan = crate::codegen::utils::mps::compile(
             &crate::graph_compiler::frontend(&g, &options).unwrap(),
             &options,
         )

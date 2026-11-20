@@ -283,7 +283,7 @@ fn triton_code(kernel: &str, functions: &[crate::runtime::kernel::triton::Functi
 struct Entry {
     name: String,
     config: [usize; 6],
-    constexprs: Vec<(&'static str, crate::codegen::triton::Constexpr)>,
+    constexprs: Vec<(&'static str, crate::codegen::utils::triton::Constexpr)>,
     device: usize,
     classes: Vec<crate::runtime::kernel::cuda::driver::Class>,
     kernel: std::sync::Arc<crate::runtime::kernel::cuda::driver::Compiled>,
@@ -301,7 +301,7 @@ fn direct(
     launches: &crate::runtime::kernel::triton::Launches,
     name: &str,
     config: [usize; 6],
-    constexprs: &[(&'static str, crate::codegen::triton::Constexpr)],
+    constexprs: &[(&'static str, crate::codegen::utils::triton::Constexpr)],
     identity: impl FnOnce() -> String,
     on: &crate::Tensor,
     values: &[crate::runtime::kernel::cuda::driver::Value],
@@ -569,7 +569,7 @@ fn triton_gemm(
 /// Launches a generated Triton elementwise loop kernel over `n` elements in `programs` programs.
 #[allow(clippy::too_many_arguments)]
 fn triton_loop(
-    kernel: &crate::codegen::triton::Kernel,
+    kernel: &crate::codegen::utils::triton::Kernel,
     config: &crate::codegen::elementwise::triton::LoopConfig,
     functions: &[crate::runtime::kernel::triton::Function],
     launches: &crate::runtime::kernel::triton::Launches,
@@ -627,11 +627,11 @@ fn triton_loop(
 
             for (key, value) in &constexprs {
                 match value {
-                    crate::codegen::triton::Constexpr::Int(v) => values.set_item(key, v)?,
-                    crate::codegen::triton::Constexpr::Ints(v) => {
+                    crate::codegen::utils::triton::Constexpr::Int(v) => values.set_item(key, v)?,
+                    crate::codegen::utils::triton::Constexpr::Ints(v) => {
                         values.set_item(key, pyo3::types::PyTuple::new(py, v)?)?
                     }
-                    crate::codegen::triton::Constexpr::DType(dtype) => {
+                    crate::codegen::utils::triton::Constexpr::DType(dtype) => {
                         let name = crate::codegen::utils::triton::triton_type(*dtype)
                             .expect("a Triton dtype")
                             .trim_start_matches("tl.");
@@ -1357,7 +1357,7 @@ fn tuned(
         const REPS: usize = 10;
 
         Cuda::launch(CudaLaunch {
-            kernel: kernel,
+            kernel,
             grid: [blocks, 1, 1],
             values: &values,
         })?;
@@ -1370,7 +1370,7 @@ fn tuned(
 
             for _ in 0..REPS {
                 Cuda::launch(CudaLaunch {
-                    kernel: kernel,
+                    kernel,
                     grid: [blocks, 1, 1],
                     values: &values,
                 })?;

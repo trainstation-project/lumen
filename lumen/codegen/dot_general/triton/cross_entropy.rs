@@ -5,7 +5,7 @@
 use crate::codegen::dot_general::triton::launch::{Epilogue, Gemm};
 use crate::codegen::dot_general::triton::{self as codegen, Config};
 use crate::codegen::elementwise::triton::{LOOP_CONFIGS, UNTUNED_LOOP};
-use crate::codegen::triton::{Kernel, Template};
+use crate::codegen::utils::triton::{Kernel, Template};
 use crate::graph::Primitive;
 use crate::plan::StepBase;
 use crate::plan::step::triton::layouts;

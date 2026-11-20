@@ -12,9 +12,12 @@ use std::fmt::Write;
 use indoc::{formatdoc, writedoc};
 
 use super::ElementwiseCodegen;
+use crate::codegen::dot_general::mps::row_dot;
 use crate::codegen::emitter::Emit;
 use crate::codegen::emitter::mps::Emitter;
 use crate::codegen::kernel::Kernel;
+use crate::codegen::kinds::{gemm_dot, reduction_root, row_reductions};
+use crate::codegen::layout::transpose_tiling;
 use crate::codegen::store::mps::written;
 use crate::codegen::utils::mps::*;
 use crate::graph::Graph;
@@ -350,7 +353,7 @@ impl Kernel for Elementwise {
         };
 
         match step.code.is_some() && TUNED_ELEMENTS.contains(&step.output.1.numel()) {
-            true => crate::codegen::mps::tunings_of(body),
+            true => crate::codegen::elementwise::mps::tunings_of(body),
             false => Vec::new(),
         }
     }
@@ -398,7 +401,7 @@ impl Elementwise {
         let t = step.code.as_ref().expect("a tunable fusion");
 
         let generate = |&tuning: &Tuning| {
-            let (kernel, source) = crate::codegen::mps::kernel(
+            let (kernel, source) = crate::codegen::utils::mps::kernel(
                 body,
                 &t.by_value,
                 &self.config,
@@ -422,5 +425,27 @@ pub(crate) fn runs(step: &StepBase, tunable: bool) -> bool {
         return false;
     };
 
-    tunable && !crate::codegen::mps::tunings_of(body).is_empty()
+    tunable && !crate::codegen::elementwise::mps::tunings_of(body).is_empty()
+}
+
+/// Default launch tuning when `body` lowers to the elementwise kernel, else `None`.
+pub(crate) fn tuning_of(body: &Graph) -> Option<Tuning> {
+    is_elementwise(body).then(|| elementwise_tuning(body))
+}
+
+/// Candidate launch tunings to autotune when `body` lowers to the elementwise kernel.
+pub(crate) fn tunings_of(body: &Graph) -> Vec<Tuning> {
+    match is_elementwise(body) {
+        true => elementwise_tunings(body),
+        false => Vec::new(),
+    }
+}
+
+/// Whether `body` matches no specialized kernel shape and lowers to the elementwise kernel.
+pub(crate) fn is_elementwise(body: &Graph) -> bool {
+    row_dot(body).is_none()
+        && gemm_dot(body).is_none()
+        && row_reductions(body).is_empty()
+        && reduction_root(body).is_none()
+        && transpose_tiling(body).is_none()
 }

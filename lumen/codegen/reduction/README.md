@@ -20,7 +20,7 @@ There is no CUDA reduction yet.
 (name, source, `lanes` per output, `splits` per output). When the fusion has fewer than `SPLIT_BELOW`
 outputs, the reduced axis is split across programs and a second `NAME_final` kernel combines the
 partials. Lane counts depend on whether the reduced axis is innermost (`ROW_LANES`, `SPLIT_ROW_LANES`)
-or strided (`COLUMN_LANES`). `codegen/triton.rs::loop_kernel` calls it, and the step runs on the
+or strided (`COLUMN_LANES`). `codegen/utils/triton::loop_kernel` calls it, and the step runs on the
 generic `Loop` kernel (`elementwise/triton`). The shared helpers are `Tile` (a 2-D program tile with
 outputs on one axis and reduced lanes on the other), `combine`, `reduce_along` and `lowest`.
 `row/triton.rs`, `scan/triton` and `dot_general/triton/row.rs` use them.
@@ -60,7 +60,7 @@ kernel suffix. `scan/mps` reuses `kernel_dtype`.
 layout. The TPU fusion passes call it to form `reduction` fusions. `ReductionCodegen for Tpu` emits a
 `Spec` (kernel name plus JSON with inputs, prologue nodes, `reduce`, epilogue nodes and `result`).
 `blocks` sizes the blocks to whole TPU tiles near `BLOCK_BYTES` of VMEM. `kernel(step)` wraps the spec
-as a `codegen::tpu::Kernel` of module `lumen.codegen.reduction.tpu.kernel` with `Rows::Last`, and the
+as a `codegen::utils::tpu::Kernel` of module `lumen.codegen.reduction.tpu.kernel` with `Rows::Last`, and the
 `Pallas` kernel launches it. `kernel.py::program(spec)` is the fixed schedule. It reduces operand blocks
 into a VMEM accumulator, replays the prologue and epilogue nodes, and runs the epilogue on the last step
 of a result block. A 32-bit integer max goes through float32 maxima of 16-bit halves (`_exact_max`).

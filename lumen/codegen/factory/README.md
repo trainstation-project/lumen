@@ -8,7 +8,7 @@ them. On other backends these ops are fused into elementwise kernels as index ar
 - `mod.rs` declares the `mps` submodule, built only with `lumen_mps_linked`. This family has no codegen trait,
   because it generates nothing.
 - `mps/mod.rs` defines the `Factory` kernel. It implements `codegen::kernel::Kernel` with no config, so it is
-  never tuned. `codegen/mps.rs` picks it for `Full` and `Iota` steps.
+  never tuned. `codegen/utils/mps` picks it for `Full` and `Iota` steps.
   - A fill launches `fill_<bytes>` over the output, with the fill value as a constant argument.
   - An iota launches `iota_<dtype>` on a 3-D grid of `[inner, iota axis, outer]`.
   - Like other MPS kernels, it binds the step's inputs and then its output.

@@ -34,7 +34,7 @@ code generated per fusion so the fixed kernels can read and write its operands i
     is unsupported. `AttentionConfig` and `ATTENTION_CONFIGS` are the tuning candidates, `untuned_attention` the
     default (64x64, or 32x32 when a head row exceeds 256 bytes). `FlashAttention` is the Kernel for both forward
     and backward steps.
-  - `launch.rs`: `is_attention` (used by `codegen/triton.rs` to pick the kernel), per-layout `Prepared` state, and
+  - `launch.rs`: `is_attention` (used by `codegen/utils/triton` to pick the kernel), per-layout `Prepared` state, and
     `attention`, which calls the Python launcher installed by `set_attention`. Operands whose last dim isn't
     contiguous are copied contiguous first.
 - `mps/` — Metal flash attention.
@@ -47,7 +47,8 @@ code generated per fusion so the fixed kernels can read and write its operands i
     `tuning` is the untuned choice, `tunings` the candidates (none for decode or below `TUNED_PAIRS` query-key pairs
     a head), `fits` / `mpp_fits` the constraints. `backward_block` and `backward_block_with_dq` size the backward's
     query blocks to threadgroup memory. `FlashAttention` is the forward Kernel: `prepare` generates and compiles a
-    variant per tuning. `runs` tells `codegen/mps.rs` which steps it takes; backward fusions run through the generic
+    variant per tuning. `runs` tells `codegen/utils/mps` which steps it takes, and `attention_reads_strided` which operands
+    it strides through; backward fusions run through the generic
     fusion encoder.
 - `tpu/` — Pallas flash attention, modeled on splash attention.
   - `forward_kernel.py`, `backward_kernel.py` (dQ, and dK with dV): Pallas programs taking a JSON spec;
@@ -55,7 +56,7 @@ code generated per fusion so the fixed kernels can read and write its operands i
   - `config.rs`: `blocks` picks query and key block sizes (multiples of 128 lanes, capped at 1024 / 4096).
   - `mod.rs`: `AttentionCodegen for Tpu` builds the spec: each operand checked to be read or written as whole tiles
     per head, epilogues limited to reshapes, sums and casts reading scalar inputs; only float32 and bfloat16, no
-    dropout. `step_kernel` is called from `codegen/tpu.rs` for fusions named `flash_attention*` and runs under the
+    dropout. `step_kernel` is called from `codegen/utils/tpu` for fusions named `flash_attention*` and runs under the
     generic `Pallas` Kernel.
 
 ## Conventions

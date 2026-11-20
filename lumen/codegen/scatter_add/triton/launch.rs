@@ -5,7 +5,7 @@
 use crate::codegen::elementwise::triton::LoopConfig;
 use crate::codegen::elementwise::triton::fill;
 use crate::codegen::scatter_add::triton::{ELEMENTS, SEGMENT, STARTS, rows};
-use crate::codegen::triton::{Kernel, Template};
+use crate::codegen::utils::triton::{Kernel, Template};
 use crate::runtime::kernel::triton::{Launches, launch};
 use crate::{DType, Scalar, Tensor, TensorOptions};
 

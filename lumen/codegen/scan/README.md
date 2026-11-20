@@ -17,15 +17,15 @@ is split or tiled.
     kernel when the axis is contiguous and longer than `ROW_THREADS`, splitting lines into chunks until there is
     enough parallel work (`ROW_GROUPS`/`ROW_CHUNK`, `LINE_THREADS`/`LINE_CHUNK`). `encode` runs one pass, or three
     for a split scan: per-chunk totals into scratch, an in-place scan of those totals, then the chunked scan
-    carrying each chunk's prefix. `scratch_bytes` (called from `codegen/mps.rs`) sizes the partials. `Cumsum` is
+    carrying each chunk's prefix. `scratch_bytes` (called from `codegen/utils/mps`) sizes the partials. `Cumsum` is
     the Kernel (`Config = ()`).
 - `triton/` — Triton.
   - `kernel.py`: `scan_kernel`, a tile of lines a program, each line scanned `LANES` elements at a time with each
     chunk's total carried into the next. It reads `in0` and writes `out` through the generated `LOAD0` and `STORE`
     helpers, so it works on any layout.
   - `mod.rs`: `ScanCodegen for Triton` returns a `Scan` tiling (line length, inner stride, lanes, whether lines are
-    rows, reverse, accumulator dtype), tiled the way a reduction over the axis is. `codegen/triton.rs` turns it into
-    the `Template::Scan` constexprs, and the step runs under the Triton `Loop` Kernel.
+    rows, reverse, accumulator dtype), tiled the way a reduction over the axis is. `scan(step)` gives a cumsum
+    step's tiling, which `codegen/utils/triton` turns into the `Template::Scan` constexprs, and the step runs under the Triton `Loop` Kernel.
 
 ## Conventions
 

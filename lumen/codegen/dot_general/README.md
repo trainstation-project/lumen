@@ -28,7 +28,7 @@ steps, and the autotuner times its configs.
   `lumen.autotune.CudaGemmConfig`.
 - `Gemm` (`Kernel`): tuned only at `TUNED_MACS` (1024³) multiply-adds or more. `run` transposes operands to
   A (.., m, k) / B (.., k, n) and calls the launcher installed in `runtime::kernel::cuda::GEMM`, with
-  `Output::Product` for a plain matmul or `Output::Epilogue` carrying code from `codegen::cuda::generated`.
+  `Output::Product` for a plain matmul or `Output::Epilogue` carrying code from `codegen::utils::cuda::generated`.
 - `ampere.py`: `AmpereGemm`, the SM80 kernel (mma.sync, cp.async), adapted from QuACK's GEMM classes.
 - `launch.py`: compiles `AmpereGemm` per dtypes, majors, batching and tile against symbolic-extent tensors so
   Rust launches it with a plain `cuLaunchKernel`.
@@ -89,7 +89,7 @@ steps, and the autotuner times its configs.
 
 ## tpu
 
-- `mod.rs`: `block` and `caps` choose block sizes; `kernel` builds the step's `codegen::tpu::Kernel` for module
+- `mod.rs`: `block` and `caps` choose block sizes; `kernel` builds the step's `codegen::utils::tpu::Kernel` for module
   `lumen.codegen.dot_general.tpu.gemm_kernel`.
 - `codegen.rs`: `GemmCodegen for Tpu`, `Epilogue` (concatenated lhs, output slices, epilogue nodes) and `spec`,
   which fits blocks into an 88 MiB VMEM budget; only float32 and bfloat16 operands.

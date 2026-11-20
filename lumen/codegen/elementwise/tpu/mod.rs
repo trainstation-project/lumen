@@ -14,11 +14,13 @@ use super::ElementwiseCodegen;
 #[cfg(lumen_tpu_linked)]
 use crate::codegen::dot_general::tpu::block;
 #[cfg(lumen_tpu_linked)]
-use crate::codegen::utils::tpu::{Tpu, fusible, window_at};
+use crate::codegen::utils::tpu::{GENERATED, Kernel, Rows, Tpu, fusible, window_at};
 #[cfg(lumen_tpu_linked)]
 use crate::device::tpu::layout::Layout;
 #[cfg(lumen_tpu_linked)]
 use crate::graph::{Graph, Node, Primitive, TensorType, UnaryOp, Var};
+#[cfg(lumen_tpu_linked)]
+use crate::plan::StepBase;
 #[cfg(lumen_tpu_linked)]
 use crate::{DType, Scalar};
 #[cfg(lumen_tpu_linked)]
@@ -914,4 +916,34 @@ impl ElementwiseCodegen for Tpu {
             indexed: false,
         })
     }
+}
+
+/// The elementwise fusion `step`'s kernel; `None` when it writes nothing.
+#[cfg(lumen_tpu_linked)]
+pub(crate) fn elementwise(step: &StepBase) -> Result<Option<Kernel>, String> {
+    let Primitive::Fusion { body, .. } = &step.primitive else {
+        unreachable!("an elementwise fusion")
+    };
+
+    if step.output.1.numel() == 0 {
+        return Ok(None);
+    }
+
+    let views: HashMap<usize, (usize, Vec<usize>)> = step
+        .output_views
+        .iter()
+        .enumerate()
+        .filter_map(|(k, v)| v.as_ref().map(|v| (k, (v.offset, v.strides.clone()))))
+        .collect();
+
+    let code =
+        Tpu::elementwise(body, &[], &views, &()).map_err(|e| format!("{}: {e}", step.label))?;
+
+    // An indexed elementwise kernel takes its inputs, then its output; a plain one its output after the step's own inputs.
+    let rows = match code.indexed {
+        true => Rows::Last,
+        false => Rows::Split,
+    };
+
+    Ok(Some(Kernel::new(GENERATED, code.kernel, code.source, rows)))
 }
