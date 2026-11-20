@@ -1,13 +1,7 @@
 //! Flash attention: pattern matching of attention (forward and backward) in traced graphs and the rewrites
 //! replacing each match with a fusion kernel. The matcher and operand layouts both directions share live
-//! here; each direction's matching, rewrite and pass live in `forward` and `backward`, with each backend's
-//! answers to that pass in their `mps`, `tpu` and `triton` files. `tpu` and `triton` here hold what those
-//! backends do with the fusions after matching: TPU's layout folding and Triton's kernel launches.
-
-mod cuda;
-#[cfg(lumen_mps_linked)]
-mod mps;
-mod triton;
+//! here; each direction's matching, rewrite and pass live in `forward` and `backward` (each backend's answers to
+//! them in its codegen), and `layouts` adapts the fusions to kernels reading whole tiles (TPU's).
 
 use crate::DType;
 use crate::graph::{Graph, Node, Primitive, Var};
@@ -17,7 +11,7 @@ use std::collections::HashMap;
 
 mod backward;
 mod forward;
-pub(crate) mod tpu;
+pub(crate) mod layouts;
 
 #[cfg(lumen_mps_linked)]
 pub(crate) use backward::backward_of_body_into;
@@ -28,7 +22,7 @@ pub(crate) use backward::{
 #[cfg(feature = "python")]
 pub(crate) use forward::traced;
 pub(crate) use forward::{
-    Attention, Attentions, Epilogues, FlashAttention, of_body, of_body_strided,
+    Attention, Attentions, Epilogues, FlashAttention, Supports, of_body, of_body_strided,
 };
 
 /// Name of a forward flash-attention fusion.

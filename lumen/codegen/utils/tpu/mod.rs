@@ -77,6 +77,66 @@ impl crate::codegen::HorizontallyFuses for Tpu {
     }
 }
 
+/// Flash-attention matching for TPU: scalar epilogue leaves, no extra scalars, static offsets.
+impl crate::graph_compiler::passes::attention::Attentions for DeviceModule<'_, Tpu> {
+    const WITH_FUSE: bool = false;
+
+    /// Whether attention may absorb elementwise epilogues.
+    fn contraction_epilogues(&self) -> bool {
+        self.options.config.contraction_epilogues
+    }
+
+    /// Epilogues reading only scalar leaves, through reshapes but not transposes.
+    fn epilogues(&self) -> crate::graph_compiler::passes::attention::Epilogues {
+        crate::graph_compiler::passes::attention::Epilogues {
+            leaves: |graph, v| graph.type_of(v).shape.is_empty(),
+            reshaped: true,
+            transposed: false,
+        }
+    }
+
+    /// None: TPU kernels take no by-value scalars.
+    fn scalars(&self) -> Vec<crate::graph::Var> {
+        Vec::new()
+    }
+
+    /// Names the forward fusion `flash_attention`.
+    fn kernel(&mut self) -> String {
+        "flash_attention".into()
+    }
+
+    /// No: the TPU kernel's causal diagonal is fixed at compile time.
+    fn runtime_offsets(&self) -> bool {
+        false
+    }
+}
+
+/// Each attention backward runs as a dK/dV kernel and a dQ kernel.
+impl crate::graph_compiler::passes::attention::AttentionBackwards for DeviceModule<'_, Tpu> {
+    const WITH_FUSE: bool = false;
+
+    /// None: the TPU backward runs dK/dV and dQ as separate kernels.
+    fn together(
+        &self,
+    ) -> impl Fn(&crate::graph_compiler::passes::attention::Backward) -> bool + 'static {
+        |_| false
+    }
+
+    /// Names the backward fusion `flash_attention_backward`.
+    fn backward_kernel(&mut self) -> String {
+        "flash_attention_backward".into()
+    }
+}
+
+/// TPU's attention kernels read and write whole tiles: `attention_layouts` adapts its attention fusions, checking
+/// each against `codegen::attention::tpu::kernel`.
+impl crate::codegen::TiledAttentions for Tpu {
+    /// What `codegen::attention::tpu::kernel` makes of the fusion.
+    fn check(name: &str, body: &crate::graph::Graph) -> Result<(), String> {
+        crate::codegen::attention::tpu::kernel(name, body).map(|_| ())
+    }
+}
+
 /// Whether `p` can run inside a plain elementwise TPU kernel (only scalar broadcasts among layout ops).
 pub(crate) fn fusible(p: &Primitive) -> bool {
     use Primitive::*;

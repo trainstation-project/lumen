@@ -1,17 +1,57 @@
-//! Flash attention backward: matching attention's gradients in traced graphs and the rewrite replacing
-//! them with `flash_attention_backward` fusions.
-
-#[cfg(lumen_mps_linked)]
-mod mps;
-pub(super) mod tpu;
-mod triton;
+//! The backward flash-attention pass (`FlashAttentionBackward`, named `flash_attention_backward`). It finds the
+//! gradients of an attention that autograd traced as primitives and replaces them with
+//! `flash_attention_backward` fusions. It runs right after the forward `flash_attention` pass.
+//!
+//! ## Pattern
+//!
+//! The match is built around the `exp` node computing the transposed probabilities `P^T = exp(S^T - lse)`:
+//! - `dV = P^T dO`
+//! - `dS = P^T * (V dO^T - delta) * scale`
+//! - `dK = dS Q`
+//! - `dQ = dS^T K`
+//!
+//! `lse` is the per-query logsumexp the forward saved, and `delta` is the per-query `rowsum(dO * O)`. Scores,
+//! causal masks and dropout are matched as in the forward. Any of dQ, dK and dV may be absent. Head dims go
+//! up to `MAX_BACKWARD_HEAD` (128). `Backward` records each gradient's writing node and `Access`, the
+//! operand accesses, sizes, scores, causal diagonal, dS scale, dtype and dropout.
+//!
+//! ## Rewrite
+//!
+//! `fuse_backward` replaces each match with either:
+//! - one fusion computing dK, dV and dQ, when the backend's `together` accepts the match and the graph order
+//!   allows it (dQ is then re-matched in its plain form, the dot or one transpose of it), or
+//! - two fusions: one for dK/dV and one for dQ.
+//!
+//! Each fusion goes after its last operand is produced and before any of its outputs is read. Extra outputs
+//! leave through `FusionOutput` nodes.
+//!
+//! ## Backend answers (`AttentionBackwards` trait, in each backend's codegen)
+//!
+//! It runs, with `flash_attention`, on each device whose module implements `AttentionBackwards` (`fuse` too where
+//! `WITH_FUSE`, every device but TPU).
+//!
+//! - MPS - one kernel when `codegen::attention::mps::backward_block_with_dq` finds a block for it and
+//!   `deterministic` is off (dQ is accumulated atomically). Kernel names are requested as
+//!   `Kernel::AttentionBackward`.
+//! - Triton - always one kernel adding dQ atomically, unless `deterministic`, which gives a dK/dV kernel
+//!   and a dQ kernel so dQ is summed in a fixed order. Kernel name `flash_attention_backward`.
+//! - TPU - always a dK/dV kernel and a dQ kernel, without `fuse` too.
+//! - CUDA and CPU: identity.
+//!
+//! ## Entry points for codegen
+//!
+//! `backward_of_body`, `backward_of_body_into` (MPS, outputs written into views) and
+//! `backward_of_body_strided` re-match the backward inside a fusion body.
 
 use std::collections::HashMap;
 
 use super::{Access, Dropout, Matcher, Score, Strides, body_of, fits32};
 use crate::DType;
 use crate::graph::{Graph, Primitive, Var};
-use crate::graph_compiler::passes::{CompilerPass, Module};
+use crate::graph_compiler::CompilerConfig;
+use crate::graph_compiler::device::DeviceModule;
+use crate::graph_compiler::passes::{CompilerPass, DevicePass, Module};
+use crate::graph_compiler::pipeline::{Pass, when};
 
 /// A matched flash-attention backward: gradients of Q, K and V from the transposed scores `S^T`.
 #[derive(Debug, Clone)]
@@ -488,6 +528,8 @@ impl<'a> Matcher<'a> {
 
 /// A module whose backend can generate flash-attention backward kernels.
 pub(crate) trait AttentionBackwards: Module {
+    /// Whether it fuses attention backwards only with `fuse`; else whenever `flash_attention` is on.
+    const WITH_FUSE: bool = true;
     /// Which backwards run as one kernel computing dK, dV and dQ; the others get a dK/dV kernel and
     /// a dQ kernel.
     fn together(&self) -> impl Fn(&Backward) -> bool + 'static;
@@ -510,5 +552,17 @@ impl<M: AttentionBackwards> CompilerPass<M> for FlashAttentionBackward {
         let together = m.together();
         *m.graph_mut() = fuse_backward(&graph, together, |_| m.backward_kernel());
         Ok(())
+    }
+}
+
+/// With `flash_attention` (and `fuse` where `AttentionBackwards::WITH_FUSE`), on every device whose module implements
+/// `AttentionBackwards`.
+impl<D: 'static> DevicePass<D> for FlashAttentionBackward
+where
+    for<'a> DeviceModule<'a, D>: AttentionBackwards,
+{
+    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
+        let fused = config.fuse || !<DeviceModule<'a, D> as AttentionBackwards>::WITH_FUSE;
+        when(config.flash_attention && fused, FlashAttentionBackward)
     }
 }

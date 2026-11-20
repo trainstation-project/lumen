@@ -118,6 +118,13 @@ pub(crate) trait HorizontallyFuses {
     fn candidate(graph: &crate::graph::Graph, node: &crate::graph::Node) -> bool;
 }
 
+/// A backend whose attention kernels read and write whole tiles (TPU's): the graph compiler's `attention_layouts`
+/// pass adapts its attention fusions to them.
+pub(crate) trait TiledAttentions {
+    /// Whether the attention kernels take fusion `body` named `name`: the error when not.
+    fn check(name: &str, body: &crate::graph::Graph) -> Result<(), String>;
+}
+
 /// A backend's codegen telling the graph compiler's `unsupported` pass which graphs it has no kernels for. A device
 /// implementing it runs the pass.
 pub(crate) trait Supports {

@@ -1,17 +1,60 @@
-//! Flash attention forward: matching attention in traced graphs and the rewrite replacing each with a
-//! `flash_attention` fusion.
-
-mod cuda;
-#[cfg(lumen_mps_linked)]
-mod mps;
-pub(super) mod tpu;
-mod triton;
+//! The forward flash-attention pass (`FlashAttention`, named `flash_attention`). It finds each live attention
+//! `softmax(scores(Q K^T)) V` in the graph and replaces it with one `flash_attention` fusion. It is the first
+//! attention pass in the device pipeline and runs right before `flash_attention_backward`.
+//!
+//! ## Pattern
+//!
+//! The match starts from the second dot (`P V`) and walks back:
+//! - `P` is `exp(s - max) / sum`, optionally rounded by a cast and multiplied by a dropout mask.
+//! - `s` is `Q K^T` followed by `Score` ops (casts and constant scales).
+//! - An optional causal mask keeps key `k` for query `q` when `k <= q + causal`, plus an optional runtime
+//!   offset read from a rank-0 integer input.
+//! - `max + log(sum)` becomes an extra output (`lse`) when the graph also reads the logsumexp. The backward
+//!   pass reads it.
+//! - The softmax input is float32, and both dots and the sum accumulate in float32; other dtypes do not match.
+//! - Q, K, V and the output are recorded as strided `Access`es, with head dims up to `MAX_HEAD` (256).
+//!
+//! `Attention` holds the match: accesses, batch dims, sizes, scores, causal diagonal and offset, the two dot
+//! nodes, dtypes and dropout.
+//!
+//! ## Rewrite
+//!
+//! `fuse` replaces each match the backend `supports` with a `Fusion` whose body is the subgraph from the
+//! operands to the output. Extra outputs (the raw attention when also read, the lse) leave through
+//! `FusionOutput` nodes. When the backend allows it, the elementwise epilogue chain after the attention
+//! is fused too; the epilogue is dropped if the raw attention or the lse is read before the chain ends.
+//! A runtime causal offset must be a buffer, so a match whose offset is a by-value scalar is skipped.
+//!
+//! ## Backend answers (`Attentions` trait, in each backend's codegen)
+//!
+//! It runs, with `flash_attention`, on each device whose module implements `Attentions` (`fuse` too where
+//! `WITH_FUSE`, every device but TPU).
+//!
+//! - MPS - epilogues when `contraction_epilogues` is on; by-value scalars from the module; kernel
+//!   names requested as `Kernel::Attention`; runtime causal offsets allowed.
+//! - Triton - epilogues always on, reading any leaf; by-value scalars from `Options::scalars`; kernel
+//!   name `flash_attention`; runtime offsets allowed (decode).
+//! - CUDA - no epilogues, no by-value scalars, static causal diagonal only, and only the attentions
+//!   `codegen::attention::cuda::supports` accepts. The rest stay unfused.
+//! - TPU - epilogues when `contraction_epilogues` is on, reading only scalar leaves, through reshapes
+//!   but not transposes; no by-value scalars; static causal diagonal; without `fuse` too.
+//!
+//! ## Other entry points
+//!
+//! - `attentions(graph, runtime_offsets)` lists every live match.
+//! - `traced(graph)` (Python feature) reports each attention found while tracing, with its output and the
+//!   values between operands and output.
+//! - `of_body` and `of_body_strided` re-match an attention inside a fusion body for codegen.
 
 use super::{Access, Dropout, Matcher, Score, Strides, body_of, fits32};
 use crate::DType;
 use crate::graph::{FUSION_SEPARATOR, Graph, Primitive, Var};
+use crate::graph_compiler::CompilerConfig;
+use crate::graph_compiler::device::DeviceModule;
+use crate::graph_compiler::passes::DevicePass;
 use crate::graph_compiler::passes::simplify::rounds;
 use crate::graph_compiler::passes::{CompilerPass, Module};
+use crate::graph_compiler::pipeline::{Pass, when};
 
 /// A matched `softmax(scores(Q K^T)) V` attention.
 #[derive(Debug, Clone)]
@@ -734,6 +777,8 @@ impl<'a> Matcher<'a> {
 
 /// A module whose backend can generate flash-attention kernels.
 pub(crate) trait Attentions: Module {
+    /// Whether it fuses attention only with `fuse`; else whenever `flash_attention` is on.
+    const WITH_FUSE: bool = true;
     /// Whether elementwise epilogues may be fused into the attention.
     fn contraction_epilogues(&self) -> bool;
     /// Which epilogues the backend accepts: by default any leaf, without reshapes.
@@ -783,5 +828,17 @@ impl<M: Attentions> CompilerPass<M> for FlashAttention {
         );
 
         Ok(())
+    }
+}
+
+/// With `flash_attention` (and `fuse` where `Attentions::WITH_FUSE`), on every device whose module implements
+/// `Attentions`.
+impl<D: 'static> DevicePass<D> for FlashAttention
+where
+    for<'a> DeviceModule<'a, D>: Attentions,
+{
+    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
+        let fused = config.fuse || !<DeviceModule<'a, D> as Attentions>::WITH_FUSE;
+        when(config.flash_attention && fused, FlashAttention)
     }
 }
