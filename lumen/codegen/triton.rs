@@ -476,6 +476,18 @@ impl crate::codegen::SwapsPairs for Triton {}
 /// Triton runs batched inner products as elementwise and reduction fusions.
 impl crate::codegen::InnerProducts for Triton {}
 
+/// Triton's fusion fuses rows of what it fuses (the rows MPS finds), column sums riding along within
+/// `row::triton::ROW_PARTIALS`.
+impl crate::codegen::NormalizationRows for Triton {
+    const PARTIALS: crate::graph_compiler::passes::diamonds::Partials =
+        crate::codegen::row::triton::ROW_PARTIALS;
+
+    /// `fusion::triton::fusible`.
+    fn fusible(graph: &Graph, node: &Node) -> bool {
+        crate::graph_compiler::passes::fusion::triton::fusible(graph, node)
+    }
+}
+
 /// Tiles a Triton split aims for: on an H100, outputs of 64 or more 128x128 tiles already keep the GPU busy (a
 /// 1024x1024 bfloat16 matmul is slower split), while 16 tiles gain about 2x.
 const SPLIT_TARGET: usize = 128;

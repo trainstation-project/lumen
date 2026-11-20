@@ -195,6 +195,24 @@ pub(crate) trait FusesDots {
     ) -> bool;
 }
 
+/// A backend whose fusion fuses normalization rows (the graph compiler's `normalization_diamonds` pass, `Diamonds`):
+/// the nodes it fuses into a row, and how its row kernels take column sums along.
+pub(crate) trait NormalizationRows {
+    /// Its row kernels' bounds on column sums riding along a row as per-group partials.
+    const PARTIALS: crate::graph_compiler::passes::diamonds::Partials;
+    /// Whether its fusion can put `node` of `graph` in a row.
+    fn fusible(graph: &crate::graph::Graph, node: &crate::graph::Node) -> bool;
+}
+
+/// A backend fusing each normalization row into a `row` fusion of its own (the graph compiler's
+/// `normalization_diamonds` pass, `FusedDiamonds`; TPU's): the nodes its row kernel takes and the bodies that fit it.
+pub(crate) trait FusedRows {
+    /// Whether the row kernel takes `node` of `graph`.
+    fn fusible(graph: &crate::graph::Graph, node: &crate::graph::Node) -> bool;
+    /// Whether a row body fits the row kernel.
+    fn fits(body: &crate::graph::Graph) -> bool;
+}
+
 /// A backend's codegen telling the graph compiler's `unsupported` pass which graphs it has no kernels for. A device
 /// implementing it runs the pass.
 pub(crate) trait Supports {

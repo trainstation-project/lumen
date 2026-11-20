@@ -566,6 +566,17 @@ impl crate::codegen::SwapsPairs for Mps {}
 /// Metal runs batched inner products as elementwise and reduction fusions.
 impl crate::codegen::InnerProducts for Mps {}
 
+/// MPS fusion fuses rows of what it fuses, column sums riding along within `row::mps::ROW_PARTIALS`.
+impl crate::codegen::NormalizationRows for Mps {
+    const PARTIALS: crate::graph_compiler::passes::diamonds::Partials =
+        crate::codegen::row::mps::ROW_PARTIALS;
+
+    /// `fusion::mps::fusible`.
+    fn fusible(graph: &Graph, node: &Node) -> bool {
+        crate::graph_compiler::passes::fusion::mps::fusible(graph, node)
+    }
+}
+
 /// Metal's GEMMs read operands laid out with each batch, free and contracting group merging into one stride.
 impl crate::codegen::DotLayouts for Mps {
     /// What `dot_general::mps::reads_strided` accepts at the operand's contiguous strides.
