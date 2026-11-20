@@ -5,7 +5,7 @@ graph, and replace each match with a fusion kernel (`flash_attention`, `flash_at
 codegen compiles into one attention kernel. They run early in the device pipeline: after the dot merges,
 before `linear_cross_entropy` and `simplify` (`matched: true`).
 
-## Files and subfolders
+## Files
 
 - `mod.rs` - what both directions share:
   - `Matcher`: producers, live readers and graph outputs of every value; it walks scores, causal masks,
@@ -17,18 +17,18 @@ before `linear_cross_entropy` and `simplify` (`matched: true`).
   - `Score` (casts and constant scales on the scores), `Dropout` (from `random_bits` against a threshold),
     `Strides` (body inputs read through views and outputs written into views), `body_of` (extract the
     subgraph between operands and outputs as a fusion body), and the names `FORWARD` and `BACKWARD`.
-- `forward/` - matching `softmax(scores(Q K^T)) V` and the `FlashAttention` pass.
-- `backward/` - matching the gradients and the `FlashAttentionBackward` pass.
-- `mps.rs` - MPS runs both passes when `fuse` and `flash_attention` are on.
-- `triton.rs` - Triton runs both passes when `fuse` and `flash_attention` are on.
-- `cuda.rs` - CUDA (CuTe DSL) runs only the forward pass, when `fuse` and `flash_attention` are on. The
-  backward is the identity on CUDA.
-- `tpu.rs` - TPU runs both passes when `flash_attention` is on (`fuse` is not checked), plus its own
-  `AttentionLayouts` pass right after them. It merges the last two axes of outputs written with rows
-  narrower than their last axis, folds reshape, sum and cast chains that read attention outputs into the
-  fusion bodies, moves the backward's `delta` dot into the backward fusion (`backward::tpu::delta_inside`),
-  and checks that `codegen::attention::tpu::kernel` accepts every attention fusion.
-- CPU: identity for all of them.
+- `forward.rs` - matching `softmax(scores(Q K^T)) V` and the `FlashAttention` pass, with its `Attentions`
+  trait: each backend's answers (MPS, Triton, CUDA and TPU, in their codegen; `WITH_FUSE` off on TPU).
+- `backward.rs` - matching the gradients and the `FlashAttentionBackward` pass, with its `AttentionBackwards`
+  trait: MPS, Triton and TPU answer it in their codegen. CUDA has no backward.
+- `layouts.rs` - the `AttentionLayouts` pass (`attention_layouts`), on devices whose codegen implements
+  `codegen::TiledAttentions` (TPU), right after the attention passes. It merges the last two axes of outputs
+  written with rows narrower than their last axis, folds reshape, sum and cast chains that read attention
+  outputs into the fusion bodies, moves the backward's `delta` dot into the backward fusion (`delta_inside`), and
+  checks that the backend's attention kernels take every attention fusion.
+
+Gates: both directions run with `flash_attention`, and `fuse` too on MPS, Triton and CUDA (their
+`WITH_FUSE`). CPU gets the identity pass for all of them.
 
 ## Invariants
 

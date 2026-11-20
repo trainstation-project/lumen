@@ -200,7 +200,7 @@ macro_rules! pipeline {
             ))
             .push($crate::graph_compiler::pipeline::pick!(
                 $device,
-                $crate::graph_compiler::passes::attention::tpu::AttentionLayouts,
+                $crate::graph_compiler::passes::attention::layouts::AttentionLayouts,
                 config
             ))
             .push($crate::graph_compiler::pipeline::pick!(

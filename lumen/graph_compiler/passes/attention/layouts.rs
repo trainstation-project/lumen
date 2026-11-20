@@ -1,11 +1,17 @@
-//! How TPU adapts attention fusions (both directions) to its kernels' layouts: folds output layout chains and
-//! the backward's `delta` dot (`backward::tpu`) into the fusions, then checks the TPU codegen takes each.
+//! Adapting attention fusions (both directions) to kernels that read and write whole tiles (TPU's): the
+//! `attention_layouts` pass, right after the attention passes. It merges the last two axes of outputs written with
+//! rows narrower than their last axis, folds reshape, sum and cast chains that read attention outputs into the
+//! fusion bodies, moves the backward's `delta` dot into the backward fusion (`delta_inside`), and checks the backend's
+//! attention kernels take every attention fusion.
+//!
+//! Devices: it runs, with `flash_attention`, on each device whose codegen implements `codegen::TiledAttentions`
+//! (its attention-kernel check): TPU.
 
-use crate::graph::{Graph, Primitive, Var};
+use crate::codegen::TiledAttentions;
+use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::device::{DeviceModule, Tpu};
+use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::DevicePass;
-use crate::graph_compiler::passes::attention::{FlashAttention, FlashAttentionBackward};
 use crate::graph_compiler::passes::{CompilerPass, attention};
 use crate::graph_compiler::pipeline::{Pass, when};
 
@@ -19,8 +25,8 @@ fn unreadable(body: &Graph, forward: bool) -> Vec<usize> {
     let index = |acc: &attention::Access| body.outputs().iter().position(|&o| o == acc.base);
 
     let accesses = match forward {
-        true => super::forward::tpu::outputs(body),
-        false => super::backward::tpu::outputs(body),
+        true => forward_outputs(body),
+        false => backward_outputs(body),
     };
 
     accesses
@@ -336,13 +342,13 @@ fn graph_producer(graph: &Graph, v: Var) -> usize {
         .expect("a node's value")
 }
 
-/// Checks that the TPU codegen supports every attention fusion left in `graph`.
-fn attentions(graph: &Graph) -> Result<(), String> {
+/// Checks that the backend's attention kernels (`D::check`) take every attention fusion left in `graph`.
+fn attentions<D: TiledAttentions>(graph: &Graph) -> Result<(), String> {
     for node in graph.nodes() {
         if let Primitive::Fusion { name, body, .. } = &node.primitive
             && let "flash_attention" | "flash_attention_backward" = name.as_str()
         {
-            crate::codegen::attention::tpu::kernel(name, body)?;
+            D::check(name, body)?;
         }
     }
 
@@ -353,36 +359,168 @@ fn attentions(graph: &Graph) -> Result<(), String> {
 /// checks the TPU codegen takes each.
 pub(crate) struct AttentionLayouts;
 
-impl CompilerPass<DeviceModule<'_, Tpu>> for AttentionLayouts {
+impl<D: TiledAttentions> CompilerPass<DeviceModule<'_, D>> for AttentionLayouts {
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "attention_layouts"
     }
 
-    /// Rewrites the graph's attention fusions for the TPU kernels and checks each.
-    fn apply(&mut self, m: &mut DeviceModule<'_, Tpu>) -> Result<(), String> {
-        m.graph = super::backward::tpu::delta_inside(&reshaped_outputs(&merged_outputs(&m.graph)));
-        attentions(&m.graph)
+    /// Rewrites the graph's attention fusions for the backend's kernels and checks each.
+    fn apply(&mut self, m: &mut DeviceModule<'_, D>) -> Result<(), String> {
+        m.graph = delta_inside(&reshaped_outputs(&merged_outputs(&m.graph)));
+        attentions::<D>(&m.graph)
     }
 }
 
-/// With `flash_attention`.
-impl DevicePass<Tpu> for FlashAttention {
-    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, Tpu>> {
-        when(config.flash_attention, FlashAttention)
-    }
-}
-
-/// With `flash_attention`.
-impl DevicePass<Tpu> for FlashAttentionBackward {
-    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, Tpu>> {
-        when(config.flash_attention, FlashAttentionBackward)
-    }
-}
-
-/// With `flash_attention`.
-impl DevicePass<Tpu> for AttentionLayouts {
-    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, Tpu>> {
+/// With `flash_attention`, on every device whose codegen implements `TiledAttentions`.
+impl<D: TiledAttentions> DevicePass<D> for AttentionLayouts {
+    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
         when(config.flash_attention, AttentionLayouts)
     }
+}
+
+/// How a forward fusion `body` writes its output.
+fn forward_outputs(body: &Graph) -> Vec<attention::Access> {
+    attention::of_body(body)
+        .map(|a| a.out)
+        .into_iter()
+        .collect()
+}
+
+/// How a backward fusion `body` writes its dQ, dK and dV outputs.
+fn backward_outputs(body: &Graph) -> Vec<attention::Access> {
+    attention::backward_of_body(body)
+        .map(|b| {
+            [b.dq_out, b.dk_out, b.dv_out]
+                .into_iter()
+                .flatten()
+                .map(|(_, acc)| acc)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Moves the dot computing a backward fusion's `delta` input inside the fusion body.
+///
+/// The fusion then reads the dot's operands, through any reshape/transpose chains, instead of `delta`.
+fn delta_inside(graph: &Graph) -> Graph {
+    let nodes = graph.nodes();
+    let producer = |v: Var| nodes.iter().find(|n| n.output == v);
+
+    // Walk back through reshapes and transposes to the value they were applied to.
+    let unshaped = |mut v: Var| {
+        let mut chain = Vec::new();
+
+        while let Some(n) = producer(v).filter(|n| {
+            matches!(
+                n.primitive,
+                Primitive::Reshape { .. } | Primitive::Transpose { .. }
+            )
+        }) {
+            chain.push(n);
+            v = n.inputs[0];
+        }
+
+        (v, chain)
+    };
+
+    let mut out = Graph::new();
+    let mut map: Vec<Var> = vec![0; graph.types.len()];
+
+    for &v in graph.inputs() {
+        map[v] = out.input(graph.type_of(v).clone());
+    }
+
+    let mut changed = false;
+
+    for node in nodes {
+        out.set_origin(node);
+        let mut inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
+        let mut primitive = node.primitive.clone();
+
+        if let Primitive::Fusion { name, label, body } = &node.primitive
+            && name == "flash_attention_backward"
+            && let Some(b) = attention::backward_of_body(body)
+            && let Some(k) = body.inputs().iter().position(|&v| v == b.delta.base)
+            && let Some(dot) = producer(node.inputs[k])
+            && matches!(dot.primitive, Primitive::DotGeneral { .. })
+        {
+            let operands: Vec<(Var, Vec<&Node>)> =
+                dot.inputs.iter().map(|&v| unshaped(v)).collect();
+
+            let mut inner = Graph::new();
+            let mut within: Vec<Var> = vec![0; body.types.len()];
+            let mut reads = Vec::new();
+            let mut outer: Vec<(Var, Var)> = Vec::new();
+
+            // Keep every body input except `delta`, which is now computed inside.
+            for (j, &v) in body.inputs().iter().enumerate() {
+                if j != k {
+                    within[v] = inner.input(body.type_of(v).clone());
+                    reads.push(map[node.inputs[j]]);
+                    outer.push((node.inputs[j], within[v]));
+                }
+            }
+
+            let mut sides = Vec::new();
+
+            // Reuse an existing read when the dot's operand is already a fusion input.
+            for (base, chain) in &operands {
+                let base = *base;
+
+                let mut x = match outer.iter().find(|(o, _)| *o == base) {
+                    Some(&(_, x)) => x,
+                    None => {
+                        let x = inner.input(graph.type_of(base).clone());
+                        reads.push(map[base]);
+                        outer.push((base, x));
+                        x
+                    }
+                };
+
+                for r in chain.iter().rev() {
+                    x = inner
+                        .apply(r.primitive.clone(), &[x])
+                        .expect("the operand's reshape or transpose");
+                }
+
+                sides.push(x);
+            }
+
+            within[body.inputs()[k]] = inner
+                .apply(dot.primitive.clone(), &sides)
+                .expect("delta's dot");
+
+            for n in body.nodes() {
+                let ins: Vec<Var> = n.inputs.iter().map(|&v| within[v]).collect();
+
+                within[n.output] = inner
+                    .apply(n.primitive.clone(), &ins)
+                    .expect("a node of the body");
+            }
+
+            let outputs: Vec<Var> = body.outputs().iter().map(|&v| within[v]).collect();
+            inner.set_outputs(&outputs).expect("the body's values");
+
+            primitive = Primitive::Fusion {
+                name: name.clone(),
+                label,
+                body: inner,
+            };
+
+            inputs = reads;
+            changed = true;
+        }
+        map[node.output] = out.apply(primitive, &inputs).expect("a node of the graph");
+
+        out.set_label(map[node.output], node.label);
+    }
+
+    if !changed {
+        return graph.clone();
+    }
+
+    let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
+    out.set_outputs(&outputs).expect("values of the graph");
+    out
 }
