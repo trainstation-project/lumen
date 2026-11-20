@@ -1,12 +1,12 @@
-//! Wide matmul rows on Triton: a normalization `row` fusion whose rows a GEMM (alone or with its
+//! Wide matmul rows (Triton's, on each device whose codegen implements `codegen::PartialRows`): a normalization `row` fusion whose rows a GEMM (alone or with its
 //! epilogue) makes, too wide for one GEMM tile to hold them whole, gets its GEMM writing the row's first
 //! reductions' partials over each `tile`-column block of a row as well (`dot_partials`); those are
 //! reduced and the row reads them instead of reducing its rows again, so the product is read once less.
 
-use crate::codegen::dot_general::triton::{gemv_body, partial_tile};
+use crate::codegen::PartialRows;
 use crate::codegen::kinds::gemm_dot;
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
-use crate::graph_compiler::device::{DeviceModule, Triton};
+use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::CompilerPass;
 use crate::graph_compiler::passes::DevicePass;
 use crate::graph_compiler::passes::diamonds::tile_reductions;
@@ -114,7 +114,11 @@ struct Wide {
 }
 
 /// The wide row `row` (node `r`) a GEMM feeds, if any.
-fn wide(graph: &Graph, producer: &[Option<usize>], (r, row): (usize, &Node)) -> Option<Wide> {
+fn wide<D: PartialRows>(
+    graph: &Graph,
+    producer: &[Option<usize>],
+    (r, row): (usize, &Node),
+) -> Option<Wide> {
     let Primitive::Fusion {
         name, body: rows, ..
     } = &row.primitive
@@ -147,7 +151,7 @@ fn wide(graph: &Graph, producer: &[Option<usize>], (r, row): (usize, &Node)) -> 
 
     let rows_shape = rows_shape(rows)?;
     let n = *rows_shape.last()?;
-    let tile = partial_tile(n)?;
+    let tile = D::partial_tile(n)?;
     let reductions = row_reductions(rows);
 
     let split: Vec<Var> = tile_reductions(rows, &reductions)
@@ -165,8 +169,7 @@ fn wide(graph: &Graph, producer: &[Option<usize>], (r, row): (usize, &Node)) -> 
     row.inputs.iter().enumerate().find_map(|(at, &v)| {
         let g = producer[v]?;
         // A matrix-vector product stays on the GEMV kernel, which writes no row partials.
-        let gemm =
-            gemm(graph, &nodes[g]).filter(|g| joins(rows, at) && only(v) && !gemv_body(g))?;
+        let gemm = gemm(graph, &nodes[g]).filter(|g| joins(rows, at) && only(v) && !D::gemv(g))?;
 
         Some(Wide {
             producer: g,
@@ -298,7 +301,7 @@ fn finished_body(rows: &Graph, split: &[Var]) -> Graph {
 /// Compiler pass splitting wide GEMM-fed rows into `dot_partials`, their partials' reduction and the row.
 pub(crate) struct WideRows;
 
-impl CompilerPass<DeviceModule<'_, Triton>> for WideRows {
+impl<D: PartialRows> CompilerPass<DeviceModule<'_, D>> for WideRows {
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "wide_rows"
@@ -306,7 +309,7 @@ impl CompilerPass<DeviceModule<'_, Triton>> for WideRows {
 
     /// Splits each wide row a GEMM feeds into a `dot_partials` fusion, the reduction of its partials, and
     /// the row reading them.
-    fn apply(&mut self, m: &mut DeviceModule<'_, Triton>) -> Result<(), String> {
+    fn apply(&mut self, m: &mut DeviceModule<'_, D>) -> Result<(), String> {
         let graph = &m.graph;
 
         let nodes = graph.nodes();
@@ -320,7 +323,7 @@ impl CompilerPass<DeviceModule<'_, Triton>> for WideRows {
         let mut taken = vec![false; nodes.len()];
 
         for (r, row) in nodes.iter().enumerate() {
-            if let Some(w) = wide(graph, &producer, (r, row)).filter(|w| !taken[w.producer]) {
+            if let Some(w) = wide::<D>(graph, &producer, (r, row)).filter(|w| !taken[w.producer]) {
                 taken[w.producer] = true;
                 wide_of[r] = Some(w);
             }
@@ -471,8 +474,8 @@ impl CompilerPass<DeviceModule<'_, Triton>> for WideRows {
 /// With `fuse`, `normalization_diamonds` and `linear_reordering` (as on MPS): rows too wide for one GEMM
 /// tile get the GEMM feeding them writing their reductions' partials too. Without the reordering the row
 /// kernel reads the rows back anyway, so the partials save nothing.
-impl DevicePass<Triton> for WideRows {
-    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, Triton>> {
+impl<D: PartialRows> DevicePass<D> for WideRows {
+    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
         when(
             config.fuse && config.normalization_diamonds && config.linear_reordering,
             WideRows,

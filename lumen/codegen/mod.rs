@@ -125,6 +125,76 @@ pub(crate) trait TiledAttentions {
     fn check(name: &str, body: &crate::graph::Graph) -> Result<(), String>;
 }
 
+/// A backend running batched inner products (dots of two vectors) as elementwise and reduction fusions: the graph
+/// compiler's `dot_strength` pass rewrites them so on these devices.
+pub(crate) trait InnerProducts {}
+
+/// A backend whose matmul kernel takes dots with their operands' reshapes folded in (TPU's): the graph compiler's
+/// `fold_dot_reshapes` pass folds them on these devices.
+pub(crate) trait FoldsDotReshapes {}
+
+/// A backend telling the graph compiler's `canonicalize_dots` pass which matmul operands its kernels read as laid out;
+/// the others are transposed into a form they can first.
+pub(crate) trait DotLayouts {
+    /// Whether the matmul kernels read operand `k` of `dot` (over `operands`) as laid out.
+    fn readable(
+        dot: &crate::graph::Primitive,
+        operands: [&crate::graph::TensorType; 2],
+        k: usize,
+    ) -> bool;
+}
+
+/// A backend's rules for the graph compiler's `split_k` pass: its tiles, the tiles it aims for, the products it keeps
+/// whole and a chunk count it prefers.
+pub(crate) trait SplitsK {
+    /// Tiles a split aims to fill the GPU with; a matmul of half as many or more is not split.
+    const TARGET: usize;
+    /// Output tiles an `m` x `n` matmul runs as.
+    fn tiles(m: usize, n: usize) -> usize;
+    /// Whether a dot of these operand and output types runs on a kernel of its own, unsplit.
+    fn unsplit(
+        dot: &crate::graph::Primitive,
+        lhs: &crate::graph::TensorType,
+        rhs: &crate::graph::TensorType,
+        out: &crate::graph::TensorType,
+    ) -> bool;
+    /// A chunk count it would rather split an `m` x `n` output with contraction `k` into (the larger of it and the
+    /// target's is used); by default none.
+    fn chunks(_m: usize, _n: usize, _k: usize) -> Option<usize> {
+        None
+    }
+}
+
+/// A backend whose row kernel reads some of a row body's inputs as whole rows (TPU's): the graph compiler's `dot_rows`
+/// pass fuses the matmuls making them into the row.
+pub(crate) trait FullRows {
+    /// Whether the row kernel reads input `at` of row body `body` as whole rows.
+    fn full(body: &crate::graph::Graph, at: usize) -> bool;
+}
+
+/// A backend whose GEMM can write a wide row's reductions' partials (Triton's): the graph compiler's `wide_rows` pass
+/// has it do so for rows too wide for one GEMM tile.
+pub(crate) trait PartialRows {
+    /// The column tile of a row `n` wide that the GEMM writes partials over, when it splits one.
+    fn partial_tile(n: usize) -> Option<usize>;
+    /// Whether GEMM body `body` runs on a matrix-vector kernel, which writes no partials.
+    fn gemv(body: &crate::graph::Graph) -> bool;
+}
+
+/// A backend fusing matmuls with their slices, stacked lhs and epilogues (TPU's): the graph compiler's `fuse_dots`
+/// pass, with its vector lanes and which producers write a concatenation's slots.
+pub(crate) trait FusesDots {
+    /// Lanes a vector holds: stacked and split parts are whole multiples of it.
+    const LANES: usize;
+    /// Whether `producer` can write operand `k` of `concat` into its slot.
+    fn slot_writes(
+        graph: &crate::graph::Graph,
+        concat: &crate::graph::Node,
+        k: usize,
+        producer: &crate::graph::Node,
+    ) -> bool;
+}
+
 /// A backend's codegen telling the graph compiler's `unsupported` pass which graphs it has no kernels for. A device
 /// implementing it runs the pass.
 pub(crate) trait Supports {

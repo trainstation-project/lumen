@@ -1,13 +1,49 @@
-//! Fuses a matmul into the normalization `row` fusion that consumes its whole output rows, as one
-//! `dot_row` fusion: the row computed from the product without it reaching memory. With `through`, one
-//! elementwise op may sit between them (a residual added to the product), its value written too where
-//! it is read again.
-
+//! Passes that join a matmul with the normalization `row` fusion that reads its whole output rows, so the
+//! product isn't written and read back (TPU) or is read once less (Triton). Each device has its own pass
+//! type and its own slot in the pass list.
+//!
+//! ## `dot_rows` (shared, used by TPU)
+//!
+//! - Matches a `row` fusion whose operand at slot `at` is read whole by the row body (`joins(body, at)`)
+//!   and comes from a plain dot: unbatched, a rank-2+ lhs contracted on its last axis, a 2-D rhs with one
+//!   contracting axis. The dot's result must be read only by that row and not be a graph output.
+//! - With `through`, one elementwise op may sit between the dot and the row (e.g. a residual add), as long
+//!   as it has the dot's shape and its other readers come after the row. Its value becomes an extra output
+//!   of the fusion (read back with `FusionOutput`) when something else reads it.
+//! - Each dot joins at most one row; the joined body must pass the backend's `fits`.
+//! - The result is one `dot_row` fusion whose inputs are the dot's operands, the linking op's other
+//!   operands, then the row's other operands; its label joins the members' labels.
+//!
+//! ## TPU: `DotRows`
+//!
+//! Slot after `fused_diamonds` (which makes the `row` fusions). Enabled with `normalization_diamonds`, and
+//! it only rewrites when `contraction_epilogues` is also on. It calls `dot_rows` with a rule that accepts
+//! inputs the TPU row kernel reads as `Kind::Full` rows, `fits` always true and `through` off.
+//!
+//! ## Triton: `WideRows`
+//!
+//! Slot right after `fusion`. Enabled when `fuse`, `normalization_diamonds` and `linear_reordering` are all
+//! on. It handles rows too wide for one GEMM tile (`partial_tile(n)` gives the column tile):
+//!
+//! - Matches a `row` fusion fed by a GEMM (a plain dot or a GEMM fusion with its epilogue) whose output is
+//!   read whole by the row, with tile-splittable last-axis reductions over the rows' shape
+//!   (`diamonds::tile_reductions`).
+//! - Replaces the GEMM with a `dot_partials` fusion that writes the row's operand plus each split
+//!   reduction's partials over `tile`-column blocks (`[rows, n / tile]`), then the GEMM's own extra outputs.
+//! - Reduces each partials output, reshapes it to the reduction's shape, and rebuilds the `row` fusion so it
+//!   reads those totals as extra inputs instead of reducing the rows again.
+//!
+//! The GEMM's values may be read elsewhere only after the row; its `FusionOutput` readers are renumbered
+//! past the partials.
+//!
+//! Devices: `dot_rows` runs, with `normalization_diamonds`, on each device whose codegen implements `codegen::FullRows`
+//! (which row-body inputs its row kernel reads as whole rows): TPU. Triton's wide rows are `dot::wide_rows`.
+use crate::codegen::FullRows;
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
-use crate::graph_compiler::elementwise;
-
-pub(crate) mod tpu;
-pub(crate) mod triton;
+use crate::graph_compiler::device::DeviceModule;
+use crate::graph_compiler::passes::{CompilerPass, DevicePass};
+use crate::graph_compiler::pipeline::{Pass, when};
+use crate::graph_compiler::{CompilerConfig, elementwise};
 
 /// Whether a row fusion's body reads its input `at` as whole rows, so a matmul can feed it.
 pub(crate) type Joins = fn(&Graph, usize) -> bool;
@@ -300,4 +336,30 @@ pub(crate) fn dot_rows(
     let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
     out.set_outputs(&outputs).expect("values of the graph");
     out
+}
+
+/// Fuses dots into the row fusions that read them when contraction epilogues are enabled.
+pub(crate) struct DotRows;
+
+impl<D: FullRows> CompilerPass<DeviceModule<'_, D>> for DotRows {
+    /// Pass name used in profiler ranges and dumps.
+    fn name(&self) -> &'static str {
+        "dot_rows"
+    }
+
+    /// Fuses the module's dots into the row fusions reading their whole rows.
+    fn apply(&mut self, m: &mut DeviceModule<'_, D>) -> Result<(), String> {
+        if m.options.config.contraction_epilogues {
+            m.graph = dot_rows(&m.graph, D::full, |_| true, false);
+        }
+
+        Ok(())
+    }
+}
+
+/// With `normalization_diamonds`, on every device whose codegen implements `FullRows`.
+impl<D: FullRows> DevicePass<D> for DotRows {
+    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
+        when(config.normalization_diamonds, DotRows)
+    }
 }
