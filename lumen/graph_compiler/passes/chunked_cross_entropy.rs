@@ -1,13 +1,35 @@
-//! Pass computing a cross entropy over full logits `h @ w` per row chunk, when the graph already
-//! computes those logits chunk by chunk from row slices of `h`.
-
-#[cfg(lumen_mps_linked)]
-mod mps;
-mod triton;
+//! Rewriting a cross entropy over the full logits `h @ w` that a graph also computes chunk by chunk, from row slices
+//! of `h`, to run per chunk on the chunked logits, so the full logits are no longer needed. It runs early in the device
+//! pipeline, after `take_along_axis` and before the dot merges and `linear_cross_entropy`.
+//!
+//! Devices: it runs, with `fuse` and `fused_linear_cross_entropy`, on each device whose codegen implements
+//! `codegen::LinearCrossEntropies` (a fused linear cross-entropy kernel, which each chunk then becomes): MPS and
+//! Triton. CPU, CUDA and TPU get the identity pass.
+//!
+//! The pattern:
+//! - The cross entropy is the one `linear_cross_entropy::matched` finds on dot node `h @ w`: a max-shifted `logsumexp`
+//!   over the classes, and the target logits gathered from the flattened logits.
+//! - The chunks are other dots with the same primitive and the same weight whose lhs is a `Slice` of `h` covering every
+//!   column, `[start, end)` in rows.
+//! - The chunks must tile rows `0..b` without gaps or overlap.
+//!
+//! The rewrite:
+//! - The softmax region, plus the gather-index computation above the target, is replayed per chunk on that chunk's
+//!   rows. `of_rows` restates each primitive for a chunk of `c` of the `b` rows.
+//! - The per-row lse and loss of all chunks are joined by concatenation along dim 0, at most 16 operands per
+//!   concatenate (`joined`).
+//! - A slice of the lse or loss matching one chunk's rows reads that chunk's value directly.
+//! - Readers of the joined lse or loss go after the last chunk.
+//! - The match is skipped when the chunks don't tile the rows, or when the rewrite would change the order of reads. The
+//!   pass repeats until no match is left.
 
 use super::linear_cross_entropy::{Found, matched, uses};
+use crate::codegen::LinearCrossEntropies;
 use crate::graph::{Graph, Node, Primitive, Var};
-use crate::graph_compiler::passes::{CompilerPass, Module};
+use crate::graph_compiler::CompilerConfig;
+use crate::graph_compiler::device::DeviceModule;
+use crate::graph_compiler::passes::{CompilerPass, DevicePass, Module};
+use crate::graph_compiler::pipeline::{Pass, when};
 
 /// Rewrites each matched cross entropy whose logits are also computed in row chunks, until none is left.
 fn chunked_cross_entropy(graph: &Graph) -> Graph {
@@ -297,6 +319,16 @@ fn of_rows(p: &Primitive, b: usize, c: usize) -> Option<Primitive> {
 
 /// Compiler pass running [`chunked_cross_entropy`].
 pub(crate) struct ChunkedCrossEntropy;
+
+/// With `fuse` and `fused_linear_cross_entropy`, on every device whose codegen implements `LinearCrossEntropies`.
+impl<D: LinearCrossEntropies> DevicePass<D> for ChunkedCrossEntropy {
+    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
+        when(
+            config.fuse && config.fused_linear_cross_entropy,
+            ChunkedCrossEntropy,
+        )
+    }
+}
 
 impl<M: Module> CompilerPass<M> for ChunkedCrossEntropy {
     /// Pass name used in profiler ranges and dumps.
