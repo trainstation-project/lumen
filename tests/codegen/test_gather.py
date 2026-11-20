@@ -5,7 +5,7 @@ import tempfile
 
 import numpy as np
 import pytest
-from helpers import CPU, MPS, TPU, TRITON_CUDA
+from helpers import CPU, CUDA, MPS, TPU, TRITON_CUDA
 
 import lumen
 import lumen.functional as F
@@ -244,13 +244,14 @@ def test_scatter_add_in_place():
     assert "out0:f32[4,6] = scatter_add[axis=0] out0 " in plan, plan
 
 
-@pytest.mark.parametrize("device", DEVICES, indirect=True)
+@pytest.mark.parametrize("device", [*DEVICES, CUDA], indirect=True)
 @pytest.mark.parametrize("index_dtype", [np.int8, np.int32, np.int64])
 @pytest.mark.parametrize("axis", [0, 1, 2])
 def test_take_along_axis(device, index_dtype, axis):
     """``F.gather`` (``torch.gather``, ``np.take_along_axis``): each entry
     along the axis at its index, the others where they are; the indices no
-    larger than the operand off the axis, of any integer dtype."""
+    larger than the operand off the axis, of any integer dtype. CUDA (CuTe)
+    runs it as its lowered flat gather in an elementwise kernel."""
     rng = np.random.default_rng(4)
     x = rng.standard_normal((4, 5, 6)).astype(np.float32)
     shape = [3, 4, 5]

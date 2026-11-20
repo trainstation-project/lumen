@@ -27,7 +27,7 @@ pass or the identity pass, which the pipeline skips.
 ## Device pipeline, in order (devices that run it in brackets)
 
 1. `unsupported` - reject ops the device has no kernel for [mps, triton].
-2. `take_along_axis` - lower `take_along_axis` to a flat `gather` [mps, triton].
+2. `take_along_axis` - lower `take_along_axis` to a flat `gather` [cuda, mps, triton].
 3. `chunked_cross_entropy` - replay a cross entropy per row chunk when the logits are already chunked [mps, triton].
 4. `merge_dots_backward` - merge gradient dots that share an operand [cuda, mps, triton, tpu].
 5. `merge_dots` - merge forward dots sharing an operand into one dot against a packed weight block [cuda, mps, triton].
