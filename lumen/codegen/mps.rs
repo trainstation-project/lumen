@@ -573,7 +573,7 @@ impl crate::codegen::NormalizationRows for Mps {
 
     /// `fusion::mps::fusible`.
     fn fusible(graph: &Graph, node: &Node) -> bool {
-        crate::graph_compiler::passes::fusion::mps::fusible(graph, node)
+        crate::codegen::fusion::mps::fusible(graph, node)
     }
 }
 
@@ -682,7 +682,7 @@ impl crate::codegen::MergesDots for Mps {
     /// What MPS fusion can fuse, read in place; views; lanes 1; `ROW_COLUMNS` columns.
     fn target() -> crate::graph_compiler::passes::merge_dots::Target {
         crate::graph_compiler::passes::merge_dots::Target {
-            reads: crate::graph_compiler::passes::fusion::mps::fusible,
+            reads: crate::codegen::fusion::mps::fusible,
             views: true,
             lanes: 1,
             columns: crate::codegen::regions::ROW_COLUMNS,
@@ -728,7 +728,7 @@ fn slot_writes(
                     | Primitive::Slice { .. }
             );
 
-            crate::graph_compiler::passes::fusion::mps::fusible(&m.graph, producer)
+            crate::codegen::fusion::mps::fusible(&m.graph, producer)
                 && (layout || crate::graph_compiler::elementwise(p))
         }
         _ => false,

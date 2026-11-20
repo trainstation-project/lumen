@@ -5,12 +5,8 @@ use crate::codegen::kinds::gemm_dot;
 use crate::codegen::regions::expansion;
 use crate::codegen::utils::cuda::cute_type;
 use crate::graph::{Graph, Node, Primitive, Var};
-use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::{Cuda, DeviceModule};
-use crate::graph_compiler::passes::CompilerPass;
-use crate::graph_compiler::passes::DevicePass;
 use crate::graph_compiler::passes::fusion::{Backend, fuse};
-use crate::graph_compiler::pipeline::{Pass, when};
 
 /// Name of an elementwise fusion.
 pub(crate) const ELEMENTWISE: &str = "elementwise";
@@ -91,26 +87,13 @@ fn named(body: &Graph) -> String {
     .into()
 }
 
-/// Compiler pass fusing the graph's elementwise work into CUDA kernels, and into the GEMMs it follows.
-struct Fusion;
-
-impl CompilerPass<DeviceModule<'_, Cuda>> for Fusion {
-    /// Pass name used in profiler ranges and dumps.
-    fn name(&self) -> &'static str {
-        "fusion"
-    }
-
+/// CUDA's fusion (the graph compiler's `fusion` pass): the shared fusion with the CuTe kernels' limits (elementwise and
+/// GEMM epilogues), with `fuse`.
+impl crate::codegen::Fuses for Cuda {
     /// Runs the shared fusion with the CUDA backend's limits.
-    fn apply(&mut self, m: &mut DeviceModule<'_, Cuda>) -> Result<(), String> {
+    fn fuse(m: &mut DeviceModule<'_, Cuda>) -> Result<(), String> {
         let backend = backend(m);
         m.graph = fuse(&m.graph, &[], &[], &backend, |body, _| named(body));
         Ok(())
-    }
-}
-
-/// With `fuse`.
-impl DevicePass<Cuda> for super::Fusion {
-    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, Cuda>> {
-        when(config.fuse, Fusion)
     }
 }

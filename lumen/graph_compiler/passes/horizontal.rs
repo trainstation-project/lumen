@@ -2,9 +2,9 @@
 //! outputs each come from one member. The `horizontal_fusion` slot is the last pass in the pass list.
 //!
 //! Devices: it runs on each device whose codegen implements `codegen::HorizontallyFuses` (its candidates, grouping and
-//! buffer limit): Triton with `fuse` and `horizontal_fusion` (candidates from `fusion::triton::horizontal_candidate`,
+//! buffer limit): Triton with `fuse` and `horizontal_fusion` (candidates from `codegen::fusion::triton::horizontal_candidate`,
 //! non-trivial `elementwise` fusions without reductions or matmuls; `Grouping::Tiling`; at most 64 buffers) and TPU
-//! with `horizontal_fusion` (`fusion::tpu::horizontal_candidate`, non-scalar `elementwise` fusions of TPU-fusible nodes
+//! with `horizontal_fusion` (`codegen::fusion::tpu::horizontal_candidate`, non-scalar `elementwise` fusions of TPU-fusible nodes
 //! not written in place into a concat; `Grouping::Shape`; at most 32 buffers). MPS calls `fuse` from inside its own
 //! `fusion` pass instead, with a `Kernels` target of its own (`Grouping::Tiling`, 30 buffers, each merged kernel a
 //! requested `Kernel::Fusion`), so its slot is the identity, as CPU's and CUDA's are.

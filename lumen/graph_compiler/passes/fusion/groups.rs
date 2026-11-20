@@ -1,9 +1,11 @@
-//! Plans which nodes fuse together into TPU `elementwise` and `reduction` kernels.
+//! Fusion by planned groups (TPU's): plans which nodes fuse together into `elementwise` and `reduction` kernels,
+//! splitting off layout ops until every group's indexing can be planned, and turns the groups into fusions, a
+//! reducing member leading. `codegen::fusion::tpu` runs it as TPU's fusion.
 use crate::codegen::elementwise::tpu::grid::{layout, plan};
 use crate::codegen::reduction::tpu::reducible;
 use crate::codegen::utils::tpu::fusible;
 use crate::graph::{Graph, Primitive};
-use crate::graph_compiler::passes::elementwise::{body, members};
+use crate::graph_compiler::passes::elementwise::{body, fused, members};
 
 /// How a node may join the fusion group of its readers.
 #[derive(Clone, Copy, PartialEq)]
@@ -17,11 +19,11 @@ enum Join {
 }
 
 /// Fusion assignment of every node.
-pub(super) struct Groups {
+struct Groups {
     /// Root node of the group each node belongs to, `None` for unfused nodes.
-    pub(super) group: Vec<Option<usize>>,
+    group: Vec<Option<usize>>,
     /// Per root, whether its group contains a reduction.
-    pub(super) reduces: Vec<bool>,
+    reduces: Vec<bool>,
 }
 
 /// Whether node `i` moves data by index (a layout op) and isn't plain elementwise.
@@ -94,7 +96,7 @@ fn groups(graph: &Graph, join: &[Join]) -> Groups {
 }
 
 /// Groups nodes, splitting off layout ops until every elementwise group's indexing can be planned.
-pub(super) fn planned(graph: &Graph) -> Groups {
+fn planned(graph: &Graph) -> Groups {
     let mut join = vec![Join::Any; graph.nodes().len()];
 
     loop {
@@ -134,4 +136,27 @@ pub(super) fn planned(graph: &Graph) -> Groups {
             return groups;
         }
     }
+}
+
+/// Rewrites `graph` with each planned group replaced by one fusion, named `reduction` when it reduces.
+pub(crate) fn elementwise_fusion(graph: &Graph) -> Graph {
+    let nodes = graph.nodes();
+    let Groups { group, reduces } = planned(graph);
+
+    fused(
+        graph,
+        &group,
+        |root, members| {
+            // A reducing member leads the fusion so the kernel is built around it.
+            let main = members.iter().find(|&&j| reducible(graph, &nodes[j]));
+
+            let name = match reduces[root] {
+                true => "reduction",
+                false => "elementwise",
+            };
+
+            (name, *main.unwrap_or(&root))
+        },
+        |_| Vec::new(),
+    )
 }

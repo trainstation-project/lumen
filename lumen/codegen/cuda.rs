@@ -8,13 +8,13 @@ use crate::codegen::dot_general::cuda::Gemm;
 use crate::codegen::dot_general::cuda::matmul;
 use crate::codegen::elementwise::ElementwiseCodegen;
 use crate::codegen::elementwise::cuda::{Elementwise, Layouts};
+use crate::codegen::fusion::cuda::{ELEMENTWISE, fusible};
 use crate::codegen::kernel::Runner;
 use crate::codegen::kinds::gemm_dot;
 use crate::codegen::utils::cuda::Cuda;
 use crate::graph::{Graph, Node, Primitive, TensorType};
 use crate::graph_compiler::device::{Device, DeviceModule};
 use crate::graph_compiler::passes::attention::FORWARD;
-use crate::graph_compiler::passes::fusion::cuda::{ELEMENTWISE, fusible};
 use crate::graph_compiler::{Options, plan_options};
 use crate::plan::step::Tensors;
 use crate::plan::step::cuda::CudaTimer;
@@ -204,7 +204,7 @@ impl crate::codegen::MergesDots for Cuda {
     /// What CUDA fusion can fuse, read in place; views; lanes 1; 8 columns.
     fn target() -> crate::graph_compiler::passes::merge_dots::Target {
         crate::graph_compiler::passes::merge_dots::Target {
-            reads: crate::graph_compiler::passes::fusion::cuda::fusible,
+            reads: crate::codegen::fusion::cuda::fusible,
             views: true,
             lanes: 1,
             columns: 8,
