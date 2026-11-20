@@ -1,9 +1,29 @@
-//! Pass folding a reshape that flattens leading dims into a 2-D dot's lhs.
-
-mod tpu;
-
+//! `FoldDotReshapes` (pass name `fold_dot_reshapes`) lets a matmul read a rank-3+ activation directly
+//! instead of through a reshape that flattens it to a matrix. It runs after `linear_cross_entropy` and
+//! just before the matched `Simplify`, early in the one pass list.
+//!
+//! ## Rewrite
+//!
+//! It matches `dot(reshape(x), w)` where:
+//!
+//! - the dot is unbatched and contracts dimension 1 of a 2-D lhs;
+//! - the lhs is made by a `Reshape` of `x`, `x` has rank above 2, and `x`'s last dimension equals the lhs's
+//!   last dimension (the reshape only merges leading dimensions).
+//!
+//! It emits `reshape(dot(x, w))`: the new dot contracts `x`'s last dimension, keeps the original rhs
+//! contracting/batch dims and the accumulation and output dtypes, and the reshape restores the original
+//! 2-D output shape. The pass copies the old reshape node as it is and does not remove it.
+//!
+//! Nodes it doesn't rewrite are copied with their labels and origins.
+//!
+//! Devices: it runs, always, on each device whose codegen implements `codegen::FoldsDotReshapes`: TPU. The others get
+//! the identity pass.
+use crate::codegen::FoldsDotReshapes;
 use crate::graph::{Graph, Primitive, Var};
-use crate::graph_compiler::passes::{CompilerPass, Module};
+use crate::graph_compiler::CompilerConfig;
+use crate::graph_compiler::device::DeviceModule;
+use crate::graph_compiler::passes::{CompilerPass, DevicePass, Module};
+use crate::graph_compiler::pipeline::Pass;
 
 /// Compiler pass running [`fold_dot_reshapes`].
 pub(crate) struct FoldDotReshapes;
@@ -96,5 +116,12 @@ impl<M: Module> CompilerPass<M> for FoldDotReshapes {
 
         *m.graph_mut() = out;
         Ok(())
+    }
+}
+
+/// Always, on every device whose codegen implements `FoldsDotReshapes`.
+impl<D: FoldsDotReshapes> DevicePass<D> for FoldDotReshapes {
+    fn pass<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
+        Box::new(FoldDotReshapes)
     }
 }

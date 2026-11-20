@@ -256,7 +256,7 @@ macro_rules! pipeline {
             ))
             .push($crate::graph_compiler::pipeline::pick!(
                 $device,
-                $crate::graph_compiler::passes::dot::rows::tpu::DotRows,
+                $crate::graph_compiler::passes::dot::rows::DotRows,
                 config
             ))
             .push($crate::graph_compiler::pipeline::pick!(
@@ -271,7 +271,7 @@ macro_rules! pipeline {
             ))
             .push($crate::graph_compiler::pipeline::pick!(
                 $device,
-                $crate::graph_compiler::passes::dot::fuse::tpu::FuseDots,
+                $crate::graph_compiler::passes::dot::fuse::FuseDots,
                 config
             ))
             .push($crate::graph_compiler::pipeline::pick!(
@@ -286,7 +286,7 @@ macro_rules! pipeline {
             ))
             .push($crate::graph_compiler::pipeline::pick!(
                 $device,
-                $crate::graph_compiler::passes::dot::rows::triton::WideRows,
+                $crate::graph_compiler::passes::dot::wide_rows::WideRows,
                 config
             ))
             .push($crate::graph_compiler::pipeline::pick!(

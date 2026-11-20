@@ -1,13 +1,33 @@
-//! Pass that transposes `DotGeneral` operands a backend's matmul kernels can't read as laid out into
-//! batch, free, contracting order (the lhs) and batch, contracting, free order (the rhs).
-
-#[cfg(lumen_mps_linked)]
-pub(crate) mod mps;
-mod tpu;
-
+//! `CanonicalizeDots` (pass name `canonicalize_dots`) puts in an explicit `Transpose` before each dot operand
+//! a backend's matmul kernel can't read as laid out, and rewrites the dot's dimension numbers to match. It
+//! runs after `split_k` and before the diamonds passes, so later passes and codegen see only operands the
+//! kernel reads directly.
+//!
+//! ## Rewrite
+//!
+//! - `CanonicalizeDots { readable }` holds the backend's rule. `Readable` is
+//!   `fn(&Primitive, [&TensorType; 2], operand index) -> bool` (0 = lhs, 1 = rhs).
+//! - `matmul_order(dot, lhs_rank, rhs_rank)` gives the permutations that put the lhs in
+//!   batch, free (M), contracting (K) order and the rhs in batch, contracting (K), free (N) order, plus where
+//!   each group ends (`lhs_split`, `rhs_split`).
+//! - An unreadable lhs is transposed by `order.lhs`; its batch dims become `0..i` and its contracting dims the
+//!   tail. An unreadable rhs is transposed by `order.rhs`; its batch dims become `0..i` and contracting dims
+//!   `i..j`. A readable operand is left alone, so only the operands that need it are copied.
+//! - Dtypes are unchanged; every other node is copied with its label.
+//!
+//! `matmul_order` is also used by MPS's GEMM codegen (`codegen::dot_general::mps`) to read operands in the
+//! same `[batch, M, K]` / `[batch, K, N]` form. Tests construct the pass directly with `mps::reads_contiguous`.
+//!
+//! Devices: it runs, always, on each device whose codegen implements `codegen::DotLayouts` (which operand layouts its
+//! matmul kernels read as laid out): MPS (what its GEMM reads at contiguous strides) and TPU (batch dims leading, one
+//! contracting dim placed as its kernel reads it). The others get the identity pass.
+use crate::codegen::DotLayouts;
 use crate::graph::primitive::free_dims;
 use crate::graph::{Graph, Primitive, TensorType, Var};
-use crate::graph_compiler::passes::{CompilerPass, Module};
+use crate::graph_compiler::CompilerConfig;
+use crate::graph_compiler::device::DeviceModule;
+use crate::graph_compiler::passes::{CompilerPass, DevicePass, Module};
+use crate::graph_compiler::pipeline::Pass;
 
 /// Whether a backend's matmul kernels read operand `k` (0 the lhs, 1 the rhs) of `dot` over `operands`
 /// as laid out, contiguously.
@@ -141,5 +161,15 @@ impl<M: Module> CompilerPass<M> for CanonicalizeDots {
 
         *m.graph_mut() = out;
         Ok(())
+    }
+}
+
+/// Always, on every device whose codegen implements `DotLayouts`: matmul operands its kernels can't read as laid out
+/// are transposed into a form they can first.
+impl<D: DotLayouts> DevicePass<D> for CanonicalizeDots {
+    fn pass<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
+        Box::new(CanonicalizeDots {
+            readable: D::readable,
+        })
     }
 }

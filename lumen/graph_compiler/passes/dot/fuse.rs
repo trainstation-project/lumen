@@ -1,11 +1,40 @@
-//! Fuses each TPU matmul with the slices that split it, the concat stacking its lhs and its elementwise epilogues.
-
-use crate::codegen::utils::tpu::LANES;
+//! TPU's dot fusion: `tpu::FuseDots` (pass name `fuse_dots`) replaces a matmul and the work around it with
+//! one `dot_general` fusion that the TPU matmul kernel runs. It runs after `diamonds` and before
+//! `place_concats` and the general `fusion` pass, which then handles what is left.
+//!
+//! ## What one dot fusion absorbs
+//!
+//! For each `DotGeneral`, the planner (`fused`) collects:
+//!
+//! - Splitting slices: when the dot is no graph output and is read only by `Slice`s that tile one of its
+//!   last two axes end to end, each keeping the other axes whole, with bounds on `LANES` boundaries. The
+//!   slices are rebuilt inside the body.
+//! - A stacked lhs: when the lhs is a `Concatenate` along one of its last two axes of lane-aligned parts,
+//!   read only by dots as their lhs, not a graph output, and not an in-place concatenation (checked with
+//!   `place_concats::in_place_concats` and `fusion::tpu::slot_writes`). The fusion reads the concat's parts.
+//! - Elementwise epilogues, only with `contraction_epilogues`: later elementwise readers of the dot (or of a
+//!   slice, or of an earlier epilogue), claimed greedily in node order. Each must have its part's shape; its
+//!   other operands must be constants (rebuilt in the body), scalar broadcasts, or scalar or same-shape
+//!   values computed before the dot. Epilogues may combine several slices only when those are at most 4
+//!   equal-width slices along the last axis; otherwise a non-scalar extra operand serves one slice only.
+//!
+//! A dot with nothing to absorb, or whose members are not read outside the fusion, stays as it is.
+//!
+//! ## Output
+//!
+//! Each planned dot becomes a `dot_general` fusion whose outputs are the member values read outside it, in
+//! variable order; the first is the fusion's value and the rest are read through `FusionOutput` nodes. Its
+//! inputs are the dot's operands (or the stacked concat's parts) followed by the epilogues' extra operands.
+//! Its label is the dot's label, prefixed `Nx` when an unlabelled dot stands for N slices or N stacked parts,
+//! followed by the absorbed nodes' labels.
+//!
+//! Devices: it runs, always, on each device whose codegen implements `codegen::FusesDots` (its vector lanes and which
+//! producers write a concatenation's slots): TPU.
+use crate::codegen::FusesDots;
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
-use crate::graph_compiler::device::{DeviceModule, Tpu};
+use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::CompilerPass;
 use crate::graph_compiler::passes::DevicePass;
-use crate::graph_compiler::passes::fusion::tpu::slot_writes;
 use crate::graph_compiler::passes::place_concats::in_place_concats;
 use crate::graph_compiler::pipeline::Pass;
 use crate::graph_compiler::{CompilerConfig, elementwise};
@@ -17,7 +46,7 @@ const MAX_TOGETHER: usize = 4;
 /// Splits a dot read only by slices that tile it along one of its last two axes.
 ///
 /// Returns the axis and each slice's `(width, value)` in order; slice bounds must be lane-aligned.
-fn split(graph: &Graph, dot: &Node) -> Option<(usize, Vec<(usize, Var)>)> {
+fn split<D: FusesDots>(graph: &Graph, dot: &Node) -> Option<(usize, Vec<(usize, Var)>)> {
     if graph.outputs().contains(&dot.output) {
         return None;
     }
@@ -64,7 +93,7 @@ fn split(graph: &Graph, dot: &Node) -> Option<(usize, Vec<(usize, Var)>)> {
             && parts.last().is_some_and(|p| p.1 == shape[axis])
             && parts
                 .iter()
-                .all(|p| p.0.is_multiple_of(LANES) && p.1.is_multiple_of(LANES));
+                .all(|p| p.0.is_multiple_of(D::LANES) && p.1.is_multiple_of(D::LANES));
 
         covers.then(|| {
             (
@@ -81,7 +110,7 @@ fn split(graph: &Graph, dot: &Node) -> Option<(usize, Vec<(usize, Var)>)> {
 ///
 /// The concat must feed only dots as their lhs, not be placed in place (`placed`, the graph's in-place
 /// concatenations), and join lane-aligned parts along one of the lhs's last two axes.
-fn stacked(
+fn stacked<D: FusesDots>(
     graph: &Graph,
     producer: &[Option<usize>],
     users: &[Vec<usize>],
@@ -112,7 +141,7 @@ fn stacked(
         && graph.nodes()[k]
             .inputs
             .iter()
-            .all(|&v| graph.type_of(v).shape[dimension].is_multiple_of(LANES));
+            .all(|&v| graph.type_of(v).shape[dimension].is_multiple_of(D::LANES));
 
     fits.then_some(k)
 }
@@ -132,7 +161,7 @@ struct Fused {
 }
 
 /// Plans a fusion for every dot worth fusing, indexed by the dot's node.
-fn fused(graph: &Graph, epilogues: bool) -> Vec<Option<Fused>> {
+fn fused<D: FusesDots>(graph: &Graph, epilogues: bool) -> Vec<Option<Fused>> {
     let nodes = graph.nodes();
     let n = graph.types.len();
     let mut producer: Vec<Option<usize>> = vec![None; n];
@@ -146,7 +175,7 @@ fn fused(graph: &Graph, epilogues: bool) -> Vec<Option<Fused>> {
     // Concatenations placed in place, which their producers write rather than a dot's fusion building them.
     let placed = in_place_concats(
         graph,
-        |c, k, p, _| slot_writes(graph, c, k, p),
+        |c, k, p, _| D::slot_writes(graph, c, k, p),
         |_, _, _, _| true,
     );
 
@@ -159,8 +188,8 @@ fn fused(graph: &Graph, epilogues: bool) -> Vec<Option<Fused>> {
         }
 
         let before = |v: Var| producer[v].is_none_or(|p| p < d);
-        let parts = split(graph, dot);
-        let stack = stacked(graph, &producer, &users, &placed, dot);
+        let parts = split::<D>(graph, dot);
+        let stack = stacked::<D>(graph, &producer, &users, &placed, dot);
 
         // Values computed by the fusion, keyed to the slice (part) they derive from.
         let mut member: HashMap<Var, usize> = match &parts {
@@ -331,19 +360,19 @@ fn fused(graph: &Graph, epilogues: bool) -> Vec<Option<Fused>> {
 /// Fuses dots with their splitting slices, stacked lhs and, when enabled, elementwise epilogues.
 pub(crate) struct FuseDots;
 
-impl CompilerPass<DeviceModule<'_, Tpu>> for FuseDots {
+impl<D: FusesDots> CompilerPass<DeviceModule<'_, D>> for FuseDots {
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "fuse_dots"
     }
 
     /// Rewrites `graph` with each planned dot replaced by a `dot_general` fusion.
-    fn apply(&mut self, m: &mut DeviceModule<'_, Tpu>) -> Result<(), String> {
+    fn apply(&mut self, m: &mut DeviceModule<'_, D>) -> Result<(), String> {
         let graph = &m.graph;
         let epilogues = m.options.config.contraction_epilogues;
 
         let nodes = graph.nodes();
-        let found = fused(graph, epilogues);
+        let found = fused::<D>(graph, epilogues);
         let mut out = Graph::new();
         let mut map: Vec<Var> = vec![0; graph.types.len()];
 
@@ -517,9 +546,9 @@ impl CompilerPass<DeviceModule<'_, Tpu>> for FuseDots {
     }
 }
 
-/// Always.
-impl DevicePass<Tpu> for FuseDots {
-    fn pass<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, Tpu>> {
+/// Always, on every device whose codegen implements `FusesDots`.
+impl<D: FusesDots> DevicePass<D> for FuseDots {
+    fn pass<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
         Box::new(FuseDots)
     }
 }

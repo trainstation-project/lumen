@@ -1,11 +1,33 @@
-//! Split-K shared by the backends: long-K matmuls with too few output tiles become partial products
-//! over K chunks summed over the chunks.
-
+//! `SplitK` (pass name `split_k`) splits a matmul with a long contraction but too few output tiles to fill
+//! the GPU into partial products over K chunks, summed over the chunks. It runs after `linear_reordering`
+//! and before `canonicalize_dots`, behind the `split_k` config flag.
+//!
+//! ## Rewrite
+//!
+//! A dot is split when it is unbatched, has one contracting dim per side, accumulates in a float dtype,
+//! neither operand is a `Slice` output, and the backend's `unsplit` rule does not keep it whole.
+//!
+//! - The chunk count is a power of two from `target / tiles(m, n)`, capped at 8, and only when the output has
+//!   fewer than half the target tiles and K is at least 2048. A backend's preferred count (`Rules::chunks`)
+//!   wins when larger.
+//! - `divides` halves the count until every chunk has at least 256 elements and is a multiple of 8 elements
+//!   (whole 16-byte vectors of 2-byte elements); fewer than 2 chunks means no split.
+//! - Each operand's contracting dim `d` is reshaped to `[s, k / s]`; the dot then batches over the chunk
+//!   index and contracts the chunk length, writing the accumulation dtype. A `ReduceSum` over axis 0 sums the
+//!   chunks, and a `Cast` follows when the original output dtype differs from the accumulator.
+//! - The new nodes are labelled `dot_general (split-K)` and `reduce_sum (split-K)`.
+//!
+//! Devices: it runs, with `split_k`, on each device whose codegen implements `codegen::SplitsK` (its tiles, target,
+//! the products it keeps whole and a chunk count it prefers): MPS (tiles counted with the GEMM's `float_groups`, a
+//! target of 256 threadgroups, GEMV and skinny products of at most 4 rows kept whole, MLX's preferred chunks) and
+//! Triton (tiles of the untuned GEMM config, a target of 128 tiles, matrix-vector products kept whole for the GEMV
+//! kernel; partials always summed by a reduction, so results stay deterministic). The others get the identity pass.
+use crate::codegen::SplitsK;
 use crate::graph::{Graph, Primitive, TensorType, Var};
-
-#[cfg(lumen_mps_linked)]
-pub(crate) mod mps;
-pub(crate) mod triton;
+use crate::graph_compiler::CompilerConfig;
+use crate::graph_compiler::device::DeviceModule;
+use crate::graph_compiler::passes::{CompilerPass, DevicePass};
+use crate::graph_compiler::pipeline::{Pass, when};
 
 /// Most K chunks a matmul is split into.
 pub(crate) const MAX_SPLIT: usize = 8;
@@ -170,5 +192,37 @@ pub(crate) fn divides(mut s: usize, k: usize) -> Option<usize> {
     (s >= 2).then_some(s)
 }
 
-/// The split-K pass's slot (each device runs its own `SplitK`).
+/// Splits `graph`'s matmuls by device `D`'s rules (`SplitsK`).
+pub(crate) fn split<D: SplitsK>(graph: &Graph) -> Graph {
+    let rules = Rules {
+        tiles: &|m, n| D::tiles(m, n),
+        target: D::TARGET,
+        unsplit: &|dot, lhs, rhs, out| D::unsplit(dot, lhs, rhs, out),
+        chunks: Some(&|m, n, k| D::chunks(m, n, k)),
+    };
+
+    split_k(graph, &rules)
+}
+
+/// Compiler pass splitting long-K matmuls with too few output tiles, by the device's rules.
 pub(crate) struct SplitK;
+
+impl<D: SplitsK> CompilerPass<DeviceModule<'_, D>> for SplitK {
+    /// Pass name used in profiler ranges and dumps.
+    fn name(&self) -> &'static str {
+        "split_k"
+    }
+
+    /// Splits the module's matmuls.
+    fn apply(&mut self, m: &mut DeviceModule<'_, D>) -> Result<(), String> {
+        m.graph = split::<D>(&m.graph);
+        Ok(())
+    }
+}
+
+/// With `split_k`, on every device whose codegen implements `SplitsK`.
+impl<D: SplitsK> DevicePass<D> for SplitK {
+    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
+        when(config.split_k, SplitK)
+    }
+}
