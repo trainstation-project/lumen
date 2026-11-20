@@ -1,14 +1,51 @@
-//! Detection of row-normalization patterns ("diamonds"): a value combined with a broadcast of its own
-//! last-axis reduction, which a backend can run as one row kernel; the rewrite replacing each row
-//! with a `row` fusion; and the pass finding them for a backend's fusion to fuse.
+//! Normalization rows ("diamonds"): a value combined with a broadcast of its own last-axis reduction, such as
+//! softmax, RMS norm or layer norm. A backend can run each one as a single row kernel. This folder finds those
+//! rows. On TPU it fuses them directly; on MPS and Triton it hands them to `fusion`.
+//!
+//! ## Pattern
+//!
+//! - A diamond is an elementwise node `side op broadcast(reduce(x))`, where `side` and `x` come from the same
+//!   value through trivial ops. For `Add`, `Mul` and `Max` either operand may be the side. Single-use
+//!   elementwise producers of that value are absorbed too.
+//! - `diamonds(graph, fusible)` builds one `Row` per diamond, then grows it:
+//!   - A diamond over the root of an earlier row that only it reads absorbs that row (chained norms).
+//!   - `grown` extends rows backwards over same-shaped producers, per-row values and earlier rows, so a
+//!     pattern with several reductions becomes one row.
+//!   - `consumed` moves a row's root forward to a later elementwise consumer whose cheap inputs reach the row.
+//! - Only nodes the backend's `Fusible` accepts go into a row.
+//! - `Row` lists the root, the last-axis reductions, the other inner nodes, the nodes read outside the row,
+//!   attached column partial sums, and `statistics` (a matmul's rows plus per-row values of one reduction of
+//!   them, CODA's statistics).
+//!
+//! ## Passes (both named `normalization_diamonds`)
+//!
+//! - `Diamonds` - finds the rows, and with `partials` splits column sums over the same rows into a per-group
+//!   partial inside the row kernel plus a final sum over groups (bounded by the backend's `Partials`:
+//!   widest row, most and fewest groups). It stores the rows in the module (`RowsModule::rows_mut`, i.e.
+//!   `DeviceModule::rows`). It runs after `dynamic_update_slices`, and `fusion` consumes and clears the rows.
+//! - `FusedDiamonds` - finds the rows and rewrites each one whose body the backend `fits` into a `row`
+//!   fusion (`fused`), with extra outputs through `FusionOutput`. A row is emitted only when it is convex
+//!   and sealed. It runs after `canonicalize_dots` and before TPU's `dot_rows`.
+//!
+//! ## Devices
+//!
+//! - `Diamonds` runs, with `fuse` and `normalization_diamonds`, on each device whose codegen implements
+//!   `codegen::NormalizationRows` (the nodes its fusion fuses into a row, and its row kernels' `Partials`):
+//!   MPS and Triton, finding the same rows.
+//! - `FusedDiamonds` runs, with `normalization_diamonds`, on each device whose codegen implements
+//!   `codegen::FusedRows` (the nodes its row kernel takes and the bodies that fit it): TPU.
+//! - CUDA and CPU: identity for both passes.
+//!
+//! `depends_on`, `softmax_pair` (`sum(exp(x - max(x)))` over the same axes) and `tile_reductions` (which leading row
+//! reductions a tiled pass may take partially; used by Triton `wide_rows` and the MPS GEMM row kernels) are helpers
+//! codegen uses.
 
-#[cfg(lumen_mps_linked)]
-mod mps;
-mod tpu;
-mod triton;
-
+use crate::codegen::{FusedRows, NormalizationRows};
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
-use crate::graph_compiler::passes::{CompilerPass, Module};
+use crate::graph_compiler::CompilerConfig;
+use crate::graph_compiler::device::DeviceModule;
+use crate::graph_compiler::passes::{CompilerPass, DevicePass, Module};
+use crate::graph_compiler::pipeline::{Pass, when};
 use crate::graph_compiler::{constant, elementwise};
 use std::collections::HashMap;
 
@@ -1274,6 +1311,32 @@ impl<M: Module> CompilerPass<M> for FusedDiamonds {
         let rows = diamonds(m.graph(), self.fusible);
         *m.graph_mut() = fused(m.graph(), &rows, self.fusible, self.fits);
         Ok(())
+    }
+}
+
+/// With `fuse` and `normalization_diamonds`, on every device whose codegen implements `NormalizationRows`: its rows
+/// for its fusion, column sums riding along within its `Partials`.
+impl<D: NormalizationRows> DevicePass<D> for Diamonds {
+    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
+        let diamonds = Diamonds {
+            fusible: D::fusible,
+            partials: D::PARTIALS,
+        };
+
+        when(config.fuse && config.normalization_diamonds, diamonds)
+    }
+}
+
+/// With `normalization_diamonds`, on every device whose codegen implements `FusedRows`: each row its row kernel takes
+/// fused into a `row` fusion of its own.
+impl<D: FusedRows> DevicePass<D> for FusedDiamonds {
+    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
+        let diamonds = FusedDiamonds {
+            fusible: D::fusible,
+            fits: D::fits,
+        };
+
+        when(config.normalization_diamonds, diamonds)
     }
 }
 

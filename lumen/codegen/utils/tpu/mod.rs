@@ -140,6 +140,19 @@ impl crate::codegen::TiledAttentions for Tpu {
 /// TPU runs batched inner products as elementwise and reduction fusions.
 impl crate::codegen::InnerProducts for Tpu {}
 
+/// TPU fuses each row its row kernel takes into a `row` fusion of its own.
+impl crate::codegen::FusedRows for Tpu {
+    /// `codegen::row::tpu::fusible`.
+    fn fusible(graph: &crate::graph::Graph, node: &crate::graph::Node) -> bool {
+        crate::codegen::row::tpu::fusible(graph, node)
+    }
+
+    /// `codegen::row::tpu::fits`.
+    fn fits(body: &crate::graph::Graph) -> bool {
+        crate::codegen::row::tpu::fits(body)
+    }
+}
+
 /// TPU's matmul kernel takes dots with their operands' reshapes folded in.
 impl crate::codegen::FoldsDotReshapes for Tpu {}
 
