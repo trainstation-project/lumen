@@ -199,6 +199,19 @@ impl Device for Cuda {
     }
 }
 
+/// CUDA merges with `fuse`, packing for the GEMM epilogue's 16-byte vectors (8 columns of 16-bit products).
+impl crate::codegen::MergesDots for Cuda {
+    /// What CUDA fusion can fuse, read in place; views; lanes 1; 8 columns.
+    fn target() -> crate::graph_compiler::passes::merge_dots::Target {
+        crate::graph_compiler::passes::merge_dots::Target {
+            reads: crate::graph_compiler::passes::fusion::cuda::fusible,
+            views: true,
+            lanes: 1,
+            columns: 8,
+        }
+    }
+}
+
 /// CuTe kernels gather (a fused `Gather`, read through the emitter).
 impl crate::codegen::Gathers for Cuda {}
 

@@ -4,10 +4,45 @@
 use std::collections::HashMap;
 
 use crate::DType;
+use crate::codegen::MergesDots;
 use crate::graph::primitive::free_dims;
 use crate::graph::{Graph, Node, Primitive, TensorType, Var};
+use crate::graph_compiler::CompilerConfig;
+use crate::graph_compiler::device::DeviceModule;
+use crate::graph_compiler::passes::merge_dots::MergeDotsLate;
+use crate::graph_compiler::passes::merge_dots::backward::{
+    Interleaving, arrange, interleaved_gradients,
+};
 use crate::graph_compiler::passes::simplify::roundings;
-use crate::graph_compiler::passes::{CompilerPass, Module};
+use crate::graph_compiler::passes::{CompilerPass, DevicePass, Module};
+use crate::graph_compiler::pipeline::{Pass, when};
+
+/// With `merge_dots` (and `fuse` where `WITH_FUSE`), packing for the device's `target`, early on a device merging
+/// before simplification; else the identity.
+impl<D: MergesDots> DevicePass<D> for MergeDots {
+    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
+        let on = config.merge_dots && (config.fuse || !D::WITH_FUSE) && !D::LATE;
+        when(
+            on,
+            MergeDots {
+                target: D::target(),
+            },
+        )
+    }
+}
+
+/// The same, late (once the graph is simplified) on a device merging then (`MergesDots::LATE`, TPU's).
+impl<D: MergesDots> DevicePass<D> for MergeDotsLate {
+    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
+        let on = config.merge_dots && (config.fuse || !D::WITH_FUSE) && D::LATE;
+        when(
+            on,
+            MergeDots {
+                target: D::target(),
+            },
+        )
+    }
+}
 use crate::graph_compiler::{combined, elementwise};
 
 /// What the backend supports for merged dots.
@@ -624,11 +659,11 @@ impl Group {
 /// How members are laid out along the concatenated dim: consecutive regions, each interleaving its
 /// members element by element.
 #[derive(Clone, Debug)]
-struct Layout {
+pub(super) struct Layout {
     /// Members per region, in member order.
-    regions: Vec<usize>,
+    pub(super) regions: Vec<usize>,
     /// Extent of each member along the dim.
-    sizes: Vec<usize>,
+    pub(super) sizes: Vec<usize>,
 }
 
 impl Layout {
@@ -714,68 +749,6 @@ fn member_of(
     out.apply(back, &[one]).expect("the member's elements")
 }
 
-/// Builds a value laid out by `layout` along `axis` from per-member `parts`.
-fn arrange(out: &mut Graph, parts: &[Var], axis: usize, layout: &Layout) -> Var {
-    let mut regions = Vec::new();
-    let mut member = 0;
-
-    for &k in &layout.regions {
-        let group = &parts[member..member + k];
-        member += k;
-
-        if k == 1 {
-            regions.push(group[0]);
-            continue;
-        }
-
-        let tuples: Vec<Var> = group
-            .iter()
-            .map(|&v| {
-                let mut one = out.type_of(v).shape.clone();
-                one.insert(axis + 1, 1);
-                let reshape = Primitive::Reshape { new_sizes: one };
-                out.apply(reshape, &[v]).expect("the same elements")
-            })
-            .collect();
-
-        let concatenated = Primitive::Concatenate {
-            dimension: axis + 1,
-            in_place: false,
-        };
-
-        let tuples = out
-            .apply(concatenated, &tuples)
-            .expect("parts of one shape");
-
-        let mut shape = out.type_of(group[0]).shape.clone();
-        shape[axis] *= k;
-        let back = Primitive::Reshape { new_sizes: shape };
-        regions.push(out.apply(back, &[tuples]).expect("the same elements"));
-    }
-
-    match regions.as_slice() {
-        [one] => *one,
-        _ => {
-            let concatenated = Primitive::Concatenate {
-                dimension: axis,
-                in_place: false,
-            };
-
-            out.apply(concatenated, &regions)
-                .expect("regions of one shape but the axis")
-        }
-    }
-}
-
-/// Graph rewrites an interleaved layout needs in the backward pass.
-#[derive(Default)]
-struct Interleaving {
-    /// Concatenate nodes of per-member gradients to rearrange into the layout.
-    cotangents: Vec<usize>,
-    /// `(slice node, member, axis)` for slices taking a member out of a product with the block.
-    slices: Vec<(usize, usize, usize)>,
-}
-
 /// Orders the group's members so those whose results (their rounding casts', per `roundings`) are
 /// combined elementwise share interleaved regions aligned to `columns`. Returns the order, members left
 /// out, the layout, and backward rewrites; `None` when nothing interleaves or the backward can't follow
@@ -844,191 +817,13 @@ fn interleaves(
     };
 
     let operands: Vec<Var> = order.iter().map(|&j| operand(g.nodes[j])).collect();
-    let rewrites = backward(graph, roundings, g.dimension, &weights, &operands, &layout)?;
+    let rewrites =
+        interleaved_gradients(graph, roundings, g.dimension, &weights, &operands, &layout)?;
     Some((order, rest, layout, rewrites))
 }
 
-/// Checks every dot reading a concatenation of the `weights` or `operands` contracts it against a
-/// concatenation of per-member gradients, and finds those and the slices of their products (rounded
-/// by their casts, per `roundings`).
-fn backward(
-    graph: &Graph,
-    roundings: &[Option<usize>],
-    dimension: usize,
-    weights: &[Var],
-    operands: &[Var],
-    layout: &Layout,
-) -> Option<Interleaving> {
-    let nodes = graph.nodes();
-    let k = weights.len();
-    let outputs = graph.outputs();
-
-    let readers = |v: Var| {
-        nodes
-            .iter()
-            .enumerate()
-            .filter(move |(_, n)| n.inputs.contains(&v))
-    };
-
-    let produced = |v: Var| nodes.iter().position(|n| n.output == v);
-
-    let concatenate_of_parts = |n: &Node, axis: usize| {
-        matches!(n.primitive, Primitive::Concatenate { dimension, .. } if dimension == axis)
-            && n.inputs.len() == k
-            && n.inputs
-                .iter()
-                .zip(&layout.sizes)
-                .all(|(&v, &size)| graph.type_of(v).shape[axis] == size)
-    };
-
-    let mut found = Interleaving::default();
-    let mut contractions = Vec::new();
-
-    for b in nodes.iter().filter(|n| {
-        matches!(n.primitive, Primitive::Concatenate { dimension: d, .. } if d == dimension)
-            && (n.inputs == weights || n.inputs == operands)
-    }) {
-        if outputs.contains(&b.output) {
-            return None;
-        }
-
-        for (r, reader) in readers(b.output) {
-            let Primitive::DotGeneral { .. } = reader.primitive else {
-                return None;
-            };
-
-            let side = reader.inputs.iter().position(|&v| v == b.output)?;
-
-            let (mine, theirs) = (
-                contracting(&reader.primitive, side),
-                contracting(&reader.primitive, 1 - side),
-            );
-
-            let c = mine.iter().position(|&d| d == dimension)?;
-            let cotangent = &nodes[produced(reader.inputs[1 - side])?];
-
-            if !concatenate_of_parts(cotangent, theirs[c]) {
-                return None;
-            }
-
-            let at = produced(cotangent.output)?;
-
-            if !found.cotangents.contains(&at) {
-                found.cotangents.push(at);
-            }
-
-            contractions.push(r);
-        }
-    }
-
-    // Start of each member along the dim, in the plain concatenated order.
-    let offsets: Vec<usize> = layout
-        .sizes
-        .iter()
-        .scan(0, |start, &n| {
-            let at = *start;
-            *start += n;
-            Some(at)
-        })
-        .collect();
-
-    for &at in &found.cotangents {
-        let cotangent = &nodes[at];
-
-        let Primitive::Concatenate {
-            dimension: axis, ..
-        } = cotangent.primitive
-        else {
-            unreachable!("a concatenate")
-        };
-
-        if outputs.contains(&cotangent.output) {
-            return None;
-        }
-
-        for (r, reader) in readers(cotangent.output) {
-            if contractions.contains(&r) {
-                continue;
-            }
-
-            let Primitive::DotGeneral { lhs_batch, .. } = &reader.primitive else {
-                return None;
-            };
-
-            let side = reader.inputs.iter().position(|&v| v == cotangent.output)?;
-            let rank = graph.type_of(cotangent.output).shape.len();
-            let free: Vec<usize> = free_dims(rank, &used_dims(&reader.primitive, side)).collect();
-            let pos = free.iter().position(|&d| d == axis)?;
-
-            let before = match side {
-                0 => 0,
-                _ => {
-                    let lhs = graph.type_of(reader.inputs[0]).shape.len();
-                    free_dims(lhs, &used_dims(&reader.primitive, 0)).count()
-                }
-            };
-
-            let result_axis = lhs_batch.len() + before + pos;
-            let product = nodes[roundings[r].unwrap_or(r)].output;
-            let result = graph.type_of(product);
-
-            if outputs.contains(&product) {
-                return None;
-            }
-
-            let mut members = vec![false; k];
-
-            for (s, slice) in readers(product) {
-                let Primitive::Slice {
-                    start_indices,
-                    limit_indices,
-                    ..
-                } = &slice.primitive
-                else {
-                    return None;
-                };
-
-                let whole = |d: usize| start_indices[d] == 0 && limit_indices[d] == result.shape[d];
-
-                let j = offsets
-                    .iter()
-                    .position(|&o| o == start_indices[result_axis])?;
-
-                let part = limit_indices[result_axis] == offsets[j] + layout.sizes[j]
-                    && (0..result.shape.len()).all(|d| d == result_axis || whole(d));
-
-                if !part || members[j] {
-                    return None;
-                }
-
-                members[j] = true;
-                found.slices.push((s, j, result_axis));
-            }
-        }
-    }
-
-    Some(found)
-}
-
-/// Contracting dims of a dot's operand `side`.
-fn contracting(p: &Primitive, side: usize) -> Vec<usize> {
-    let Primitive::DotGeneral {
-        lhs_contracting,
-        rhs_contracting,
-        ..
-    } = p
-    else {
-        unreachable!("a dot")
-    };
-
-    match side {
-        0 => lhs_contracting.clone(),
-        _ => rhs_contracting.clone(),
-    }
-}
-
 /// Batch and contracting dims of a dot's operand `side`.
-fn used_dims(p: &Primitive, side: usize) -> Vec<usize> {
+pub(super) fn used_dims(p: &Primitive, side: usize) -> Vec<usize> {
     let Primitive::DotGeneral {
         lhs_contracting,
         rhs_contracting,

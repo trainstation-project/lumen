@@ -87,6 +87,19 @@ pub(crate) trait Rechecks: Slots + Lone {
     ) -> bool;
 }
 
+/// A backend whose matmuls merge into packed blocks (the graph compiler's `merge_dots`, `merge_dots_late` and
+/// `merge_dots_backward` passes): when it merges and what its GEMMs read in place of a packed block.
+pub(crate) trait MergesDots {
+    /// Whether it merges only with `fuse` (the GEMM epilogues reading the merged product); else always.
+    const WITH_FUSE: bool = true;
+    /// Whether the backward merge also needs `contraction_epilogues` (its merged gradients sliced in an epilogue).
+    const BACKWARD_EPILOGUES: bool = false;
+    /// Whether the forward merge runs late, once the graph is simplified, instead of early.
+    const LATE: bool = false;
+    /// What a merged product's readers read in place, and how a block is packed.
+    fn target() -> crate::graph_compiler::passes::merge_dots::Target;
+}
+
 /// A backend's codegen telling the graph compiler's `unsupported` pass which graphs it has no kernels for. A device
 /// implementing it runs the pass.
 pub(crate) trait Supports {

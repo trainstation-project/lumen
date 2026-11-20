@@ -563,6 +563,22 @@ impl crate::codegen::Supports for Mps {
 /// Metal kernels read each element's partner at `j ^ 1`.
 impl crate::codegen::SwapsPairs for Mps {}
 
+/// MPS merges with `fuse`, its backward merge with `contraction_epilogues` too, packing for the GEMM epilogue's row
+/// columns.
+impl crate::codegen::MergesDots for Mps {
+    const BACKWARD_EPILOGUES: bool = true;
+
+    /// What MPS fusion can fuse, read in place; views; lanes 1; `ROW_COLUMNS` columns.
+    fn target() -> crate::graph_compiler::passes::merge_dots::Target {
+        crate::graph_compiler::passes::merge_dots::Target {
+            reads: crate::graph_compiler::passes::fusion::mps::fusible,
+            views: true,
+            lanes: 1,
+            columns: crate::codegen::regions::ROW_COLUMNS,
+        }
+    }
+}
+
 /// The kind of kernel `producer` awaits when it is a still-pending fusion.
 fn pending(producer: &Node) -> Option<Kernel> {
     match &producer.primitive {
