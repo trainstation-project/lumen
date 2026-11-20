@@ -1,15 +1,37 @@
-//! Pass lowering `take_along_axis` to a flat `gather`.
+//! Lowering each `take_along_axis` to a flat `gather`, so no backend needs a kernel of its own for it. It is the second
+//! pass in the list, right after `unsupported`.
+//!
+//! Devices: it runs on each device whose codegen implements `codegen::Gathers` (its kernels compute `Gather`): CUDA,
+//! MPS and Triton. CPU interprets `take_along_axis` and TPU lowers it in Mosaic, so both get the identity pass.
+//!
+//! The rewrite, for `take_along_axis(x, indices, axis)`:
+//! 1. The index dtype is int64 when the indices are 64-bit (`I64` or `U64`), int32 otherwise; the indices are cast to it
+//!    when needed.
+//! 2. A flat position of the indices' shape is the sum over `x`'s dimensions of the coordinate times the row-major
+//!    stride: the (cast) indices along `axis`, an `Iota` along every other dimension, each multiplied by a `Full` of the
+//!    stride.
+//! 3. `x` is reshaped to one dimension of `x.numel()` elements and gathered with `Gather { axis: 0 }` at the flat
+//!    positions.
+//!
+//! The gather keeps the original node's label; every other node is copied unchanged.
 
-#[cfg(lumen_mps_linked)]
-mod mps;
-mod triton;
-
+use crate::codegen::Gathers;
 use crate::graph::{Graph, Primitive, Var};
-use crate::graph_compiler::passes::{CompilerPass, Module};
+use crate::graph_compiler::CompilerConfig;
+use crate::graph_compiler::device::DeviceModule;
+use crate::graph_compiler::passes::{CompilerPass, DevicePass, Module};
+use crate::graph_compiler::pipeline::Pass;
 use crate::{DType, Scalar};
 
-/// Compiler pass running [`take_along_axis`].
+/// Compiler pass lowering `take_along_axis` to a flat `gather`.
 pub(crate) struct TakeAlongAxis;
+
+/// Always, on every device whose codegen implements `Gathers`.
+impl<D: Gathers> DevicePass<D> for TakeAlongAxis {
+    fn pass<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
+        Box::new(TakeAlongAxis)
+    }
+}
 
 impl<M: Module> CompilerPass<M> for TakeAlongAxis {
     /// Pass name used in profiler ranges and dumps.

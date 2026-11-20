@@ -575,3 +575,6 @@ impl crate::codegen::StridedOperands for Mps {
         crate::codegen::dot_general::mps::reads_strided(dot, operands, k, strides)
     }
 }
+
+/// Metal kernels gather (a fused `Gather`).
+impl crate::codegen::Gathers for Mps {}

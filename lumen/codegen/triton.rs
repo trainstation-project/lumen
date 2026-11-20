@@ -485,3 +485,6 @@ impl crate::codegen::StridedOperands for Triton {
         true
     }
 }
+
+/// Triton kernels gather (a fused `Gather`).
+impl crate::codegen::Gathers for Triton {}
