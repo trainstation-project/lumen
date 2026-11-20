@@ -101,7 +101,8 @@ pub(crate) trait MergesDots {
 }
 
 /// A backend with a fused linear cross-entropy kernel (`Primitive::LinearCrossEntropy`, never writing the logits): the
-/// graph compiler's `linear_cross_entropy` pass rewrites a cross entropy over a matmul's logits into it.
+/// graph compiler's `linear_cross_entropy` pass rewrites a cross entropy over a matmul's logits into it, and its
+/// `chunked_cross_entropy` pass first moves one over logits also computed chunk by chunk onto the chunks.
 pub(crate) trait LinearCrossEntropies {}
 
 /// A backend merging small independent kernels into one launch (the graph compiler's `horizontal_fusion` pass): which
