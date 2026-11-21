@@ -4,7 +4,7 @@ import math
 
 import lumen
 import lumen.functional as F
-from lumen.codegen.utils.tpu import computed, pallas
+from lumen.codegen.devices.tpu import computed, pallas
 from lumen.kernels import pallas as pl
 
 
@@ -85,7 +85,7 @@ def _schedule(spec):
 
 def program(spec):
     """A reduction with its prologue and epilogue (the hand-written
-    schedule; the fused work generated: ``lumen/codegen/utils/tpu/reduction.rs``).
+    schedule; the fused work generated: ``lumen/codegen/devices/tpu/reduction.rs``).
     ``inputs`` (each ``[dtype, kind]``: ``in``, the reduced operand's shape;
     ``out``, the result's; or ``scalar``), ``prologue`` (nodes computing the
     reduced ``operand`` on its blocks), ``reduce`` (``sum`` in ``accum``, or

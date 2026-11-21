@@ -63,7 +63,7 @@ def test_reads_strided_inputs_in_place(device):
     assert not [e for e in prof.events() if e["name"] == "lumen::contiguous"]
     dot = lumen.compile(lambda u, v: F.matmul(u, v, "float32", "float32"))
     if device == "cuda":
-        import lumen.codegen.utils.triton as triton
+        import lumen.codegen.devices.triton as triton
 
         # Prologues another test (on this worker) compiled first are compiled again here, so they count as new.
         for name in [n for n in triton.kernels if n.startswith("prologue_")]:

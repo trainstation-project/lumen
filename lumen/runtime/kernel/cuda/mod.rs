@@ -11,9 +11,9 @@ use std::sync::OnceLock;
 #[cfg(all(feature = "python", lumen_cuda_linked))]
 use super::Launch;
 use crate::Tensor;
-use crate::codegen::dot_general::cuda::Config;
 #[cfg(all(feature = "python", lumen_cuda_linked))]
-use crate::codegen::utils::cuda::Cuda;
+use crate::codegen::devices::cuda::Cuda;
+use crate::codegen::dot_general::cuda::Config;
 #[cfg(all(feature = "python", lumen_cuda_linked))]
 use driver::{Compiled, PARAM_BYTES, Value, bytes, driver};
 
@@ -27,7 +27,7 @@ pub type Launcher = fn(
     n: usize,
 ) -> Result<(), String>;
 
-/// The launcher installed from Python (`lumen.codegen.utils.cuda`).
+/// The launcher installed from Python (`lumen.codegen.devices.cuda`).
 pub(crate) static LAUNCH: OnceLock<Launcher> = OnceLock::new();
 
 /// Installs the launcher; later calls are ignored.

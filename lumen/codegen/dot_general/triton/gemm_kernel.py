@@ -3,7 +3,7 @@
 import triton
 import triton.language as tl
 
-from lumen.codegen.utils.triton import compiled_launch, functions, scalar
+from lumen.codegen.devices.triton import compiled_launch, functions, scalar
 
 
 @triton.jit

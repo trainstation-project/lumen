@@ -2,7 +2,7 @@
 //! nodes horizontal fusion merges, and which producers write a concatenation's slots (its dot fusions live in
 //! `passes::dot`).
 
-use crate::codegen::utils::tpu::LANES;
+use crate::codegen::devices::tpu::LANES;
 use crate::graph::{Graph, Node, Primitive};
 use crate::graph_compiler::device::{DeviceModule, Tpu};
 
@@ -37,7 +37,7 @@ pub(crate) fn horizontal_candidate(graph: &Graph, node: &Node) -> bool {
         && body
             .nodes()
             .iter()
-            .all(|n| crate::codegen::utils::tpu::fusible(&n.primitive))
+            .all(|n| crate::codegen::devices::tpu::fusible(&n.primitive))
         && !placed
 }
 

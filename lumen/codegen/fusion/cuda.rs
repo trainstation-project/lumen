@@ -1,9 +1,9 @@
 //! What CUDA (CuTe DSL) runs for this pass.
 
+use crate::codegen::devices::cuda::cute_type;
 use crate::codegen::dot_general::cuda::epilogue;
 use crate::codegen::kinds::gemm_dot;
 use crate::codegen::regions::expansion;
-use crate::codegen::utils::cuda::cute_type;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::device::{Cuda, DeviceModule};
 use crate::graph_compiler::passes::fusion::{Backend, fuse};

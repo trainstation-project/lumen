@@ -2,7 +2,7 @@
 
 use super::float_tiles;
 use crate::Tensor;
-use crate::codegen::utils::mps::Mps;
+use crate::codegen::devices::mps::Mps;
 use crate::graph::TensorType;
 use crate::plan::StepBase;
 use crate::runtime::kernel::Launch as _;

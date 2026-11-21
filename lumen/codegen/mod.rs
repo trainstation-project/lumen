@@ -1,5 +1,6 @@
 //! Code generators for each backend, plus GEMM epilogue region detection shared between them.
 pub(crate) mod attention;
+pub(crate) mod devices;
 pub(crate) mod dot_general;
 pub(crate) mod dynamic_slice;
 pub(crate) mod elementwise;
@@ -17,7 +18,6 @@ pub(crate) mod row;
 pub(crate) mod scan;
 pub(crate) mod scatter_add;
 pub(crate) mod store;
-pub(crate) mod utils;
 
 /// A backend whose kernels compute `SwapPairs` (reading each element's partner at `j ^ 1`, or swapping a register
 /// tile's adjacent lanes): the graph compiler's `swap_pairs` pass rewrites pair swaps into it on these devices.

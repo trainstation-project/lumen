@@ -1,9 +1,9 @@
 //! Encodes row gathers from `[vocab, width]` tables on TPU, on the SparseCore when the layout allows.
 
 use crate::DType;
+use crate::codegen::devices::tpu::Tpu;
+use crate::codegen::devices::tpu::{Kernel, Pallas, Rows};
 use crate::codegen::dot_general::tpu::block;
-use crate::codegen::utils::tpu::Tpu;
-use crate::codegen::utils::tpu::{Kernel, Pallas, Rows};
 use crate::device::tpu::layout::Layout;
 use crate::graph::Primitive;
 use crate::plan::StepBase;

@@ -2,13 +2,13 @@
 //! touches, and whether the touched region can stay resident in VMEM.
 #[cfg(lumen_tpu_linked)]
 use crate::DType;
+use crate::codegen::devices::tpu::Tpu;
+#[cfg(lumen_tpu_linked)]
+use crate::codegen::devices::tpu::{Kernel, Rows};
 #[cfg(lumen_tpu_linked)]
 use crate::codegen::dot_general::tpu::block;
 #[cfg(lumen_tpu_linked)]
 use crate::codegen::dynamic_slice::DynamicSliceCodegen;
-use crate::codegen::utils::tpu::Tpu;
-#[cfg(lumen_tpu_linked)]
-use crate::codegen::utils::tpu::{Kernel, Rows};
 #[cfg(lumen_tpu_linked)]
 use crate::device::tpu::layout::Layout;
 #[cfg(lumen_tpu_linked)]

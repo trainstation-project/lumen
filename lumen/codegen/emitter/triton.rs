@@ -4,9 +4,9 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
 
 use super::Emit;
+use crate::codegen::devices::triton::*;
 use crate::codegen::random::RandomCodegen;
 use crate::codegen::store::triton::gather_index;
-use crate::codegen::utils::triton::*;
 use crate::graph::{BinaryOp, Graph, Node, Primitive, UnaryOp, Var};
 use crate::graph_compiler::elementwise;
 use crate::tensor::contiguous_strides;

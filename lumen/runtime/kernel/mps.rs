@@ -5,6 +5,7 @@
 
 use crate::codegen::attention::AttentionCodegen;
 use crate::codegen::attention::mps::decodes;
+use crate::codegen::devices::mps::Mps;
 use crate::codegen::dot_general::mps as gemm;
 use crate::codegen::dot_general::mps::GemmConfig;
 use crate::codegen::elementwise::mps::Tuning;
@@ -14,7 +15,6 @@ use crate::codegen::layout::transpose_tiling;
 use crate::codegen::reduction::mps::{has_epilogue, split_launches};
 use crate::codegen::row::mps::row_groups;
 use crate::codegen::store::mps::strided_load;
-use crate::codegen::utils::mps::Mps;
 pub(crate) use crate::custom_op::mps::Grid;
 use crate::graph::{Graph, Primitive, TensorType, Var, View};
 use crate::graph_compiler::passes::apple_neural_engine::mps as ane;
@@ -429,7 +429,7 @@ pub(crate) fn elementwise_grid(n: usize, dtype: DType) -> Grid {
 
 /// Kernel templates and helpers every generated Metal source is compiled against.
 const PRELUDE: &str = concat!(
-    include_str!("../../codegen/utils/mps/prelude.metal"),
+    include_str!("../../codegen/devices/mps/prelude.metal"),
     include_str!("../../codegen/random/mps/philox.metal"),
     indoc::indoc!(
         "
@@ -675,7 +675,7 @@ pub(crate) fn fill(dst: &Tensor, value: Scalar) -> Result<(), String> {
 
     let v = body.apply(broadcast, &[x])?;
     body.set_outputs(&[v]).expect("the filled value");
-    let bits = crate::codegen::utils::triton::bits(dst.dtype(), value);
+    let bits = crate::codegen::devices::triton::bits(dst.dtype(), value);
 
     let scalar = match ty.dtype {
         DType::U8 => Tensor::from_slice(&[bits as u8], ty.dtype),
@@ -703,7 +703,7 @@ fn run_loop(
 
     let config = crate::graph_compiler::config::config();
     let (name, source) =
-        crate::codegen::utils::mps::kernel(&body, &[by_value], &config, &views, None)?;
+        crate::codegen::devices::mps::kernel(&body, &[by_value], &config, &views, None)?;
 
     let compiled = SOURCES
         .lock()

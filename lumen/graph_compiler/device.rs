@@ -6,7 +6,7 @@ use super::passes::Module;
 use super::passes::diamonds::{Row, RowsModule};
 use super::passes::merge_dots::{Blocks, Packs};
 use super::{CompilerConfig, Options};
-pub(crate) use crate::codegen::utils::{cuda::Cuda, tpu::Tpu, triton::Triton};
+pub(crate) use crate::codegen::devices::{cuda::Cuda, tpu::Tpu, triton::Triton};
 use crate::graph::Graph;
 use crate::graph_compiler::positions;
 use crate::plan::{CpuPlan, Plan, PlanOptions};
@@ -15,7 +15,7 @@ use std::marker::PhantomData;
 // Each kernel backend's codegen type is the device it compiles for: CUDA through CuTe DSL kernels (CUDA's default),
 // CUDA through Triton (`config.compiler.use_triton_backend`), Apple GPUs through Metal, TPUs through Pallas.
 #[cfg(lumen_mps_linked)]
-pub(crate) use crate::codegen::utils::mps::Mps;
+pub(crate) use crate::codegen::devices::mps::Mps;
 
 /// The host, interpreting the simplified graph.
 pub(crate) struct Cpu;

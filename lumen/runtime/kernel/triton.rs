@@ -10,12 +10,12 @@ use super::Launch;
 #[cfg(all(feature = "python", lumen_cuda_linked))]
 use super::cuda::CudaLaunch;
 use crate::Tensor;
+#[cfg(all(feature = "python", lumen_cuda_linked))]
+use crate::codegen::devices::cuda::Cuda;
+use crate::codegen::devices::triton::Kernel;
+#[cfg(all(feature = "python", lumen_cuda_linked))]
+use crate::codegen::devices::triton::Triton;
 use crate::codegen::elementwise::triton::LoopConfig;
-#[cfg(all(feature = "python", lumen_cuda_linked))]
-use crate::codegen::utils::cuda::Cuda;
-use crate::codegen::utils::triton::Kernel;
-#[cfg(all(feature = "python", lumen_cuda_linked))]
-use crate::codegen::utils::triton::Triton;
 
 #[cfg(all(feature = "python", lumen_cuda_linked))]
 /// Triton enqueues its compiled kernel on lumen's stream through CUDA's launch.
@@ -89,7 +89,7 @@ pub(crate) fn launch(
     n: usize,
 ) -> Result<(), String> {
     let launch = LOOP.get().ok_or(
-        "the Triton backend's loops launch from Python (lumen.codegen.utils.triton): none is installed",
+        "the Triton backend's loops launch from Python (lumen.codegen.devices.triton): none is installed",
     )?;
 
     let programs = match kernel.segments.as_slice() {

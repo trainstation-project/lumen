@@ -2,7 +2,7 @@
 //! standalone `random_bits` kernel (`kernel.metal`) and its launch.
 
 use super::RandomCodegen;
-use crate::codegen::utils::mps::Mps;
+use crate::codegen::devices::mps::Mps;
 use crate::graph::Primitive;
 use crate::runtime::kernel::Launch as _;
 use crate::runtime::kernel::mps::{MpsLaunch, elementwise_grid, u32_arg, u64_arg};

@@ -14,8 +14,8 @@ import cutlass
 import cutlass.cute as cute
 from cutlass.cute.runtime import make_ptr
 
+from lumen.codegen.devices.cuda import VECTOR_BYTES, check, compiled_cubin, modules
 from lumen.codegen.dot_general.cuda.ampere import AmpereGemm
-from lumen.codegen.utils.cuda import VECTOR_BYTES, check, compiled_cubin, modules
 
 # The CuTe type of each dtype a GEMM reads or writes, by lumen's name for it.
 DTYPES = {"float16": cutlass.Float16, "bfloat16": cutlass.BFloat16, "float32": cutlass.Float32}
@@ -81,7 +81,7 @@ def compile(
     outputs from the product, its tensors passed as pointers after A and B, 16-byte aligned when `aligned`.
     `copy_bytes` is A's, B's and D's copy width (16, 8, 4 or 2 bytes, each dividing its address, contiguous extent
     and strides), which their loads and stores move by.
-    Returns its launch info as `lumen.codegen.utils.cuda.compile` does: its ``CUfunction``, warps per block, dynamic
+    Returns its launch info as `lumen.codegen.devices.cuda.compile` does: its ``CUfunction``, warps per block, dynamic
     shared bytes, that a plain ``cuLaunchKernel`` runs it, and its parameters' types (a tensor struct each, of
     `tensor_bytes` bytes, checked against the loaded kernel)."""
     if a_dtype != b_dtype or a_dtype not in ("float16", "bfloat16"):

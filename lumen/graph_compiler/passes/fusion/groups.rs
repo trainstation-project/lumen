@@ -1,9 +1,9 @@
 //! Fusion by planned groups (TPU's): plans which nodes fuse together into `elementwise` and `reduction` kernels,
 //! splitting off layout ops until every group's indexing can be planned, and turns the groups into fusions, a
 //! reducing member leading. `codegen::fusion::tpu` runs it as TPU's fusion.
+use crate::codegen::devices::tpu::fusible;
 use crate::codegen::elementwise::tpu::grid::{layout, plan};
 use crate::codegen::reduction::tpu::reducible;
-use crate::codegen::utils::tpu::fusible;
 use crate::graph::{Graph, Primitive};
 use crate::graph_compiler::passes::elementwise::{body, fused, members};
 

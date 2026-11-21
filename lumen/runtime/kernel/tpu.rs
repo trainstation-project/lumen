@@ -6,9 +6,9 @@ use std::ffi::c_void;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use super::Launch;
-use crate::codegen::utils::tpu::GENERATED;
-use crate::codegen::utils::tpu::Tpu;
-use crate::codegen::utils::tpu::lowering::lowering;
+use crate::codegen::devices::tpu::GENERATED;
+use crate::codegen::devices::tpu::Tpu;
+use crate::codegen::devices::tpu::lowering::lowering;
 use crate::device::tpu::{error, ffi};
 use crate::runtime::stream::tpu::BATCHES;
 

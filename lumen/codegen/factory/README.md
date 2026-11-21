@@ -8,7 +8,7 @@ them. On other backends these ops are fused into elementwise kernels as index ar
 - `mod.rs` declares the `mps` submodule, built only with `lumen_mps_linked`. This family has no codegen trait,
   because it generates nothing.
 - `mps/mod.rs` defines the `Factory` kernel. It implements `codegen::kernel::Kernel` with no config, so it is
-  never tuned. `codegen/utils/mps` picks it for `Full` and `Iota` steps.
+  never tuned. `codegen/devices/mps` picks it for `Full` and `Iota` steps.
   - A fill launches `fill_<bytes>` over the output, with the fill value as a constant argument.
   - An iota launches `iota_<dtype>` on a 3-D grid of `[inner, iota axis, outer]`.
   - Like other MPS kernels, it binds the step's inputs and then its output.
@@ -17,7 +17,7 @@ them. On other backends these ops are fused into elementwise kernels as index ar
   - `iota_*` is instantiated per numeric dtype (`FOR_NUMERIC`). It writes each element's grid `y` index,
     converted with `from_int<T>`.
   - `event_marker` is an empty kernel dispatched to mark a point in the command stream for profiling.
-  - `build.rs` compiles this file into the primitive-kernel library, after `utils/mps/prelude.metal`, which
+  - `build.rs` compiles this file into the primitive-kernel library, after `devices/mps/prelude.metal`, which
     provides `ELEMENTWISE_ARGS`, `FOR_EACH_ELEMENT` and the type lists.
 
 ## Conventions

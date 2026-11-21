@@ -13,7 +13,7 @@ Backend-independent kernel autotuning. After codegen lowers a graph to a device 
 ## How it connects
 
 - Each backend's step type implements `KernelStep` (its kernel, name, candidates and forced config) and the backend provides a `Timer` that allocates scratch buffers and enqueues one run of a step. These live in `lumen/plan/step/{mps,cuda,triton}.rs`.
-- Codegen builds the `Autotuner` (`lumen/codegen/utils`) once the plan's steps exist.
+- Codegen builds the `Autotuner` (`lumen/codegen/devices`) once the plan's steps exist.
 - The config structs themselves live next to their kernels in `lumen/codegen`; this folder only wraps them.
 - Timing on or off comes from `lumen.config.compiler.autotune` (`lumen/config`). With it off, only forced configs apply.
 

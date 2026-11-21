@@ -9,6 +9,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 
 use crate::DType;
 use crate::Tensor;
+use crate::codegen::devices::cuda::{Cuda, cute_type, unsigned};
 use crate::codegen::dot_general::GemmCodegen;
 use crate::codegen::elementwise::cuda::Layouts;
 use crate::codegen::emitter::Emit;
@@ -17,7 +18,6 @@ use crate::codegen::kernel::Kernel;
 use crate::codegen::kinds::gemm_dot;
 use crate::codegen::regions::{Region, gemm_expanded, gemm_regions};
 use crate::codegen::store::triton::gather_index;
-use crate::codegen::utils::cuda::{Cuda, cute_type, unsigned};
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::plan::CudaStep;
 use crate::plan::step::Tensors;

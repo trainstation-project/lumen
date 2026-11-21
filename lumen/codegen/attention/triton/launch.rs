@@ -5,8 +5,8 @@ use std::sync::OnceLock;
 
 use crate::codegen::attention::AttentionCodegen;
 use crate::codegen::attention::triton::{AttentionConfig, untuned_attention};
+use crate::codegen::devices::triton as codegen;
 use crate::codegen::elementwise::triton::{copy, fill};
-use crate::codegen::utils::triton as codegen;
 use crate::graph::{Primitive, Var};
 use crate::graph_compiler::passes::attention::{self, BACKWARD, FORWARD, Strides};
 use crate::plan::StepBase;

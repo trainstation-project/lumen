@@ -6,13 +6,13 @@ use std::fmt::Write;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
 use super::ElementwiseCodegen;
+use crate::codegen::devices::cuda::{Cuda, cute_type, unsigned};
 use crate::codegen::dot_general::GemmCodegen;
 use crate::codegen::emitter::Emit;
 use crate::codegen::emitter::cuda::Emitter;
 use crate::codegen::kernel::Kernel;
 use crate::codegen::kinds::gemm_dot;
 use crate::codegen::store::triton::gather_index;
-use crate::codegen::utils::cuda::{Cuda, cute_type, unsigned};
 use crate::graph::Graph;
 use crate::graph::{Primitive, TensorType};
 use crate::graph_compiler::passes::horizontal::segments;
@@ -49,7 +49,7 @@ pub(crate) struct Layouts {
 }
 
 /// CUDA elementwise fusions: the fixed `ElementwiseKernel` (lumen.codegen.elementwise.cuda.kernel) walks
-/// the outputs and runs a generated `BODY` at each index; `lumen.codegen.utils.cuda` compiles and runs
+/// the outputs and runs a generated `BODY` at each index; `lumen.codegen.devices.cuda` compiles and runs
 /// the generated module's `launch`.
 impl ElementwiseCodegen for Cuda {
     /// The kernel's name and its generated module's Python source.
@@ -245,7 +245,7 @@ impl Kernel for Elementwise {
         (inputs, out, outs): &Tensors,
     ) -> Result<(), String> {
         let launch = LAUNCH.get().ok_or(
-            "the CUDA backend launches from Python (lumen.codegen.utils.cuda): none is installed",
+            "the CUDA backend launches from Python (lumen.codegen.devices.cuda): none is installed",
         )?;
 
         let outputs: Vec<&Tensor> = std::iter::once(out).chain(outs).collect();

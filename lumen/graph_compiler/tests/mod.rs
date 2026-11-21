@@ -813,7 +813,7 @@ fn row_scaled_matmul(extra_output: bool) -> Graph {
 fn row_scale_moves_past_its_matmul() {
     use super::passes::linear_reordering::LinearReordering;
     use super::pipeline::rewritten_on;
-    use crate::codegen::utils::triton::Triton;
+    use crate::codegen::devices::triton::Triton;
 
     let g = row_scaled_matmul(false);
     let out = rewritten_on::<Triton, _>(&g, LinearReordering { tile: None });
@@ -858,7 +858,7 @@ fn row_scale_moves_past_its_matmul() {
 fn row_division_moves_past_its_matmul() {
     use super::passes::linear_reordering::LinearReordering;
     use super::pipeline::rewritten_on;
-    use crate::codegen::utils::triton::Triton;
+    use crate::codegen::devices::triton::Triton;
 
     let mut g = Graph::new();
     let x = g.input(ty(&[8, 32]));
@@ -898,7 +898,7 @@ fn row_division_moves_past_its_matmul() {
 fn shared_lhs_and_column_scales_stay() {
     use super::passes::linear_reordering::LinearReordering;
     use super::pipeline::rewritten_on;
-    use crate::codegen::utils::triton::Triton;
+    use crate::codegen::devices::triton::Triton;
 
     let g = row_scaled_matmul(true);
     assert_eq!(
@@ -940,7 +940,7 @@ fn shared_lhs_and_column_scales_stay() {
 fn column_scale_of_the_weight_moves_past_its_matmul() {
     use super::passes::linear_reordering::LinearReordering;
     use super::pipeline::rewritten_on;
-    use crate::codegen::utils::triton::Triton;
+    use crate::codegen::devices::triton::Triton;
 
     let mut g = Graph::new();
     let x = g.input(ty(&[8, 32]));
@@ -1089,7 +1089,7 @@ fn assert_reordered(g: &Graph, out: &Graph, shapes: &[Vec<usize>], moved: usize,
 fn factors_move_past_their_matmul_in_every_layout() {
     use super::passes::linear_reordering::LinearReordering;
     use super::pipeline::rewritten_on;
-    use crate::codegen::utils::triton::Triton;
+    use crate::codegen::devices::triton::Triton;
 
     for (xt, wt) in [(false, false), (false, true), (true, false), (true, true)] {
         for keepdim in [false, true] {
@@ -1110,7 +1110,7 @@ fn factors_move_past_their_matmul_in_every_layout() {
 fn contracted_axis_factors_stay_in_every_layout() {
     use super::passes::linear_reordering::LinearReordering;
     use super::pipeline::rewritten_on;
-    use crate::codegen::utils::triton::Triton;
+    use crate::codegen::devices::triton::Triton;
 
     for (xt, wt) in [(false, false), (false, true), (true, false), (true, true)] {
         for side in 0..2 {
@@ -1157,7 +1157,7 @@ fn contracted_axis_factors_stay_in_every_layout() {
 fn batched_rows_move_past_their_matmul() {
     use super::passes::linear_reordering::LinearReordering;
     use super::pipeline::rewritten_on;
-    use crate::codegen::utils::triton::Triton;
+    use crate::codegen::devices::triton::Triton;
 
     for wt in [false, true] {
         for keepdim in [false, true] {
@@ -1230,7 +1230,7 @@ fn norm_scaled_matmul() -> Graph {
 fn reordering_moves_only_factors_of_cross_tile_reductions() {
     use super::passes::linear_reordering::LinearReordering;
     use super::pipeline::rewritten_on;
-    use crate::codegen::utils::triton::Triton;
+    use crate::codegen::devices::triton::Triton;
 
     let g = norm_scaled_matmul();
     let moved = |out: &Graph| names(out).ends_with(&["dot_general", "broadcast_in_dim", "mul"]);

@@ -17,7 +17,7 @@ their launch.
     Kernels exist for int32 and int64 indices.
   - `mod.rs`: `encode` runs the copy then either the atomic kernel (float32, float16, bfloat16, int32, uint32 when
     not `deterministic`, a thread an element) or the count, prefix-sum, place and rows passes. `scratch_bytes`
-    sizes the counts, starts and order (`2n + 1 + m` u32s) and is used by `codegen/utils/mps`. `ScatterAdd` is the
+    sizes the counts, starts and order (`2n + 1 + m` u32s) and is used by `codegen/devices/mps`. `ScatterAdd` is the
     Kernel (`Config = ()`).
 - `triton/` — Triton.
   - `mod.rs`: `atomic_add(dtype)`, whether `tl.atomic_add` adds the dtype (else the sorted path runs).

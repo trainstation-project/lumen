@@ -8,7 +8,7 @@ without waiting. Codegen generates and compiles the kernels; the `Kernel` implem
 
 - `mod.rs` — the `Launch` trait: an associated `Args<'a>` (one launch in the device's form) and
   `launch(args)`, which queues it. It is implemented on each backend's codegen marker type (`Cuda`, `Triton`,
-  `Mps`, `Tpu` from `codegen::utils`).
+  `Mps`, `Tpu` from `codegen::devices`).
 - `cuda/mod.rs` — `CudaLaunch` (compiled kernel, grid, runtime parameter values) launched with `cuLaunchKernel`
   straight from Rust on `stream::cuda::launch_stream()`, which is a CUDA graph's capture stream while one
   captures. Also the launchers Python installs once at import: `LAUNCH` (CuTe kernels), `GEMM` (with

@@ -1,18 +1,18 @@
 //! Lowering TPU kernels to Mosaic: each Pallas kernel (or generated program) traced by
-//! `lumen.codegen.utils.tpu.pallas` for a device's memory, once per spec and device.
+//! `lumen.codegen.devices.tpu.pallas` for a device's memory, once per spec and device.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use crate::codegen::utils::tpu::GENERATED;
+use crate::codegen::devices::tpu::GENERATED;
 
-/// Mosaic source of `module`'s kernel for JSON `spec`, lowered by `lumen.codegen.utils.tpu.pallas`.
+/// Mosaic source of `module`'s kernel for JSON `spec`, lowered by `lumen.codegen.devices.tpu.pallas`.
 #[cfg(feature = "python")]
 fn lower(module: &str, spec: &str) -> Result<String, String> {
     use pyo3::prelude::*;
 
     Python::attach(|py| {
-        py.import("lumen.codegen.utils.tpu.pallas")?
+        py.import("lumen.codegen.devices.tpu.pallas")?
             .call_method1("lower", (module, spec))?
             .extract::<String>()
     })
@@ -20,7 +20,7 @@ fn lower(module: &str, spec: &str) -> Result<String, String> {
 }
 
 /// Mosaic source of the generated program `source` (defining `program(device)`), traced on a device with
-/// `scalars` scalars, `host_rows` host rows and `rows` memory rows by `lumen.codegen.utils.tpu.pallas`.
+/// `scalars` scalars, `host_rows` host rows and `rows` memory rows by `lumen.codegen.devices.tpu.pallas`.
 #[cfg(feature = "python")]
 fn lower_source(
     source: &str,
@@ -31,7 +31,7 @@ fn lower_source(
     use pyo3::prelude::*;
 
     Python::attach(|py| {
-        py.import("lumen.codegen.utils.tpu.pallas")?
+        py.import("lumen.codegen.devices.tpu.pallas")?
             .call_method1("lower_source", (source, scalars, host_rows, rows))?
             .extract::<String>()
     })

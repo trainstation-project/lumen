@@ -7,6 +7,7 @@ use std::fmt::Write;
 use indoc::{formatdoc, writedoc};
 
 use crate::DType;
+use crate::codegen::devices::mps::*;
 use crate::codegen::dot_general::mps::GemmConfig;
 use crate::codegen::dot_general::mps::{
     Cut, ROW_TILE, cut, early_outputs, gemm_rows, gemm_tiles, read_staged,
@@ -16,7 +17,6 @@ use crate::codegen::emitter::mps::Emitter;
 use crate::codegen::fusion::mps as fusion;
 pub(crate) use crate::codegen::kinds::{row_partials, row_reductions};
 use crate::codegen::reduction::mps as reduce;
-use crate::codegen::utils::mps::*;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::passes::diamonds::{Partials, depends_on, softmax_pair};

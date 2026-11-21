@@ -3,7 +3,7 @@ head and block specs, causal masking and online-softmax lane layouts."""
 
 import lumen
 import lumen.functional as F
-from lumen.codegen.utils.tpu import pallas
+from lumen.codegen.devices.tpu import pallas
 from lumen.kernels import pallas as pl
 
 LANES = 128

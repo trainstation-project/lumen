@@ -8,7 +8,7 @@ have no gather kernel; they gather inside their elementwise fusions (`take_along
 
 - `mod.rs` declares the `tpu` submodule, built only with `lumen_tpu_linked`. This family has no codegen trait.
 - `tpu/mod.rs` encodes the gather:
-  - `kernel(step)` builds the TensorCore kernel's `codegen::utils::tpu::Kernel` (module
+  - `kernel(step)` builds the TensorCore kernel's `codegen::devices::tpu::Kernel` (module
     `lumen.codegen.gather.tpu.kernel`, `Rows::Step`). It returns an error for any gather the kernels don't
     cover; `checked` accepts only table rows at int32 indices along axis 0.
   - The spec's blocks are bounded by `BLOCK_BYTES`, `ROWS` and the index window `WINDOW`. Each output block
@@ -34,8 +34,8 @@ have no gather kernel; they gather inside their elementwise fusions (`take_along
 ## How it runs
 
 - The SparseCore or TensorCore choice depends on the buffers' layout, which is known only at launch. For that
-  reason `codegen/utils/tpu` gives every `Gather` step the `Gather` kernel (in `tpu/mod.rs`).
-- At codegen, `codegen/utils/tpu` tries to build the TensorCore kernel. A gather that kernel rejects keeps no code
+  reason `codegen/devices/tpu` gives every `Gather` step the `Gather` kernel (in `tpu/mod.rs`).
+- At codegen, `codegen/devices/tpu` tries to build the TensorCore kernel. A gather that kernel rejects keeps no code
   rather than failing.
 - When the step runs, `Gather` tries `sparse_core` first. If that declines, it runs the TensorCore kernel
   through `Pallas`. If neither can run the gather, it fails with the TensorCore kernel's error.

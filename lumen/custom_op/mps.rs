@@ -1,7 +1,7 @@
 //! User-written Metal kernels compiled at runtime and launched on lumen's MPS stream.
 
 #[cfg(lumen_mps_linked)]
-use crate::codegen::utils::mps::Mps;
+use crate::codegen::devices::mps::Mps;
 #[cfg(lumen_mps_linked)]
 use crate::runtime::kernel::Launch as _;
 #[cfg(lumen_mps_linked)]
