@@ -11,9 +11,7 @@ use crate::codegen::TiledAttentions;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
-use crate::graph_compiler::passes::DevicePass;
 use crate::graph_compiler::passes::{CompilerPass, attention};
-use crate::graph_compiler::pipeline::{Pass, when};
 
 /// Indices of the attention fusion's outputs written with rows narrower than their last axis.
 fn unreadable(body: &Graph, forward: bool) -> Vec<usize> {
@@ -360,6 +358,11 @@ fn attentions<D: TiledAttentions>(graph: &Graph) -> Result<(), String> {
 pub(crate) struct AttentionLayouts;
 
 impl<D: TiledAttentions> CompilerPass<DeviceModule<'_, D>> for AttentionLayouts {
+    /// With `flash_attention`.
+    fn configured(config: &CompilerConfig) -> Option<Self> {
+        (config.flash_attention).then_some(AttentionLayouts)
+    }
+
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "attention_layouts"
@@ -369,13 +372,6 @@ impl<D: TiledAttentions> CompilerPass<DeviceModule<'_, D>> for AttentionLayouts 
     fn apply(&mut self, m: &mut DeviceModule<'_, D>) -> Result<(), String> {
         m.graph = delta_inside(&reshaped_outputs(&merged_outputs(&m.graph)));
         attentions::<D>(&m.graph)
-    }
-}
-
-/// With `flash_attention`, on every device whose codegen implements `TiledAttentions`.
-impl<D: TiledAttentions> DevicePass<D> for AttentionLayouts {
-    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
-        when(config.flash_attention, AttentionLayouts)
     }
 }
 

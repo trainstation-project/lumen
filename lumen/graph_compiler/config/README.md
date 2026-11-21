@@ -1,8 +1,8 @@
 # graph_compiler/config
 
 The compiler's settings. Every device's compiler reads one `CompilerConfig`; each backend uses the flags it
-needs and ignores the rest. Passes read it through `Module::config()` and use it to pick their device
-version or the identity pass (`pipeline::when`).
+needs and ignores the rest. Passes read it in `CompilerPass::configured` to say whether a device's pipeline runs
+them (else the identity pass).
 
 ## Files
 

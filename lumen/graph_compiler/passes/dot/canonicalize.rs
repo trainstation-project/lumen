@@ -26,8 +26,7 @@ use crate::graph::primitive::free_dims;
 use crate::graph::{Graph, Primitive, TensorType, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
-use crate::graph_compiler::passes::{CompilerPass, DevicePass, Module};
-use crate::graph_compiler::pipeline::Pass;
+use crate::graph_compiler::passes::{CompilerPass, Module};
 
 /// Whether a backend's matmul kernels read operand `k` (0 the lhs, 1 the rhs) of `dot` over `operands`
 /// as laid out, contiguously.
@@ -77,14 +76,21 @@ pub(crate) struct CanonicalizeDots {
     pub readable: Readable,
 }
 
-impl<M: Module> CompilerPass<M> for CanonicalizeDots {
+impl<D: DotLayouts> CompilerPass<DeviceModule<'_, D>> for CanonicalizeDots {
+    /// Always, with the layouts the device's matmuls read.
+    fn configured(_: &CompilerConfig) -> Option<Self> {
+        Some(CanonicalizeDots {
+            readable: D::readable,
+        })
+    }
+
     fn name(&self) -> &'static str {
         "canonicalize_dots"
     }
 
     /// Rebuilds `graph` with explicit transposes in front of dot operands the backend's kernels can't read as laid
     /// out (`readable`), rewriting the dimension numbers to match the transposed layout.
-    fn apply(&mut self, m: &mut M) -> Result<(), String> {
+    fn apply(&mut self, m: &mut DeviceModule<'_, D>) -> Result<(), String> {
         let graph = m.graph();
         let readable = self.readable;
 
@@ -161,15 +167,5 @@ impl<M: Module> CompilerPass<M> for CanonicalizeDots {
 
         *m.graph_mut() = out;
         Ok(())
-    }
-}
-
-/// Always, on every device whose codegen implements `DotLayouts`: matmul operands its kernels can't read as laid out
-/// are transposed into a form they can first.
-impl<D: DotLayouts> DevicePass<D> for CanonicalizeDots {
-    fn pass<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
-        Box::new(CanonicalizeDots {
-            readable: D::readable,
-        })
     }
 }

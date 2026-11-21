@@ -12,4 +12,4 @@ mod forward;
 pub(crate) use forward::merge_dots;
 
 /// The late dot merge, once the graph is simplified (TPU's, packing whole vector lanes).
-pub(crate) struct MergeDotsLate;
+pub(crate) struct MergeDotsLate(pub(crate) MergeDots);

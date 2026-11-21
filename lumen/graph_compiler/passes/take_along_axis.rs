@@ -19,21 +19,18 @@ use crate::codegen::Gathers;
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
-use crate::graph_compiler::passes::{CompilerPass, DevicePass, Module};
-use crate::graph_compiler::pipeline::Pass;
+use crate::graph_compiler::passes::{CompilerPass, Module};
 use crate::{DType, Scalar};
 
 /// Compiler pass lowering `take_along_axis` to a flat `gather`.
 pub(crate) struct TakeAlongAxis;
 
-/// Always, on every device whose codegen implements `Gathers`.
-impl<D: Gathers> DevicePass<D> for TakeAlongAxis {
-    fn pass<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
-        Box::new(TakeAlongAxis)
+impl<D: Gathers> CompilerPass<DeviceModule<'_, D>> for TakeAlongAxis {
+    /// Always.
+    fn configured(_: &CompilerConfig) -> Option<Self> {
+        Some(TakeAlongAxis)
     }
-}
 
-impl<M: Module> CompilerPass<M> for TakeAlongAxis {
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "take_along_axis"
@@ -41,7 +38,7 @@ impl<M: Module> CompilerPass<M> for TakeAlongAxis {
 
     /// Rewrites each `take_along_axis` as a gather from the flattened operand at flat positions built from
     /// iotas and the indices (int64 for 64-bit indices, int32 otherwise).
-    fn apply(&mut self, m: &mut M) -> Result<(), String> {
+    fn apply(&mut self, m: &mut DeviceModule<'_, D>) -> Result<(), String> {
         let graph = m.graph();
 
         let mut out = Graph::new();

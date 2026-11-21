@@ -33,8 +33,7 @@ use crate::codegen::layout::{MAX_HEROES, transpose_tiling};
 use crate::graph::{Graph, Node, Primitive, Scope, Var, intern};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
-use crate::graph_compiler::passes::{CompilerPass, DevicePass, Module};
-use crate::graph_compiler::pipeline::{Pass, when};
+use crate::graph_compiler::passes::{CompilerPass, Module};
 use std::collections::HashMap;
 
 /// Most nodes in one horizontal group.
@@ -571,14 +570,26 @@ pub(crate) struct HorizontalFusion {
     pub name: &'static str,
 }
 
-impl<M: Module> CompilerPass<M> for HorizontalFusion {
+impl<D: HorizontallyFuses> CompilerPass<DeviceModule<'_, D>> for HorizontalFusion {
+    /// With `horizontal_fusion` (and `fuse` where `WITH_FUSE`), grouping as the device does.
+    fn configured(config: &CompilerConfig) -> Option<Self> {
+        let on = config.horizontal_fusion && (config.fuse || !D::WITH_FUSE);
+
+        on.then_some(HorizontalFusion {
+            candidate: D::candidate,
+            grouping: D::GROUPING,
+            buffers: D::BUFFERS,
+            name: "elementwise",
+        })
+    }
+
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "horizontal_fusion"
     }
 
     /// Replaces each group of candidates with one multi-output fusion.
-    fn apply(&mut self, m: &mut M) -> Result<(), String> {
+    fn apply(&mut self, m: &mut DeviceModule<'_, D>) -> Result<(), String> {
         let name = self.name;
 
         let mut target = Kernels {
@@ -590,23 +601,5 @@ impl<M: Module> CompilerPass<M> for HorizontalFusion {
 
         *m.graph_mut() = fuse(m.graph(), &[], &mut target);
         Ok(())
-    }
-}
-
-/// With `horizontal_fusion` (and `fuse` where `WITH_FUSE`), on every device whose codegen implements
-/// `HorizontallyFuses`: its candidates, grouping and buffer limit, every merged kernel an `elementwise` fusion.
-impl<D: HorizontallyFuses> DevicePass<D> for HorizontalFusion {
-    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
-        let horizontal = HorizontalFusion {
-            candidate: D::candidate,
-            grouping: D::GROUPING,
-            buffers: D::BUFFERS,
-            name: "elementwise",
-        };
-
-        when(
-            config.horizontal_fusion && (config.fuse || !D::WITH_FUSE),
-            horizontal,
-        )
     }
 }

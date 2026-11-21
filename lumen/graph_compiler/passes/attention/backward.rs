@@ -49,9 +49,7 @@ use super::{Access, Dropout, Matcher, Score, Strides, body_of, fits32};
 use crate::DType;
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::device::DeviceModule;
-use crate::graph_compiler::passes::{CompilerPass, DevicePass, Module};
-use crate::graph_compiler::pipeline::{Pass, when};
+use crate::graph_compiler::passes::{CompilerPass, Module};
 
 /// A matched flash-attention backward: gradients of Q, K and V from the transposed scores `S^T`.
 #[derive(Debug, Clone)]
@@ -541,6 +539,11 @@ pub(crate) trait AttentionBackwards: Module {
 pub(crate) struct FlashAttentionBackward;
 
 impl<M: AttentionBackwards> CompilerPass<M> for FlashAttentionBackward {
+    /// With `flash_attention` (and `fuse` where `WITH_FUSE`).
+    fn configured(config: &CompilerConfig) -> Option<Self> {
+        (config.flash_attention && (config.fuse || !M::WITH_FUSE)).then_some(FlashAttentionBackward)
+    }
+
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "flash_attention_backward"
@@ -552,17 +555,5 @@ impl<M: AttentionBackwards> CompilerPass<M> for FlashAttentionBackward {
         let together = m.together();
         *m.graph_mut() = fuse_backward(&graph, together, |_| m.backward_kernel());
         Ok(())
-    }
-}
-
-/// With `flash_attention` (and `fuse` where `AttentionBackwards::WITH_FUSE`), on every device whose module implements
-/// `AttentionBackwards`.
-impl<D: 'static> DevicePass<D> for FlashAttentionBackward
-where
-    for<'a> DeviceModule<'a, D>: AttentionBackwards,
-{
-    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
-        let fused = config.fuse || !<DeviceModule<'a, D> as AttentionBackwards>::WITH_FUSE;
-        when(config.flash_attention && fused, FlashAttentionBackward)
     }
 }

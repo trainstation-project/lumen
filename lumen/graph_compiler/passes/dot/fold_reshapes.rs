@@ -22,13 +22,17 @@ use crate::codegen::FoldsDotReshapes;
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
-use crate::graph_compiler::passes::{CompilerPass, DevicePass, Module};
-use crate::graph_compiler::pipeline::Pass;
+use crate::graph_compiler::passes::{CompilerPass, Module};
 
 /// Compiler pass running [`fold_dot_reshapes`].
 pub(crate) struct FoldDotReshapes;
 
-impl<M: Module> CompilerPass<M> for FoldDotReshapes {
+impl<D: FoldsDotReshapes> CompilerPass<DeviceModule<'_, D>> for FoldDotReshapes {
+    /// Always.
+    fn configured(_: &CompilerConfig) -> Option<Self> {
+        Some(FoldDotReshapes)
+    }
+
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "fold_dot_reshapes"
@@ -36,7 +40,7 @@ impl<M: Module> CompilerPass<M> for FoldDotReshapes {
 
     /// Rewrites `dot(reshape(x), w)`, where the reshape flattens `x`'s leading dims to a matrix with the
     /// same last dim, into `reshape(dot(x, w))` so the dot reads `x` directly.
-    fn apply(&mut self, m: &mut M) -> Result<(), String> {
+    fn apply(&mut self, m: &mut DeviceModule<'_, D>) -> Result<(), String> {
         let graph = m.graph();
 
         let mut out = Graph::new();
@@ -116,12 +120,5 @@ impl<M: Module> CompilerPass<M> for FoldDotReshapes {
 
         *m.graph_mut() = out;
         Ok(())
-    }
-}
-
-/// Always, on every device whose codegen implements `FoldsDotReshapes`.
-impl<D: FoldsDotReshapes> DevicePass<D> for FoldDotReshapes {
-    fn pass<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
-        Box::new(FoldDotReshapes)
     }
 }

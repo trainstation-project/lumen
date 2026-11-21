@@ -41,8 +41,7 @@
 use crate::codegen::FullRows;
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
 use crate::graph_compiler::device::DeviceModule;
-use crate::graph_compiler::passes::{CompilerPass, DevicePass};
-use crate::graph_compiler::pipeline::{Pass, when};
+use crate::graph_compiler::passes::CompilerPass;
 use crate::graph_compiler::{CompilerConfig, elementwise};
 
 /// Whether a row fusion's body reads its input `at` as whole rows, so a matmul can feed it.
@@ -342,6 +341,11 @@ pub(crate) fn dot_rows(
 pub(crate) struct DotRows;
 
 impl<D: FullRows> CompilerPass<DeviceModule<'_, D>> for DotRows {
+    /// With `normalization_diamonds`.
+    fn configured(config: &CompilerConfig) -> Option<Self> {
+        (config.normalization_diamonds).then_some(DotRows)
+    }
+
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "dot_rows"
@@ -354,12 +358,5 @@ impl<D: FullRows> CompilerPass<DeviceModule<'_, D>> for DotRows {
         }
 
         Ok(())
-    }
-}
-
-/// With `normalization_diamonds`, on every device whose codegen implements `FullRows`.
-impl<D: FullRows> DevicePass<D> for DotRows {
-    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
-        when(config.normalization_diamonds, DotRows)
     }
 }

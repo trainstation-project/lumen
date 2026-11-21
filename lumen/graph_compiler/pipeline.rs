@@ -6,7 +6,7 @@ use crate::graph::Graph;
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::{Cpu, DeviceModule};
 use crate::graph_compiler::passes::identity::Identity;
-use crate::graph_compiler::passes::{CompilerPass, DevicePass, Module};
+use crate::graph_compiler::passes::{CompilerPass, Module};
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -88,13 +88,23 @@ impl<M: Module> Pipeline<M> {
 
 /// `graph` as `pass` leaves it, run on a plain module with default options.
 #[cfg(test)]
-pub(crate) fn rewritten<P>(graph: &Graph, mut pass: P) -> Graph
+pub(crate) fn rewritten<P>(graph: &Graph, pass: P) -> Graph
 where
     P: for<'a> CompilerPass<GraphModule<'a>>,
 {
+    rewritten_on::<Cpu, P>(graph, pass)
+}
+
+/// `graph` as `pass` leaves it, run on device `D`'s module with default options (a pass implemented for the
+/// devices whose codegen it reads).
+#[cfg(test)]
+pub(crate) fn rewritten_on<D, P>(graph: &Graph, mut pass: P) -> Graph
+where
+    P: for<'a> CompilerPass<DeviceModule<'a, D>>,
+{
     let options = crate::graph_compiler::Options::default();
 
-    let mut module = GraphModule::new(graph, &options);
+    let mut module = DeviceModule::<D>::new(graph, &options);
 
     pass.apply(&mut module).expect("a rewritten graph");
     module.graph
@@ -103,16 +113,8 @@ where
 /// A boxed pass for a module of type `M`.
 pub(crate) type Pass<M> = Box<dyn CompilerPass<M>>;
 
-/// `pass` when `on`, else the identity pass.
-pub(crate) fn when<M>(on: bool, pass: impl CompilerPass<M> + 'static) -> Pass<M> {
-    match on {
-        true => Box::new(pass),
-        false => Box::new(Identity),
-    }
-}
-
 /// Device `D`'s version of pass `P`, picked by method resolution: through `(&Pick::<P, D>::new()).pass(config)`,
-/// written for a concrete `D`, the impl on `Pick<P, D>` (taken when `P: DevicePass<D>`) wins over the one on
+/// written for a concrete `D`, the impl on `Pick<P, D>` (taken when `P: CompilerPass<DeviceModule<D>>`) wins over the one on
 /// `&Pick<P, D>` (the identity pass), so a device implements only the passes it runs.
 pub(crate) struct Pick<P, D>(PhantomData<(P, D)>);
 
@@ -129,10 +131,13 @@ pub(crate) trait Picked<'a, D> {
     fn pass(&self, config: &CompilerConfig) -> Pass<DeviceModule<'a, D>>;
 }
 
-impl<'a, P: DevicePass<D>, D> Picked<'a, D> for Pick<P, D> {
-    /// The device's own version.
+impl<'a, P: CompilerPass<DeviceModule<'a, D>> + 'static, D> Picked<'a, D> for Pick<P, D> {
+    /// The pass as the device runs it under `config`, or the identity pass when it says it doesn't run.
     fn pass(&self, config: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
-        P::pass(config)
+        match P::configured(config) {
+            Some(pass) => Box::new(pass),
+            None => Box::new(Identity),
+        }
     }
 }
 
@@ -143,8 +148,8 @@ impl<'a, P, D> Picked<'a, D> for &Pick<P, D> {
     }
 }
 
-/// Concrete device `$device`'s version of pass `$pass` under `$config`: its own when the pass implements
-/// `DevicePass<$device>`, else the identity pass.
+/// Concrete device `$device`'s version of pass `$pass` under `$config`: `CompilerPass::configured` when the pass
+/// implements `CompilerPass` for the device's module, else the identity pass.
 macro_rules! pick {
     ($device:ty, $pass:ty, $config:expr) => {{
         use $crate::graph_compiler::pipeline::Picked as _;

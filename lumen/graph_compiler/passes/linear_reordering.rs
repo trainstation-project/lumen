@@ -31,20 +31,7 @@ use crate::codegen::dot_general::RowTile;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
-use crate::graph_compiler::passes::{CompilerPass, DevicePass, Module};
-use crate::graph_compiler::pipeline::{Pass, when};
-
-/// With `linear_reordering`, on every device whose GEMM has a `RowTile`: a matmul operand's factor along the
-/// kept axes (a norm's 1 / rms, a weight's per-channel scale) moves to its output, for its epilogue.
-impl<D: RowTile> DevicePass<D> for LinearReordering {
-    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
-        let reordering = LinearReordering {
-            tile: Some(D::ROW_TILE),
-        };
-
-        when(config.linear_reordering, reordering)
-    }
-}
+use crate::graph_compiler::passes::{CompilerPass, Module};
 
 /// How an operand is rebuilt without its factor: the original value, or an op of the rebuilt value and an
 /// original operand; each op carries the index of the node it rebuilds, whose scope and source lines it
@@ -330,7 +317,14 @@ pub(crate) struct LinearReordering {
     pub(crate) tile: Option<usize>,
 }
 
-impl<M: Module> CompilerPass<M> for LinearReordering {
+impl<D: RowTile> CompilerPass<DeviceModule<'_, D>> for LinearReordering {
+    /// With `linear_reordering`, rows limited to the device's GEMM tile.
+    fn configured(config: &CompilerConfig) -> Option<Self> {
+        config.linear_reordering.then_some(LinearReordering {
+            tile: Some(D::ROW_TILE),
+        })
+    }
+
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "linear_reordering"
@@ -341,7 +335,7 @@ impl<M: Module> CompilerPass<M> for LinearReordering {
     /// (or divided by) each factor per output row or column, rounded once to its output dtype. With `tile`,
     /// only a factor of a reduction over rows wider than `tile` moves ([`crosses_tiles`]): it is what would
     /// otherwise take a pass over the rows after their GEMM's tiles; every other factor stays as traced.
-    fn apply(&mut self, m: &mut M) -> Result<(), String> {
+    fn apply(&mut self, m: &mut DeviceModule<'_, D>) -> Result<(), String> {
         let graph = m.graph();
         let tile = self.tile;
 

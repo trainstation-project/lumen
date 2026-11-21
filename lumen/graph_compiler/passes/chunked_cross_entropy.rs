@@ -28,8 +28,7 @@ use crate::codegen::LinearCrossEntropies;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
-use crate::graph_compiler::passes::{CompilerPass, DevicePass, Module};
-use crate::graph_compiler::pipeline::{Pass, when};
+use crate::graph_compiler::passes::{CompilerPass, Module};
 
 /// Rewrites each matched cross entropy whose logits are also computed in row chunks, until none is left.
 fn chunked_cross_entropy(graph: &Graph) -> Graph {
@@ -320,24 +319,19 @@ fn of_rows(p: &Primitive, b: usize, c: usize) -> Option<Primitive> {
 /// Compiler pass running [`chunked_cross_entropy`].
 pub(crate) struct ChunkedCrossEntropy;
 
-/// With `fuse` and `fused_linear_cross_entropy`, on every device whose codegen implements `LinearCrossEntropies`.
-impl<D: LinearCrossEntropies> DevicePass<D> for ChunkedCrossEntropy {
-    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
-        when(
-            config.fuse && config.fused_linear_cross_entropy,
-            ChunkedCrossEntropy,
-        )
+impl<D: LinearCrossEntropies> CompilerPass<DeviceModule<'_, D>> for ChunkedCrossEntropy {
+    /// With `fuse` and `fused_linear_cross_entropy`.
+    fn configured(config: &CompilerConfig) -> Option<Self> {
+        (config.fuse && config.fused_linear_cross_entropy).then_some(ChunkedCrossEntropy)
     }
-}
 
-impl<M: Module> CompilerPass<M> for ChunkedCrossEntropy {
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "chunked_cross_entropy"
     }
 
     /// Replaces the module's graph with its chunked version.
-    fn apply(&mut self, m: &mut M) -> Result<(), String> {
+    fn apply(&mut self, m: &mut DeviceModule<'_, D>) -> Result<(), String> {
         *m.graph_mut() = chunked_cross_entropy(m.graph());
         Ok(())
     }

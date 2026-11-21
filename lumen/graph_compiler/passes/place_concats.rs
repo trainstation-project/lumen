@@ -20,10 +20,8 @@
 use crate::codegen::{Rechecks, Slots};
 use crate::graph::{Graph, Node, Primitive};
 use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::device::DeviceModule;
+use crate::graph_compiler::passes::CompilerPass;
 use crate::graph_compiler::passes::alone::wrapped;
-use crate::graph_compiler::passes::{CompilerPass, DevicePass};
-use crate::graph_compiler::pipeline::{Pass, when};
 
 /// Whether an operand `producer` makes is worth placing its concatenation for: when `producer` is a kernel of its
 /// own (a matmul, attention's backward, a fusion), whose output written into its slot needs no copy. A cheap
@@ -111,6 +109,11 @@ pub(crate) fn in_place_concats(
 pub(crate) struct PlaceConcats;
 
 impl<M: Slots> CompilerPass<M> for PlaceConcats {
+    /// With `fuse` where `WITH_FUSE`, else always.
+    fn configured(config: &CompilerConfig) -> Option<Self> {
+        (config.fuse || !M::WITH_FUSE).then_some(PlaceConcats)
+    }
+
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "place_concats"
@@ -134,23 +137,15 @@ impl<M: Slots> CompilerPass<M> for PlaceConcats {
     }
 }
 
-/// Where the module implements `Slots`: with `fuse`, or always on a device placing without it (`Slots::WITH_FUSE`).
-impl<D: 'static> DevicePass<D> for PlaceConcats
-where
-    for<'a> DeviceModule<'a, D>: Slots,
-{
-    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
-        when(
-            config.fuse || !<DeviceModule<'a, D> as Slots>::WITH_FUSE,
-            PlaceConcats,
-        )
-    }
-}
-
 /// Compiler pass copying the concatenations fusion left unable to be written in place.
 pub(crate) struct Concats;
 
 impl<M: Rechecks> CompilerPass<M> for Concats {
+    /// Always.
+    fn configured(_: &CompilerConfig) -> Option<Self> {
+        Some(Concats)
+    }
+
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "concats"
@@ -195,15 +190,5 @@ impl<M: Rechecks> CompilerPass<M> for Concats {
         }
 
         Ok(())
-    }
-}
-
-/// Always, where the module implements `Rechecks`.
-impl<D: 'static> DevicePass<D> for Concats
-where
-    for<'a> DeviceModule<'a, D>: Rechecks,
-{
-    fn pass<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
-        Box::new(Concats)
     }
 }

@@ -1163,3 +1163,21 @@ pub(crate) fn philox4x32(mut k: [u32; 2], mut c: [u32; 4]) -> [u32; 4] {
 
     c
 }
+
+/// What the CPU (this interpreter) runs: every primitive but a `lumen.kernels.pallas` kernel, which runs on a TPU.
+impl crate::codegen::Supports for crate::graph_compiler::device::Cpu {
+    /// Rejects graphs with a Pallas kernel.
+    fn check(graph: &Graph) -> Result<(), String> {
+        match graph
+            .nodes()
+            .iter()
+            .find(|n| matches!(n.primitive, Primitive::PallasCall { .. }))
+        {
+            Some(n) => Err(format!(
+                "{}: a lumen.kernels.pallas kernel runs on a TPU, not the CPU",
+                n.primitive.name()
+            )),
+            None => Ok(()),
+        }
+    }
+}

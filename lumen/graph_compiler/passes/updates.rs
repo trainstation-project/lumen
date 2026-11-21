@@ -23,8 +23,7 @@ use crate::codegen::dynamic_slice::UpdateChains;
 use crate::graph::{Graph, Node, Primitive, UPDATES, Var, intern};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
-use crate::graph_compiler::passes::{CompilerPass, DevicePass, Module};
-use crate::graph_compiler::pipeline::{Pass, when};
+use crate::graph_compiler::passes::{CompilerPass, Module};
 use crate::tensor::scalar::Scalar;
 
 /// Whether `v` is made by a scalar `i32` integer fill, i.e. a compile-time start index.
@@ -156,20 +155,15 @@ pub(crate) struct Updates {
     pub(crate) most: usize,
 }
 
-/// On every device whose codegen implements `UpdateChains`, with its chain lengths: under `fuse`, or always when
-/// the backend says so.
-impl<D: UpdateChains> DevicePass<D> for Updates {
-    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
-        let updates = Updates {
+impl<D: UpdateChains> CompilerPass<DeviceModule<'_, D>> for Updates {
+    /// With `fuse` where `WITH_FUSE`, else always; chains as long as the device takes.
+    fn configured(config: &CompilerConfig) -> Option<Self> {
+        (config.fuse || !D::WITH_FUSE).then_some(Updates {
             least: D::LEAST,
             most: D::MOST,
-        };
-
-        when(config.fuse || !D::WITH_FUSE, updates)
+        })
     }
-}
 
-impl<M: Module> CompilerPass<M> for Updates {
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "dynamic_update_slices"
@@ -177,7 +171,7 @@ impl<M: Module> CompilerPass<M> for Updates {
 
     /// Replaces each update chain of `least` to `most` updates with one `updates` fusion emitted at the
     /// chain's last node.
-    fn apply(&mut self, m: &mut M) -> Result<(), String> {
+    fn apply(&mut self, m: &mut DeviceModule<'_, D>) -> Result<(), String> {
         let graph = m.graph();
         let (least, most) = (self.least, self.most);
 

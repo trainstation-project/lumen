@@ -26,8 +26,7 @@ use crate::codegen::SplitsK;
 use crate::graph::{Graph, Primitive, TensorType, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
-use crate::graph_compiler::passes::{CompilerPass, DevicePass};
-use crate::graph_compiler::pipeline::{Pass, when};
+use crate::graph_compiler::passes::CompilerPass;
 
 /// Most K chunks a matmul is split into.
 pub(crate) const MAX_SPLIT: usize = 8;
@@ -208,6 +207,11 @@ pub(crate) fn split<D: SplitsK>(graph: &Graph) -> Graph {
 pub(crate) struct SplitK;
 
 impl<D: SplitsK> CompilerPass<DeviceModule<'_, D>> for SplitK {
+    /// With `split_k`.
+    fn configured(config: &CompilerConfig) -> Option<Self> {
+        (config.split_k).then_some(SplitK)
+    }
+
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "split_k"
@@ -217,12 +221,5 @@ impl<D: SplitsK> CompilerPass<DeviceModule<'_, D>> for SplitK {
     fn apply(&mut self, m: &mut DeviceModule<'_, D>) -> Result<(), String> {
         m.graph = split::<D>(&m.graph);
         Ok(())
-    }
-}
-
-/// With `split_k`, on every device whose codegen implements `SplitsK`.
-impl<D: SplitsK> DevicePass<D> for SplitK {
-    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
-        when(config.split_k, SplitK)
     }
 }

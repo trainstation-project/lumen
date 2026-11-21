@@ -8,9 +8,7 @@ use crate::codegen::kinds::gemm_dot;
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
 use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::CompilerPass;
-use crate::graph_compiler::passes::DevicePass;
 use crate::graph_compiler::passes::diamonds::tile_reductions;
-use crate::graph_compiler::pipeline::{Pass, when};
 use crate::graph_compiler::{CompilerConfig, elementwise};
 
 /// Name of a GEMM writing a row's operand and its first reductions' partials.
@@ -302,6 +300,12 @@ fn finished_body(rows: &Graph, split: &[Var]) -> Graph {
 pub(crate) struct WideRows;
 
 impl<D: PartialRows> CompilerPass<DeviceModule<'_, D>> for WideRows {
+    /// With `fuse`, `normalization_diamonds` and `linear_reordering`.
+    fn configured(config: &CompilerConfig) -> Option<Self> {
+        (config.fuse && config.normalization_diamonds && config.linear_reordering)
+            .then_some(WideRows)
+    }
+
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "wide_rows"
@@ -468,17 +472,5 @@ impl<D: PartialRows> CompilerPass<DeviceModule<'_, D>> for WideRows {
 
         m.graph = out;
         Ok(())
-    }
-}
-
-/// With `fuse`, `normalization_diamonds` and `linear_reordering` (as on MPS): rows too wide for one GEMM
-/// tile get the GEMM feeding them writing their reductions' partials too. Without the reordering the row
-/// kernel reads the rows back anyway, so the partials save nothing.
-impl<D: PartialRows> DevicePass<D> for WideRows {
-    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
-        when(
-            config.fuse && config.normalization_diamonds && config.linear_reordering,
-            WideRows,
-        )
     }
 }
