@@ -16,9 +16,9 @@
 //!
 //! Nodes it doesn't rewrite are copied with their labels and origins.
 //!
-//! Devices: it runs, always, on each device whose codegen implements `codegen::FoldsDotReshapes`: TPU. The others get
+//! Devices: it runs, always, on each device whose codegen implements `codegen::dot_general::FoldsDotReshapes`: TPU. The others get
 //! the identity pass.
-use crate::codegen::FoldsDotReshapes;
+use crate::codegen::dot_general::FoldsDotReshapes;
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;

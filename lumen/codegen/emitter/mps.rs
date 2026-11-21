@@ -375,7 +375,7 @@ impl<'a> Emit<'a> for Emitter<'a> {
 }
 
 /// Metal kernels read each element's partner at `j ^ 1`.
-impl crate::codegen::SwapsPairs for Mps {}
+impl crate::codegen::emitter::SwapsPairs for Mps {}
 
 /// Metal kernels gather (a fused `Gather`).
-impl crate::codegen::Gathers for Mps {}
+impl crate::codegen::emitter::Gathers for Mps {}

@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 
 use crate::DType;
-use crate::codegen::MergesDots;
+use crate::codegen::dot_general::MergesDots;
 use crate::graph::primitive::free_dims;
 use crate::graph::{Graph, Node, Primitive, TensorType, Var};
 use crate::graph_compiler::CompilerConfig;

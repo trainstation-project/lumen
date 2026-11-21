@@ -741,10 +741,10 @@ impl crate::codegen::kernel::Kernel for Matmul {
 }
 
 /// Metal runs batched inner products as elementwise and reduction fusions.
-impl crate::codegen::InnerProducts for Mps {}
+impl crate::codegen::dot_general::InnerProducts for Mps {}
 
 /// Metal's GEMMs read operands laid out with each batch, free and contracting group merging into one stride.
-impl crate::codegen::DotLayouts for Mps {
+impl crate::codegen::dot_general::DotLayouts for Mps {
     /// What `dot_general::mps::reads_strided` accepts at the operand's contiguous strides.
     fn readable(dot: &Primitive, operands: [&crate::graph::TensorType; 2], k: usize) -> bool {
         let strides = crate::tensor::contiguous_strides(&operands[k].shape);
@@ -774,7 +774,7 @@ fn chunks(m: usize, n: usize, k: usize) -> Option<usize> {
 
 /// MPS splits with its GEMM's tiles (`float_groups`), aiming at 256 threadgroups, keeping GEMV and skinny products of
 /// at most `WHOLE_ROWS` rows whole, and preferring MLX's chunk counts (`chunks`).
-impl crate::codegen::SplitsK for Mps {
+impl crate::codegen::dot_general::SplitsK for Mps {
     const TARGET: usize = 256;
 
     /// Threadgroups of the GEMM's float tiles.
@@ -801,11 +801,11 @@ impl crate::codegen::SplitsK for Mps {
 }
 
 /// Metal runs a linear cross entropy as one kernel (`dot_general::mps::linear_cross_entropy`).
-impl crate::codegen::LinearCrossEntropies for Mps {}
+impl crate::codegen::dot_general::LinearCrossEntropies for Mps {}
 
 /// MPS merges with `fuse`, its backward merge with `contraction_epilogues` too, packing for the GEMM epilogue's row
 /// columns.
-impl crate::codegen::MergesDots for Mps {
+impl crate::codegen::dot_general::MergesDots for Mps {
     const BACKWARD_EPILOGUES: bool = true;
 
     /// What MPS fusion can fuse, read in place; views; lanes 1; `ROW_COLUMNS` columns.
@@ -820,7 +820,7 @@ impl crate::codegen::MergesDots for Mps {
 }
 
 /// Metal GEMMs read the operand layouts `dot_general::mps::reads_strided` accepts in place.
-impl crate::codegen::StridedOperands for Mps {
+impl crate::codegen::dot_general::StridedOperands for Mps {
     /// The MPS GEMM's rule.
     fn reads_strided(
         dot: &Primitive,

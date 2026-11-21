@@ -368,7 +368,7 @@ fn dot_operands_are_put_in_matmul_form_by_a_transpose_step() {
             &g,
             crate::graph_compiler::passes::dot::canonicalize::CanonicalizeDots {
                 readable:
-                    <crate::codegen::devices::mps::Mps as crate::codegen::DotLayouts>::readable,
+                    <crate::codegen::devices::mps::Mps as crate::codegen::dot_general::DotLayouts>::readable,
             },
         );
 
@@ -405,7 +405,7 @@ fn dot_operands_are_put_in_matmul_form_by_a_transpose_step() {
             &g,
             crate::graph_compiler::passes::dot::canonicalize::CanonicalizeDots {
                 readable:
-                    <crate::codegen::devices::mps::Mps as crate::codegen::DotLayouts>::readable,
+                    <crate::codegen::devices::mps::Mps as crate::codegen::dot_general::DotLayouts>::readable,
             },
         )),
         ["dot_general"]

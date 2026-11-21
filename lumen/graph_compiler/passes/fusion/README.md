@@ -42,7 +42,7 @@ before `wide_rows`, `place_views`, `alone`, `concats` and `horizontal`; it consu
   splitting off layout ops until every group's indexing can be planned, and turns the groups into
   `elementwise` or `reduction` fusions (a reducing member leads).
 
-The `Fusion` pass (in `mod.rs`) runs each device's fusion, `codegen::Fuses::fuse`, on every device whose codegen
+The `Fusion` pass (in `mod.rs`) runs each device's fusion, `codegen::fusion::Fuses::fuse`, on every device whose codegen
 implements `Fuses`: MPS, Triton and CUDA (with `fuse`) and TPU (always, `WITH_FUSE` off). Each backend's fusion,
 `Backend` and helpers live in `codegen/fusion` (`mps.rs`, `triton.rs`, `cuda.rs`, `tpu.rs`). CPU gets the identity
 pass.

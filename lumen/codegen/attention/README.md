@@ -10,7 +10,7 @@ code generated per fusion so the fixed kernels can read and write its operands i
 - `mod.rs` — the `AttentionCodegen` trait each backend implements: `forward` and `backward` code for a matched
   `Attention` / `Backward` laid out as `Strides`, `score` (the traced score ops applied to the float32 `Q K^T`
   products) and `dropout`. `Code` differs per backend: a Metal kernel's name and source, Triton jit helpers, or a
-  TPU kernel kind and JSON spec.
+  TPU kernel kind and JSON spec. It also defines `TiledAttentions` (`attention_layouts`, TPU's).
 - `cuda/` — the CuTe DSL (SM80) forward.
   - `mod.rs`: `supports` decides which matched attentions the kernel runs (16-bit floats written in their own dtype,
     head dims of 16-byte rows up to 256, no dropout or runtime causal offset, float32 LSE, operands in 16-byte rows).

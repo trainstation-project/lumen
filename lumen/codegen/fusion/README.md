@@ -2,11 +2,11 @@
 
 Each backend's fusion: which nodes its kernels fuse, its view of the shared fusion (`passes::fusion::Backend`) or
 a fusion of its own, how its fused bodies are named, and the helpers other passes and codegen ask. Each implements
-`codegen::Fuses`, which the graph compiler's `fusion` pass (`passes/fusion`) runs.
+`codegen::fusion::Fuses`, which the graph compiler's `fusion` pass (`passes/fusion`) runs.
 
 ## Files
 
-- `mod.rs` — declares the backends.
+- `mod.rs` — declares the backends. It defines `Fuses` (the `fusion` pass), `Slots` (`place_concats`), `Rechecks` (`concats`) and `HorizontallyFuses` (`horizontal_fusion`), which each backend implements in its file.
 - `mps.rs` — MPS (built only when MPS is linked): `fusible` (elementwise, layout, gather and reduction ops under
   2^32 elements, never float64), its `Backend` (29 input buffers, `row_dot` limited to `ROW_TILE` without
   `linear_reordering`), and its `Fuses`: the shared fusion, every fusion requested as a `Kernel::Fusion`, then

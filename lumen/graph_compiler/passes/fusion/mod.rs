@@ -111,11 +111,11 @@ pub(crate) fn fuse(
     )
 }
 
-/// The fusion pass: each device's fusion (`codegen::Fuses::fuse`, in its codegen), on every device whose codegen
+/// The fusion pass: each device's fusion (`codegen::fusion::Fuses::fuse`, in its codegen), on every device whose codegen
 /// implements `Fuses`.
 pub(crate) struct Fusion;
 
-impl<D: crate::codegen::Fuses>
+impl<D: crate::codegen::fusion::Fuses>
     crate::graph_compiler::passes::CompilerPass<crate::graph_compiler::device::DeviceModule<'_, D>>
     for Fusion
 {

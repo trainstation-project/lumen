@@ -25,12 +25,12 @@ body's values at an index) and `store` (strided load/store addressing). `devices
 type, prelude and helpers, what it supports, and its `codegen` and `Device` impl, the dispatcher picking every step's
 kernel across families (family-specific helpers live in their family).
 
-Each backend implements the graph compiler's pass traits (`codegen/mod.rs`, plus `Attentions` and
-`AttentionBackwards` in `passes/attention`) in the family file they belong to: attention traits in
-`attention/<device>`; `SplitsK`, `DotLayouts`, `PartialRows`, `InnerProducts`, `MergesDots`, `FoldsDotReshapes`,
+Each pass trait is defined in the family it belongs to (`<family>/mod.rs`; `Attentions` and `AttentionBackwards` in
+`passes/attention`; `Supports` and `Lone`, backend-wide, in `devices/mod.rs`), and each backend implements it in that
+family's device file: attention traits in `attention/<device>`; `SplitsK`, `DotLayouts`, `PartialRows`, `InnerProducts`, `MergesDots`, `FoldsDotReshapes`,
 `FusesDots`, `LinearCrossEntropies` and `StridedOperands` in `dot_general/<device>`; `NormalizationRows`, `FusedRows`
 and `FullRows` in `row/<device>`; `UpdateChains` in `dynamic_slice/<device>`; `Slots`, `Rechecks` and
-`HorizontallyFuses` in `fusion/<device>`; `SwapsPairs` and `Gathers` in `emitter/<device>`. A TPU family module is
+`HorizontallyFuses` and `Fuses` in `fusion/<device>`; `SwapsPairs` and `Gathers` in `emitter/<device>`. A TPU family module is
 built without the TPU linked too, so the pipeline has its pass traits on every build; the parts that need the TPU
 runtime are `#[cfg(lumen_tpu_linked)]`.
 

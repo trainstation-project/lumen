@@ -2,7 +2,7 @@
 //! when the GEMM kernel can read the operand at the parent's strides. It runs after `fusion` and `wide_rows` and before
 //! `alone`, so the lone layout ops `alone` turns into elementwise fusions no longer include these slices.
 //!
-//! Devices: it runs on each device whose codegen implements `codegen::StridedOperands` (its GEMM's rule for the
+//! Devices: it runs on each device whose codegen implements `codegen::dot_general::StridedOperands` (its GEMM's rule for the
 //! operand layouts it reads in place): MPS (`dot_general::mps::reads_strided`) and Triton (any strides). CPU, CUDA and
 //! TPU get the identity pass.
 //!
@@ -13,7 +13,7 @@
 //! exactly one of its operands, in a layout the rule accepts. MPS codegen calls `fusion_reads_strided` too
 //! (`codegen::fusion::mps::fusion_reads_strided`, planning MPS steps).
 
-use crate::codegen::StridedOperands;
+use crate::codegen::dot_general::StridedOperands;
 use crate::codegen::kinds::gemm_dot;
 use crate::graph::{Graph, Primitive, TensorType, Var};
 use crate::graph_compiler::CompilerConfig;

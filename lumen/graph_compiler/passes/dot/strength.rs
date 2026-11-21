@@ -20,10 +20,10 @@
 //!
 //! Integer dots and dots with any non-trivial free dimension are copied unchanged.
 //!
-//! Devices: it runs, always, on each device whose codegen implements `codegen::InnerProducts`: MPS, Triton and TPU.
+//! Devices: it runs, always, on each device whose codegen implements `codegen::dot_general::InnerProducts`: MPS, Triton and TPU.
 //! CPU and CUDA get the identity pass.
 use crate::DType;
-use crate::codegen::InnerProducts;
+use crate::codegen::dot_general::InnerProducts;
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;

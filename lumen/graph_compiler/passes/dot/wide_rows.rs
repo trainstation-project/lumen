@@ -1,9 +1,9 @@
-//! Wide matmul rows (Triton's, on each device whose codegen implements `codegen::PartialRows`): a normalization `row` fusion whose rows a GEMM (alone or with its
+//! Wide matmul rows (Triton's, on each device whose codegen implements `codegen::dot_general::PartialRows`): a normalization `row` fusion whose rows a GEMM (alone or with its
 //! epilogue) makes, too wide for one GEMM tile to hold them whole, gets its GEMM writing the row's first
 //! reductions' partials over each `tile`-column block of a row as well (`dot_partials`); those are
 //! reduced and the row reads them instead of reducing its rows again, so the product is read once less.
 
-use crate::codegen::PartialRows;
+use crate::codegen::dot_general::PartialRows;
 use crate::codegen::kinds::gemm_dot;
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
 use crate::graph_compiler::device::DeviceModule;

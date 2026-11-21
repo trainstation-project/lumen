@@ -539,7 +539,7 @@ impl RowCodegen for Triton {
 
 /// Triton's fusion fuses rows of what it fuses (the rows MPS finds), column sums riding along within
 /// `row::triton::ROW_PARTIALS`.
-impl crate::codegen::NormalizationRows for Triton {
+impl crate::codegen::row::NormalizationRows for Triton {
     const PARTIALS: crate::graph_compiler::passes::diamonds::Partials =
         crate::codegen::row::triton::ROW_PARTIALS;
 

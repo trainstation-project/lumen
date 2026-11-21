@@ -3,7 +3,7 @@
 //! `chunked_cross_entropy`, earlier in the list, reuses its matcher (`Found`, `matched` and `uses` are `pub(super)`).
 //!
 //! Devices: it runs, with `fuse` and `fused_linear_cross_entropy`, on each device whose codegen implements
-//! `codegen::LinearCrossEntropies` (a fused linear cross-entropy kernel): MPS and Triton. CPU, CUDA and TPU get the
+//! `codegen::dot_general::LinearCrossEntropies` (a fused linear cross-entropy kernel): MPS and Triton. CPU, CUDA and TPU get the
 //! identity pass.
 //!
 //! The pattern, for an unbatched dot computing float32 logits (float32 accumulation and output) from 2-D hidden states
@@ -24,7 +24,7 @@
 //!
 //! Every other node is copied with its label; replaced nodes pass their origins to the new ones.
 
-use crate::codegen::LinearCrossEntropies;
+use crate::codegen::dot_general::LinearCrossEntropies;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;

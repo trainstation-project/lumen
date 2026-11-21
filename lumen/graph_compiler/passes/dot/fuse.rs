@@ -28,9 +28,9 @@
 //! Its label is the dot's label, prefixed `Nx` when an unlabelled dot stands for N slices or N stacked parts,
 //! followed by the absorbed nodes' labels.
 //!
-//! Devices: it runs, always, on each device whose codegen implements `codegen::FusesDots` (its vector lanes and which
+//! Devices: it runs, always, on each device whose codegen implements `codegen::dot_general::FusesDots` (its vector lanes and which
 //! producers write a concatenation's slots): TPU.
-use crate::codegen::FusesDots;
+use crate::codegen::dot_general::FusesDots;
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
 use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::CompilerPass;

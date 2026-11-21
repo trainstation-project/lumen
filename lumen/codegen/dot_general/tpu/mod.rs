@@ -79,7 +79,7 @@ pub(crate) fn kernel(step: &StepBase) -> Result<Option<Kernel>, String> {
 
 /// TPU merges without `fuse`, late (once the graph is simplified), packing whole vector lanes: everything read in place,
 /// no views, `LANES` lanes, 1 column.
-impl crate::codegen::MergesDots for Tpu {
+impl crate::codegen::dot_general::MergesDots for Tpu {
     const WITH_FUSE: bool = false;
     const LATE: bool = true;
 
@@ -95,14 +95,14 @@ impl crate::codegen::MergesDots for Tpu {
 }
 
 /// TPU runs batched inner products as elementwise and reduction fusions.
-impl crate::codegen::InnerProducts for Tpu {}
+impl crate::codegen::dot_general::InnerProducts for Tpu {}
 
 /// TPU's matmul kernel takes dots with their operands' reshapes folded in.
-impl crate::codegen::FoldsDotReshapes for Tpu {}
+impl crate::codegen::dot_general::FoldsDotReshapes for Tpu {}
 
 /// TPU's matmul kernel reads its batch dims leading, the lhs as batch, free dims then one contracting one (or batch,
 /// contracting, free), the rhs as batch, then one contracting and one free dim in either order.
-impl crate::codegen::DotLayouts for Tpu {
+impl crate::codegen::dot_general::DotLayouts for Tpu {
     /// Whether the TPU matmul kernel reads operand `k` of `dot` over `operands` as laid out.
     fn readable(
         dot: &crate::graph::Primitive,
@@ -137,7 +137,7 @@ impl crate::codegen::DotLayouts for Tpu {
 
 /// TPU fuses matmuls with their slices, stacked lhs and epilogues, in whole vector lanes, a producer writing a
 /// concatenation's slot as `fusion::tpu::slot_writes` accepts.
-impl crate::codegen::FusesDots for Tpu {
+impl crate::codegen::dot_general::FusesDots for Tpu {
     const LANES: usize = crate::codegen::devices::tpu::LANES;
 
     /// `fusion::tpu::slot_writes`.

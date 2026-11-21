@@ -604,7 +604,7 @@ fn feeding(primitive: &Primitive, p: usize, inputs: usize) -> Vec<usize> {
     reads
 }
 
-impl crate::codegen::Lone for DeviceModule<'_, Mps> {
+impl crate::codegen::devices::Lone for DeviceModule<'_, Mps> {
     /// Whether `n` needs its own kernel: a float GEMM, a copying concatenation, a gather, a layout op that
     /// copies (a broadcast, transpose or slice not placed as a view) or an elementwise op.
     fn alone(graph: &Graph, n: &Node) -> bool {
@@ -642,7 +642,7 @@ impl crate::codegen::Lone for DeviceModule<'_, Mps> {
     }
 }
 
-impl crate::codegen::Supports for Mps {
+impl crate::codegen::devices::Supports for Mps {
     /// Rejects graphs with ops MPS has no kernel for: bfloat16 transcendentals and mixed-dtype dots.
     fn check(graph: &Graph) -> Result<(), String> {
         use Primitive::*;

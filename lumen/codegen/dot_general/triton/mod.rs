@@ -922,7 +922,7 @@ impl crate::codegen::kernel::Kernel for Gemm {
 }
 
 /// Triton runs batched inner products as elementwise and reduction fusions.
-impl crate::codegen::InnerProducts for Triton {}
+impl crate::codegen::dot_general::InnerProducts for Triton {}
 
 /// Tiles a Triton split aims for: on an H100, outputs of 64 or more 128x128 tiles already keep the GPU busy (a
 /// 1024x1024 bfloat16 matmul is slower split), while 16 tiles gain about 2x.
@@ -931,7 +931,7 @@ const SPLIT_TARGET: usize = 128;
 /// Triton splits with the untuned GEMM config's tiles, aiming at `SPLIT_TARGET`, keeping matrix-vector products whole
 /// for the GEMV kernel (its lanes already split K, as MPS keeps its GEMVs). Its partials are always summed by a
 /// reduction (no atomics), so results stay deterministic.
-impl crate::codegen::SplitsK for Triton {
+impl crate::codegen::dot_general::SplitsK for Triton {
     const TARGET: usize = SPLIT_TARGET;
 
     /// Tiles of the untuned GEMM config.
@@ -953,7 +953,7 @@ impl crate::codegen::SplitsK for Triton {
 }
 
 /// Triton's GEMM writes a wide row's partials over `partial_tile`-column blocks, except on the GEMV kernel.
-impl crate::codegen::PartialRows for Triton {
+impl crate::codegen::dot_general::PartialRows for Triton {
     /// `dot_general::triton::partial_tile`.
     fn partial_tile(n: usize) -> Option<usize> {
         crate::codegen::dot_general::triton::partial_tile(n)
@@ -967,10 +967,10 @@ impl crate::codegen::PartialRows for Triton {
 
 /// Triton runs a linear cross entropy as its GEMM with a per-tile max/sum epilogue, then a combine
 /// (`dot_general::triton::cross_entropy`).
-impl crate::codegen::LinearCrossEntropies for Triton {}
+impl crate::codegen::dot_general::LinearCrossEntropies for Triton {}
 
 /// Triton merges with `fuse`.
-impl crate::codegen::MergesDots for Triton {
+impl crate::codegen::dot_general::MergesDots for Triton {
     /// What Triton fusion can fuse, read in place; views; lanes 1; 8 columns.
     fn target() -> crate::graph_compiler::passes::merge_dots::Target {
         crate::graph_compiler::passes::merge_dots::Target {
@@ -983,7 +983,7 @@ impl crate::codegen::MergesDots for Triton {
 }
 
 /// Triton's GEMM reads its operands at any strides (its prologues are generated for their layouts).
-impl crate::codegen::StridedOperands for Triton {
+impl crate::codegen::dot_general::StridedOperands for Triton {
     /// Any layout.
     fn reads_strided(
         _: &Primitive,

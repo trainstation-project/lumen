@@ -30,17 +30,17 @@
 //! ## Devices
 //!
 //! - `Diamonds` runs, with `fuse` and `normalization_diamonds`, on each device whose codegen implements
-//!   `codegen::NormalizationRows` (the nodes its fusion fuses into a row, and its row kernels' `Partials`):
+//!   `codegen::row::NormalizationRows` (the nodes its fusion fuses into a row, and its row kernels' `Partials`):
 //!   MPS and Triton, finding the same rows.
 //! - `FusedDiamonds` runs, with `normalization_diamonds`, on each device whose codegen implements
-//!   `codegen::FusedRows` (the nodes its row kernel takes and the bodies that fit it): TPU.
+//!   `codegen::row::FusedRows` (the nodes its row kernel takes and the bodies that fit it): TPU.
 //! - CUDA and CPU: identity for both passes.
 //!
 //! `depends_on`, `softmax_pair` (`sum(exp(x - max(x)))` over the same axes) and `tile_reductions` (which leading row
 //! reductions a tiled pass may take partially; used by Triton `wide_rows` and the MPS GEMM row kernels) are helpers
 //! codegen uses.
 
-use crate::codegen::{FusedRows, NormalizationRows};
+use crate::codegen::{row::FusedRows, row::NormalizationRows};
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
