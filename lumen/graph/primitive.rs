@@ -595,6 +595,19 @@ impl Primitive {
 
                 Ok(x.clone())
             }
+            // A 32- or 64-bit integer to a float narrower than float32 has two roundings to choose from (once,
+            // or through float32), so the program says which: it casts to float32 first.
+            Cast { new_dtype }
+                if args[0].dtype.is_int()
+                    && args[0].dtype.bits() > 16
+                    && new_dtype.is_float()
+                    && new_dtype.bits() < 32 =>
+            {
+                err(format!(
+                    "of {} to {new_dtype} is ambiguous (rounded once, or through float32): cast to float32 first",
+                    args[0].dtype
+                ))
+            }
             Cast { new_dtype } => Ok(TensorType::new(*new_dtype, &args[0].shape)),
             Unary(op) => {
                 use UnaryOp::*;

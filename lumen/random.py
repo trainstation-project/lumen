@@ -146,6 +146,9 @@ def rand(shape, dtype=None, device=None):
     # Keep only the top k bits so every value is exact in the dtype.
     if k < 32:
         bits = prims.div(bits, prims.full(tuple(shape), 1 << (32 - k), "uint32"))
+    # A narrow float's k bits fit 16 (a uint32 to a float under float32 is an ambiguous cast): exact as uint16.
+    if k <= 16:
+        bits = bits.to(dtype="uint16")
     return bits.to(dtype=dtype) * 2.0**-k
 
 

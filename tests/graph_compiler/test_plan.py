@@ -65,6 +65,9 @@ def test_reads_strided_inputs_in_place(device):
     if device == "cuda":
         import lumen.codegen.utils.triton as triton
 
+        # Prologues another test (on this worker) compiled first are compiled again here, so they count as new.
+        for name in [n for n in triton.kernels if n.startswith("prologue_")]:
+            del triton.kernels[name]
         before = set(triton.kernels)
     np.testing.assert_allclose(lumen.to_numpy(dot(x.transpose(0, 1), x)), a.T @ a, rtol=1e-4, atol=1e-4)
     out = lumen.to_numpy(dot(z.transpose(0, 1), w))

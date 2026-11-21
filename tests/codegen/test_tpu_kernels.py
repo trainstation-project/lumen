@@ -67,6 +67,8 @@ def test_the_profiler_times_each_tpu_program():
     kernel named and typed as an MPS kernel is."""
     from lumen.profiler import ProfilerActivity, profile
 
+    if lumen.tpu.device_count() < 2:
+        pytest.skip("needs a second TPU (tpu:1)")
     x = lumen.ones([256, 512]).to("tpu:1")
     f = lumen.compile(lambda x: lumen.functional.exp(x) * x)
     f(x)

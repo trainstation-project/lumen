@@ -576,23 +576,25 @@ def test_elementwise_primitives_agree_with_numpy(device, shape):
 
 @pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
 @pytest.mark.parametrize("dtype", ["int32", "uint32", "int64"])
-def test_integers_round_once_to_bfloat16(device, dtype):
-    """An integer cast to bfloat16 is rounded once, the CPU's: not to
-    float32 first (2^24 + 2^16 + 1 is 2^24 + 2^17, not 2^24: float32 drops
-    its 1, leaving a tie bfloat16 breaks to even), nor on the CPU to
-    float64 first (-(2^62 + 2^54 + 1) is -(2^62 + 2^55)), extremes and
-    negatives too."""
+def test_wide_integers_cast_to_bfloat16_through_float32_explicitly(device, dtype):
+    """A 32- or 64-bit integer cast straight to bfloat16 is an error (two
+    roundings to choose from); cast to float32 first, it is rounded to
+    float32, then to bfloat16, the CPU's too (2^24 + 2^16 + 1 is 2^24:
+    float32 drops its 1, leaving a tie bfloat16 breaks to even;
+    -(2^62 + 2^54 + 1) is -2^62), extremes and negatives too."""
     info = np.iinfo(dtype)
     values = [(1 << 24) + (1 << 16) + 1, (1 << 24) + 1, (1 << 25) + (1 << 17) + 3, 1 << 24, 255, info.max, info.min]
     if info.min < 0:
         values += [-((1 << 24) + (1 << 16) + 1), -((1 << 25) + (1 << 17) + 3)]
     if info.bits == 64:
         values += [(1 << 40) + (1 << 32) + 1, -((1 << 62) + (1 << 54) + 1)]
-    got, expected = on(device, lambda x: prims.cast(x, "bfloat16"), np.array(values, dtype))
+    with pytest.raises(Exception, match="cast to float32 first"):
+        run(lambda x: prims.cast(x, "bfloat16"), tensor(np.array(values, dtype)))
+    got, expected = on(device, lambda x: prims.cast(prims.cast(x, "float32"), "bfloat16"), np.array(values, dtype))
     np.testing.assert_array_equal(got.astype(np.float32), expected.astype(np.float32))
-    assert expected.astype(np.float32)[0] == (1 << 24) + (1 << 17)
+    assert expected.astype(np.float32)[0] == 1 << 24
     if info.bits == 64:
-        assert expected.astype(np.float32)[-1] == -float((1 << 62) + (1 << 55))
+        assert expected.astype(np.float32)[-1] == -float(1 << 62)
 
 
 # The Metal elementwise kernel's config class, in a build with Metal.
