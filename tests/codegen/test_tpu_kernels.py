@@ -504,6 +504,37 @@ def test_an_integer_maximum_over_everything_is_exact(shape, dims, dtype):
         assert got == a.max(), (got, a.max())
 
 
+@pytest.mark.parametrize("dtype", ["float32", "int32"])
+@pytest.mark.parametrize(
+    "shape, indices, axis",
+    [
+        ([3, 40, 300], [2, 33, 260], 2),
+        ([3, 40, 300], [2, 50, 260], 1),
+        ([5, 24, 200], [9, 20, 130], 0),
+        ([20, 1000], [17, 700], 1),
+        ([300, 64], [500, 60], 0),
+    ],
+    ids=["last", "second-last", "outer", "rows", "columns"],
+)
+def test_take_along_axis_reads_the_tiles_in_place(shape, indices, axis, dtype):
+    """``take_along_axis`` (``F.gather``) on TPU reads the operand where it
+    lies in its tiles, never flattened: along the last axis a register of
+    128 columns at a time (300 and 1000 columns, three and eight
+    registers), along the second-last a register of 8 rows at a time (40
+    and 300 rows), along an earlier axis one block per position; each
+    value exactly NumPy's."""
+    rng = np.random.default_rng(0)
+    x = rng.standard_normal(shape).astype(np.float32)
+    x = x if dtype == "float32" else (x * 1000).astype(np.int32)
+    ids = rng.integers(0, shape[axis], indices).astype(np.int32)
+    t = lumen.from_numpy(x).to("tpu")
+    got = lumen.compile(lambda x, i: F.gather(x, axis, i))(t, lumen.from_numpy(ids).to("tpu"))
+    want = np.take_along_axis(
+        x[tuple(slice(n) if d != axis else slice(None) for d, n in enumerate(indices))], ids, axis
+    )
+    np.testing.assert_array_equal(lumen.to_numpy(got.to("cpu")), want)
+
+
 def test_an_integer_power_keeps_its_exponents_parity():
     """``x ** n`` of a bfloat16 or float32 ``x`` and an int32 ``n`` takes
     its sign from ``n``'s parity: ``(-1) ** 257`` is -1 (257 is 256 in
