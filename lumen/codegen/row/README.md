@@ -7,7 +7,7 @@ codegen recognizes one with `kinds::row_reductions` (Triton also checks the fusi
 
 ## Files
 
-- `mod.rs` — the `RowCodegen` trait: `row(body, by_value, options)` returns the backend's `Code`.
+- `mod.rs` — the `RowCodegen` trait: `row(body, by_value, options)` returns the backend's `Code`. It also defines the row pass traits: `NormalizationRows` and `FusedRows` (`normalization_diamonds`) and `FullRows` (`dot_rows`).
 - `mps.rs` — Metal row kernels.
 - `triton.rs` — Triton row kernels.
 - `tpu/` — Pallas row program (`mod.rs`, `kernel.py`).

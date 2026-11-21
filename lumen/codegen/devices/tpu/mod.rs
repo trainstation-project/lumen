@@ -165,7 +165,7 @@ impl Device for Tpu {
 
 /// What TPU kernels run: no float16 (Mosaic's TPU kernels have no float16), and no cumsum, scatter-add or random
 /// bits (no TPU kernel computes them yet).
-impl crate::codegen::Supports for Tpu {
+impl crate::codegen::devices::Supports for Tpu {
     /// Rejects graphs with a float16 value or an op no TPU kernel computes.
     fn check(graph: &crate::graph::Graph) -> Result<(), String> {
         use crate::DType;

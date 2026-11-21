@@ -4,7 +4,7 @@ The emitters write the statements that compute a fused body's values at an index
 
 ## Files
 
-- `mod.rs` — the `Emit<'a>` trait: `new(body, by_value)` creates an emitter with nothing emitted yet, and `value(v, idx)` returns the local that holds value `v` at flat index expression `idx`, emitting any statements it needs first.
+- `mod.rs` — the `Emit<'a>` trait: `new(body, by_value)` creates an emitter with nothing emitted yet, and `value(v, idx)` returns the local that holds value `v` at flat index expression `idx`, emitting any statements it needs first. It also defines `SwapsPairs` (`swap_pairs`) and `Gathers` (`take_along_axis`), for backends whose emitted code computes them.
 - `cuda.rs` — CuTe DSL (Python) statements, one scalar element per thread.
 - `triton.rs` — Triton (Python) statements over blocks of indices under a mask.
 - `mps.rs` — Metal statements.

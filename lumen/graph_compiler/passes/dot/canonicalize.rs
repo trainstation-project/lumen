@@ -18,10 +18,10 @@
 //! `matmul_order` is also used by MPS's GEMM codegen (`codegen::dot_general::mps`) to read operands in the
 //! same `[batch, M, K]` / `[batch, K, N]` form. Tests construct the pass directly with `mps::reads_contiguous`.
 //!
-//! Devices: it runs, always, on each device whose codegen implements `codegen::DotLayouts` (which operand layouts its
+//! Devices: it runs, always, on each device whose codegen implements `codegen::dot_general::DotLayouts` (which operand layouts its
 //! matmul kernels read as laid out): MPS (what its GEMM reads at contiguous strides) and TPU (batch dims leading, one
 //! contracting dim placed as its kernel reads it). The others get the identity pass.
-use crate::codegen::DotLayouts;
+use crate::codegen::dot_general::DotLayouts;
 use crate::graph::primitive::free_dims;
 use crate::graph::{Graph, Primitive, TensorType, Var};
 use crate::graph_compiler::CompilerConfig;

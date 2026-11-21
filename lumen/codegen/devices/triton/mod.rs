@@ -585,7 +585,7 @@ impl Device for Triton {
     }
 }
 
-impl crate::codegen::Lone for DeviceModule<'_, Triton> {
+impl crate::codegen::devices::Lone for DeviceModule<'_, Triton> {
     /// Whether lone `n` is one a Triton loop kernel computes (Triton has no other kernel for it): every
     /// fusible node but views of their operand (reshapes, slices placed as views) and in-place
     /// concatenations.
@@ -610,7 +610,7 @@ impl crate::codegen::Lone for DeviceModule<'_, Triton> {
     }
 }
 
-impl crate::codegen::Supports for Triton {
+impl crate::codegen::devices::Supports for Triton {
     /// Rejects graphs with half-precision transcendentals, which Triton's libdevice lacks.
     fn check(graph: &Graph) -> Result<(), String> {
         for node in graph.nodes() {

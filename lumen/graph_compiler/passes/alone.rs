@@ -2,7 +2,7 @@
 //! single-node `Fusion` kernels. It runs near the end of the device pipeline, after `fusion` and `place_views`,
 //! so codegen compiles every remaining kernel the same way; it is always on, with no config flag.
 //!
-//! Devices: it runs on each device whose codegen implements `codegen::Lone` (which lone nodes only a generated
+//! Devices: it runs on each device whose codegen implements `codegen::devices::Lone` (which lone nodes only a generated
 //! kernel computes, which inputs kernels take by value, each kernel's name): CUDA (`codegen/devices/cuda`), MPS
 //! (`codegen/devices/mps`) and Triton (`codegen/devices/triton`). TPU and CPU get the identity pass.
 //!
@@ -13,7 +13,7 @@
 //!   graph output; otherwise they are dropped from the list, since an unfused reader needs them as buffers.
 //! - `wrapped` is the rewrite on its own; other code calls it with any predicate.
 
-use crate::codegen::Lone;
+use crate::codegen::devices::Lone;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::passes::CompilerPass;

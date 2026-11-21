@@ -7,7 +7,7 @@ use crate::graph::{Graph, Node, Primitive};
 use crate::graph_compiler::device::{DeviceModule, Tpu};
 
 /// TPU's fusion (the graph compiler's `fusion` pass): its planned groups (`passes::fusion::groups`), always.
-impl crate::codegen::Fuses for Tpu {
+impl crate::codegen::fusion::Fuses for Tpu {
     const WITH_FUSE: bool = false;
 
     /// Rewrites the graph with each planned group fused into an `elementwise` or `reduction` fusion.
@@ -67,7 +67,7 @@ pub(crate) fn slot_writes(graph: &Graph, concat: &Node, k: usize, producer: &Nod
 
 /// TPU's kernels writing a concatenation's operands into their slots, always (here, where `Tpu` is built without the
 /// TPU linked too): what `fusion::tpu::slot_writes` accepts, every operand worth placing.
-impl crate::codegen::Slots for DeviceModule<'_, Tpu> {
+impl crate::codegen::fusion::Slots for DeviceModule<'_, Tpu> {
     const WITH_FUSE: bool = false;
 
     /// What `fusion::tpu::slot_writes` accepts.
@@ -89,7 +89,7 @@ impl crate::codegen::Slots for DeviceModule<'_, Tpu> {
 
 /// TPU merges non-scalar `elementwise` fusions grouped by output shape, without `fuse` too. Here, where `Tpu` is built
 /// without the TPU linked too.
-impl crate::codegen::HorizontallyFuses for Tpu {
+impl crate::codegen::fusion::HorizontallyFuses for Tpu {
     const WITH_FUSE: bool = false;
     const GROUPING: crate::graph_compiler::passes::horizontal::Grouping =
         crate::graph_compiler::passes::horizontal::Grouping::Shape;

@@ -17,12 +17,12 @@
 //!   chunks, and a `Cast` follows when the original output dtype differs from the accumulator.
 //! - The new nodes are labelled `dot_general (split-K)` and `reduce_sum (split-K)`.
 //!
-//! Devices: it runs, with `split_k`, on each device whose codegen implements `codegen::SplitsK` (its tiles, target,
+//! Devices: it runs, with `split_k`, on each device whose codegen implements `codegen::dot_general::SplitsK` (its tiles, target,
 //! the products it keeps whole and a chunk count it prefers): MPS (tiles counted with the GEMM's `float_groups`, a
 //! target of 256 threadgroups, GEMV and skinny products of at most 4 rows kept whole, MLX's preferred chunks) and
 //! Triton (tiles of the untuned GEMM config, a target of 128 tiles, matrix-vector products kept whole for the GEMV
 //! kernel; partials always summed by a reduction, so results stay deterministic). The others get the identity pass.
-use crate::codegen::SplitsK;
+use crate::codegen::dot_general::SplitsK;
 use crate::graph::{Graph, Primitive, TensorType, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;

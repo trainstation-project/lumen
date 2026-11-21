@@ -10,8 +10,8 @@ in the `merge_dots_late` slot after `Simplify` and `dot_strength`.
 
 - `mod.rs` — re-exports the pass types and declares `MergeDotsLate`, the slot type of the late merge.
 - `forward.rs` — `merge_dots`, `MergeDots`, `Target`, `Packs` and the `Blocks` trait; `MergeDots` and
-  `MergeDotsLate` run on each device whose codegen implements `codegen::MergesDots`.
-- `backward.rs` — `MergeDotsBackward`, run on each device whose codegen implements `codegen::MergesDots`;
+  `MergeDotsLate` run on each device whose codegen implements `codegen::dot_general::MergesDots`.
+- `backward.rs` — `MergeDotsBackward`, run on each device whose codegen implements `codegen::dot_general::MergesDots`;
   and the backward side of the forward merge's interleaving: `interleaved_gradients` (the gradient concatenates
   and slices to rewrite, an `Interleaving`) and `arrange` (a gradient concatenation in the interleaved layout).
 

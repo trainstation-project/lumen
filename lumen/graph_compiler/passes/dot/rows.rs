@@ -36,9 +36,9 @@
 //! The GEMM's values may be read elsewhere only after the row; its `FusionOutput` readers are renumbered
 //! past the partials.
 //!
-//! Devices: `dot_rows` runs, with `normalization_diamonds`, on each device whose codegen implements `codegen::FullRows`
+//! Devices: `dot_rows` runs, with `normalization_diamonds`, on each device whose codegen implements `codegen::row::FullRows`
 //! (which row-body inputs its row kernel reads as whole rows): TPU. Triton's wide rows are `dot::wide_rows`.
-use crate::codegen::FullRows;
+use crate::codegen::row::FullRows;
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
 use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::CompilerPass;

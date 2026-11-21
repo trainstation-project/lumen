@@ -112,7 +112,7 @@ pub(crate) fn named(body: &Graph) -> String {
 
 /// Triton's fusion (the graph compiler's `fusion` pass): the shared fusion with Triton's limits, each fusion named by
 /// its kind (`named`), with `fuse`.
-impl crate::codegen::Fuses for Triton {
+impl crate::codegen::fusion::Fuses for Triton {
     /// Fuses the graph around the normalization rows the diamonds pass found.
     fn fuse(m: &mut DeviceModule<'_, Triton>) -> Result<(), String> {
         let scalars: Vec<Var> = crate::graph_compiler::positions(&m.options.scalars)
@@ -165,7 +165,7 @@ pub(crate) fn slot_writes(graph: &Graph, producer: &Node) -> bool {
 }
 
 /// Triton merges, with `fuse`, non-trivial `elementwise` fusions without reductions or matmuls, grouped by tiling.
-impl crate::codegen::HorizontallyFuses for Triton {
+impl crate::codegen::fusion::HorizontallyFuses for Triton {
     const GROUPING: crate::graph_compiler::passes::horizontal::Grouping =
         crate::graph_compiler::passes::horizontal::Grouping::Tiling;
     const BUFFERS: usize = crate::codegen::fusion::triton::HORIZONTAL_BUFFERS;
@@ -178,7 +178,7 @@ impl crate::codegen::HorizontallyFuses for Triton {
 
 /// Triton's kernels writing a concatenation's operands into their slots, with `fuse`: kernels of their own writing
 /// fresh memory (`fusion::triton::slot_writes`).
-impl crate::codegen::Slots for DeviceModule<'_, Triton> {
+impl crate::codegen::fusion::Slots for DeviceModule<'_, Triton> {
     /// What `fusion::triton::slot_writes` accepts.
     fn writes(&self, _: &Node, _: usize, producer: &Node, _: usize) -> bool {
         crate::codegen::fusion::triton::slot_writes(&self.graph, producer)

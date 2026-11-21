@@ -108,7 +108,7 @@ pub(crate) fn fuse(
 
 /// MPS's fusion (the graph compiler's `fusion` pass): the shared fusion with Metal's limits, then horizontal fusion
 /// within this pass, with `horizontal_fusion`. MPS fuses only with `fuse`.
-impl crate::codegen::Fuses for Mps {
+impl crate::codegen::fusion::Fuses for Mps {
     /// Fuses the graph, repeating until every by-value scalar is read only by fusions.
     fn fuse(m: &mut DeviceModule<'_, Mps>) -> Result<(), String> {
         let config = &m.options.config;
@@ -233,7 +233,7 @@ fn slot_writes(
 
 /// Metal's kernels writing a concatenation's operands into their slots, before fusion (`slot_writes`, fusible nodes
 /// counting as kernels), with `fuse`.
-impl crate::codegen::Slots for DeviceModule<'_, Mps> {
+impl crate::codegen::fusion::Slots for DeviceModule<'_, Mps> {
     /// What `slot_writes` accepts before fusion.
     fn writes(&self, concat: &Node, k: usize, producer: &Node, index: usize) -> bool {
         slot_writes(self, concat, k, producer, index, true)
@@ -241,7 +241,7 @@ impl crate::codegen::Slots for DeviceModule<'_, Mps> {
 }
 
 /// MPS rechecks its in-place concatenations after fusion: some fusion leaves unable to write their slot.
-impl crate::codegen::Rechecks for DeviceModule<'_, Mps> {
+impl crate::codegen::fusion::Rechecks for DeviceModule<'_, Mps> {
     /// What `slot_writes` accepts after fusion.
     fn written(&self, concat: &Node, k: usize, producer: &Node, index: usize) -> bool {
         slot_writes(self, concat, k, producer, index, false)

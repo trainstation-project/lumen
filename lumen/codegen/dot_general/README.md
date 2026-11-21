@@ -10,7 +10,7 @@ steps, and the autotuner times its configs.
 - `mod.rs` — the `GemmCodegen` trait: `gemm(body, dot, by_value, options)` returns a backend's `Code` for a GEMM
   fusion, with backend-specific `Options` (MPS tile configs, Triton operand/output layouts, TPU's step).
   Also `RowTile`: the widest row one GEMM tile holds whole (`ROW_TILE`), which MPS and Triton implement and
-  `graph_compiler::passes::linear_reordering` reads.
+  `graph_compiler::passes::linear_reordering` reads. It also defines the graph compiler's dot pass traits each backend implements in its device folder: `StridedOperands`, `MergesDots`, `LinearCrossEntropies`, `InnerProducts`, `FoldsDotReshapes`, `DotLayouts`, `SplitsK`, `PartialRows`, `FusesDots` and `RowTile`.
 - `cuda/` — CUDA (CuTe DSL) GEMM.
 - `triton/` — Triton GEMM, row-epilogue GEMMs and linear cross entropy.
 - `mps/` — Metal GEMMs (tiled, MPP, skinny, GEMV, integer), row matmuls and linear cross entropy.

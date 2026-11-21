@@ -4,10 +4,10 @@
 //! then reads each element's partner at index `j ^ 1`, or, when the value is in registers (a GEMM accumulator),
 //! swaps the two elements a thread holds; slices and a concatenation would need the value in memory.
 //!
-//! Devices: it runs on each device whose codegen implements `codegen::SwapsPairs` (MPS and Triton), right after the
+//! Devices: it runs on each device whose codegen implements `codegen::emitter::SwapsPairs` (MPS and Triton), right after the
 //! full `simplify`. Other devices keep the slices and concatenation.
 
-use crate::codegen::SwapsPairs;
+use crate::codegen::emitter::SwapsPairs;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;

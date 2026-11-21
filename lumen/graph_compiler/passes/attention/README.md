@@ -23,7 +23,7 @@ before `linear_cross_entropy` and `simplify` (`matched: true`).
 - `backward.rs` - matching the gradients and the `FlashAttentionBackward` pass, with its `AttentionBackwards`
   trait: MPS, Triton and TPU answer it in their codegen. CUDA has no backward.
 - `layouts.rs` - the `AttentionLayouts` pass (`attention_layouts`), on devices whose codegen implements
-  `codegen::TiledAttentions` (TPU), right after the attention passes. It merges the last two axes of outputs
+  `codegen::attention::TiledAttentions` (TPU), right after the attention passes. It merges the last two axes of outputs
   written with rows narrower than their last axis, folds reshape, sum and cast chains that read attention
   outputs into the fusion bodies, moves the backward's `delta` dot into the backward fusion (`delta_inside`), and
   checks that the backend's attention kernels take every attention fusion.

@@ -3,9 +3,9 @@
 //! (`in_place = true`) before `fusion`, right after the dot passes; `concats` runs after `fusion`, `place_views` and
 //! `alone` and unmarks the ones fusion made invalid, each then copied by a kernel of its own.
 //!
-//! Devices: `place_concats` runs on each device whose module implements `codegen::Slots` (what its kernels can write
+//! Devices: `place_concats` runs on each device whose module implements `codegen::fusion::Slots` (what its kernels can write
 //! through a slot's strides): MPS and Triton with `fuse`, TPU always (`Slots::WITH_FUSE`). `concats` runs where the
-//! module implements `codegen::Rechecks` (the slot rule after fusion): MPS. CPU and CUDA get the identity pass in both.
+//! module implements `codegen::fusion::Rechecks` (the slot rule after fusion): MPS. CPU and CUDA get the identity pass in both.
 //!
 //! The rule: `in_place_concats(graph, writes, worth)` returns the live concatenations where every operand is read only
 //! by that concatenation (ignoring `FusionOutput` readers), exactly once, is no program output, and is made by a
@@ -17,7 +17,7 @@
 //! `passes/fusion` treats in-place concatenations as unfusible, and `dot/fuse/tpu.rs` calls `in_place_concats` to avoid
 //! building a placed concat inside a dot fusion.
 
-use crate::codegen::{Rechecks, Slots};
+use crate::codegen::{fusion::Rechecks, fusion::Slots};
 use crate::graph::{Graph, Node, Primitive};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::passes::CompilerPass;

@@ -89,7 +89,7 @@ fn named(body: &Graph) -> String {
 
 /// CUDA's fusion (the graph compiler's `fusion` pass): the shared fusion with the CuTe kernels' limits (elementwise and
 /// GEMM epilogues), with `fuse`.
-impl crate::codegen::Fuses for Cuda {
+impl crate::codegen::fusion::Fuses for Cuda {
     /// Runs the shared fusion with the CUDA backend's limits.
     fn fuse(m: &mut DeviceModule<'_, Cuda>) -> Result<(), String> {
         let backend = backend(m);

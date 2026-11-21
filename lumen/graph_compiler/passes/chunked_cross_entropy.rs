@@ -3,7 +3,7 @@
 //! pipeline, after `take_along_axis` and before the dot merges and `linear_cross_entropy`.
 //!
 //! Devices: it runs, with `fuse` and `fused_linear_cross_entropy`, on each device whose codegen implements
-//! `codegen::LinearCrossEntropies` (a fused linear cross-entropy kernel, which each chunk then becomes): MPS and
+//! `codegen::dot_general::LinearCrossEntropies` (a fused linear cross-entropy kernel, which each chunk then becomes): MPS and
 //! Triton. CPU, CUDA and TPU get the identity pass.
 //!
 //! The pattern:
@@ -24,7 +24,7 @@
 //!   pass repeats until no match is left.
 
 use super::linear_cross_entropy::{Found, matched, uses};
-use crate::codegen::LinearCrossEntropies;
+use crate::codegen::dot_general::LinearCrossEntropies;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;

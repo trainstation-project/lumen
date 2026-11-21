@@ -1,7 +1,7 @@
 //! Horizontal fusion: merges small, independent kernels of the same kind into one launch, a multi-output `Fusion` whose
 //! outputs each come from one member. The `horizontal_fusion` slot is the last pass in the pass list.
 //!
-//! Devices: it runs on each device whose codegen implements `codegen::HorizontallyFuses` (its candidates, grouping and
+//! Devices: it runs on each device whose codegen implements `codegen::fusion::HorizontallyFuses` (its candidates, grouping and
 //! buffer limit): Triton with `fuse` and `horizontal_fusion` (candidates from `codegen::fusion::triton::horizontal_candidate`,
 //! non-trivial `elementwise` fusions without reductions or matmuls; `Grouping::Tiling`; at most 64 buffers) and TPU
 //! with `horizontal_fusion` (`codegen::fusion::tpu::horizontal_candidate`, non-scalar `elementwise` fusions of TPU-fusible nodes
@@ -28,7 +28,7 @@
 //! range of the grid, so one launch can cover several sizes. The MPS, Triton and CUDA elementwise codegen,
 //! `codegen::devices::triton` and the MPS kernel runtime read it.
 
-use crate::codegen::HorizontallyFuses;
+use crate::codegen::fusion::HorizontallyFuses;
 use crate::codegen::layout::{MAX_HEROES, transpose_tiling};
 use crate::graph::{Graph, Node, Primitive, Scope, Var, intern};
 use crate::graph_compiler::CompilerConfig;

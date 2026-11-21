@@ -2,14 +2,14 @@
 //! with a readable error and changes nothing otherwise. It is the first pass in the list, so it sees the graph
 //! exactly as traced.
 //!
-//! Devices: every device's codegen implements `codegen::Supports` (its check of the graph): the CPU (`reference`:
+//! Devices: every device's codegen implements `codegen::devices::Supports` (its check of the graph): the CPU (`reference`:
 //! no Pallas kernels), CUDA (`codegen/devices/cuda`: ops and dtypes the CuTe DSL backend has kernels for), MPS
 //! (`codegen/devices/mps`: float64 and float8 values, bfloat16 transcendentals, dots of two dtypes), Triton
 //! (`codegen/devices/triton`: float16 and bfloat16 transcendentals, which libdevice lacks) and TPU
 //! (`codegen/devices/tpu`: float16, cumsum, scatter-add and random bits). "Transcendental" is
 //! `Primitive::is_transcendental`; the operand checked is a node's first input (or its output when it has none).
 
-use crate::codegen::Supports;
+use crate::codegen::devices::Supports;
 use crate::graph::Graph;
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;

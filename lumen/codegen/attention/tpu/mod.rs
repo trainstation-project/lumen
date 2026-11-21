@@ -870,7 +870,7 @@ impl crate::graph_compiler::passes::attention::AttentionBackwards for DeviceModu
 
 /// TPU's attention kernels read and write whole tiles: `attention_layouts` adapts its attention fusions, checking
 /// each against `codegen::attention::tpu::kernel`.
-impl crate::codegen::TiledAttentions for Tpu {
+impl crate::codegen::attention::TiledAttentions for Tpu {
     /// What `codegen::attention::tpu::kernel` makes of the fusion.
     fn check(name: &str, body: &crate::graph::Graph) -> Result<(), String> {
         crate::codegen::attention::tpu::kernel(name, body).map(|_| ())

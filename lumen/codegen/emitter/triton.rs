@@ -792,7 +792,7 @@ fn unsigned(bits: usize) -> &'static str {
 }
 
 /// Triton kernels read each element's partner at `j ^ 1`, or swap a GEMM accumulator tile's adjacent lanes.
-impl crate::codegen::SwapsPairs for Triton {}
+impl crate::codegen::emitter::SwapsPairs for Triton {}
 
 /// Triton kernels gather (a fused `Gather`).
-impl crate::codegen::Gathers for Triton {}
+impl crate::codegen::emitter::Gathers for Triton {}

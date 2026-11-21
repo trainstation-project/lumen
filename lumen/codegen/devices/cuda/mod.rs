@@ -188,7 +188,7 @@ impl Device for Cuda {
     }
 }
 
-impl crate::codegen::Lone for DeviceModule<'_, Cuda> {
+impl crate::codegen::devices::Lone for DeviceModule<'_, Cuda> {
     /// Whether lone `n` needs a one-node kernel: every fusible node but reshapes, which are views.
     fn alone(graph: &Graph, n: &Node) -> bool {
         fusible(graph, n) && !matches!(n.primitive, Primitive::Reshape { .. })
@@ -208,7 +208,7 @@ impl crate::codegen::Lone for DeviceModule<'_, Cuda> {
 /// What the CUDA (CuTe DSL) backend runs: elementwise and layout ops and gathers in CuTe dtypes (`fusible`),
 /// matmuls, `take_along_axis` (lowered to a gather), and the reductions of an attention `flash_attention` fuses
 /// (any other reduction still fails at codegen). Anything else runs on Triton.
-impl crate::codegen::Supports for Cuda {
+impl crate::codegen::devices::Supports for Cuda {
     /// Rejects graphs with an op the CuTe DSL backend has no kernel for, or a dtype CuTe has no type for.
     fn check(graph: &Graph) -> Result<(), String> {
         for node in graph.nodes() {

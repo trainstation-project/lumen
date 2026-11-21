@@ -8,7 +8,7 @@ kernel family needs lives in that family (`codegen/<family>/<device>`).
 
 ## Files
 
-- `mod.rs` — declares the backends. `mps` compiles only when MPS is linked (`lumen_mps_linked`).
+- `mod.rs` — declares the backends. `mps` compiles only when MPS is linked (`lumen_mps_linked`). It defines the backend-wide pass traits: `Supports` (`unsupported`) and `Lone` (`alone`).
 - `cuda/mod.rs` — `Cuda`, the CuTe DSL code generator type. `cute_type` gives a dtype's CuTe numeric type (`None` when there are no kernels for it). `unsigned` gives the unsigned type of a bit width. `constant` writes a value as its bits so it is exact in every dtype. It also holds CUDA's `codegen` (each planned step's kernel, generated per layout and kept in the step's memo) and its `Device` impl.
 - `cuda/__init__.py` — Python side of the CUDA backend. `compile` compiles a generated module's `launch` for its tensors' CuTe types, 16-byte alignment and launch shape, loads it, and returns launch info (`CUfunction`, warps, shared bytes, parameter types) for Rust to launch. `compiled_cubin` dumps each compile into its own directory, because lumen kernels share names and concurrent processes would otherwise read each other's cubins.
 - `triton/mod.rs` — `Triton`, the Triton code generator type. It provides `triton_type`, `params` (the parameter list of a generated kernel), the `fill` kernel source, `Tensors` (the layouts a template kernel's `BODY` is generated for), `body_function` (builds a template's `BODY(EXTRA, ...)` with its `LOAD{k}`/`STORE{k}` helpers), `bits`/`constant` (bit-exact scalars), `named` and `indented`. It also holds Triton's `codegen`: the generated loop kernel type (`Kernel`, `Template`, `Constexpr`), `loop_kernel`, and the `Device` impl.

@@ -4,10 +4,10 @@
 //! fusion bodies, moves the backward's `delta` dot into the backward fusion (`delta_inside`), and checks the backend's
 //! attention kernels take every attention fusion.
 //!
-//! Devices: it runs, with `flash_attention`, on each device whose codegen implements `codegen::TiledAttentions`
+//! Devices: it runs, with `flash_attention`, on each device whose codegen implements `codegen::attention::TiledAttentions`
 //! (its attention-kernel check): TPU.
 
-use crate::codegen::TiledAttentions;
+use crate::codegen::attention::TiledAttentions;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;

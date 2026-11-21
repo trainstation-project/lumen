@@ -4,7 +4,7 @@
 //! product, the merged dot rounded by one cast.
 
 use crate::DType;
-use crate::codegen::MergesDots;
+use crate::codegen::dot_general::MergesDots;
 use crate::graph::primitive::free_dims;
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
 use crate::graph_compiler::CompilerConfig;
