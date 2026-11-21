@@ -119,6 +119,11 @@ impl<D: crate::codegen::Fuses>
     crate::graph_compiler::passes::CompilerPass<crate::graph_compiler::device::DeviceModule<'_, D>>
     for Fusion
 {
+    /// With `fuse` where `WITH_FUSE`, else always.
+    fn configured(config: &crate::graph_compiler::CompilerConfig) -> Option<Self> {
+        (config.fuse || !D::WITH_FUSE).then_some(Fusion)
+    }
+
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "fusion"
@@ -130,16 +135,5 @@ impl<D: crate::codegen::Fuses>
         m: &mut crate::graph_compiler::device::DeviceModule<'_, D>,
     ) -> Result<(), String> {
         D::fuse(m)
-    }
-}
-
-/// With `fuse` (always on a device fusing without it, `Fuses::WITH_FUSE`), on every device whose codegen implements
-/// `Fuses`.
-impl<D: crate::codegen::Fuses> crate::graph_compiler::passes::DevicePass<D> for Fusion {
-    fn pass<'a>(
-        config: &crate::graph_compiler::CompilerConfig,
-    ) -> crate::graph_compiler::pipeline::Pass<crate::graph_compiler::device::DeviceModule<'a, D>>
-    {
-        crate::graph_compiler::pipeline::when(config.fuse || !D::WITH_FUSE, Fusion)
     }
 }

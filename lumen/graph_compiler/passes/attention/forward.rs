@@ -50,11 +50,8 @@ use super::{Access, Dropout, Matcher, Score, Strides, body_of, fits32};
 use crate::DType;
 use crate::graph::{FUSION_SEPARATOR, Graph, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::device::DeviceModule;
-use crate::graph_compiler::passes::DevicePass;
 use crate::graph_compiler::passes::simplify::rounds;
 use crate::graph_compiler::passes::{CompilerPass, Module};
-use crate::graph_compiler::pipeline::{Pass, when};
 
 /// A matched `softmax(scores(Q K^T)) V` attention.
 #[derive(Debug, Clone)]
@@ -807,6 +804,11 @@ pub(crate) trait Attentions: Module {
 pub(crate) struct FlashAttention;
 
 impl<M: Attentions> CompilerPass<M> for FlashAttention {
+    /// With `flash_attention` (and `fuse` where `WITH_FUSE`).
+    fn configured(config: &CompilerConfig) -> Option<Self> {
+        (config.flash_attention && (config.fuse || !M::WITH_FUSE)).then_some(FlashAttention)
+    }
+
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "flash_attention"
@@ -830,17 +832,5 @@ impl<M: Attentions> CompilerPass<M> for FlashAttention {
 
         *m.graph_mut() = fused.prune().0;
         Ok(())
-    }
-}
-
-/// With `flash_attention` (and `fuse` where `Attentions::WITH_FUSE`), on every device whose module implements
-/// `Attentions`.
-impl<D: 'static> DevicePass<D> for FlashAttention
-where
-    for<'a> DeviceModule<'a, D>: Attentions,
-{
-    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
-        let fused = config.fuse || !<DeviceModule<'a, D> as Attentions>::WITH_FUSE;
-        when(config.flash_attention && fused, FlashAttention)
     }
 }

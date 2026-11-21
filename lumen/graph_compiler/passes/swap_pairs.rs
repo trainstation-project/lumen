@@ -11,27 +11,24 @@ use crate::codegen::SwapsPairs;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
-use crate::graph_compiler::passes::{CompilerPass, DevicePass, Module};
-use crate::graph_compiler::pipeline::Pass;
+use crate::graph_compiler::passes::{CompilerPass, Module};
 
 /// Compiler pass turning each pair swap written with slices and a concatenation into `SwapPairs`.
 pub(crate) struct SwapPairs;
 
-/// Always, on every device whose codegen implements `SwapsPairs`.
-impl<D: SwapsPairs> DevicePass<D> for SwapPairs {
-    fn pass<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
-        Box::new(SwapPairs)
+impl<D: SwapsPairs> CompilerPass<DeviceModule<'_, D>> for SwapPairs {
+    /// Always.
+    fn configured(_: &CompilerConfig) -> Option<Self> {
+        Some(SwapPairs)
     }
-}
 
-impl<M: Module> CompilerPass<M> for SwapPairs {
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "swap_pairs"
     }
 
     /// Rewrites every pair swap of the module's graph.
-    fn apply(&mut self, m: &mut M) -> Result<(), String> {
+    fn apply(&mut self, m: &mut DeviceModule<'_, D>) -> Result<(), String> {
         if let Some(graph) = swapped(m.graph()) {
             *m.graph_mut() = graph;
         }

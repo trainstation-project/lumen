@@ -27,8 +27,7 @@ use crate::codegen::InnerProducts;
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
-use crate::graph_compiler::passes::{CompilerPass, DevicePass, Module};
-use crate::graph_compiler::pipeline::Pass;
+use crate::graph_compiler::passes::{CompilerPass, Module};
 
 /// `reduce_sum(v * m)` over `m`'s contracting dims, with `v` laid out and broadcast onto `m`'s shape;
 /// the result is in dot output order (batch dims, then free dims).
@@ -140,7 +139,12 @@ fn reshaped(out: &mut Graph, v: Var, shape: &[usize]) -> Var {
 /// Compiler pass running [`reduce_vector_dots`].
 pub(crate) struct DotStrength;
 
-impl<M: Module> CompilerPass<M> for DotStrength {
+impl<D: InnerProducts> CompilerPass<DeviceModule<'_, D>> for DotStrength {
+    /// Always.
+    fn configured(_: &CompilerConfig) -> Option<Self> {
+        Some(DotStrength)
+    }
+
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "dot_strength"
@@ -148,7 +152,7 @@ impl<M: Module> CompilerPass<M> for DotStrength {
 
     /// Rewrites float dots whose operands both have only size-1 free dims (batched inner products)
     /// as `reduce_sum(x * y)`, cast to the output dtype when it differs from the accumulator.
-    fn apply(&mut self, m: &mut M) -> Result<(), String> {
+    fn apply(&mut self, m: &mut DeviceModule<'_, D>) -> Result<(), String> {
         let graph = m.graph();
 
         let mut out = Graph::new();
@@ -219,12 +223,5 @@ impl<M: Module> CompilerPass<M> for DotStrength {
 
         *m.graph_mut() = out;
         Ok(())
-    }
-}
-
-/// Always, on every device whose codegen implements `InnerProducts`.
-impl<D: InnerProducts> DevicePass<D> for DotStrength {
-    fn pass<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
-        Box::new(DotStrength)
     }
 }

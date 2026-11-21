@@ -12,18 +12,7 @@ use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::elementwise;
 use crate::graph_compiler::passes::merge_dots::forward::{Layout, used_dims};
 use crate::graph_compiler::passes::simplify::roundings;
-use crate::graph_compiler::passes::{CompilerPass, DevicePass, Module};
-use crate::graph_compiler::pipeline::{Pass, when};
-
-/// With `merge_dots`, on every device whose codegen implements `MergesDots`: also only with `fuse` where it merges only
-/// then (`WITH_FUSE`), and with `contraction_epilogues` where its merged gradients need them (`BACKWARD_EPILOGUES`).
-impl<D: MergesDots> DevicePass<D> for MergeDotsBackward {
-    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
-        let fused = config.fuse || !D::WITH_FUSE;
-        let epilogues = config.contraction_epilogues || !D::BACKWARD_EPILOGUES;
-        when(config.merge_dots && fused && epilogues, MergeDotsBackward)
-    }
-}
+use crate::graph_compiler::passes::{CompilerPass, Module};
 
 /// A sum of dots to merge.
 struct Group {
@@ -320,7 +309,14 @@ fn through(dot: &Primitive, lhs: bool, permutation: &[usize]) -> Option<Primitiv
 /// Compiler pass running [`merge_dots_backward`].
 pub(crate) struct MergeDotsBackward;
 
-impl<M: Module> CompilerPass<M> for MergeDotsBackward {
+impl<D: MergesDots> CompilerPass<DeviceModule<'_, D>> for MergeDotsBackward {
+    /// With `merge_dots` (and `fuse` where `WITH_FUSE`; `contraction_epilogues` where `BACKWARD_EPILOGUES`).
+    fn configured(config: &CompilerConfig) -> Option<Self> {
+        let fused = config.fuse || !D::WITH_FUSE;
+        let epilogues = config.contraction_epilogues || !D::BACKWARD_EPILOGUES;
+        (config.merge_dots && fused && epilogues).then_some(MergeDotsBackward)
+    }
+
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "merge_dots_backward"
@@ -328,7 +324,7 @@ impl<M: Module> CompilerPass<M> for MergeDotsBackward {
 
     /// Finds sums of same-shaped dots against weights used by one forward input and merges each into a
     /// single dot over concatenations.
-    fn apply(&mut self, m: &mut M) -> Result<(), String> {
+    fn apply(&mut self, m: &mut DeviceModule<'_, D>) -> Result<(), String> {
         let graph = m.graph();
 
         let nodes = graph.nodes();

@@ -34,9 +34,7 @@ use crate::codegen::FusesDots;
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
 use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::CompilerPass;
-use crate::graph_compiler::passes::DevicePass;
 use crate::graph_compiler::passes::place_concats::in_place_concats;
-use crate::graph_compiler::pipeline::Pass;
 use crate::graph_compiler::{CompilerConfig, elementwise};
 use std::collections::HashMap;
 
@@ -361,6 +359,11 @@ fn fused<D: FusesDots>(graph: &Graph, epilogues: bool) -> Vec<Option<Fused>> {
 pub(crate) struct FuseDots;
 
 impl<D: FusesDots> CompilerPass<DeviceModule<'_, D>> for FuseDots {
+    /// Always.
+    fn configured(_: &CompilerConfig) -> Option<Self> {
+        Some(FuseDots)
+    }
+
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "fuse_dots"
@@ -543,12 +546,5 @@ impl<D: FusesDots> CompilerPass<DeviceModule<'_, D>> for FuseDots {
 
         m.graph = out;
         Ok(())
-    }
-}
-
-/// Always, on every device whose codegen implements `FusesDots`.
-impl<D: FusesDots> DevicePass<D> for FuseDots {
-    fn pass<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
-        Box::new(FuseDots)
     }
 }

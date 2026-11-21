@@ -18,8 +18,7 @@ use crate::codegen::kinds::gemm_dot;
 use crate::graph::{Graph, Primitive, TensorType, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
-use crate::graph_compiler::passes::{CompilerPass, DevicePass, Module};
-use crate::graph_compiler::pipeline::Pass;
+use crate::graph_compiler::passes::{CompilerPass, Module};
 use crate::tensor::contiguous_strides;
 
 /// Whether a dot (`Primitive`, its two operands' types) reads operand `k` laid out with `strides`.
@@ -108,24 +107,21 @@ pub(crate) struct PlaceViews {
     pub reads: ReadsStrided,
 }
 
-/// Always, on every device whose codegen implements `StridedOperands`: slices a GEMM reads in place become views
-/// before the lone layout ops left become elementwise fusions.
-impl<D: StridedOperands> DevicePass<D> for PlaceViews {
-    fn pass<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
-        Box::new(PlaceViews {
+impl<D: StridedOperands> CompilerPass<DeviceModule<'_, D>> for PlaceViews {
+    /// Always, reading strided operands as the device's GEMMs can.
+    fn configured(_: &CompilerConfig) -> Option<Self> {
+        Some(PlaceViews {
             reads: D::reads_strided,
         })
     }
-}
 
-impl<M: Module> CompilerPass<M> for PlaceViews {
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "place_views"
     }
 
     /// Marks the slices `place_views` accepts.
-    fn apply(&mut self, m: &mut M) -> Result<(), String> {
+    fn apply(&mut self, m: &mut DeviceModule<'_, D>) -> Result<(), String> {
         place_views(m.graph_mut(), self.reads);
         Ok(())
     }

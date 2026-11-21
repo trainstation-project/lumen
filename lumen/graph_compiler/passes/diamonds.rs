@@ -44,8 +44,7 @@ use crate::codegen::{FusedRows, NormalizationRows};
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
-use crate::graph_compiler::passes::{CompilerPass, DevicePass, Module};
-use crate::graph_compiler::pipeline::{Pass, when};
+use crate::graph_compiler::passes::{CompilerPass, Module};
 use crate::graph_compiler::{constant, elementwise};
 use std::collections::HashMap;
 
@@ -1277,14 +1276,22 @@ pub(crate) struct Diamonds {
     pub partials: Partials,
 }
 
-impl<M: RowsModule> CompilerPass<M> for Diamonds {
+impl<D: NormalizationRows> CompilerPass<DeviceModule<'_, D>> for Diamonds {
+    /// With `fuse` and `normalization_diamonds`, fusing what the device's rows take.
+    fn configured(config: &CompilerConfig) -> Option<Self> {
+        (config.fuse && config.normalization_diamonds).then_some(Diamonds {
+            fusible: D::fusible,
+            partials: D::PARTIALS,
+        })
+    }
+
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "normalization_diamonds"
     }
 
     /// Stores the rows found and the graph rewritten for their partial sums.
-    fn apply(&mut self, m: &mut M) -> Result<(), String> {
+    fn apply(&mut self, m: &mut DeviceModule<'_, D>) -> Result<(), String> {
         let found = diamonds(m.graph(), self.fusible);
         let (graph, rows) = partials(m.graph(), found, self.fusible, self.partials);
         *m.graph_mut() = graph;
@@ -1300,43 +1307,25 @@ pub(crate) struct FusedDiamonds {
     pub fits: fn(&Graph) -> bool,
 }
 
-impl<M: Module> CompilerPass<M> for FusedDiamonds {
+impl<D: FusedRows> CompilerPass<DeviceModule<'_, D>> for FusedDiamonds {
+    /// With `normalization_diamonds`, rows the device's kernels fit.
+    fn configured(config: &CompilerConfig) -> Option<Self> {
+        config.normalization_diamonds.then_some(FusedDiamonds {
+            fusible: D::fusible,
+            fits: D::fits,
+        })
+    }
+
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "normalization_diamonds"
     }
 
     /// Rewrites the graph with each row fused.
-    fn apply(&mut self, m: &mut M) -> Result<(), String> {
+    fn apply(&mut self, m: &mut DeviceModule<'_, D>) -> Result<(), String> {
         let rows = diamonds(m.graph(), self.fusible);
         *m.graph_mut() = fused(m.graph(), &rows, self.fusible, self.fits);
         Ok(())
-    }
-}
-
-/// With `fuse` and `normalization_diamonds`, on every device whose codegen implements `NormalizationRows`: its rows
-/// for its fusion, column sums riding along within its `Partials`.
-impl<D: NormalizationRows> DevicePass<D> for Diamonds {
-    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
-        let diamonds = Diamonds {
-            fusible: D::fusible,
-            partials: D::PARTIALS,
-        };
-
-        when(config.fuse && config.normalization_diamonds, diamonds)
-    }
-}
-
-/// With `normalization_diamonds`, on every device whose codegen implements `FusedRows`: each row its row kernel takes
-/// fused into a `row` fusion of its own.
-impl<D: FusedRows> DevicePass<D> for FusedDiamonds {
-    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
-        let diamonds = FusedDiamonds {
-            fusible: D::fusible,
-            fits: D::fits,
-        };
-
-        when(config.normalization_diamonds, diamonds)
     }
 }
 

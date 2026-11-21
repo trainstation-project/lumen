@@ -14,35 +14,8 @@ use crate::graph_compiler::passes::merge_dots::backward::{
     Interleaving, arrange, interleaved_gradients,
 };
 use crate::graph_compiler::passes::simplify::roundings;
-use crate::graph_compiler::passes::{CompilerPass, DevicePass, Module};
-use crate::graph_compiler::pipeline::{Pass, when};
+use crate::graph_compiler::passes::{CompilerPass, Module};
 
-/// With `merge_dots` (and `fuse` where `WITH_FUSE`), packing for the device's `target`, early on a device merging
-/// before simplification; else the identity.
-impl<D: MergesDots> DevicePass<D> for MergeDots {
-    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
-        let on = config.merge_dots && (config.fuse || !D::WITH_FUSE) && !D::LATE;
-        when(
-            on,
-            MergeDots {
-                target: D::target(),
-            },
-        )
-    }
-}
-
-/// The same, late (once the graph is simplified) on a device merging then (`MergesDots::LATE`, TPU's).
-impl<D: MergesDots> DevicePass<D> for MergeDotsLate {
-    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
-        let on = config.merge_dots && (config.fuse || !D::WITH_FUSE) && D::LATE;
-        when(
-            on,
-            MergeDots {
-                target: D::target(),
-            },
-        )
-    }
-}
 use crate::graph_compiler::{combined, elementwise};
 
 /// What the backend supports for merged dots.
@@ -857,14 +830,23 @@ pub(crate) struct MergeDots {
     pub(crate) target: Target,
 }
 
-impl<T: Module + Blocks> CompilerPass<T> for MergeDots {
+impl<D: MergesDots> CompilerPass<DeviceModule<'_, D>> for MergeDots {
+    /// With `merge_dots` (and `fuse` where `WITH_FUSE`), early on a device merging then, packing for its `target`.
+    fn configured(config: &CompilerConfig) -> Option<Self> {
+        let on = config.merge_dots && (config.fuse || !D::WITH_FUSE) && !D::LATE;
+
+        on.then(|| MergeDots {
+            target: D::target(),
+        })
+    }
+
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "merge_dots"
     }
 
     /// Merges dots, recording the packs on the module; donated inputs can't be stored strided.
-    fn apply(&mut self, m: &mut T) -> Result<(), String> {
+    fn apply(&mut self, m: &mut DeviceModule<'_, D>) -> Result<(), String> {
         let options = m.options();
 
         let donated: Vec<bool> = (0..options.packable.len())
@@ -880,5 +862,29 @@ impl<T: Module + Blocks> CompilerPass<T> for MergeDots {
         let (p, i) = m.blocks();
         (*p, *i) = (packed, interleaved);
         Ok(())
+    }
+}
+
+/// The same merge, late (once the graph is simplified) on a device merging then (`MergesDots::LATE`, TPU's).
+impl<D: MergesDots> CompilerPass<DeviceModule<'_, D>> for MergeDotsLate {
+    /// With `merge_dots` (and `fuse` where `WITH_FUSE`), late on a device merging then.
+    fn configured(config: &CompilerConfig) -> Option<Self> {
+        let on = config.merge_dots && (config.fuse || !D::WITH_FUSE) && D::LATE;
+
+        on.then(|| {
+            MergeDotsLate(MergeDots {
+                target: D::target(),
+            })
+        })
+    }
+
+    /// Pass name used in profiler ranges and dumps.
+    fn name(&self) -> &'static str {
+        "merge_dots"
+    }
+
+    /// Merges dots as the early merge does.
+    fn apply(&mut self, m: &mut DeviceModule<'_, D>) -> Result<(), String> {
+        self.0.apply(m)
     }
 }

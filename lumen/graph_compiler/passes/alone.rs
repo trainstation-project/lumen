@@ -16,24 +16,17 @@
 use crate::codegen::Lone;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::device::DeviceModule;
-use crate::graph_compiler::passes::{CompilerPass, DevicePass};
-use crate::graph_compiler::pipeline::Pass;
+use crate::graph_compiler::passes::CompilerPass;
 
 /// Compiler pass wrapping every lone node the backend has no other kernel for in its own one-node fusion.
 pub(crate) struct Alone;
 
-/// Always, on every device whose codegen implements `Lone` (CUDA, MPS, Triton).
-impl<D: 'static> DevicePass<D> for Alone
-where
-    for<'a> DeviceModule<'a, D>: Lone,
-{
-    fn pass<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
-        Box::new(Alone)
-    }
-}
-
 impl<M: Lone> CompilerPass<M> for Alone {
+    /// Always.
+    fn configured(_: &CompilerConfig) -> Option<Self> {
+        Some(Alone)
+    }
+
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "alone"

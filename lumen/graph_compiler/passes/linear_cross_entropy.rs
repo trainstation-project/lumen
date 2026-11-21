@@ -28,9 +28,7 @@ use crate::codegen::LinearCrossEntropies;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
-use crate::graph_compiler::passes::DevicePass;
 use crate::graph_compiler::passes::{CompilerPass, Module};
-use crate::graph_compiler::pipeline::{Pass, when};
 use crate::{DType, Scalar};
 
 /// A matched linear cross entropy.
@@ -340,17 +338,12 @@ fn row_offsets_plus(
 /// Compiler pass running [`linear_cross_entropy`].
 pub(crate) struct LinearCrossEntropy;
 
-/// With `fuse` and `fused_linear_cross_entropy`, on every device whose codegen implements `LinearCrossEntropies`.
-impl<D: LinearCrossEntropies> DevicePass<D> for LinearCrossEntropy {
-    fn pass<'a>(config: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
-        when(
-            config.fuse && config.fused_linear_cross_entropy,
-            LinearCrossEntropy,
-        )
+impl<D: LinearCrossEntropies> CompilerPass<DeviceModule<'_, D>> for LinearCrossEntropy {
+    /// With `fuse` and `fused_linear_cross_entropy`.
+    fn configured(config: &CompilerConfig) -> Option<Self> {
+        (config.fuse && config.fused_linear_cross_entropy).then_some(LinearCrossEntropy)
     }
-}
 
-impl<M: Module> CompilerPass<M> for LinearCrossEntropy {
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "linear_cross_entropy"
@@ -359,7 +352,7 @@ impl<M: Module> CompilerPass<M> for LinearCrossEntropy {
     /// Replaces every matched cross entropy with a `LinearCrossEntropy` whose `[2, b]` result holds the
     /// loss row and the lse row, and every logsumexp of logits nothing else reads (a gradient's, its loss
     /// unused) with one of class-0 targets, its lse row alone used.
-    fn apply(&mut self, m: &mut M) -> Result<(), String> {
+    fn apply(&mut self, m: &mut DeviceModule<'_, D>) -> Result<(), String> {
         let graph = m.graph();
 
         let nodes = graph.nodes();

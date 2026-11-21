@@ -12,29 +12,26 @@ use crate::codegen::Supports;
 use crate::graph::Graph;
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
-use crate::graph_compiler::passes::{CompilerPass, DevicePass, Module};
-use crate::graph_compiler::pipeline::Pass;
+use crate::graph_compiler::passes::{CompilerPass, Module};
 
 /// A pass failing on a graph `check` rejects, leaving the graph as it is otherwise.
 pub(crate) struct Unsupported {
     pub(crate) check: fn(&Graph) -> Result<(), String>,
 }
 
-/// Always, on every device whose codegen implements `Supports`: rejects graphs with an op it has no kernel for.
-impl<D: Supports> DevicePass<D> for Unsupported {
-    fn pass<'a>(_: &CompilerConfig) -> Pass<DeviceModule<'a, D>> {
-        Box::new(Unsupported { check: D::check })
+impl<D: Supports> CompilerPass<DeviceModule<'_, D>> for Unsupported {
+    /// Always, with the device's check.
+    fn configured(_: &CompilerConfig) -> Option<Self> {
+        Some(Unsupported { check: D::check })
     }
-}
 
-impl<M: Module> CompilerPass<M> for Unsupported {
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "unsupported"
     }
 
     /// Fails when the module's graph has an op the device has no kernel for.
-    fn apply(&mut self, m: &mut M) -> Result<(), String> {
+    fn apply(&mut self, m: &mut DeviceModule<'_, D>) -> Result<(), String> {
         (self.check)(m.graph())
     }
 }
