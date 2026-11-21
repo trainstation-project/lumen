@@ -3,7 +3,7 @@
 //! exactly as traced.
 //!
 //! Devices: every device's codegen implements `codegen::Supports` (its check of the graph): the CPU (`reference`:
-//! no Pallas kernels), CUDA (`codegen/devices/cuda.rs`: ops and dtypes the CuTe DSL backend has kernels for), MPS
+//! no Pallas kernels), CUDA (`codegen/devices/cuda`: ops and dtypes the CuTe DSL backend has kernels for), MPS
 //! (`codegen/devices/mps`: float64 and float8 values, bfloat16 transcendentals, dots of two dtypes), Triton
 //! (`codegen/devices/triton`: float16 and bfloat16 transcendentals, which libdevice lacks) and TPU
 //! (`codegen/devices/tpu`: float16, cumsum, scatter-add and random bits). "Transcendental" is

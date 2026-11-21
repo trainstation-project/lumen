@@ -53,7 +53,7 @@ forced through `lumen.autotune.use` is honoured only when `accepts` allows it. S
 
 Each backend's `codegen(plan, options)` runs once per compiled plan and gives every step its kernel:
 
-- CUDA (`devices/cuda.rs`): a `DotGeneral` or GEMM fusion runs `Gemm`, the flash-attention forward fusion runs
+- CUDA (`devices/cuda`): a `DotGeneral` or GEMM fusion runs `Gemm`, the flash-attention forward fusion runs
   `FlashAttention`, everything else runs `Elementwise` (a reshape runs as a copy body). Elementwise and GEMM-fusion
   sources are generated per tensor layout and kept in the step's memo; any other op is an error.
 - Triton (`devices/triton`): `loop_kernel` generates each step's loop kernel first; then attention runs

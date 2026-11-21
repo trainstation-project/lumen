@@ -3,7 +3,7 @@
 //! so codegen compiles every remaining kernel the same way; it is always on, with no config flag.
 //!
 //! Devices: it runs on each device whose codegen implements `codegen::Lone` (which lone nodes only a generated
-//! kernel computes, which inputs kernels take by value, each kernel's name): CUDA (`codegen/devices/cuda.rs`), MPS
+//! kernel computes, which inputs kernels take by value, each kernel's name): CUDA (`codegen/devices/cuda`), MPS
 //! (`codegen/devices/mps`) and Triton (`codegen/devices/triton`). TPU and CPU get the identity pass.
 //!
 //! The rewrite:
