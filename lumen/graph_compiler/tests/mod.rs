@@ -902,10 +902,10 @@ fn shared_lhs_and_column_scales_stay() {
 
     let g = row_scaled_matmul(true);
     assert_eq!(
-        names(&super::pipeline::rewritten_on::<
-            crate::codegen::utils::triton::Triton,
-            _,
-        >(&g, LinearReordering { tile: None })),
+        names(&rewritten_on::<Triton, _>(
+            &g,
+            LinearReordering { tile: None }
+        )),
         names(&g)
     );
 
@@ -925,10 +925,10 @@ fn shared_lhs_and_column_scales_stay() {
     g.set_outputs(&[y]).unwrap();
 
     assert_eq!(
-        names(&super::pipeline::rewritten_on::<
-            crate::codegen::utils::triton::Triton,
-            _,
-        >(&g, LinearReordering { tile: None })),
+        names(&rewritten_on::<Triton, _>(
+            &g,
+            LinearReordering { tile: None }
+        )),
         names(&g)
     );
 }
@@ -1139,10 +1139,10 @@ fn contracted_axis_factors_stay_in_every_layout() {
 
             let case = format!("xt {xt} wt {wt} side {side}");
             assert_eq!(
-                names(&super::pipeline::rewritten_on::<
-                    crate::codegen::utils::triton::Triton,
-                    _,
-                >(&g, LinearReordering { tile: None })),
+                names(&rewritten_on::<Triton, _>(
+                    &g,
+                    LinearReordering { tile: None }
+                )),
                 names(&g),
                 "{case}"
             );
@@ -1236,37 +1236,37 @@ fn reordering_moves_only_factors_of_cross_tile_reductions() {
     let moved = |out: &Graph| names(out).ends_with(&["dot_general", "broadcast_in_dim", "mul"]);
 
     assert!(
-        moved(&super::pipeline::rewritten_on::<
-            crate::codegen::utils::triton::Triton,
-            _,
-        >(&g, LinearReordering { tile: Some(64) })),
+        moved(&rewritten_on::<Triton, _>(
+            &g,
+            LinearReordering { tile: Some(64) }
+        )),
         "{g}"
     );
     assert_eq!(
-        names(&super::pipeline::rewritten_on::<
-            crate::codegen::utils::triton::Triton,
-            _,
-        >(&g, LinearReordering { tile: Some(256) })),
+        names(&rewritten_on::<Triton, _>(
+            &g,
+            LinearReordering { tile: Some(256) }
+        )),
         names(&g)
     );
-    assert!(moved(&super::pipeline::rewritten_on::<
-        crate::codegen::utils::triton::Triton,
-        _,
-    >(&g, LinearReordering { tile: None })));
+    assert!(moved(&rewritten_on::<Triton, _>(
+        &g,
+        LinearReordering { tile: None }
+    )));
 
     let (g, _) = factored_matmul(false, false, false, true, true);
     assert_eq!(
-        names(&super::pipeline::rewritten_on::<
-            crate::codegen::utils::triton::Triton,
-            _,
-        >(&g, LinearReordering { tile: Some(64) })),
+        names(&rewritten_on::<Triton, _>(
+            &g,
+            LinearReordering { tile: Some(64) }
+        )),
         names(&g)
     );
     assert_ne!(
-        names(&super::pipeline::rewritten_on::<
-            crate::codegen::utils::triton::Triton,
-            _,
-        >(&g, LinearReordering { tile: None })),
+        names(&rewritten_on::<Triton, _>(
+            &g,
+            LinearReordering { tile: None }
+        )),
         names(&g)
     );
 }
