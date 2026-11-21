@@ -87,6 +87,9 @@ pub(crate) fn kernel(step: &StepBase) -> Result<Option<Kernel>, String> {
         }
         Primitive::Reshape { .. } => crate::codegen::layout::tpu::kernel(step).map(Some),
         Primitive::Gather { .. } => crate::codegen::gather::tpu::kernel(step).map(Some),
+        Primitive::TakeAlongAxis { .. } => {
+            crate::codegen::gather::tpu::take_along_axis(step).map(Some)
+        }
         Primitive::DynamicUpdateSlice => crate::codegen::dynamic_slice::tpu::kernel(step),
         Primitive::PallasCall { kernel, .. } => {
             // Pallas kernels see their inputs, then the output, then any scratch buffers.

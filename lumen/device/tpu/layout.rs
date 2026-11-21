@@ -52,7 +52,7 @@ impl Layout {
     }
 
     /// The leading dims' product and the last two dims padded to whole tiles.
-    fn padded(&self) -> (usize, usize, usize) {
+    pub(crate) fn padded(&self) -> (usize, usize, usize) {
         let r = self.shape.len();
         let lead = self.shape[..r - 2].iter().product();
         let m = self.shape[r - 2].div_ceil(self.rows) * self.rows;

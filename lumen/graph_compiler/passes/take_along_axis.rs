@@ -2,7 +2,8 @@
 //! pass in the list, right after `unsupported`.
 //!
 //! Devices: it runs on each device whose codegen implements `codegen::Gathers` (its kernels compute `Gather`): CUDA,
-//! MPS and Triton. CPU interprets `take_along_axis` and TPU lowers it in Mosaic, so both get the identity pass.
+//! MPS and Triton. The CPU interprets `take_along_axis` and TPU runs it as its own kernel (`codegen::gather::tpu`,
+//! reading the operand in its tiles, which a flat view would move between), so both get the identity pass.
 //!
 //! The rewrite, for `take_along_axis(x, indices, axis)`:
 //! 1. The index dtype is int64 when the indices are 64-bit (`I64` or `U64`), int32 otherwise; the indices are cast to it

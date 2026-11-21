@@ -113,6 +113,81 @@ pub(crate) fn kernel(step: &StepBase) -> Result<Kernel, String> {
     Ok(kernel)
 }
 
+/// The kernel of the `take_along_axis` step: a 32-bit operand of rank 2 or more at int32 indices, each viewed at its
+/// tile-padded shape (`lumen.codegen.gather.tpu.take_along_axis`, by the axis: the last, the second-last or an earlier
+/// one); rejects others.
+pub(crate) fn take_along_axis(step: &StepBase) -> Result<Kernel, String> {
+    let Primitive::TakeAlongAxis { axis } = step.primitive else {
+        unreachable!("a take_along_axis step")
+    };
+
+    let (x, ids) = (&step.inputs[0].1, &step.inputs[1].1);
+
+    let failed = |what: &str| {
+        Err(format!(
+            "{what} does not run on TPU yet: take_along_axis of {x} at {ids}"
+        ))
+    };
+
+    if x.dtype.bits() != 32 {
+        return failed("an operand of other than 32 bits");
+    }
+
+    if !matches!(ids.dtype, DType::I32 | DType::U32) {
+        return failed("indices of other than 32 bits");
+    }
+
+    let rank = x.shape.len();
+
+    if rank < 2 {
+        return failed("an operand of fewer than two dimensions");
+    }
+
+    let (operand, indices) = (
+        Layout::new(x.dtype, &x.shape)?,
+        Layout::new(ids.dtype, &ids.shape)?,
+    );
+    let (xv, iv) = (operand.padded(), indices.padded());
+    let lead = &ids.shape[..rank - 2];
+
+    // The operand's row-major strides over its leading dims, in slabs.
+    let mut strides = vec![1; rank - 2];
+
+    for d in (0..(rank - 2).saturating_sub(1)).rev() {
+        strides[d] = strides[d + 1] * x.shape[d + 1];
+    }
+
+    let kind = match axis {
+        a if a == rank - 1 => "lanes",
+        a if a == rank - 2 => "sublanes",
+        _ => "outer",
+    };
+
+    let spec = format!(
+        "\"kind\": \"{kind}\", \"dtype\": \"{}\", \"x\": [{}, {}, {}], \"idx\": [{}, {}, {}], \"lead\": {lead:?}, \"strides\": {strides:?}, \"bm\": {}, \"bn\": {LANES}, \"tile\": {}, \"axis\": {axis}, \"n\": {}",
+        x.dtype.full_name(),
+        xv.0,
+        xv.1,
+        xv.2,
+        iv.0,
+        iv.1,
+        iv.2,
+        operand.rows,
+        operand.rows,
+        x.shape[axis]
+    );
+
+    let mut kernel = Kernel::new(
+        "lumen.codegen.gather.tpu.take_along_axis",
+        format!("take_along_axis_{kind}_{}", x.dtype),
+        spec,
+        Rows::Step,
+    );
+
+    kernel.context = Some(step.label.to_string());
+    Ok(kernel)
+}
+
 /// Encodes the gather on the SparseCore when rows are 32-bit, whole lanes and tile-aligned in the shared region;
 /// returns whether it did. Rejects gathers no kernel covers.
 pub(crate) fn sparse_core(
