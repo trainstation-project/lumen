@@ -11,7 +11,7 @@ import cutlass
 import cutlass.cute as cute
 
 from lumen.codegen.attention.cuda.ampere.forward import AmpereAttentionForward
-from lumen.codegen.utils.cuda import check, compiled_cubin, modules
+from lumen.codegen.devices.cuda import check, compiled_cubin, modules
 
 # The CuTe type of each dtype the kernel reads or writes, by lumen's name for it.
 DTYPES = {
@@ -44,7 +44,7 @@ def compile(dtype, layouts, heads_per_kv, causal, scores, config):
     query heads share each K/V head. `causal` is the causal diagonal's shift (key `k` seen by query `q` when
     `k <= q + causal`) or None; `scores` the traced score ops, `("round", _, dtype)` or `("mul", c, dtype)` with
     lumen dtype names; `config` (tile_m, tile_n, stages, warps, q_in_regs) from `codegen/attention/cuda/mod.rs`.
-    Returns its launch info as `lumen.codegen.utils.cuda.compile` does: its ``CUfunction``, warps per block, dynamic
+    Returns its launch info as `lumen.codegen.devices.cuda.compile` does: its ``CUfunction``, warps per block, dynamic
     shared bytes, that a plain ``cuLaunchKernel`` runs it, and its parameters' types (each an address)."""
     if dtype not in ("float16", "bfloat16"):
         raise RuntimeError(f"flash_attention: the CUDA kernel reads float16 or bfloat16, got {dtype}")

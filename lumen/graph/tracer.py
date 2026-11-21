@@ -1009,7 +1009,7 @@ class Compiled:
             # The first call compiles the plan's kernels, which capturing cannot.
             self._warm.add(id(plan))
             return plan.run_in(workspace, inputs)
-        from lumen.codegen.utils import triton
+        from lumen.codegen.devices import triton
         from lumen.runtime.stream._C import CudaGraph
 
         self._graphs.pop(id(plan), None)

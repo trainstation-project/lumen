@@ -28,7 +28,7 @@ from lumen.codegen.attention.tpu.utils import (
     when,
     zeros,
 )
-from lumen.codegen.utils.tpu import pallas
+from lumen.codegen.devices.tpu import pallas
 from lumen.kernels import pallas as pl
 
 

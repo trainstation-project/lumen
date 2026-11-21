@@ -17,7 +17,7 @@ one operand. Codegen picks these kernels for the matching plan steps on MPS, Tri
       update into `out`, which already holds the operand. `update` returns an error because a single update
       runs the fixed kernel.
     - Kernel structs (no config, never tuned): `DynamicSlice` runs a lone `dynamic_slice` or
-      `dynamic_update_slice` (`codegen/utils/mps` picks it), and `Copy` runs a `Reshape` step as a whole-buffer
+      `dynamic_update_slice` (`codegen/devices/mps` picks it), and `Copy` runs a `Reshape` step as a whole-buffer
       byte copy.
     - The free function `copy(src, dst, ty, keep, name)` launches `dynamic_slice_copy_<bytes>`. The plan runner,
       tensor copies, host-to-device transfers and the scatter-add also use it.
@@ -31,13 +31,13 @@ one operand. Codegen picks these kernels for the matching plan steps on MPS, Tri
     `(name, source)` of a `BODY(EXTRA, BLOCK, MASK)` function, which loads and stores through helpers generated
     for those layouts. The `BODY` is generated when the step launches.
   - `kernel.py` holds the fixed `dynamic_update_slice_kernel`: a 1-D grid of `BLOCK_SIZE` blocks over the `N`
-    update elements that calls `BODY`. It runs as `Template::DynamicUpdateSlice` in `codegen/utils/triton`, under
+    update elements that calls `BODY`. It runs as `Template::DynamicUpdateSlice` in `codegen/devices/triton`, under
     the `Loop` kernel.
 - `tpu/`: Pallas (built only with `lumen_tpu_linked`).
   - `mod.rs` implements the trait for TPU, producing a `Program`: the kernel name, a JSON spec, and the
-    constant starts passed as `i32` scalars. `kernel(step)` returns the step's `codegen::utils::tpu::Kernel` (module
+    constant starts passed as `i32` scalars. `kernel(step)` returns the step's `codegen::devices::tpu::Kernel` (module
     `lumen.codegen.dynamic_slice.tpu.kernel`, `Rows::Step`), or `None` for an empty update. The generic
-    `Pallas` kernel in `codegen/utils/tpu` launches it.
+    `Pallas` kernel in `codegen/devices/tpu` launches it.
     - The spec picks block sizes under fixed budgets (`STAGED`, `STREAMED`, `COPY_BYTES`).
     - It records whether each update is tile-aligned on its last two dims.
     - It records whether the region all updates touch can stay resident in VMEM (`RESIDENT`). When the

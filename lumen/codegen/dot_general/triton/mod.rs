@@ -16,12 +16,12 @@ use std::fmt::Write;
 
 use indoc::formatdoc;
 
+use crate::codegen::devices::triton::{Triton, indented, named, triton_type};
 use crate::codegen::dot_general::GemmCodegen;
 use crate::codegen::emitter::Emit;
 use crate::codegen::emitter::triton::Emitter;
 use crate::codegen::regions::{Columns, Region, gemm_expanded, gemm_regions};
 use crate::codegen::store::triton::{gather_index, load, stored_at};
-use crate::codegen::utils::triton::{Triton, indented, named, triton_type};
 use crate::graph::{Graph, Node, Primitive, TensorType, Var};
 use crate::tensor::contiguous_strides;
 
@@ -798,7 +798,7 @@ pub(crate) fn untuned_gemv(m: usize) -> Config {
 pub(crate) const ROW_TILE: usize = 256;
 
 /// Triton's GEMM tile holds rows up to `ROW_TILE` whole (`linear_reordering`).
-impl super::RowTile for crate::codegen::utils::triton::Triton {
+impl super::RowTile for crate::codegen::devices::triton::Triton {
     const ROW_TILE: usize = ROW_TILE;
 }
 

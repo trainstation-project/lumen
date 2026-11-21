@@ -12,9 +12,9 @@ use indoc::formatdoc;
 #[cfg(lumen_tpu_linked)]
 use super::ElementwiseCodegen;
 #[cfg(lumen_tpu_linked)]
-use crate::codegen::dot_general::tpu::block;
+use crate::codegen::devices::tpu::{GENERATED, Kernel, Rows, Tpu, fusible, window_at};
 #[cfg(lumen_tpu_linked)]
-use crate::codegen::utils::tpu::{GENERATED, Kernel, Rows, Tpu, fusible, window_at};
+use crate::codegen::dot_general::tpu::block;
 #[cfg(lumen_tpu_linked)]
 use crate::device::tpu::layout::Layout;
 #[cfg(lumen_tpu_linked)]
@@ -808,7 +808,7 @@ fn program(specs: &[String], kernel: &[String]) -> String {
         "
         from lumen.kernels import pallas as pl
         from lumen.graph import prims
-        from lumen.codegen.utils.tpu import pallas
+        from lumen.codegen.devices.tpu import pallas
 
 
         def program(device):

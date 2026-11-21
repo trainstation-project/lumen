@@ -6,6 +6,7 @@ use std::fmt::Write;
 use indoc::{formatdoc, writedoc};
 
 use super::row::{gemm_row_kernel, row_dot, tile_scratch};
+use crate::codegen::devices::mps::*;
 use crate::codegen::dot_general::GemmCodegen;
 use crate::codegen::dot_general::mps::{
     Algorithm, DEFAULT_CONFIGS, GemmConfig, gemv, gemv_default, gemv_rows, gemv_tiles_default,
@@ -13,7 +14,6 @@ use crate::codegen::dot_general::mps::{
 };
 use crate::codegen::emitter::Emit;
 use crate::codegen::emitter::mps::Emitter;
-use crate::codegen::utils::mps::*;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::tensor::contiguous_strides;

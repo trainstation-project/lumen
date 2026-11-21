@@ -26,7 +26,7 @@
 //!
 //! Used elsewhere: `segments(body)` groups a fused body's outputs by element count; a kernel runs each group on its own
 //! range of the grid, so one launch can cover several sizes. The MPS, Triton and CUDA elementwise codegen,
-//! `codegen::utils::triton` and the MPS kernel runtime read it.
+//! `codegen::devices::triton` and the MPS kernel runtime read it.
 
 use crate::codegen::HorizontallyFuses;
 use crate::codegen::layout::{MAX_HEROES, transpose_tiling};

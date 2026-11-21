@@ -2,19 +2,19 @@
 //! reductions split into a partials pass plus a final pass), and the source of a reduction fused with an
 //! elementwise prologue and epilogue.
 
-use crate::codegen::utils::mps::Mps;
+use crate::codegen::devices::mps::Mps;
 use crate::runtime::kernel::Launch as _;
 use crate::runtime::kernel::mps::MpsLaunch;
 use std::fmt::Write;
 
 use indoc::{formatdoc, indoc};
 
+use crate::codegen::devices::mps::*;
 use crate::codegen::emitter::Emit;
 use crate::codegen::emitter::mps::Emitter;
 use crate::codegen::fusion::mps as fusion;
 use crate::codegen::kinds::reduction_root;
 use crate::codegen::reduction::ReductionCodegen;
-use crate::codegen::utils::mps::*;
 use crate::graph::Primitive::{self, *};
 use crate::graph::TensorType;
 use crate::graph::primitive::free_dims;

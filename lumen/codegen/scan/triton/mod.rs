@@ -2,8 +2,8 @@
 
 use super::ScanCodegen;
 use crate::DType;
+use crate::codegen::devices::triton::Triton;
 use crate::codegen::reduction::triton::Tile;
-use crate::codegen::utils::triton::Triton;
 use crate::graph::Primitive;
 use crate::graph::TensorType;
 use crate::plan::StepBase;

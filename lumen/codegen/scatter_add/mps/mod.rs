@@ -1,7 +1,7 @@
 //! Metal scatter-adds: the fixed `scatter_add` kernels (`kernel.metal`) and their launch, which copies the
 //! operand into the output, then adds the updates in.
 
-use crate::codegen::utils::mps::Mps;
+use crate::codegen::devices::mps::Mps;
 use crate::graph::{Primitive, TensorType};
 use crate::plan::StepBase;
 use crate::runtime::kernel::Launch as _;

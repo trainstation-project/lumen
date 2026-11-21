@@ -20,10 +20,10 @@ pub(crate) use row::*;
 pub(crate) use skinny::*;
 pub(crate) use tiled::*;
 
+use crate::codegen::devices::mps::Mps;
 use crate::codegen::dot_general::mps as gemm;
 use crate::codegen::kernel::Kernel;
 use crate::codegen::kinds::gemm_dot;
-use crate::codegen::utils::mps::Mps;
 use crate::graph::Primitive;
 use crate::graph::TensorType;
 use crate::graph::Var;

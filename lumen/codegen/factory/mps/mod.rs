@@ -1,6 +1,6 @@
 //! Metal fills and iotas: `kernel.metal`'s kernels and their launches.
 
-use crate::codegen::utils::mps::Mps;
+use crate::codegen::devices::mps::Mps;
 use crate::graph::Primitive::{Full, Iota};
 use crate::runtime::kernel::Launch as _;
 use crate::runtime::kernel::mps::{Grid, MpsLaunch, element_arg, elementwise_grid, u32_arg};

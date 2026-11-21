@@ -1,7 +1,7 @@
 //! Metal encoding of `Cumsum`, splitting long scans into chunks scanned in three passes.
+use crate::codegen::devices::mps::Mps;
 use crate::codegen::reduction::mps::kernel_dtype;
 use crate::codegen::scan::ScanCodegen;
-use crate::codegen::utils::mps::Mps;
 use crate::graph::{Primitive, TensorType};
 use crate::plan::StepBase;
 use crate::runtime::kernel::Launch as _;

@@ -1,6 +1,6 @@
 # emitter
 
-The emitters write the statements that compute a fused body's values at an index, which is the core of every generated GPU kernel. Every family generator that turns graph nodes into source calls one: elementwise, reduction, row, layout/transpose, GEMM epilogues and prologues, and the attention score chain. TPU has no emitter here. Its Pallas programs rebuild nodes from JSON specs or `prims.bind` calls (see `codegen/utils/tpu`).
+The emitters write the statements that compute a fused body's values at an index, which is the core of every generated GPU kernel. Every family generator that turns graph nodes into source calls one: elementwise, reduction, row, layout/transpose, GEMM epilogues and prologues, and the attention score chain. TPU has no emitter here. Its Pallas programs rebuild nodes from JSON specs or `prims.bind` calls (see `codegen/devices/tpu`).
 
 ## Files
 
@@ -11,7 +11,7 @@ The emitters write the statements that compute a fused body's values at an index
 
 ## How it works
 
-Each `Emitter` walks back from the requested value through its producers. It memoizes every `(value, index)` pair and every index expression, so shared subexpressions are emitted once. Layout primitives (reshape, broadcast, transpose, slice, gather, iota and similar) become index arithmetic on the operand's index (`operand_index`), never materialized tensors; `SwapPairs` reads its operand at `idx ^ 1`, except that Triton swaps the adjacent lanes of a value computed from a register tile (`registers`, a GEMM epilogue's accumulator) with the `swap_pairs` helper of `codegen/utils/triton`. Constants are written bit-exactly through `codegen/utils` helpers. Random bits come from the `RandomCodegen` Philox expression in `codegen/random`. Callers read `lines` (plus `hoisted` on Metal) and splice them into their kernel.
+Each `Emitter` walks back from the requested value through its producers. It memoizes every `(value, index)` pair and every index expression, so shared subexpressions are emitted once. Layout primitives (reshape, broadcast, transpose, slice, gather, iota and similar) become index arithmetic on the operand's index (`operand_index`), never materialized tensors; `SwapPairs` reads its operand at `idx ^ 1`, except that Triton swaps the adjacent lanes of a value computed from a register tile (`registers`, a GEMM epilogue's accumulator) with the `swap_pairs` helper of `codegen/devices/triton`. Constants are written bit-exactly through `codegen/devices` helpers. Random bits come from the `RandomCodegen` Philox expression in `codegen/random`. Callers read `lines` (plus `hoisted` on Metal) and splice them into their kernel.
 
 ## Per backend
 

@@ -9,9 +9,9 @@ pub(crate) mod codegen;
 #[cfg(lumen_tpu_linked)]
 pub(crate) mod row;
 
-use crate::codegen::utils::tpu::Tpu;
+use crate::codegen::devices::tpu::Tpu;
 #[cfg(lumen_tpu_linked)]
-use crate::codegen::utils::tpu::{Kernel, Rows};
+use crate::codegen::devices::tpu::{Kernel, Rows};
 #[cfg(lumen_tpu_linked)]
 use crate::graph::Primitive;
 #[cfg(lumen_tpu_linked)]
@@ -88,7 +88,7 @@ impl crate::codegen::MergesDots for Tpu {
         crate::graph_compiler::passes::merge_dots::Target {
             reads: |_, _| true,
             views: false,
-            lanes: crate::codegen::utils::tpu::LANES,
+            lanes: crate::codegen::devices::tpu::LANES,
             columns: 1,
         }
     }
@@ -138,7 +138,7 @@ impl crate::codegen::DotLayouts for Tpu {
 /// TPU fuses matmuls with their slices, stacked lhs and epilogues, in whole vector lanes, a producer writing a
 /// concatenation's slot as `fusion::tpu::slot_writes` accepts.
 impl crate::codegen::FusesDots for Tpu {
-    const LANES: usize = crate::codegen::utils::tpu::LANES;
+    const LANES: usize = crate::codegen::devices::tpu::LANES;
 
     /// `fusion::tpu::slot_writes`.
     fn slot_writes(

@@ -154,7 +154,7 @@ impl Device for Tpu {
 
         // Each step's kernel is generated now, so running the plan only launches them.
         #[cfg(lumen_tpu_linked)]
-        return Ok(Box::new(crate::codegen::utils::tpu::codegen(
+        return Ok(Box::new(crate::codegen::devices::tpu::codegen(
             plan, options,
         )?));
 

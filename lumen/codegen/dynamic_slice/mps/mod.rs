@@ -1,7 +1,7 @@
 //! Metal dynamic slices: the dynamic-slice and dynamic-update-slice kernels and their launches, the copy
 //! an out-of-place update starts from, and the source of a fused chain of dynamic-update-slices.
 
-use crate::codegen::utils::mps::Mps;
+use crate::codegen::devices::mps::Mps;
 use crate::graph::Primitive;
 use crate::runtime::kernel::Launch as _;
 use crate::runtime::kernel::mps::MpsLaunch;
@@ -12,12 +12,12 @@ use indoc::formatdoc;
 
 use super::DynamicSliceCodegen;
 use crate::Tensor;
-use crate::codegen::utils::mps::*;
+use crate::codegen::devices::mps::*;
 use crate::graph::{Graph, TensorType, UPDATES};
 use crate::graph_compiler::passes::updates::{overlaps, starts};
 
 /// MPS fuses chains of 2 to 29 updates under `fuse`: Metal binds 31 buffers, two of them the operand and output.
-impl super::UpdateChains for crate::codegen::utils::mps::Mps {
+impl super::UpdateChains for crate::codegen::devices::mps::Mps {
     const LEAST: usize = 2;
     const MOST: usize = 29;
 }

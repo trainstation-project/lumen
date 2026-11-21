@@ -9,7 +9,7 @@ tensors in ``EXTRA``), and ``SCORE`` applies the traced score ops (casts, scales
 import triton
 import triton.language as tl
 
-from lumen.codegen.utils.triton import compiled_launch, functions
+from lumen.codegen.devices.triton import compiled_launch, functions
 
 
 @triton.jit

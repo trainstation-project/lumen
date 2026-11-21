@@ -4,8 +4,8 @@ prologues and fused epilogue."""
 import triton
 import triton.language as tl
 
+from lumen.codegen.devices.triton import compiled_launch, functions, scalar
 from lumen.codegen.dot_general.triton.gemm_kernel import TL_DTYPES
-from lumen.codegen.utils.triton import compiled_launch, functions, scalar
 
 
 @triton.jit

@@ -12,12 +12,12 @@ use std::fmt::Write;
 use indoc::formatdoc;
 
 use super::AttentionCodegen;
+use crate::codegen::devices::mps::*;
+use crate::codegen::devices::mps::{Kernel as Request, request};
 use crate::codegen::emitter::Emit;
 use crate::codegen::emitter::mps::Emitter;
 use crate::codegen::kernel::Kernel;
 use crate::codegen::random::RandomCodegen;
-use crate::codegen::utils::mps::*;
-use crate::codegen::utils::mps::{Kernel as Request, request};
 use crate::graph::Primitive;
 use crate::graph::{Graph, Var};
 use crate::graph_compiler::device::DeviceModule;

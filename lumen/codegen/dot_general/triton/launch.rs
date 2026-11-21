@@ -2,10 +2,10 @@
 
 use std::sync::OnceLock;
 
+use crate::codegen::devices::triton::Triton;
 use crate::codegen::dot_general::GemmCodegen;
 use crate::codegen::dot_general::triton::cross_entropy;
 use crate::codegen::dot_general::triton::{self as codegen, CONFIGS, Config, UNTUNED};
-use crate::codegen::utils::triton::Triton;
 use crate::graph::{Graph, Node, Primitive};
 use crate::plan::Buffer;
 use crate::plan::StepBase;

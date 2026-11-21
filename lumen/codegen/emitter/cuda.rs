@@ -11,8 +11,8 @@ use std::collections::{BTreeSet, HashMap};
 use std::fmt::Write;
 
 use super::Emit;
+use crate::codegen::devices::cuda::*;
 use crate::codegen::store::triton::gather_index;
-use crate::codegen::utils::cuda::*;
 use crate::graph::{BinaryOp, Graph, Node, Primitive, UnaryOp, Var};
 use crate::tensor::contiguous_strides;
 use crate::{DType, Scalar};

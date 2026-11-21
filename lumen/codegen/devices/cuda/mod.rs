@@ -5,6 +5,7 @@
 
 use crate::autotune::Autotuner;
 use crate::codegen::attention::cuda::FlashAttention;
+use crate::codegen::devices::triton::bits;
 use crate::codegen::dot_general::cuda::Gemm;
 use crate::codegen::dot_general::cuda::matmul;
 use crate::codegen::elementwise::cuda::{Elementwise, Layouts};
@@ -12,7 +13,6 @@ use crate::codegen::elementwise::cuda::{extent, generated};
 use crate::codegen::fusion::cuda::{ELEMENTWISE, fusible};
 use crate::codegen::kernel::Runner;
 use crate::codegen::kinds::gemm_dot;
-use crate::codegen::utils::triton::bits;
 use crate::graph::{Graph, Node, Primitive};
 use crate::graph_compiler::device::{Device, DeviceModule};
 use crate::graph_compiler::passes::attention::FORWARD;
@@ -173,7 +173,7 @@ impl Device for Cuda {
         let mut plan = CpuPlan::compile_with(&fused, &plan);
         plan.packed = packed;
         plan.interleaved = interleaved;
-        let mut plan = crate::codegen::utils::cuda::codegen(plan, options)?;
+        let mut plan = crate::codegen::devices::cuda::codegen(plan, options)?;
 
         if config.autotune || crate::autotune::forcing() {
             let tuner = Autotuner {

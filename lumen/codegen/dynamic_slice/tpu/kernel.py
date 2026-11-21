@@ -5,7 +5,7 @@ Unaligned updates are rolled into place inside tile-aligned windows; aligned one
 
 import math
 
-from lumen.codegen.utils.tpu import pallas
+from lumen.codegen.devices.tpu import pallas
 from lumen.graph import prims
 from lumen.kernels import pallas as pl
 

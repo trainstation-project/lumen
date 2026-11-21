@@ -28,7 +28,7 @@ One program (a threadgroup on Metal) handles one `TILE` x `TILE` (32 x 32) tile.
 `MIN_TILED` is not tiled. These users decide what to run from `transpose_tiling` (keep them in
 agreement):
 
-- `codegen/utils/mps` and `codegen/utils/triton` choose the transpose kernel.
+- `codegen/devices/mps` and `codegen/devices/triton` choose the transpose kernel.
 - `elementwise/triton` uses it to size the grid.
 - `runtime::kernel::mps` uses it for the launch.
 - `graph_compiler/passes/horizontal` fuses only members that are all tiled or all untiled.
@@ -50,7 +50,7 @@ reshape is a view the elementwise kernels read through.
 **TPU (`tpu/`).** `LayoutCodegen for Tpu` handles only reshapes, because transposes fuse into the TPU
 elementwise kernels. A reshape is supported only when it splits a last dimension `a * w` into `[a, w]`
 or merges them back. Any other reshape that moves elements between tiles fails. `kernel(step)` wraps it
-as module `lumen.codegen.layout.tpu.kernel` with `Rows::Step`. `codegen/utils/tpu` uses that for
+as module `lumen.codegen.layout.tpu.kernel` with `Rows::Step`. `codegen/devices/tpu` uses that for
 `Reshape` steps, and the `Pallas` kernel launches it. `kernel.py::program(spec)` copies `bm`-row blocks
 between the flat and tiled forms.
 

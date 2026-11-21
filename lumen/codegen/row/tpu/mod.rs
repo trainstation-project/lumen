@@ -5,13 +5,13 @@
 #[cfg(lumen_tpu_linked)]
 use std::collections::HashMap;
 
+use crate::codegen::devices::tpu::Tpu;
+#[cfg(lumen_tpu_linked)]
+use crate::codegen::devices::tpu::{Kernel, Rows};
 #[cfg(lumen_tpu_linked)]
 use crate::codegen::dot_general::tpu::block;
 #[cfg(lumen_tpu_linked)]
 use crate::codegen::row::RowCodegen;
-use crate::codegen::utils::tpu::Tpu;
-#[cfg(lumen_tpu_linked)]
-use crate::codegen::utils::tpu::{Kernel, Rows};
 use crate::device::tpu::layout::Layout;
 #[cfg(lumen_tpu_linked)]
 use crate::graph::Var;
@@ -59,7 +59,7 @@ pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
         .chain([&node.output])
         .all(|&v| graph.type_of(v).dtype.bits() <= 32);
 
-    let row_op = crate::codegen::utils::tpu::fusible(&node.primitive)
+    let row_op = crate::codegen::devices::tpu::fusible(&node.primitive)
         || matches!(
             node.primitive,
             Reshape { .. } | BroadcastInDim { .. } | ReduceSum { .. } | ReduceMax { .. }
@@ -276,7 +276,7 @@ pub(crate) fn row_node(node: &Node, args: &[usize], kind: Kind) -> String {
         | Primitive::BroadcastInDim { .. } => named(String::new()),
         // Splice the kind into the plain node's closing brace.
         p => {
-            let plain = crate::codegen::utils::tpu::node(p, args);
+            let plain = crate::codegen::devices::tpu::node(p, args);
 
             format!(
                 "{}, \"kind\": \"{}\"}}",

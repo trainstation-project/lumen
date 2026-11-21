@@ -10,11 +10,11 @@ use indoc::{formatdoc, writedoc};
 
 use super::RowCodegen;
 use crate::DType;
+use crate::codegen::devices::triton::*;
 use crate::codegen::emitter::Emit;
 use crate::codegen::emitter::triton::Emitter;
 use crate::codegen::reduction::triton::Reduction;
 use crate::codegen::reduction::triton::{combine, lowest, reduce_along};
-use crate::codegen::utils::triton::*;
 use crate::graph::TensorType;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::elementwise;

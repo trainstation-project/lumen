@@ -12,6 +12,7 @@ use std::fmt::Write;
 use indoc::{formatdoc, writedoc};
 
 use super::ElementwiseCodegen;
+use crate::codegen::devices::mps::*;
 use crate::codegen::dot_general::mps::row_dot;
 use crate::codegen::emitter::Emit;
 use crate::codegen::emitter::mps::Emitter;
@@ -19,7 +20,6 @@ use crate::codegen::kernel::Kernel;
 use crate::codegen::kinds::{gemm_dot, reduction_root, row_reductions};
 use crate::codegen::layout::transpose_tiling;
 use crate::codegen::store::mps::written;
-use crate::codegen::utils::mps::*;
 use crate::graph::Graph;
 use crate::graph::Primitive;
 use crate::graph_compiler::CompilerConfig;
@@ -401,7 +401,7 @@ impl Elementwise {
         let t = step.code.as_ref().expect("a tunable fusion");
 
         let generate = |&tuning: &Tuning| {
-            let (kernel, source) = crate::codegen::utils::mps::kernel(
+            let (kernel, source) = crate::codegen::devices::mps::kernel(
                 body,
                 &t.by_value,
                 &self.config,

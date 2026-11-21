@@ -3,7 +3,7 @@ the axis, read where the operand lies in its TPU tiles (it is never flattened)."
 
 import lumen
 import lumen.functional as F
-from lumen.codegen.utils.tpu import pallas
+from lumen.codegen.devices.tpu import pallas
 from lumen.kernels import pallas as pl
 
 LANES = 128

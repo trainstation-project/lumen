@@ -10,7 +10,7 @@ LUMEN = pathlib.Path(lumen.__file__).parent
 
 def prelude():
     """The Metal prelude every generated kernel is compiled with: the shared one, then Philox."""
-    return (LUMEN / "codegen/utils/mps/prelude.metal").read_text() + (
+    return (LUMEN / "codegen/devices/mps/prelude.metal").read_text() + (
         LUMEN / "codegen/random/mps/philox.metal"
     ).read_text()
 

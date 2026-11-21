@@ -1,11 +1,11 @@
 //! Triton fusion: the shared fusion (`passes::fusion`, as MPS runs it) with the Triton
 //! kernels' limits and shapes, and which nodes left outside any fusion need one-node kernels.
 
+use crate::codegen::devices::triton::triton_type;
 use crate::codegen::dot_general::triton::gemv_body;
 use crate::codegen::dot_general::triton::row::dot_row_fits;
 use crate::codegen::kinds::{combine_root, gemm_dot, reduction_root, row_reductions};
 use crate::codegen::regions::expansion;
-use crate::codegen::utils::triton::triton_type;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::device::{DeviceModule, Triton};
 use crate::graph_compiler::passes::fusion::{Backend, fuse};

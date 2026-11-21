@@ -58,7 +58,7 @@ helpers such as the load and store prologues/epilogues and functors.
    breaks. Never build a signature or a call with `join(", ")` into one
    line; join parameter lists with `",\n"` (`io_params` already emits one
    parameter a line).
-2. **Don't indent by hand.** `formatted` (`codegen/utils/mps.rs`) trims every
+2. **Don't indent by hand.** `formatted` (`codegen/devices/mps.rs`) trims every
    line and re-indents it: by brace depth, aligned after an open `(`, `[`
    or template `<` that has text after it, and 4 past the statement after
    one that ends its line. It runs in `named` after `NAME` is replaced by

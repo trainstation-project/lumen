@@ -4,7 +4,7 @@ use std::ptr::NonNull;
 
 use crate::Tensor;
 use crate::allocator::tpu::ROW;
-use crate::codegen::utils::tpu::Tpu;
+use crate::codegen::devices::tpu::Tpu;
 use crate::device::Device;
 use crate::device::tpu::layout::Layout;
 use crate::runtime::kernel::Launch as _;

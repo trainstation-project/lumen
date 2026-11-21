@@ -2,9 +2,9 @@
 //! dumps, and the hooks that launch Triton kernels through Python.
 
 #[cfg(lumen_cuda_linked)]
-use crate::codegen::utils::cuda::Cuda;
+use crate::codegen::devices::cuda::Cuda;
 #[cfg(lumen_cuda_linked)]
-use crate::codegen::utils::triton::Triton;
+use crate::codegen::devices::triton::Triton;
 #[cfg(lumen_cuda_linked)]
 use crate::runtime::kernel::Launch as _;
 #[cfg(lumen_cuda_linked)]
@@ -283,7 +283,7 @@ fn triton_code(kernel: &str, functions: &[crate::runtime::kernel::triton::Functi
 struct Entry {
     name: String,
     config: [usize; 6],
-    constexprs: Vec<(&'static str, crate::codegen::utils::triton::Constexpr)>,
+    constexprs: Vec<(&'static str, crate::codegen::devices::triton::Constexpr)>,
     device: usize,
     classes: Vec<crate::runtime::kernel::cuda::driver::Class>,
     kernel: std::sync::Arc<crate::runtime::kernel::cuda::driver::Compiled>,
@@ -301,7 +301,7 @@ fn direct(
     launches: &crate::runtime::kernel::triton::Launches,
     name: &str,
     config: [usize; 6],
-    constexprs: &[(&'static str, crate::codegen::utils::triton::Constexpr)],
+    constexprs: &[(&'static str, crate::codegen::devices::triton::Constexpr)],
     identity: impl FnOnce() -> String,
     on: &crate::Tensor,
     values: &[crate::runtime::kernel::cuda::driver::Value],
@@ -569,7 +569,7 @@ fn triton_gemm(
 /// Launches a generated Triton elementwise loop kernel over `n` elements in `programs` programs.
 #[allow(clippy::too_many_arguments)]
 fn triton_loop(
-    kernel: &crate::codegen::utils::triton::Kernel,
+    kernel: &crate::codegen::devices::triton::Kernel,
     config: &crate::codegen::elementwise::triton::LoopConfig,
     functions: &[crate::runtime::kernel::triton::Function],
     launches: &crate::runtime::kernel::triton::Launches,
@@ -627,12 +627,14 @@ fn triton_loop(
 
             for (key, value) in &constexprs {
                 match value {
-                    crate::codegen::utils::triton::Constexpr::Int(v) => values.set_item(key, v)?,
-                    crate::codegen::utils::triton::Constexpr::Ints(v) => {
+                    crate::codegen::devices::triton::Constexpr::Int(v) => {
+                        values.set_item(key, v)?
+                    }
+                    crate::codegen::devices::triton::Constexpr::Ints(v) => {
                         values.set_item(key, pyo3::types::PyTuple::new(py, v)?)?
                     }
-                    crate::codegen::utils::triton::Constexpr::DType(dtype) => {
-                        let name = crate::codegen::utils::triton::triton_type(*dtype)
+                    crate::codegen::devices::triton::Constexpr::DType(dtype) => {
+                        let name = crate::codegen::devices::triton::triton_type(*dtype)
                             .expect("a Triton dtype")
                             .trim_start_matches("tl.");
 
@@ -642,7 +644,7 @@ fn triton_loop(
             }
 
             return py
-                .import("lumen.codegen.utils.triton")?
+                .import("lumen.codegen.devices.triton")?
                 .getattr("template")?
                 .call(
                     (
@@ -661,7 +663,7 @@ fn triton_loop(
                 .map(Bound::unbind);
         }
 
-        py.import("lumen.codegen.utils.triton")?
+        py.import("lumen.codegen.devices.triton")?
             .getattr("launch")?
             .call(
                 (
@@ -1207,7 +1209,7 @@ fn gemm_tensor(
 
 /// Launches the CUDA backend's kernel `name` of module `source` on `tensors` (inputs, then its `outputs`
 /// outputs, each a flat view) over `n` elements, as a Triton kernel launches:
-/// `lumen.codegen.utils.cuda.compile` compiles it once for its tensors' dtypes and 16-byte alignment and
+/// `lumen.codegen.devices.cuda.compile` compiles it once for its tensors' dtypes and 16-byte alignment and
 /// a launch shape, and returns the loaded function, which every launch then runs by `cuLaunchKernel`
 /// from here, on lumen's stream (a CUDA graph's while it captures). The shape is the fastest of
 /// `shapes()` when autotuning (timed once a kernel and argument classes), else the untuned one.
@@ -1245,7 +1247,7 @@ fn cuda_launch(
             driver::compiled(&format!("{key}|{threads}x{step_bytes}"), || {
                 let dtypes = tensors
                     .iter()
-                    .map(|t| crate::codegen::utils::cuda::cute_type(t.dtype()))
+                    .map(|t| crate::codegen::devices::cuda::cute_type(t.dtype()))
                     .collect::<Option<Vec<&str>>>()
                     .ok_or(format!("{name}: a dtype CuTe has no type for"))?;
 
@@ -1255,7 +1257,7 @@ fn cuda_launch(
 
                 Python::attach(|py| {
                     let (function, warps, shared, plain, types) = py
-                        .import("lumen.codegen.utils.cuda")?
+                        .import("lumen.codegen.devices.cuda")?
                         .getattr("compile")?
                         .call1((name, source, dtypes, aligned, threads, step_bytes))?
                         .extract()?;
