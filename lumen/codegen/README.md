@@ -27,12 +27,12 @@ across families; family-specific helpers live in their family).
 
 Each backend implements the graph compiler's pass traits (`codegen/mod.rs`, plus `Attentions` and
 `AttentionBackwards` in `passes/attention`) in the family file they belong to: attention traits in
-`attention/<device>`; `SplitsK`, `DotLayouts`, `PartialRows`, `InnerProducts`, `MergesDots`,
-`LinearCrossEntropies` and `StridedOperands` in `dot_general/<device>`; `NormalizationRows`, `FusedRows` and
-`FullRows` in `row/<device>`; `Slots`, `Rechecks` and `HorizontallyFuses` in `fusion/<device>`; `SwapsPairs` and
-`Gathers` in `emitter/<device>`. TPU's dot and dynamic-slice ones (`InnerProducts`, `DotLayouts`,
-`FoldsDotReshapes`, `FusesDots`, `MergesDots`, `UpdateChains`) stay in `utils/tpu`, since `dot_general/tpu` and
-`dynamic_slice/tpu` build only with the TPU linked and the pipeline needs them without it.
+`attention/<device>`; `SplitsK`, `DotLayouts`, `PartialRows`, `InnerProducts`, `MergesDots`, `FoldsDotReshapes`,
+`FusesDots`, `LinearCrossEntropies` and `StridedOperands` in `dot_general/<device>`; `NormalizationRows`, `FusedRows`
+and `FullRows` in `row/<device>`; `UpdateChains` in `dynamic_slice/<device>`; `Slots`, `Rechecks` and
+`HorizontallyFuses` in `fusion/<device>`; `SwapsPairs` and `Gathers` in `emitter/<device>`. A TPU family module is
+built without the TPU linked too, so the pipeline has its pass traits on every build; the parts that need the TPU
+runtime are `#[cfg(lumen_tpu_linked)]`.
 
 ## The Kernel trait
 
