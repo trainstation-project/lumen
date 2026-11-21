@@ -22,7 +22,8 @@ pass or the identity pass, which the pipeline skips.
 1. `preserve_precision` - drop `cast(cast(x, b), a)` round trips for forward readers (flag
    `preserve_precision`).
 2. `cse` - common subexpression elimination (never of custom calls or collectives: each collective is a message every process must issue).
-3. `simplify` (`matched: false`) - algebraic simplification without structural rewrites.
+3. `simplify` (`matched: false`) - algebraic simplification without structural rewrites (identities, such as an
+   update as large as its operand being the update).
 
 ## Device pipeline, in order (devices that run it in brackets)
 

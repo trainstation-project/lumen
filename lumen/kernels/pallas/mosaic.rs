@@ -727,6 +727,8 @@ impl Emitter<'_> {
         let uns = unsigned(a.1.dtype);
 
         Ok(match p {
+            // Mosaic has no unsigned maximum (and folds a compare and select back into one).
+            Max if !float && uns => self.unsigned_extreme("arith.maxsi", a, &args[1], out),
             Add | Sub | Mul | Div | Max => {
                 let (name, attrs) = match (p, float, uns) {
                     (Add, true, _) => ("addf", FAST),
@@ -941,12 +943,25 @@ impl Emitter<'_> {
                     }
                 };
 
-                let (kind, identity) = match (p, accum.is_float(), unsigned(accum)) {
-                    (ReduceSum { .. }, true, _) => ("add", Scalar::Float(0.0)),
-                    (ReduceSum { .. }, false, _) => ("add", Scalar::Int(0)),
-                    (_, true, _) => ("maximumf", Scalar::Float(f64::NEG_INFINITY)),
-                    (_, false, false) => ("maxsi", Scalar::Int(-(1 << (accum.bits() - 1)))),
-                    _ => ("maxui", Scalar::Int(0)),
+                // Mosaic has no unsigned maximum: an unsigned max is the signed one of the values with their
+                // sign bits flipped, flipped back.
+                let flip = matches!(p, ReduceMax { .. }) && !accum.is_float() && unsigned(accum);
+                let sign = Scalar::Int(-(1 << (accum.bits() - 1)));
+
+                let src = match flip {
+                    true => {
+                        let bit = self.splat(sign, &src.1);
+                        let t = src.1.clone();
+                        self.apply("arith.xori", &[&src, &bit], "", &t)
+                    }
+                    false => src,
+                };
+
+                let (kind, identity) = match (p, accum.is_float()) {
+                    (ReduceSum { .. }, true) => ("add", Scalar::Float(0.0)),
+                    (ReduceSum { .. }, false) => ("add", Scalar::Int(0)),
+                    (_, true) => ("maximumf", Scalar::Float(f64::NEG_INFINITY)),
+                    (_, false) => ("maxsi", sign),
                 };
 
                 let acc = (self.constant(&identity, out), out.clone());
@@ -957,7 +972,14 @@ impl Emitter<'_> {
                     dims.join(", ")
                 );
 
-                self.unary("vector.multi_reduction", &[&src, &acc], &attrs, out)
+                match flip {
+                    true => {
+                        let r = self.apply("vector.multi_reduction", &[&src, &acc], &attrs, out);
+                        let bit = self.splat(sign, out);
+                        self.unary("arith.xori", &[&r, &bit], "", out)
+                    }
+                    false => self.unary("vector.multi_reduction", &[&src, &acc], &attrs, out),
+                }
             }
             DotGeneral {
                 lhs_contracting,
@@ -1243,7 +1265,6 @@ impl Emitter<'_> {
             U::Ceil => "math.ceil",
             U::RoundEven => "math.roundeven",
             U::Log1p => "math.log1p",
-            U::Expm1 => "math.expm1",
             U::Exp2 => "math.exp2",
             U::Log2 => "math.log2",
             U::Rsqrt => "math.rsqrt",
@@ -1295,6 +1316,7 @@ impl Emitter<'_> {
                 self.compare(&abs, &inf, 4).0
             }
             U::ErfInv => self.erf_inv(a)?,
+            U::Expm1 => self.expm1(a),
             U::ReducePrecision {
                 exponent_bits,
                 mantissa_bits,
@@ -1318,13 +1340,17 @@ impl Emitter<'_> {
             return self.integer_pow(a, b, out);
         }
 
+        // Mosaic has no unsigned minimum (and folds a compare and select back into one).
+        if matches!(op, B::Min) && !float && uns {
+            return Ok(self.unsigned_extreme("arith.minsi", a, b, out));
+        }
+
         let (name, attrs) = match op {
             B::Pow => ("math.powf", FAST),
             B::Rem if float => ("arith.remf", FAST),
             B::Rem if uns => ("arith.remui", ""),
             B::Rem => ("arith.remsi", ""),
             B::Min if float => ("arith.minimumf", FAST),
-            B::Min if uns => ("arith.minui", ""),
             B::Min => ("arith.minsi", ""),
             B::And => ("arith.andi", ""),
             B::Or => ("arith.ori", ""),
@@ -1362,6 +1388,43 @@ impl Emitter<'_> {
         let negated = self.apply("arith.negf", &[&magnitude], FAST, &f32);
         let r = self.select(&flip, &negated, &magnitude);
         self.cast(&r, out.dtype)
+    }
+
+    /// The unsigned max or min of `a` and `b` through the signed `op` (`arith.maxsi`/`minsi`): with their sign
+    /// bits flipped, signed order is unsigned order; the result flipped back.
+    fn unsigned_extreme(
+        &mut self,
+        op: &str,
+        a: &(String, TensorType),
+        b: &(String, TensorType),
+        out: &TensorType,
+    ) -> String {
+        let t = a.1.clone();
+        let bit = self.splat(Scalar::Int(-(1 << (t.dtype.bits() - 1))), &t);
+        let x = self.apply("arith.xori", &[a, &bit], "", &t);
+        let y = self.apply("arith.xori", &[b, &bit], "", &t);
+        let r = self.apply(op, &[&x, &y], "", &t);
+        self.unary("arith.xori", &[&r, &bit], "", out)
+    }
+
+    /// `exp(x) - 1` (Mosaic has no `math.expm1`) by Kahan's `(u - 1) * x / log(u)` of `u = exp(x)`, whose rounding
+    /// errors cancel: `x` where `u` rounds to 1, -1 where `u - 1` does, `u` where it overflows to infinity.
+    fn expm1(&mut self, x: &(String, TensorType)) -> String {
+        let t = x.1.clone();
+        let u = self.apply("math.exp", &[x], FAST, &t);
+        let one = self.splat(Scalar::Float(1.0), &t);
+        let minus = self.splat(Scalar::Float(-1.0), &t);
+        let inf = self.splat(Scalar::Float(f64::INFINITY), &t);
+        let um1 = self.apply("arith.subf", &[&u, &one], FAST, &t);
+        let log = self.apply("math.log", &[&u], FAST, &t);
+        let scaled = self.apply("arith.mulf", &[&um1, x], FAST, &t);
+        let kahan = self.apply("arith.divf", &[&scaled, &log], FAST, &t);
+        let unit = self.compare(&u, &one, 1);
+        let low = self.compare(&um1, &minus, 1);
+        let high = self.compare(&u, &inf, 1);
+        let r = self.select(&high, &u, &kahan);
+        let r = self.select(&low, &minus, &r);
+        self.select(&unit, x, &r).0
     }
 
     /// Float32 `erf_inv` with XLA's two-range polynomial, ±inf at ±1.

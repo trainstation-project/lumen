@@ -18,7 +18,7 @@ enum Rewrite {
 }
 
 /// Local rewrite of `primitive` on `inputs`: identities (`x * 1`, `x + 0`, double negation, no-op casts,
-/// reshapes and transposes) and composition of consecutive layout ops.
+/// reshapes and transposes, updates of a whole operand) and composition of consecutive layout ops.
 fn rewrite(
     out: &Graph,
     producer: &HashMap<Var, usize>,
@@ -47,6 +47,10 @@ fn rewrite(
             _ => None,
         },
         Select if inputs[1] == inputs[2] => Some(Rewrite::Value(inputs[1])),
+        // An update as large as its operand overwrites all of it (its starts clamp to 0).
+        DynamicUpdateSlice if out.type_of(inputs[1]).shape == out.type_of(inputs[0]).shape => {
+            Some(Rewrite::Value(inputs[1]))
+        }
         Cast { new_dtype } if out.type_of(inputs[0]).dtype == *new_dtype => {
             Some(Rewrite::Value(inputs[0]))
         }

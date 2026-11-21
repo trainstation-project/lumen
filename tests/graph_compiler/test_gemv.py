@@ -17,9 +17,9 @@ def on(device, *arrays):
         pytest.skip(str(e))
 
 
-def labels(f, args, device):
-    """The labels of the steps `f`'s plan on `device` runs."""
-    return [s["label"] for s in lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), device).steps()]
+def labels(f, args, device, **options):
+    """The labels of the steps `f`'s plan on `device` runs, compiled with `options` (e.g. its parameters)."""
+    return [s["label"] for s in lumen.graph_compiler.Plan(lumen.make_graph(f)(*args), device, **options).steps()]
 
 
 def floats(t):
@@ -60,5 +60,6 @@ def test_gated_pair(device, rows):
     want = g / (1 + np.exp(-g)) * u
     np.testing.assert_allclose(got, want, rtol=2e-2, atol=2e-2 * np.abs(want).max())
     if device == "cuda":
-        (label,) = labels(f, (x, wg, wu), device)
+        # The weights are parameters, packable into one block, as a model's are.
+        (label,) = labels(f, (x, wg, wu), device, parameters=[1, 2], packable=[1, 2])
         assert "split-K" not in label and "logistic" in label, label

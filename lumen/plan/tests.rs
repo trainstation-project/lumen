@@ -1056,7 +1056,8 @@ pub(crate) mod mps {
         }
     }
 
-    /// Casts between every dtype pair, including saturating and NaN float casts.
+    /// Casts between every dtype pair, including saturating and NaN float casts; a 32- or 64-bit integer to a
+    /// float narrower than float32 is rejected (cast to float32 first).
     #[test]
     fn conversions() {
         if !available() {
@@ -1065,7 +1066,12 @@ pub(crate) mod mps {
 
         for from in DTYPES {
             for to in DTYPES {
-                check_node(Cast { new_dtype: to }, &[ty(from, &[64])]);
+                let cast = Cast { new_dtype: to };
+
+                match from.is_int() && from.bits() > 16 && to.is_float() && to.bits() < 32 {
+                    true => assert!(cast.infer(&[&ty(from, &[64])]).is_err(), "{from} to {to}"),
+                    false => check_node(cast, &[ty(from, &[64])]),
+                }
             }
         }
 

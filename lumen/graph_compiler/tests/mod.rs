@@ -233,6 +233,40 @@ fn algebraic_simplification() {
     same_values(&g, &simplified, &[data(&[2, 3], 1)]);
 }
 
+/// An update as large as its operand (a lone chunk's gradient written into zeros) is the update itself; a smaller
+/// one stays.
+#[test]
+fn whole_updates_are_their_update() {
+    let build = |rows: usize| {
+        let mut g = Graph::new();
+        let x = g.input(ty(&[rows, 3]));
+        let zeros = apply(&mut g, full(&[4, 3], 0.0), &[]);
+
+        let start = apply(
+            &mut g,
+            Full {
+                shape: vec![],
+                fill_value: Scalar::Int(1),
+                dtype: DType::I32,
+            },
+            &[],
+        );
+
+        let u = apply(&mut g, DynamicUpdateSlice, &[zeros, x, start, start]);
+        g.set_outputs(&[u]).unwrap();
+        g
+    };
+
+    let whole = build(4);
+    let folded = simplified(&whole, false);
+    assert_eq!(names(&folded), Vec::<&str>::new(), "{folded}");
+    same_values(&whole, &folded, &[data(&[4, 3], 1)]);
+
+    let part = build(2);
+    let kept = simplified(&part, false);
+    assert!(names(&kept).contains(&"dynamic_update_slice"), "{kept}");
+}
+
 /// A transposed matmul becomes a matmul with swapped operands when the untransposed result isn't read.
 #[test]
 fn transposes_of_dots_swap_their_operands() {

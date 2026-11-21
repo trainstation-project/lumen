@@ -18,7 +18,8 @@ before `linear_cross_entropy` and `simplify` (`matched: true`).
     `Strides` (body inputs read through views and outputs written into views), `body_of` (extract the
     subgraph between operands and outputs as a fusion body), and the names `FORWARD` and `BACKWARD`.
 - `forward.rs` - matching `softmax(scores(Q K^T)) V` and the `FlashAttention` pass, with its `Attentions`
-  trait: each backend's answers (MPS, Triton, CUDA and TPU, in their codegen; `WITH_FUSE` off on TPU).
+  trait: each backend's answers (MPS, Triton, CUDA and TPU, in their codegen; `WITH_FUSE` off on TPU). The pass
+  prunes what no output reads, such as the attention's own layout of an output whose epilogue took it.
 - `backward.rs` - matching the gradients and the `FlashAttentionBackward` pass, with its `AttentionBackwards`
   trait: MPS, Triton and TPU answer it in their codegen. CUDA has no backward.
 - `layouts.rs` - the `AttentionLayouts` pass (`attention_layouts`), on devices whose codegen implements

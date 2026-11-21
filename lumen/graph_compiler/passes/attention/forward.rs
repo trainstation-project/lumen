@@ -812,13 +812,14 @@ impl<M: Attentions> CompilerPass<M> for FlashAttention {
         "flash_attention"
     }
 
-    /// Replaces each forward attention in the module's graph with a flash-attention fusion.
+    /// Replaces each forward attention in the module's graph with a flash-attention fusion, dropping what no output
+    /// reads (the attention's own layout of an output whose epilogue took it, unread in inference).
     fn apply(&mut self, m: &mut M) -> Result<(), String> {
         let epilogues = m.contraction_epilogues().then(|| m.epilogues());
         let (graph, scalars) = (m.graph().clone(), m.scalars());
         let (runtime_offsets, supports) = (m.runtime_offsets(), m.supports());
 
-        *m.graph_mut() = fuse(
+        let fused = fuse(
             &graph,
             epilogues,
             &scalars,
@@ -827,6 +828,7 @@ impl<M: Attentions> CompilerPass<M> for FlashAttention {
             |_| m.kernel(),
         );
 
+        *m.graph_mut() = fused.prune().0;
         Ok(())
     }
 }

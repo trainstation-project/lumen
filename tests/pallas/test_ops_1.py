@@ -658,13 +658,25 @@ def _cast_output(y, to_dtype):
 @pytest.mark.parametrize("to_dtype", _DTYPES)
 @pytest.mark.parametrize("from_dtype", _DTYPES_32BIT)
 def test_cast_from_32bit(from_dtype, to_dtype):
-    """Casts from 32-bit dtypes to every dtype match XLA's conversion rules bit for bit."""
+    """Casts from 32-bit dtypes to every dtype match XLA's conversion rules bit for bit; a 32-bit integer to a
+    float narrower than float32 is rejected (cast to float32 first)."""
     if from_dtype == to_dtype:
         pytest.skip("Unnecessary test")
     if to_dtype == "float16":
         pytest.skip("float16 is only supported with Mosaic GPU")
 
     shape = (8, 128)
+    if _is_int(from_dtype) and (to_dtype == "bfloat16" or to_dtype in _FLOAT8):
+
+        def ambiguous(x_ref, y_ref):
+            """Casts the block straight to the narrow float."""
+            y_ref[...] = x_ref[...].to(to_dtype)
+
+        x = _random_bits(np.random.default_rng(0), shape, from_dtype)
+        with pytest.raises(Exception, match="cast to float32 first"):
+            _run(ambiguous, pl.ShapeDtypeStruct(x.shape, to_dtype), _tensor(x))
+        return
+
     if to_dtype in {"int2", "uint2"}:
         shape = (128, 128)
 
