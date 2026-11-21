@@ -1346,7 +1346,8 @@ fn triton_gemv_rule_follows_mps() {
 }
 
 /// Each device's default pass list is the passes it implements (picked over the identity pass), in the one order:
-/// the CPU only simplifies, CuTe merges dots and fuses attention, elementwise work and GEMM epilogues, Triton and TPU run their own versions.
+/// every device rejects what it has no kernel for; the CPU then only simplifies, CuTe merges dots and fuses attention,
+/// elementwise work and GEMM epilogues, Triton and TPU run their own versions.
 #[test]
 fn devices_run_the_passes_they_implement() {
     use super::device::{Cpu, Cuda, Tpu, Triton};
@@ -1354,10 +1355,11 @@ fn devices_run_the_passes_they_implement() {
 
     let config = super::CompilerConfig::default();
 
-    assert_eq!(pipeline!(Cpu, &config).names(), ["simplify"]);
+    assert_eq!(pipeline!(Cpu, &config).names(), ["unsupported", "simplify"]);
     assert_eq!(
         pipeline!(Cuda, &config).names(),
         [
+            "unsupported",
             "take_along_axis",
             "merge_dots_backward",
             "merge_dots",
@@ -1396,6 +1398,7 @@ fn devices_run_the_passes_they_implement() {
     assert_eq!(
         pipeline!(Tpu, &config).names(),
         [
+            "unsupported",
             "merge_dots_backward",
             "flash_attention",
             "flash_attention_backward",

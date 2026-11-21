@@ -2,11 +2,12 @@
 //! with a readable error and changes nothing otherwise. It is the first pass in the list, so it sees the graph
 //! exactly as traced.
 //!
-//! Devices: it runs on each device whose codegen implements `codegen::Supports` (its check of the graph): MPS
-//! (`codegen/utils/mps`: float64 and float8 values, bfloat16 transcendentals, dots of two dtypes) and Triton
-//! (`codegen/utils/triton`: float16 and bfloat16 transcendentals, which libdevice lacks). CPU, CUDA and TPU get the
-//! identity pass. "Transcendental" is `Primitive::is_transcendental`; the operand checked is a node's first
-//! input (or its output when it has none).
+//! Devices: every device's codegen implements `codegen::Supports` (its check of the graph): the CPU (`reference`:
+//! no Pallas kernels), CUDA (`codegen/utils/cuda.rs`: ops and dtypes the CuTe DSL backend has kernels for), MPS
+//! (`codegen/utils/mps`: float64 and float8 values, bfloat16 transcendentals, dots of two dtypes), Triton
+//! (`codegen/utils/triton`: float16 and bfloat16 transcendentals, which libdevice lacks) and TPU
+//! (`codegen/utils/tpu`: float16, cumsum, scatter-add and random bits). "Transcendental" is
+//! `Primitive::is_transcendental`; the operand checked is a node's first input (or its output when it has none).
 
 use crate::codegen::Supports;
 use crate::graph::Graph;

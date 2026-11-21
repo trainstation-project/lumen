@@ -7,14 +7,16 @@ pass or the identity pass, which the pipeline skips.
 ## How a pass is written
 
 - `Module` is what a pass rewrites: a graph, its `Options` and the device's `CompilerConfig`.
-- `CompilerPass<M>` has `name` (used for profiler ranges and dump files), `apply` and `is_empty`.
-- A device runs a pass by implementing `DevicePass<D>` for the pass's slot type in
-  `passes/<pass>/<device>.rs`. That impl returns the pass, usually behind config flags via
-  `pipeline::when`. Without such an impl, `pick!` returns `identity::Identity`.
+- `CompilerPass<M>` has `name` (used for profiler ranges and dump files), `apply`, `is_empty` and
+  `configured(config)`: the pass as a device's pipeline runs it (its config gate, and what it reads from the
+  device's codegen), or `None` (the default) for the identity pass.
+- A device runs a pass when the pass implements `CompilerPass` for its module, bounded by the codegen trait the
+  pass reads (`impl<D: Trait> CompilerPass<DeviceModule<'_, D>>`). `pick!` takes `configured` then, and
+  `identity::Identity` for a device without the impl.
 - Shared matching and rewriting live in the pass's `mod.rs`. Device answers (what is fusible, kernel
   names, limits) come in through a trait the pass defines and `DeviceModule<D>` implements.
 - A pass whose devices differ only in a value their codegen knows is one file, `passes/<pass>.rs`: a generic
-  `impl<D: Trait> DevicePass<D>` reads it through a small trait each backend's codegen implements, so every
+  `impl<D: Trait> CompilerPass<DeviceModule<'_, D>>` reads it through a small trait each backend's codegen implements, so every
   device implementing the trait runs the same pass (`linear_reordering.rs`, `RowTile`).
 
 ## Frontend (every device, before staging)
@@ -27,7 +29,7 @@ pass or the identity pass, which the pipeline skips.
 
 ## Device pipeline, in order (devices that run it in brackets)
 
-1. `unsupported` - reject ops the device has no kernel for [mps, triton].
+1. `unsupported` - reject ops the device has no kernel for [cpu, cuda, mps, triton, tpu].
 2. `take_along_axis` - lower `take_along_axis` to a flat `gather` [cuda, mps, triton].
 3. `chunked_cross_entropy` - replay a cross entropy per row chunk when the logits are already chunked [mps, triton].
 4. `merge_dots_backward` - merge gradient dots that share an operand [cuda, mps, triton, tpu].
@@ -60,7 +62,7 @@ pass or the identity pass, which the pipeline skips.
 
 ## Other files
 
-- `mod.rs` - the `Module`, `DevicePass` and `CompilerPass` traits.
+- `mod.rs` - the `Module` and `CompilerPass` traits.
 - `identity.rs` - the identity pass.
 - `elementwise.rs` - building elementwise fusion bodies from node groups (used by fusion).
 - `multi_output.rs` - `Readers`: a fusion also writes a value other fusions read as an extra output.
