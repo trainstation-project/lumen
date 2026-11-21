@@ -505,7 +505,7 @@ impl Tensor {
         let mut t = self.clone();
         t.offset += start * self.strides[dim];
         t.shape[dim] = len;
-        recorded(op, self.tiled(t))
+        recorded(op, t)
     }
 
     /// The view of `len` entries along `dim` taking every `step`th from `start`.
@@ -522,7 +522,7 @@ impl Tensor {
         t.offset += start * self.strides[dim];
         t.shape[dim] = len;
         t.strides[dim] *= step;
-        self.tiled(t)
+        t
     }
 
     /// The view at `index` along `dim`, with that dim removed.
@@ -538,7 +538,7 @@ impl Tensor {
         let mut t = self.clone();
         t.shape.swap(a, b);
         t.strides.swap(a, b);
-        recorded(op, self.tiled(t))
+        recorded(op, t)
     }
 
     /// The view whose dim `i` is this tensor's dim `dims[i]`.
@@ -559,7 +559,7 @@ impl Tensor {
             t.strides[new] = self.strides[old];
         }
 
-        recorded(op, self.tiled(t))
+        recorded(op, t)
     }
 
     /// The view with size-1 dim `dim` removed.
@@ -569,7 +569,7 @@ impl Tensor {
         let mut t = self.clone();
         t.shape.remove(dim);
         t.strides.remove(dim);
-        recorded(op, self.tiled(t))
+        recorded(op, t)
     }
 
     /// The view with a size-1 dim inserted at `dim`.
@@ -586,37 +586,7 @@ impl Tensor {
 
         t.shape.insert(dim, 1);
         t.strides.insert(dim, stride);
-        recorded(op, self.tiled(t))
-    }
-
-    /// `view` (a view of this tensor) on its own when this is a TPU tensor whose layout the view changes: TPU tensors are
-    /// stored in tiles over their last two dims, so a view that isn't laid out as a fresh tensor of its shape copies
-    /// through the host into a contiguous TPU tensor, as a reshape does (no TPU kernel reads a strided view). Elsewhere,
-    /// or when the layout stays, `view` itself.
-    fn tiled(&self, view: Tensor) -> Tensor {
-        let Device::Tpu(_) = self.device() else {
-            return view;
-        };
-
-        let kept = view.is_contiguous()
-            && view.offset == self.offset
-            && crate::device::tpu::layout::same(&self.ty(), &view.ty());
-
-        if kept {
-            return view;
-        }
-
-        let host = self.to(Device::Cpu(0));
-
-        let seen = Tensor {
-            storage: Arc::clone(&host.storage),
-            dtype: view.dtype,
-            shape: view.shape,
-            strides: view.strides,
-            offset: host.offset + view.offset - self.offset,
-        };
-
-        dispatch_dtype!(seen.dtype, T => seen.contiguous::<T>()).to(self.device())
+        recorded(op, t)
     }
 
     /// This tensor if contiguous, else a contiguous copy on the same device; `T` is the element type for host copies.
