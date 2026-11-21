@@ -535,6 +535,30 @@ def test_take_along_axis_reads_the_tiles_in_place(shape, indices, axis, dtype):
     np.testing.assert_array_equal(lumen.to_numpy(got.to("cpu")), want)
 
 
+@pytest.mark.parametrize(
+    "view, numpy",
+    [
+        (lambda t: t.transpose(0, 2), lambda a: a.transpose(2, 1, 0)),
+        (lambda t: t.permute([1, 2, 0]), lambda a: a.transpose(1, 2, 0)),
+        (lambda t: t.narrow(2, 1, 3), lambda a: a[:, :, 1:4]),
+        (lambda t: t.narrow(0, 2, 3), lambda a: a[2:5]),
+        (lambda t: t.select(1, 2), lambda a: a[:, 2]),
+        (lambda t: t.unsqueeze(1), lambda a: a[:, None]),
+    ],
+    ids=["transpose", "permute", "narrow last", "narrow first", "select", "unsqueeze"],
+)
+def test_views_of_tpu_tensors_are_their_own_tensors(view, numpy):
+    """A view of a TPU tensor that changes its tiled layout (a transpose, a
+    narrow, a select, a new axis) is copied into a contiguous TPU tensor
+    when taken, as a reshape is: no TPU kernel reads a strided view. It
+    runs in a compiled program like any input, NumPy's values."""
+    a = np.random.default_rng(0).standard_normal((6, 5, 4)).astype(np.float32)
+    x = view(lumen.from_numpy(a).to("tpu"))
+    assert x.is_contiguous()
+    got = lumen.compile(lambda x: x * 2.0 + 1.0)(x)
+    np.testing.assert_array_equal(lumen.to_numpy(got.to("cpu")), numpy(a) * 2.0 + 1.0)
+
+
 def test_an_integer_power_keeps_its_exponents_parity():
     """``x ** n`` of a bfloat16 or float32 ``x`` and an int32 ``n`` takes
     its sign from ``n``'s parity: ``(-1) ** 257`` is -1 (257 is 256 in
