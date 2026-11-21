@@ -207,11 +207,16 @@ impl<S: Step + Clone> Plan for DevicePlan<S> {
         let inputs: Vec<Tensor> = inputs
             .iter()
             .zip(&self.inputs_at)
-            .map(|(t, at)| match at {
-                Buffer::Scalar(_) => t.to(Device::Cpu(0)),
-                _ => dispatch_dtype!(t.dtype(), T => t.contiguous::<T>()),
+            .enumerate()
+            .map(|(i, (t, at))| match at {
+                Buffer::Scalar(_) => Ok(t.to(Device::Cpu(0))),
+                // A TPU tensor is stored tiled by the shape it was made with, which a view doesn't keep.
+                _ if matches!(t.device(), Device::Tpu(_)) && !t.is_contiguous() => Err(format!(
+                    "input {i}: a strided view on tpu is not supported; pass a contiguous TPU tensor"
+                )),
+                _ => Ok(dispatch_dtype!(t.dtype(), T => t.contiguous::<T>())),
             })
-            .collect();
+            .collect::<Result<_, String>>()?;
 
         let options = |dtype| TensorOptions::new().dtype(dtype).device(device);
 
@@ -308,6 +313,12 @@ impl<S: Step + Clone> Plan for DevicePlan<S> {
                 }
                 _ if !read(i) || t.is_contiguous() || self.reads_strided(i, t.strides()) => {
                     params.push(t.clone())
+                }
+                // A TPU tensor is stored tiled by the shape it was made with, which a view doesn't keep.
+                _ if matches!(t.device(), Device::Tpu(_)) => {
+                    return Err(format!(
+                        "input {i}: a strided view on tpu is not supported; pass a contiguous TPU tensor"
+                    ));
                 }
                 _ => params.push(dispatch_dtype!(t.dtype(), T => t.contiguous::<T>())),
             }
