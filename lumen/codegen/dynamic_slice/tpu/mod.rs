@@ -1,31 +1,46 @@
 //! Plans the Pallas `dynamic_update_slice` kernel on TPU: block sizes, the windows each update
 //! touches, and whether the touched region can stay resident in VMEM.
+#[cfg(lumen_tpu_linked)]
 use crate::DType;
+#[cfg(lumen_tpu_linked)]
 use crate::codegen::dot_general::tpu::block;
+#[cfg(lumen_tpu_linked)]
 use crate::codegen::dynamic_slice::DynamicSliceCodegen;
 use crate::codegen::utils::tpu::Tpu;
+#[cfg(lumen_tpu_linked)]
 use crate::codegen::utils::tpu::{Kernel, Rows};
+#[cfg(lumen_tpu_linked)]
 use crate::device::tpu::layout::Layout;
+#[cfg(lumen_tpu_linked)]
 use crate::graph::{Graph, Primitive, TensorType};
+#[cfg(lumen_tpu_linked)]
 use crate::plan::StepBase;
+#[cfg(lumen_tpu_linked)]
 use crate::tensor::scalar::Scalar;
 
 /// Lane width of a TPU tile.
+#[cfg(lumen_tpu_linked)]
 const LANES: usize = 128;
 /// Element budget for one staged `bm` x `bn` piece of an aligned update.
+#[cfg(lumen_tpu_linked)]
 const STAGED: usize = 1 << 20;
 /// Element budget for one streamed `gm` x `width` window of an unaligned update.
+#[cfg(lumen_tpu_linked)]
 const STREAMED: usize = 1 << 19;
 /// Byte budget for one row block of the operand-to-output copy.
+#[cfg(lumen_tpu_linked)]
 const COPY_BYTES: usize = 2 << 20;
 /// Updates kept in flight when each update fits in one block.
+#[cfg(lumen_tpu_linked)]
 const DEPTH: usize = 8;
 
 /// Most bytes of the output region all updates touch that may be kept in VMEM.
+#[cfg(lumen_tpu_linked)]
 const RESIDENT: usize = 48 << 20;
 
 /// The constant starts of the updates in `updates` fusion `body`, clamped into range, each update's after
 /// the one before.
+#[cfg(lumen_tpu_linked)]
 fn starts(body: &Graph, operand: &TensorType, update: &TensorType) -> Vec<i32> {
     let nodes = body.nodes();
 
@@ -52,6 +67,7 @@ fn starts(body: &Graph, operand: &TensorType, update: &TensorType) -> Vec<i32> {
 
 /// A TPU `dynamic_update_slice` program: its kernel name, its spec (but for whether the operand is copied,
 /// which the launch knows) and the constant starts it reads as scalars.
+#[cfg(lumen_tpu_linked)]
 pub(crate) struct Program {
     pub(crate) kernel: String,
     pub(crate) spec: String,
@@ -60,6 +76,7 @@ pub(crate) struct Program {
 
 /// The program writing `count` updates of `update`'s type into `operand`: at the constant starts `fixed`
 /// (each update's after the one before), or at runtime int32 starts when `None`.
+#[cfg(lumen_tpu_linked)]
 fn program(
     operand: &TensorType,
     update: &TensorType,
@@ -233,6 +250,7 @@ fn program(
 
 /// TPU dynamic slices: the fixed `dynamic_update_slice` Pallas program, specialized by a spec of the operand,
 /// the updates and their blocks.
+#[cfg(lumen_tpu_linked)]
 impl DynamicSliceCodegen for Tpu {
     type Code = Program;
     type Options = ();
@@ -259,6 +277,7 @@ impl DynamicSliceCodegen for Tpu {
 
 /// The `dynamic_update_slice` kernel for `step`: one update at runtime int32 starts, or a fusion of
 /// several updates at constant starts (clamped into range here); `None` when the update is empty.
+#[cfg(lumen_tpu_linked)]
 pub(crate) fn kernel(step: &StepBase) -> Result<Option<Kernel>, String> {
     let (operand, update) = (&step.inputs[0].1, &step.inputs[1].1);
     let fixed = matches!(step.primitive, Primitive::Fusion { .. });
@@ -294,4 +313,11 @@ pub(crate) fn kernel(step: &StepBase) -> Result<Option<Kernel>, String> {
     kernel.scalars = p.scalars;
     kernel.context = Some(step.label.to_string());
     Ok(Some(kernel))
+}
+
+/// TPU fuses chains of 1 or more updates, always: even one update runs as an `updates` kernel.
+impl crate::codegen::dynamic_slice::UpdateChains for Tpu {
+    const LEAST: usize = 1;
+    const MOST: usize = usize::MAX;
+    const WITH_FUSE: bool = false;
 }
