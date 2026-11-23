@@ -3,8 +3,8 @@
 import inspect
 
 from lumen.autograd.core import _accumulate, _full, _value
-from lumen.graph import tracer
-from lumen.graph.tracer import TracedTensor
+from lumen.graph.tracing import tracer
+from lumen.graph.tracing.tracer import TracedTensor
 
 _FUNCTION = "autograd.Function"
 
@@ -86,7 +86,7 @@ def _replicated(cls, sharded, args, kwargs):
     """``cls.apply(*args, **kwargs)`` with ``sharded`` among its arguments: run on every argument's whole
     value (a sharded one gathered and reduced first), as a primitive without strategies runs, its results
     replicated over the arguments' mesh. Its ``forward`` and ``backward`` see local values alone."""
-    from lumen.graph import sharding
+    from lumen.graph.propagation import sharding
     from lumen.tensor.placements import replicated
 
     mesh = sharding._mesh(sharded)

@@ -1,6 +1,6 @@
 """``pallas_call``: a Pallas kernel as a traced op, lowered to Mosaic when the TPU plan builds it."""
 
-from lumen.graph import prims, tracer
+from lumen.graph.tracing import prims, tracer
 
 from .pipeline import _NAMES, BoundedSlice
 

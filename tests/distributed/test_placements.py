@@ -293,7 +293,7 @@ def test_a_collective_takes_local_tensors():
     """A collective on a sharded tensor raises: it moves local values, which to_local() gives."""
     mesh = dist.init_device_mesh("cpu", (1,), mesh_dim_names=("tp",))
     x = lumen.from_numpy(rand(4)).distribute(mesh, [Shard(0)])
-    from lumen.graph import prims
+    from lumen.graph.tracing import prims
 
     with pytest.raises(TypeError, match="to_local"):
         lumen.compile(lambda x: prims.all_reduce(x, "sum", [0]))(x)
@@ -310,7 +310,7 @@ import lumen
 import lumen.distributed as dist
 import lumen.functional as F
 from lumen.distributed import Partial, Replicate, Shard, from_local
-from lumen.graph import prims
+from lumen.graph.tracing import prims
 
 n = int(os.environ["WORLD_SIZE"])
 mesh = dist.init_device_mesh("cpu", (n,), mesh_dim_names=("tp",))

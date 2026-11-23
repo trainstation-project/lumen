@@ -5,7 +5,7 @@
 
 use crate::DType;
 use crate::codegen::dot_general::MergesDots;
-use crate::graph::primitive::free_dims;
+use crate::graph::ir::primitive::free_dims;
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;

@@ -1,7 +1,7 @@
 """Pallas-style TPU kernel language: refs, control flow, DMAs and ops traced into a Mosaic kernel."""
 
-from lumen.graph import prims, tracer
-from lumen.graph.tracer import TracedTensor
+from lumen.graph.tracing import prims, tracer
+from lumen.graph.tracing.tracer import TracedTensor
 from lumen.kernels.pallas._C import Kernel
 
 from .call import ANY, ShapeDtypeStruct, pallas_call, program

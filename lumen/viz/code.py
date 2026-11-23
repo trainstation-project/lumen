@@ -66,7 +66,7 @@ def _literal(value):
 def program_source(graph, name="program"):
     """Python source of a function named ``name`` that re-traces ``graph`` via ``prims.bind``."""
     names = {v: f"in{k}" for k, v in enumerate(graph.inputs())}
-    lines = ["from lumen.graph import prims", "", ""]
+    lines = ["from lumen.graph.tracing import prims", "", ""]
     lines += [f"# {names[v]}: {type_text(*graph.type_of(v))}" for v in graph.inputs()]
     lines.append(f"def {name}({', '.join(names[v] for v in graph.inputs())}):")
     traced = None

@@ -1,6 +1,6 @@
 """Helpers shared by the TPU Pallas kernels that rebuild an elementwise fusion's nodes as primitives on kernel blocks."""
 
-from lumen.graph import prims
+from lumen.graph.tracing import prims
 
 
 def computed(nodes, values, shape):

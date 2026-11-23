@@ -22,7 +22,7 @@
 //! matmul kernels read as laid out): MPS (what its GEMM reads at contiguous strides) and TPU (batch dims leading, one
 //! contracting dim placed as its kernel reads it). The others get the identity pass.
 use crate::codegen::dot_general::DotLayouts;
-use crate::graph::primitive::free_dims;
+use crate::graph::ir::primitive::free_dims;
 use crate::graph::{Graph, Primitive, TensorType, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;

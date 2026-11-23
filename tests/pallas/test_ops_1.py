@@ -8,7 +8,7 @@ import pytest
 
 import lumen
 import lumen.functional as F
-from lumen.graph import prims
+from lumen.graph.tracing import prims
 from lumen.kernels import pallas as pl
 
 pytestmark = pytest.mark.tpu

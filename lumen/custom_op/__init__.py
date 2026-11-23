@@ -5,9 +5,9 @@ import functools
 import inspect
 
 from lumen.custom_op._C import MetalKernel, _register_kernel, _registered_ops, _unregister_kernel
-from lumen.graph import prims, tracer
 from lumen.graph._C import _register_custom_op
-from lumen.graph.tracer import TracedTensor
+from lumen.graph.tracing import prims, tracer
+from lumen.graph.tracing.tracer import TracedTensor
 
 __all__ = ["CustomOp", "MetalKernel", "custom_op", "register", "registered_ops", "signature", "unregister"]
 

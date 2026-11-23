@@ -13,7 +13,7 @@ pub(crate) struct PyGraph {
     pub(crate) inner: Graph,
 }
 
-/// Builds the primitive called `name` from its Python keyword parameters, as `lumen.graph.prims` passes them.
+/// Builds the primitive called `name` from its Python keyword parameters, as `lumen.graph.tracing.prims` passes them.
 /// Parses a collective's `op` parameter: `"sum"`, `"max"` or `"min"`.
 fn reduction(op: &str) -> PyResult<crate::graph::Reduction> {
     use crate::graph::Reduction::*;

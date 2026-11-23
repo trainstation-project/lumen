@@ -1,7 +1,7 @@
 """Pallas row gather for TPU: a TensorCore kernel over TPU-tiled tables and a SparseCore DMA kernel."""
 
 from lumen.codegen.devices.tpu import pallas
-from lumen.graph import prims
+from lumen.graph.tracing import prims
 from lumen.kernels import pallas as pl
 
 SUBLANES = 8

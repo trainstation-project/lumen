@@ -1,7 +1,7 @@
 //! How tensor metadata flows through each primitive, as `Primitive::infer` gives its type. `Primitive::names`
 //! infers a result's axis names from its operands' (PyTorch's named-tensor name inference); the tracer calls it
 //! for every node with a named operand. `Primitive::strategies` lists how a primitive runs on local shards of
-//! operands placed over a device mesh (PyTorch DTensor's single-dim strategies), which `lumen/graph/sharding.py`
+//! operands placed over a device mesh (PyTorch DTensor's single-dim strategies), which `lumen/graph/propagation/sharding.py`
 //! chooses from. The graph itself never holds names or placements.
 
 use crate::graph::{BinaryOp, Primitive};

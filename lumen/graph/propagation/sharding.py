@@ -12,9 +12,9 @@ import itertools
 import math
 from typing import Any, Sequence
 
-from lumen.graph import prims, tracer
 from lumen.graph._C import Graph
 from lumen.graph._C import strategies as _strategies
+from lumen.graph.tracing import prims, tracer
 from lumen.tensor import placements as _placements
 from lumen.tensor.placements import Partial, Replicate, Shard, Sharding, local_shape, replicated
 

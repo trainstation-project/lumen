@@ -23,7 +23,7 @@ from lumen.distributed import (
     is_initialized,
     reduce_scatter,
 )
-from lumen.graph import prims
+from lumen.graph.tracing import prims
 
 # Environment variables a launcher like torchrun sets for each process.
 LAUNCHER = ("RANK", "WORLD_SIZE", "MASTER_ADDR", "MASTER_PORT")

@@ -1,6 +1,6 @@
 # functional
 
-The public functional API, `lumen.functional` (usually imported as `F`): torch-style operations on traced tensors. Each function validates its arguments and binds primitives from `lumen.graph.prims` into the current trace; nothing here runs eagerly. The graph compiler later fuses and lowers what these functions emit.
+The public functional API, `lumen.functional` (usually imported as `F`): torch-style operations on traced tensors. Each function validates its arguments and binds primitives from `lumen.graph.tracing.prims` into the current trace; nothing here runs eagerly. The graph compiler later fuses and lowers what these functions emit.
 
 ## Files and folders
 
@@ -16,7 +16,7 @@ The public functional API, `lumen.functional` (usually imported as `F`): torch-s
 
 ## How it connects
 
-- Shared tracing helpers come from `lumen/graph/tracer.py`: `_lift` (Python scalars and tensors to traced values), `_common_dtype`, `_accum_dtype`, `_require_float`, `_dot`.
+- Shared tracing helpers come from `lumen/graph/tracing/tracer.py`: `_lift` (Python scalars and tensors to traced values), `_common_dtype`, `_accum_dtype`, `_require_float`, `_dot`.
 - `dropout` draws its mask from `lumen.random`'s counter-based generator (`_dropped`).
 - `lumen/autograd` substitutes recorded attention, RMS norm and cross entropy patterns with the `Function`s defined here (`_RMSNorm`, `_CrossEntropy`, `_FlashAttention`).
 

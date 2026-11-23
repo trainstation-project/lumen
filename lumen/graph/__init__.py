@@ -3,8 +3,8 @@
 from lumen.graph._C import Graph
 
 # isort: off
-from lumen.graph.tracer import TracedTensor, compile, make_graph
-from lumen.graph import prims
+from lumen.graph.tracing.tracer import TracedTensor, compile, make_graph
+from lumen.graph.tracing import prims
 
 # isort: on
 

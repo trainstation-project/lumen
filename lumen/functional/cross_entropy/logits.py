@@ -5,8 +5,8 @@ import math
 from lumen.autograd.function import Function
 from lumen.functional.cross_entropy.utils import _one_hot
 from lumen.functional.functions import amax, exp, log, sum
-from lumen.graph import prims
-from lumen.graph.tracer import _lift, _require_float
+from lumen.graph.tracing import prims
+from lumen.graph.tracing.tracer import _lift, _require_float
 
 __all__ = ["cross_entropy"]
 

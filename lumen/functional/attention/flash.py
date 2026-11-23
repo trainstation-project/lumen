@@ -5,8 +5,8 @@ import math
 from lumen.autograd.function import Function
 from lumen.functional.attention.utils import _expand_heads, _scores
 from lumen.functional.functions import _dropped, amax, exp, le, log, sum, where
-from lumen.graph import prims
-from lumen.graph.tracer import (
+from lumen.graph.tracing import prims
+from lumen.graph.tracing.tracer import (
     TracedTensor,
     _accum_dtype,
     _common_dtype,

@@ -810,7 +810,7 @@ fn program(specs: &[String], kernel: &[String]) -> String {
     formatdoc!(
         "
         from lumen.kernels import pallas as pl
-        from lumen.graph import prims
+        from lumen.graph.tracing import prims
         from lumen.codegen.devices.tpu import pallas
 
 

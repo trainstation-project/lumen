@@ -7,8 +7,8 @@ import math
 from typing import Sequence
 
 from lumen.autograd.function import Function
-from lumen.graph import prims
-from lumen.graph.tracer import (
+from lumen.graph.tracing import prims
+from lumen.graph.tracing.tracer import (
     TracedTensor,
     _accum_dtype,
     _as_tensor,

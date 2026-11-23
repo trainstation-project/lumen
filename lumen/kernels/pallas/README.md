@@ -16,7 +16,7 @@ A Pallas-style kernel language for TPUs, modelled on JAX's `jax.experimental.pal
 
 ## How it connects
 
-- Ops inside a kernel reuse `lumen.graph.prims` and the tracer: `kernel` makes the `Kernel` the current "graph" with `tracer.tracing`, so `prims.bind` appends to it.
+- Ops inside a kernel reuse `lumen.graph.tracing.prims` and the tracer: `kernel` makes the `Kernel` the current "graph" with `tracer.tracing`, so `prims.bind` appends to it.
 - `lumen/codegen/devices/tpu/lowering.rs` and `lumen/codegen/devices/tpu/pallas.py` drive the lowering once per spec and device; `view` there turns scalar-addressed rows of device memory into typed refs.
 - Tiled views use `lumen/device/tpu/layout.rs`.
 

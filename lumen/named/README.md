@@ -17,7 +17,7 @@ arguments a name could replace, so it lives here.
 
 ## How it connects
 
-- The result's names come from `dot_general`'s rule in `lumen/graph/propagation.rs` (batch, then the left
+- The result's names come from `dot_general`'s rule in `lumen/graph/propagation/mod.rs` (batch, then the left
   operand's free axes, then the right's), as every op's do; the ops here only pick the dimension numbers.
 - Sizes are checked by name with `tracer._union`, the same check elementwise broadcasting by name runs.
 

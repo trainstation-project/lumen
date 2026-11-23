@@ -14,8 +14,9 @@ from lumen.autograd.core import (
     primitive_transposes,
 )
 from lumen.autograd.function import _FUNCTION, _function_jvp, _function_transpose
-from lumen.graph import prims, sharding, tracer
-from lumen.graph.tracer import TracedTensor
+from lumen.graph.propagation import sharding
+from lumen.graph.tracing import prims, tracer
+from lumen.graph.tracing.tracer import TracedTensor
 
 
 def _record(fn, *args):

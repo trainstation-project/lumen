@@ -12,7 +12,7 @@ from helpers import CPU, MPS, TPU, TRITON_CUDA, meta, rand
 import lumen
 import lumen.functional as F
 import lumen.named as N
-from lumen.graph import prims
+from lumen.graph.tracing import prims
 
 DEVICES = [CPU, MPS, TRITON_CUDA, TPU]
 

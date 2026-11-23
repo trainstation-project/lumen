@@ -34,7 +34,9 @@ def test_a_compiled_function_prints_its_program():
         return x * 2.0
 
     f = lumen.compile(scaled)
-    assert isinstance(f, lumen.graph.tracer.Compiled) and f.__name__ == "scaled" and f.__doc__ == "Doubles `x`."
+    assert (
+        isinstance(f, lumen.graph.tracing.tracer.Compiled) and f.__name__ == "scaled" and f.__doc__ == "Doubles `x`."
+    )
     assert str(f) == "<lumen.compile of scaled: not called yet, so nothing is traced>"
     f(lumen.ones([3]))
     assert str(f) == lumen.viz.program_source(lumen.make_graph(scaled)(lumen.ones([3])))

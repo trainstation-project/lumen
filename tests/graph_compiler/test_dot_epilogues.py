@@ -7,7 +7,7 @@ from helpers import CUDA, MPS, TRITON_CUDA, meta
 import lumen
 import lumen.functional as F
 from lumen import prims
-from lumen.graph import tracer
+from lumen.graph.tracing import tracer
 
 
 class _ScaledMatmul(lumen.nn.Module):
