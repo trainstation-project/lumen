@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use crate::DType;
 use crate::codegen::dot_general::MergesDots;
-use crate::graph::primitive::free_dims;
+use crate::graph::ir::primitive::free_dims;
 use crate::graph::{Graph, Node, Primitive, TensorType, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;

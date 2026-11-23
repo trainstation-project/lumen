@@ -2,18 +2,19 @@
 
 The traced dataflow graph and the Python tracer that builds it. This is the start of the pipeline: `lumen.compile` traces a Python function into a `Graph` here, then hands it to `lumen/graph_compiler` (through `lumen.graph_compiler._C.Plan`), which runs its passes and lowers it to a plan.
 
+## Subfolders
+
+- `ir/`: the Rust graph (`Graph`, `Node`, `TensorType`, `Var`) and its primitives (`Primitive`, their type inference). `mod.rs` re-exports it, so the rest of the crate names them `crate::graph::Graph`.
+- `propagation/`: how each primitive's result names and sharding follow from its operands' (Rust), and the Python that runs primitives on sharded operands by those rules (`sharding.py`, with `cost.py`, `redistribute.py` and `gradients.py`).
+- `tracing/`: the Python tracer (`TracedTensor`, `compile`, `make_graph`) and the primitive wrappers (`prims`) that record nodes.
+
 ## Files
 
-- `mod.rs` holds the Rust graph: `TensorType` (dtype and shape), `Var` (an index into the type table), `Node` (one primitive applied to input vars, producing one output, with its scope, source lines, label and a `backward` flag), and `Graph` (types, inputs, nodes in topological order, outputs). It also has `prune` (drop nodes no output needs, keep all inputs), `placements` and `slot` (values stored inside another value's buffer: view slices and operands of in-place concatenates) and `precision_warnings` (accumulations rounded to a narrow dtype and later cast back up).
-- `primitive.rs` holds the `Primitive` enum with `UnaryOp`, `BinaryOp` and `Reduction`, their names, and `Primitive::infer`, the output type inference every `Graph::apply` runs. It also defines the label markers `FUSION_SEPARATOR`, `NEURAL_ENGINE` and `UPDATES` used in fused node names.
+- `mod.rs` declares the subfolders and re-exports `ir`.
 - `custom.rs` is the bridge from a `custom_call` kernel at run time back to the Python function registered for it (`set_hook`, `call`).
-- `python.rs` binds `Graph` to Python (`input`, `apply`, `prune`, `set_outputs`, `run` on the reference interpreter) and `names` and `strategies` (a result's axis names; a primitive's sharding strategies), and converts primitive names plus a params dict to `Primitive` and back.
-- `tracer.py` is the tracer: `TracedTensor` (the tensor type inside a trace, with torch-style methods, optional axis `names` and an optional `placement`: a sharded value's `shape` is global, its var the local shard; `distribute`, `to_local`, `full_tensor`, `redistribute`), `compile` and `Compiled`, `make_graph`, scopes, pytree helpers, broadcasting (`_broadcast`: positional, or by name when several operands are named), dimension helpers (`_dim`, `_dims`: positions or axis names) and dtype helpers (`_lift`, `_accum_dtype`, `_common_dtype`, `_dot`) the rest of the Python code uses.
-- `propagation.rs` holds, for each primitive, how its result's metadata follows from its operands'. `Primitive::names`: its axis names (PyTorch's name inference: elementwise ops keep the names their named operands share, reductions drop the reduced ones, `transpose` permutes, `dot_general` keeps batch and free names, `gather` splices in the indices'). `Primitive::strategies`: its sharding strategies on one mesh dim (PyTorch DTensor's: elementwise ops on operands sharded alike and partial ones as far as they are linear, reductions making a sharded reduced dim partial, `dot_general`'s einsum strategies, `transpose`, `reshape` and `broadcast_in_dim` where a sharded dim maps whole, `slice`, `dynamic_slice` and `cumsum` of other dims, `gather`, `take_along_axis`, `scatter_add`, `dynamic_update_slice` and `concatenate` of other dims or of partial sums, and a `gather` along a sharded dim as a masked lookup giving a partial sum, DTensor's `MaskPartial`; none for factories, custom kernels and collectives, which run replicated). Both `match` every primitive, so a new one must say how each flows through it. Python calls them as `_C.names` and `_C.strategies`.
-- `sharding.py` runs primitives on sharded operands (`propagate`, called by `bind`): the cheapest of the primitive's strategies (`_C.strategies`) (the product over mesh dims; cost: bytes moved, DTensor's model, plus a fixed cost a collective), the collectives moving the operands' local shards to it (`redistribute`: all-gather, all-to-all, all-reduce, reduce-scatter from `lumen.distributed`, local slices, partitions; a dim that doesn't split evenly padded to whole blocks around a collective; a dim sharded over several mesh dims gathered innermost first and sliced outermost first), the primitive on the local shards (with its shape params made local, `_local_params`; a `gather` along a sharded dim masked, `_masked_gather`), its result placed. Choices use the largest block's shape, so every process makes the same ones; a reshape takes evenly split shards only. A primitive without strategies runs on replicated operands; a collective takes local values only. It also translates gradients between placements and the local program autograd transposes (`cotangent`, `gradient`, `tangent`), partial averages, maxes and mins included (`_weighted`).
-- `prims.py` has one Python wrapper per primitive; each calls `bind`, which records the node into the current graph and names its result by the primitive's rule (`_C.names`) when an operand is named; with a sharded operand, `sharding.propagate` records it on the local shards.
+- `python.rs` builds the `lumen.graph._C` native module: the `Graph` class (`ir/python.rs`), `names` and `strategies` (`propagation/python.rs`), and the custom-op hook (`_register_custom_op`, the function `custom.rs` calls).
 - `__init__.py` exports `Graph`, `TracedTensor`, `compile`, `make_graph` and `prims`.
-- `_C.pyi` types the native module. `tests.rs` holds unit tests.
+- `_C.pyi` types the native module.
 
 ## How it works
 
@@ -26,7 +27,7 @@ The traced dataflow graph and the Python tracer that builds it. This is the star
 
 ## Conventions
 
-- Every `Graph::apply` type-checks through `Primitive::infer`; a new primitive needs a variant, a name, inference, its name rule and sharding strategies (`propagation.rs`), a `prims.py` wrapper, a `python.rs` conversion and autograd rules in `lumen/autograd/rules.py`.
+- Every `Graph::apply` type-checks through `Primitive::infer`; a new primitive needs a variant, a name, inference, its name rule and sharding strategies (`propagation/`), a `tracing/prims.py` wrapper, a `python.rs` conversion and autograd rules in `lumen/autograd/rules.py`.
 - Nodes are kept in topological order; passes rely on it.
 - `Scope` and `Lines` are interned `'static` slices, so nodes are cheap to clone.
 - Placements are Python-side metadata too: the graph holds local values and the explicit collectives `sharding` recorded, so autograd differentiates it as any local program. Every process must choose the same strategies (they depend on global shapes alone) and issue the same collectives.

@@ -3,8 +3,8 @@
 import math
 
 from lumen.functional.functions import dropout, le, softmax, where
-from lumen.graph import prims
-from lumen.graph.tracer import (
+from lumen.graph.tracing import prims
+from lumen.graph.tracing.tracer import (
     TracedTensor,
     _accum_dtype,
     _common_dtype,

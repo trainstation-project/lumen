@@ -3,7 +3,7 @@
 import lumen
 import lumen.functional as F
 from lumen.codegen.devices.tpu import pallas
-from lumen.graph import prims
+from lumen.graph.tracing import prims
 from lumen.kernels import pallas as pl
 
 # Length of the SMEM row holding a scalar input.

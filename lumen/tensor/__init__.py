@@ -74,7 +74,7 @@ default_dtype = float32
 
 def _prims():
     """`lumen.prims` while a function is being traced, else None."""
-    from lumen.graph import prims, tracer
+    from lumen.graph.tracing import prims, tracer
 
     return prims if tracer._TRACES else None
 
@@ -251,7 +251,7 @@ def _traced_only(name):
 
     def method(self, *args, **kwargs):
         """Raises: the method records collectives, which run inside ``lumen.compile``."""
-        from lumen.graph import tracer
+        from lumen.graph.tracing import tracer
 
         tracer._lift(self)
         tracer.current_graph()

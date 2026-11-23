@@ -6,7 +6,7 @@ from helpers import CPU, MPS, TRITON_CUDA, rand
 
 import lumen
 import lumen.functional as F
-from lumen.graph import tracer
+from lumen.graph.tracing import tracer
 
 
 @pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)

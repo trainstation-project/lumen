@@ -127,7 +127,7 @@ def test_float_fields_are_runtime_scalars(device):
         expected = w * x / np.sqrt((x.astype(np.float64) ** 2).mean(-1, keepdims=True) + eps)
         np.testing.assert_allclose(out, expected, rtol=1e-5, atol=1e-6)
     assert len(traces) == 2
-    from lumen.graph import tracer
+    from lumen.graph.tracing import tracer
 
     args = (ScaledNorm(weight, 0.5), lumen.from_numpy(x))
     graph = tracer._settled(forward, args, "cpu", {(0, ("eps",))}, set(), set(), portable=True, split=False)[0]
@@ -277,7 +277,7 @@ def test_scalars_written_from_scalars_alone_run_on_the_host():
     1``) is computed on the host each call, from the scalars passed, never
     read back from the device (which would wait for the device's work); one
     assigned from the device's values (a loss) is read back."""
-    from lumen.graph import tracer
+    from lumen.graph.tracing import tracer
 
     def step(s, x):
         """Increments the step on the host and sets `seen` from the device."""

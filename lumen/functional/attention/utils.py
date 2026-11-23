@@ -1,8 +1,8 @@
 """Helpers shared by the attention implementations."""
 
 from lumen.functional.functions import le, where
-from lumen.graph import prims
-from lumen.graph.tracer import (
+from lumen.graph.tracing import prims
+from lumen.graph.tracing.tracer import (
     _accum_dtype,
 )
 

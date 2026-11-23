@@ -4,7 +4,7 @@ from lumen.autograd.core import UndefinedPrimal, _value
 from lumen.autograd.function import _FUNCTION, Function, FunctionCtx
 from lumen.autograd.rules import _dot_dims, _dot_general_transpose, _narrowed
 from lumen.config._C import config
-from lumen.graph import prims, tracer
+from lumen.graph.tracing import prims, tracer
 
 __all__ = ["substitute"]
 

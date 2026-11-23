@@ -14,8 +14,9 @@ from lumen.autograd.core import (
     primitive_transposes,
 )
 from lumen.autograd.function import _FUNCTION, _function_jvp, _function_transpose
-from lumen.graph import prims, sharding, tracer
-from lumen.graph.tracer import TracedTensor
+from lumen.graph.propagation import gradients
+from lumen.graph.tracing import prims, tracer
+from lumen.graph.tracing.tracer import TracedTensor
 
 
 def _record(fn, *args):
@@ -106,14 +107,14 @@ def jvp(fn, primals, tangents):
             )
 
         if _is_float(p.dtype):
-            tangent[p.var] = sharding.tangent(t, p).var
+            tangent[p.var] = gradients.tangent(t, p).var
 
     _jvp_tape(tape, tangent)
 
     def tangent_of(o):
         """Output ``o``'s tangent, zeros if it has none, named and placed as ``o``."""
         t = _value(tangent[o.var]) if o.var in tangent else _full(o, 0)
-        return tracer._renamed(sharding.placed_like(t, o), o.names)
+        return tracer._renamed(gradients.placed_like(t, o), o.names)
 
     return out, tracer._tree_map(tangent_of, out)
 
@@ -163,9 +164,9 @@ def backward(out, ct, tape, leaves):
 
     seeds, linear, linear_vars, tangents = _linearize_tape(tape, leaves)
     t = tangents.get(out.var)
-    cts = backward_pass(linear, linear_vars, {t: sharding.cotangent(ct, out).var} if t in linear_vars else {})
+    cts = backward_pass(linear, linear_vars, {t: gradients.cotangent(ct, out).var} if t in linear_vars else {})
 
-    return [sharding.gradient(_value(cts[seeds[p.var]]), p) if seeds.get(p.var) in cts else None for p in leaves]
+    return [gradients.gradient(_value(cts[seeds[p.var]]), p) if seeds.get(p.var) in cts else None for p in leaves]
 
 
 def backward_pass(linear, linear_vars, cts):
@@ -221,7 +222,7 @@ def vjp(fn, *primals):
                 )
             t = tangents.get(o.var)
             if t in linear_vars:
-                c = sharding.cotangent(c, o)
+                c = gradients.cotangent(c, o)
                 cts[t] = prims.add(_value(cts[t]), c).var if t in cts else c.var
         cts = backward_pass(linear, linear_vars, cts)
 
@@ -229,8 +230,8 @@ def vjp(fn, *primals):
             """``p``'s cotangent, zeros if nothing reached its seed, named and placed as ``p``."""
             seed = seeds.get(p.var)
             if seed in cts:
-                return tracer._renamed(sharding.gradient(_value(cts[seed]), p), p.names)
-            return tracer._renamed(sharding.placed_like(_full(p, 0), p), p.names)
+                return tracer._renamed(gradients.gradient(_value(cts[seed]), p), p.names)
+            return tracer._renamed(gradients.placed_like(_full(p, 0), p), p.names)
 
         return tuple(tracer._tree_map(cotangent, p) for p in primals)
 

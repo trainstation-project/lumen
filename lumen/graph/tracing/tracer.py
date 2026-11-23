@@ -15,8 +15,8 @@ from typing import Sequence
 
 from lumen import nn
 from lumen.config._C import config
-from lumen.graph import prims
 from lumen.graph._C import Graph
+from lumen.graph.tracing import prims
 from lumen.graph_compiler._C import Plan
 from lumen.tensor import names as _names
 from lumen.tensor._C import Tensor, _pack
@@ -44,7 +44,7 @@ _PRODUCERS = []
 _WARNED = {}
 
 
-_PACKAGE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_PACKAGE = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
 _TAPES = []
@@ -1682,9 +1682,9 @@ class TracedTensor:
         """It, a global value every process holds, placed over ``mesh`` by ``placements`` (one
         ``Shard``, ``Replicate`` or ``Partial`` per mesh dimension): this process keeps its shard
         (DTensor's ``distribute_tensor``)."""
-        from lumen.graph import sharding
+        from lumen.graph.propagation import redistribute
 
-        return sharding.distribute(self, mesh, placements)
+        return redistribute.distribute(self, mesh, placements)
 
     def to_local(self):
         """Its local shard, a local value (DTensor's ``to_local``): no op."""
@@ -1704,9 +1704,9 @@ class TracedTensor:
     def redistribute(self, device_mesh=None, placements=None):
         """It placed by ``placements`` instead (over its own mesh: ``device_mesh``, if given, must be it),
         through the collectives that takes (DTensor's ``redistribute``)."""
-        from lumen.graph import sharding
+        from lumen.graph.propagation import redistribute
 
-        return sharding.redistribute(self, device_mesh, placements)
+        return redistribute.redistribute(self, device_mesh, placements)
 
     def numel(self):
         """Number of elements."""

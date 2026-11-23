@@ -2,7 +2,7 @@
 
 from lumen.autograd.core import _value
 from lumen.autograd.function import _FUNCTION, FunctionCtx
-from lumen.graph import prims, tracer
+from lumen.graph.tracing import prims, tracer
 
 __all__ = ["substitute"]
 

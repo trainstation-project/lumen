@@ -4,8 +4,8 @@ import math
 
 from lumen.functional.attention.utils import _expand_heads
 from lumen.functional.functions import amax, exp, le, sum, where
-from lumen.graph import prims
-from lumen.graph.tracer import TracedTensor, _accum_dtype, _common_dtype, _dot, _lift, _require_float
+from lumen.graph.tracing import prims
+from lumen.graph.tracing.tracer import TracedTensor, _accum_dtype, _common_dtype, _dot, _lift, _require_float
 
 __all__ = ["attention_decode"]
 

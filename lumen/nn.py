@@ -92,7 +92,7 @@ def _assigned(name, kind, value):
     0-d traced tensor of it."""
     import numpy as np
 
-    from lumen.graph.tracer import TracedTensor
+    from lumen.graph.tracing.tracer import TracedTensor
 
     # Inside a trace, accept a 0-d tensor whose dtype family matches the field kind.
     if isinstance(value, TracedTensor) and len(value.shape) == 0:
@@ -112,7 +112,7 @@ def _leaves(x, path):
     """``(path, tensor)`` for each tensor in ``x`` (a module, a list or
     tuple, or a tensor), recursively: inside a compiled function, its
     traced weights (not its floats, runtime scalars)."""
-    from lumen.graph.tracer import TracedTensor
+    from lumen.graph.tracing.tracer import TracedTensor
 
     prefix = f"{path}." if path else ""
     if isinstance(x, Tensor) or (isinstance(x, TracedTensor) and not x.weak):

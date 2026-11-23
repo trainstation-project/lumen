@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from typing import Any, Sequence
 
-from lumen.graph.tracer import TracedTensor, _accum_dtype, _common_dtype, _dot, _lift, _union
+from lumen.graph.tracing.tracer import TracedTensor, _accum_dtype, _common_dtype, _dot, _lift, _union
 from lumen.tensor import names as _names
 
 __all__ = ["dot", "contract"]

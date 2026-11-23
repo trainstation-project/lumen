@@ -1,6 +1,6 @@
 # tensor
 
-The concrete tensor: a strided view of device storage, its dtypes and scalars, parameters (weights placed per device), and the Python, NumPy and DLPack interop. Tensors are what a compiled plan reads and writes; inside a trace, Python code works on `TracedTensor` (`lumen/graph/tracer.py`) instead.
+The concrete tensor: a strided view of device storage, its dtypes and scalars, parameters (weights placed per device), and the Python, NumPy and DLPack interop. Tensors are what a compiled plan reads and writes; inside a trace, Python code works on `TracedTensor` (`lumen/graph/tracing/tracer.py`) instead.
 
 ## Files
 

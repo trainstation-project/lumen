@@ -1,6 +1,6 @@
 # viz
 
-Tools for looking at what the compiler did: an HTML page of a traced graph next to its fused plan with kernel timings, and a dump of every kernel's generated code. It reads graphs and plans; it never changes them. `Compiled.dump_graph` and `Compiled.dump_code` (`lumen/graph/tracer.py`) call into it.
+Tools for looking at what the compiler did: an HTML page of a traced graph next to its fused plan with kernel timings, and a dump of every kernel's generated code. It reads graphs and plans; it never changes them. `Compiled.dump_graph` and `Compiled.dump_code` (`lumen/graph/tracing/tracer.py`) call into it.
 
 ## Files
 

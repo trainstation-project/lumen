@@ -190,7 +190,7 @@ class record_function:
 
     def __enter__(self):
         """Opens the range in the profiler and as a scope in any active trace."""
-        from lumen.graph import tracer
+        from lumen.graph.tracing import tracer
 
         tracer._enter_scope(self.name)
         self._handle = _C._record_function_enter(self.name)
@@ -198,7 +198,7 @@ class record_function:
 
     def __exit__(self, *exc):
         """Closes the profiler range and the trace scope."""
-        from lumen.graph import tracer
+        from lumen.graph.tracing import tracer
 
         self._handle.exit()
         self._handle = None

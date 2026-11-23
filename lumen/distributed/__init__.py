@@ -6,7 +6,7 @@ result. Every process issues its collectives in program order, so a pair's sends
 order they were written. ``group`` is ``None`` (every process), a ``DeviceMesh`` or a list of global ranks;
 ``src``, ``dst`` and roots are global ranks. Tensors may be sharded over a mesh (``Shard``, ``Replicate``,
 ``Partial``; ``from_local``, ``Tensor.distribute``) as PyTorch's DTensor: ops on them record the collectives
-they need while tracing (``lumen/graph/sharding.py``)."""
+they need while tracing (``lumen/graph/propagation/``)."""
 
 from __future__ import annotations
 
@@ -147,7 +147,7 @@ def _ranks(group):
 def _split(tensor, dim, n, op):
     """``tensor`` with ``dim`` split into ``n`` equal blocks along a new leading axis, block ``r`` its row ``r``;
     ``op`` names the collective in the error when ``dim`` doesn't split."""
-    from lumen.graph import prims
+    from lumen.graph.tracing import prims
 
     if tensor.shape[dim] % n:
         raise ValueError(f"{op}(): dimension {dim} of size {tensor.shape[dim]} doesn't split over {n} processes")
@@ -159,7 +159,7 @@ def _split(tensor, dim, n, op):
 def _merge(rows, dim):
     """``rows``' leading axis (one row per process) concatenated along ``dim`` of a row: row ``r`` comes
     ``r``-th."""
-    from lumen.graph import prims
+    from lumen.graph.tracing import prims
 
     n, shape = rows.shape[0], rows.shape[1:]
     # The leading axis goes just before `dim`, then merges with it.
@@ -171,7 +171,7 @@ def _merge(rows, dim):
 def all_reduce(tensor, op="sum", group=None):
     """``tensor`` combined across ``group``'s processes with ``op`` (``"sum"``, ``"max"`` or ``"min"``); every one
     of them gets the result. Traced inside ``lumen.compile`` (PyTorch's functional ``all_reduce``)."""
-    from lumen.graph import prims
+    from lumen.graph.tracing import prims
 
     ranks = _ranks(group)
     return tensor if len(ranks) == 1 else prims.device_wait(prims.all_reduce(tensor, op, ranks))
@@ -180,7 +180,7 @@ def all_reduce(tensor, op="sum", group=None):
 def all_gather(tensor, dim: AxisType = 0, group=None):
     """Every process in ``group``'s ``tensor`` concatenated along ``dim``, in rank order (PyTorch's
     ``all_gather_into_tensor``, any ``dim``)."""
-    from lumen.graph import prims
+    from lumen.graph.tracing import prims
 
     ranks = _ranks(group)
     if len(ranks) == 1:
@@ -191,7 +191,7 @@ def all_gather(tensor, dim: AxisType = 0, group=None):
 def reduce_scatter(tensor, dim: AxisType = 0, op="sum", group=None):
     """``tensor`` combined across ``group``'s processes with ``op``, each keeping its share of ``dim`` (split
     into one equal block per process, in rank order): PyTorch's ``reduce_scatter_tensor``, any ``dim``."""
-    from lumen.graph import prims
+    from lumen.graph.tracing import prims
 
     ranks = _ranks(group)
     if len(ranks) == 1:
@@ -204,7 +204,7 @@ def all_to_all(tensor, split_dim: AxisType = 0, concat_dim: AxisType = 0, group=
     """``tensor`` split along ``split_dim`` into one equal block per process of ``group``, block ``j`` sent to
     the ``j``-th; the blocks received concatenated along ``concat_dim`` in rank order (PyTorch's
     ``all_to_all_single`` with equal splits, any dims)."""
-    from lumen.graph import prims
+    from lumen.graph.tracing import prims
 
     ranks = _ranks(group)
     if len(ranks) == 1:
@@ -216,7 +216,7 @@ def all_to_all(tensor, split_dim: AxisType = 0, concat_dim: AxisType = 0, group=
 
 def broadcast(tensor, src=0, group=None):
     """Process ``src``'s ``tensor``, given to every process of ``group`` (PyTorch's ``broadcast``)."""
-    from lumen.graph import prims
+    from lumen.graph.tracing import prims
 
     ranks = _ranks(group)
     return tensor if len(ranks) == 1 else prims.device_wait(prims.broadcast(tensor, src, ranks))
@@ -225,7 +225,7 @@ def broadcast(tensor, src=0, group=None):
 def reduce(tensor, dst=0, op="sum", group=None):
     """``tensor`` combined across ``group``'s processes with ``op`` on process ``dst``; zeros on the others
     (PyTorch's ``reduce``)."""
-    from lumen.graph import prims
+    from lumen.graph.tracing import prims
 
     ranks = _ranks(group)
     return tensor if len(ranks) == 1 else prims.device_wait(prims.reduce(tensor, op, dst, ranks))
@@ -234,7 +234,7 @@ def reduce(tensor, dst=0, op="sum", group=None):
 def gather(tensor, dst=0, dim: AxisType = 0, group=None):
     """Every process in ``group``'s ``tensor`` concatenated along ``dim``, in rank order, on process ``dst``;
     zeros on the others (PyTorch's ``gather`` into one tensor)."""
-    from lumen.graph import prims
+    from lumen.graph.tracing import prims
 
     ranks = _ranks(group)
     if len(ranks) == 1:
@@ -246,7 +246,7 @@ def scatter(tensor, src=0, dim: AxisType = 0, group=None):
     """Process ``src``'s ``tensor`` split along ``dim`` into one equal block per process of ``group``, the
     ``r``-th going to the ``r``-th; the other processes pass a tensor of the same type, which is not read
     (PyTorch's ``scatter`` from one tensor)."""
-    from lumen.graph import prims
+    from lumen.graph.tracing import prims
 
     ranks = _ranks(group)
     if len(ranks) == 1:
@@ -259,7 +259,7 @@ def send(tensor, dst, group=None):
     """Sends ``tensor`` to process ``dst``, which receives it with ``recv`` (PyTorch's ``send``). The send runs
     though nothing reads it; a process's sends and receives pair with another's in program order, and a send
     may wait for its receive, so two processes exchanging tensors order them oppositely (one sends first)."""
-    from lumen.graph import prims, tracer
+    from lumen.graph.tracing import prims, tracer
 
     tracer.keep(prims.device_wait(prims.send(tensor, dst, _ranks(group))))
 
@@ -267,7 +267,7 @@ def send(tensor, dst, group=None):
 def recv(tensor, src, group=None):
     """The tensor process ``src`` sends (``send``), of ``tensor``'s dtype and shape, whose values are not read
     (PyTorch's ``recv`` into ``tensor``, returned instead of written)."""
-    from lumen.graph import prims
+    from lumen.graph.tracing import prims
 
     return prims.device_wait(prims.recv(tensor.shape, tensor.dtype, src, _ranks(group)))
 
@@ -278,7 +278,7 @@ def from_local(local, mesh, placements, *, shape=None):
     its memory (DTensor's ``from_local``, without checks across processes). Its global shape is ``shape``,
     else ``local``'s with each sharded dimension times its mesh dimension's size (even shards); a ValueError
     if ``local`` isn't this process's block of it."""
-    from lumen.graph import tracer
+    from lumen.graph.tracing import tracer
 
     if local.placement is not None:
         raise TypeError("from_local: the tensor is sharded already")

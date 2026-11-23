@@ -2,8 +2,8 @@
 
 import math
 
-from lumen.graph import prims
-from lumen.graph.tracer import TracedTensor
+from lumen.graph.tracing import prims
+from lumen.graph.tracing.tracer import TracedTensor
 from lumen.tensor import Tensor
 
 # Stack of (current step index, grid) for the pipelines being traced.

@@ -9,7 +9,7 @@ from lumen.autograd.core import (
     primitive_jvps,
     primitive_transposes,
 )
-from lumen.graph import prims, tracer
+from lumen.graph.tracing import prims, tracer
 
 deflinear(
     prims.add,

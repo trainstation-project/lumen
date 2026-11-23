@@ -1,6 +1,6 @@
 //! Reference interpreter: evaluates graphs element by element on the host in i128/f64, rounding to each result
 //! dtype, as the ground truth backends are tested against.
-use crate::graph::primitive::free_dims;
+use crate::graph::ir::primitive::free_dims;
 use crate::graph::{Graph, Primitive, TensorType};
 use crate::tensor::dtype::{dispatch_dtype, f8e4m3b11fnuz, f8e4m3fn, f8e5m2, to_bf16, to_f16};
 use crate::tensor::for_each_index;

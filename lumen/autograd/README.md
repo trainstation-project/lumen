@@ -1,6 +1,6 @@
 # autograd
 
-Automatic differentiation, written in Python and run during tracing. The transforms read the nodes the tracer (`lumen/graph/tracer.py`) recorded while running a function and bind new primitives for the derivative into the same graph, so forward and backward reach the graph compiler as one program. They raise when called outside a trace.
+Automatic differentiation, written in Python and run during tracing. The transforms read the nodes the tracer (`lumen/graph/tracing/tracer.py`) recorded while running a function and bind new primitives for the derivative into the same graph, so forward and backward reach the graph compiler as one program. They raise when called outside a trace.
 
 ## Files
 
@@ -17,7 +17,7 @@ Automatic differentiation, written in Python and run during tracing. The transfo
 
 ## How it connects
 
-- Primitives come from `lumen.graph.prims`; tape nodes, scopes and tree helpers come from `lumen.graph.tracer`.
+- Primitives come from `lumen.graph.tracing.prims`; tape nodes, scopes and tree helpers come from `lumen.graph.tracing.tracer`.
 - The substitutes build their replacement nodes from `lumen.functional` (`_RMSNorm`, `_CrossEntropy`, the flash attention functions).
 - The order of substitution is fixed in `_linearize_tape`: attention, then RMS norm, then cross entropy, then dots.
 
@@ -27,7 +27,7 @@ Automatic differentiation, written in Python and run during tracing. The transfo
 - Rules follow JAX's design: a JVP rule per primitive, a transpose rule for each linear primitive, and reverse mode by transposing the linearized program.
 - Primals, tangents, cotangents and outputs are trees walked by `tracer._tree_map`: tensors, modules, lists and tuples. Gradients, cotangents and tangents come back named as their primals or outputs; a named tangent or cotangent given is aligned to its value by name (`tracer._like`). Rules work on values rebuilt from vars (`core._value`), unnamed.
 - Only float leaves get tangents; integer and bool values have none.
-- Sharded values (placements) need nothing of the rules: the tape holds local values and explicit collectives, whose existing rules transpose them. The transforms translate at the edges (`lumen/graph/sharding.py`): a cotangent of a replicated output enters on one process of each group (the others' zero), so the copies' gradients add up to it once; a replicated leaf's gradient (partial over its processes) is all-reduced, a partial sum leaf's partitioned; a cotangent of a partial average is divided among the parts, of a partial max or min given to the parts equal to the whole (ties share), and such a leaf's parts' gradients are summed; gradients come back placed as their leaves. A `Function` with a sharded argument runs on replicated arguments, its results replicated.
+- Sharded values (placements) need nothing of the rules: the tape holds local values and explicit collectives, whose existing rules transpose them. The transforms translate at the edges (`lumen/graph/propagation/sharding.py`): a cotangent of a replicated output enters on one process of each group (the others' zero), so the copies' gradients add up to it once; a replicated leaf's gradient (partial over its processes) is all-reduced, a partial sum leaf's partitioned; a cotangent of a partial average is divided among the parts, of a partial max or min given to the parts equal to the whole (ties share), and such a leaf's parts' gradients are summed; gradients come back placed as their leaves. A `Function` with a sharded argument runs on replicated arguments, its results replicated.
 - Tangents and cotangents must match their primal's dtype and shape exactly; the transforms raise `TypeError` otherwise.
 - `rules.py` must be imported for its side effect before any transform runs; `transforms.py` does this.
 - A new differentiable primitive needs its rules registered in `rules.py` with `defjvp`, `deflinear` or a direct entry in the registries.

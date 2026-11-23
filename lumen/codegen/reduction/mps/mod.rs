@@ -17,7 +17,7 @@ use crate::codegen::kinds::reduction_root;
 use crate::codegen::reduction::ReductionCodegen;
 use crate::graph::Primitive::{self, *};
 use crate::graph::TensorType;
-use crate::graph::primitive::free_dims;
+use crate::graph::ir::primitive::free_dims;
 use crate::graph::{Graph, Node};
 use crate::plan::StepBase;
 use crate::runtime::kernel::mps::{Grid, dims_arg, dims32_arg, element_arg, u32_arg, u64_arg};

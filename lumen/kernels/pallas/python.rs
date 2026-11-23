@@ -83,7 +83,7 @@ impl PyKernel {
             None => PyDict::new(py),
         };
 
-        let primitive = crate::graph::python::primitive(name, &params)?;
+        let primitive = crate::graph::ir::convert::primitive(name, &params)?;
         self.inner.apply(primitive, &inputs).map_err(err)
     }
 

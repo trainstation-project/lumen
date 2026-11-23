@@ -2,8 +2,8 @@
 
 import functools
 
-from lumen.graph import prims, tracer
-from lumen.graph.tracer import TracedTensor
+from lumen.graph.tracing import prims, tracer
+from lumen.graph.tracing.tracer import TracedTensor
 
 primitive_jvps = {}
 primitive_transposes = {}

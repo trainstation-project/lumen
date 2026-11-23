@@ -1,6 +1,8 @@
 """Python wrappers that record each lumen primitive into the graph being traced."""
 
-from lumen.graph import _C, sharding, tracer
+from lumen.graph import _C
+from lumen.graph.propagation import sharding
+from lumen.graph.tracing import tracer
 
 __all__ = [
     "add",
@@ -93,7 +95,7 @@ __all__ = [
 
 def _named(out, name, operands, params):
     """``out``, primitive ``name``'s result on ``operands``, named by the primitive's rule
-    (``Primitive::names``, ``lumen/graph/propagation.rs``) when an operand has names."""
+    (``Primitive::names``, ``lumen/graph/propagation/mod.rs``) when an operand has names."""
     if any(getattr(x, "names", None) is not None for x in operands):
         names = _C.names(name, params, [(x.shape, getattr(x, "names", None)) for x in operands], out.shape)
         out.names = None if names is None else tuple(names)

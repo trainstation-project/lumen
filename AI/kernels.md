@@ -65,7 +65,7 @@ Everything per element is generated from the fusion's body.
    program in `lumen/codegen/<op>/tpu/`) uses operators, `lumen.functional`,
    `lumen.full`/`lumen.zeros` and `lumen.pallas` (its `lax` names, such as
    `pl.broadcasted_iota`), as a JAX Pallas kernel uses `jnp` and `lax`; not
-   `lumen.graph.prims`. Only codegen's replay of a body's nodes
+   `lumen.graph.tracing.prims`. Only codegen's replay of a body's nodes
    (`codegen/devices/tpu/__init__.py`) binds primitives by name.
 
 ## Checklist

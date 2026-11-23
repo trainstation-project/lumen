@@ -2,7 +2,7 @@
 
 import contextlib
 
-from lumen.graph import prims, tracer
+from lumen.graph.tracing import prims, tracer
 
 __all__ = [
     "fork_rng",

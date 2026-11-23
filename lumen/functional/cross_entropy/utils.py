@@ -1,7 +1,7 @@
 """Helpers shared by the cross-entropy functions."""
 
 from lumen.functional.functions import eq
-from lumen.graph import prims
+from lumen.graph.tracing import prims
 
 
 def _one_hot(target, n, dtype):
