@@ -6,7 +6,7 @@ result. Every process issues its collectives in program order, so a pair's sends
 order they were written. ``group`` is ``None`` (every process), a ``DeviceMesh`` or a list of global ranks;
 ``src``, ``dst`` and roots are global ranks. Tensors may be sharded over a mesh (``Shard``, ``Replicate``,
 ``Partial``; ``from_local``, ``Tensor.distribute``) as PyTorch's DTensor: ops on them record the collectives
-they need while tracing (``lumen/graph/propagation/sharding.py``)."""
+they need while tracing (``lumen/graph/propagation/``)."""
 
 from __future__ import annotations
 

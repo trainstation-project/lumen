@@ -86,11 +86,11 @@ def _replicated(cls, sharded, args, kwargs):
     """``cls.apply(*args, **kwargs)`` with ``sharded`` among its arguments: run on every argument's whole
     value (a sharded one gathered and reduced first), as a primitive without strategies runs, its results
     replicated over the arguments' mesh. Its ``forward`` and ``backward`` see local values alone."""
-    from lumen.graph.propagation import sharding
+    from lumen.graph.propagation import redistribute, sharding
     from lumen.tensor.placements import replicated
 
-    mesh = sharding._mesh(sharded)
-    whole = lambda v: sharding.replicate(v) if isinstance(v, TracedTensor) else v  # noqa: E731
+    mesh = sharding.mesh_of(sharded)
+    whole = lambda v: redistribute.replicate(v) if isinstance(v, TracedTensor) else v  # noqa: E731
     out = cls.apply(*map(whole, args), **{k: whole(v) for k, v in kwargs.items()})
     place = lambda o: o.distribute(mesh, replicated(mesh).placements)  # noqa: E731
     return place(out) if isinstance(out, TracedTensor) else type(out)(map(place, out))

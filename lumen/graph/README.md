@@ -5,7 +5,7 @@ The traced dataflow graph and the Python tracer that builds it. This is the star
 ## Subfolders
 
 - `ir/`: the Rust graph (`Graph`, `Node`, `TensorType`, `Var`) and its primitives (`Primitive`, their type inference). `mod.rs` re-exports it, so the rest of the crate names them `crate::graph::Graph`.
-- `propagation/`: how each primitive's result names and sharding follow from its operands' (Rust), and `sharding.py`, which runs primitives on sharded operands by those rules.
+- `propagation/`: how each primitive's result names and sharding follow from its operands' (Rust), and the Python that runs primitives on sharded operands by those rules (`sharding.py`, with `cost.py`, `redistribute.py` and `gradients.py`).
 - `tracing/`: the Python tracer (`TracedTensor`, `compile`, `make_graph`) and the primitive wrappers (`prims`) that record nodes.
 
 ## Files
