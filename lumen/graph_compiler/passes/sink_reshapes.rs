@@ -50,7 +50,7 @@ fn split(graph: &Graph, producer: &[Option<usize>], r: &Node) -> Option<(Var, us
     let made = producer[q]
         .is_some_and(|k| matches!(graph.nodes()[k].primitive, Primitive::DotGeneral { .. }));
 
-    (splits && made).then_some((q, to[b - 1]))
+    (splits && made).then(|| (q, to[b - 1]))
 }
 
 /// The chain after reshape node `r` making `p` of width `w` (see the module docs), in graph order.

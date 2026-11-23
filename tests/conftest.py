@@ -38,6 +38,7 @@ TPU_GAPS = re.compile(
     r"|a strided view on tpu"
     r"|TPU programs read and write whole rows"
     r"|operands of one dtype accumulating in float32"
+    r"|the lhs must be batch, free then one contracting dimension"
 )
 
 # The error of a primitive the CUDA (CuTe DSL) backend has no kernel for; failing CuTe CUDA tests hitting it skip.

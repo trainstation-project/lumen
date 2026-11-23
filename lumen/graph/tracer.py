@@ -639,13 +639,19 @@ def _settled(fn, args, device, dynamic, pinned, proven, portable=False, split=Tr
     slots in ``dynamic`` runtime, traced again until it settles: one ``fn``
     assigns is made runtime, written back each call; one that cannot be
     (used as a shape or a condition, which a runtime scalar cannot be) is
-    ``pinned`` static, its new value baked in. ``proven``: the slots traced
-    runtime before. With ``split``, the scalars' math runs on the host
+    ``pinned`` static, its new value baked in. A trace that fails with
+    module float fields baked in (one read as a tensor: ``copy_`` into it)
+    is traced again with them runtime. ``proven``: the slots traced runtime
+    before. With ``split``, the scalars' math runs on the host
     (``_trace``)."""
     while True:
         try:
             result = _trace(fn, args, device, _runtime(dynamic), portable, split)
         except Exception:
+            floats = {slot for slot, v in _slots(args) if type(v) is float and _baked(slot, v)} - dynamic - pinned
+            if floats:
+                dynamic |= floats
+                continue
             fresh = dynamic - proven
             if not fresh:
                 raise

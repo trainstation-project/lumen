@@ -144,7 +144,8 @@ fn planned(graph: &Graph, held: &[bool]) -> Groups {
 
 /// Each node's small fusion (`codegen::elementwise::tpu::small`), by its root (its last node): the connected groups
 /// of two or more nodes the small kernel takes, each reading only graph inputs and other such nodes (so the group is
-/// computed from inputs alone), whose inputs and outputs it reads and writes whole, all joined into one fusion.
+/// computed from inputs alone) and building on an iota (a table, as a rotary's angles or its swap's sign), whose inputs
+/// and outputs it reads and writes whole, all joined into one fusion.
 fn small_groups(graph: &Graph) -> Vec<Option<usize>> {
     use crate::codegen::elementwise::tpu::small::{buffer, takes};
 
@@ -209,7 +210,12 @@ fn small_groups(graph: &Graph) -> Vec<Option<usize>> {
             .map(|&k| nodes[k].output)
             .filter(|&v| graph.outputs().contains(&v) || readers[v].iter().any(|&r| !inside(r)));
 
-        let whole = reads.clone().all(|&v| buffer(graph.type_of(v), false))
+        let iota = m
+            .iter()
+            .any(|&k| matches!(nodes[k].primitive, Primitive::Iota { .. }));
+
+        let whole = iota
+            && reads.clone().all(|&v| buffer(graph.type_of(v), false))
             && written.clone().all(|v| buffer(graph.type_of(v), true))
             && written.count() > 0;
 

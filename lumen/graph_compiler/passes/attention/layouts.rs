@@ -634,7 +634,8 @@ fn heads_major<D: TiledAttentions>(graph: &Graph) -> Graph {
             continue;
         };
 
-        if name == "flash_attention" {
+        // One query a head writes its heads' matrix as laid out (`unreadable`): its chain stays.
+        if name == "flash_attention" && attention::of_body(body).is_some_and(|a| a.sq > 1) {
             trailing[i] = layout_chain(body);
         }
 
