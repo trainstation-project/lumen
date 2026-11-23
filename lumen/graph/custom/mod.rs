@@ -1,5 +1,8 @@
 //! Bridge from custom-op kernels in a compiled graph back to the Python functions that implement them.
 
+#[cfg(feature = "python")]
+pub(crate) mod python;
+
 use std::sync::OnceLock;
 
 use crate::Tensor;

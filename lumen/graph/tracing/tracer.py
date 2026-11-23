@@ -15,7 +15,7 @@ from typing import Sequence
 
 from lumen import nn
 from lumen.config._C import config
-from lumen.graph._C import Graph
+from lumen.graph.ir._C import Graph
 from lumen.graph.tracing import prims
 from lumen.graph_compiler._C import Plan
 from lumen.tensor import names as _names

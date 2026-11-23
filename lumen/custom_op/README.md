@@ -16,7 +16,7 @@ User-defined ops. There are two mechanisms here: Python functions that mutate te
 
 ## How it connects
 
-- `CustomOp.__call__` binds `prims._custom_call` into the current trace (`lumen/graph`). It registers a `run` closure with `lumen.graph._C._register_custom_op`; at run time `lumen/graph/custom.rs` calls back into it by kernel number.
+- `CustomOp.__call__` binds `prims._custom_call` into the current trace (`lumen/graph`). It registers a `run` closure with `lumen.graph.custom._C._register_custom_op`; at run time `lumen/graph/custom.rs` calls back into it by kernel number.
 - The node's results are copied back into the mutated arguments with `copy_`, so the program sees the mutation.
 - Kernel tables are `Op` entries keyed by `DispatchKey` from `lumen/runtime/dispatch`.
 

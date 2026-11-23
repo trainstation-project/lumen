@@ -11,7 +11,7 @@ The reference interpreter: it evaluates a `Graph` element by element on the host
 
 ## How it connects
 
-- `lumen.graph.Graph.run` in Python (`lumen/graph/python.rs`) calls `run`.
+- `lumen.graph.Graph.run` in Python (`lumen/graph/ir/python.rs`) calls `run`.
 - Graph compiler tests (`lumen/graph_compiler/tests`) compare a rewritten graph's results with the original's through `run`, so every pass must keep the reference results unchanged.
 
 ## Conventions

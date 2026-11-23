@@ -7,7 +7,7 @@ import pathlib
 import statistics
 
 import lumen
-from lumen.graph._C import FUSION_SEPARATOR
+from lumen.graph.ir._C import FUSION_SEPARATOR
 from lumen.graph_compiler._C import Plan
 from lumen.profiler import ProfilerActivity, profile
 

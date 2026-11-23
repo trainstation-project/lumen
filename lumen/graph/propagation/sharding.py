@@ -8,9 +8,9 @@ as any other program, whose gradients ``cotangent`` and ``gradient`` translate t
 
 import itertools
 
-from lumen.graph._C import Graph
-from lumen.graph._C import strategies as _strategies
+from lumen.graph.ir._C import Graph
 from lumen.graph.propagation import cost
+from lumen.graph.propagation._C import strategies as _strategies
 from lumen.graph.propagation.redistribute import moved, placed
 from lumen.graph.tracing import prims
 from lumen.tensor import placements as _placements

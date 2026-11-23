@@ -1,6 +1,6 @@
 # tracing
 
-The Python tracer: it runs a function on traced tensors and records each primitive into the Rust `Graph` (`lumen.graph._C`), which `lumen.graph_compiler` then compiles. `lumen.graph` re-exports `TracedTensor`, `compile`, `make_graph` and `prims`.
+The Python tracer: it runs a function on traced tensors and records each primitive into the Rust `Graph` (`lumen.graph.ir._C`), which `lumen.graph_compiler` then compiles. `lumen.graph` re-exports `TracedTensor`, `compile`, `make_graph` and `prims`.
 
 ## Files
 
