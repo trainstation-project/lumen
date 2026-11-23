@@ -6,6 +6,7 @@ from helpers import CPU, MPS, TRITON_CUDA, rand
 
 import lumen
 import lumen.functional as F
+from lumen.graph import tracer
 
 
 @pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
@@ -55,9 +56,11 @@ def test_upcast_rms_norm_is_one_kernel(device, n):
     except RuntimeError as e:
         pytest.skip(str(e))
     weight = lumen.empty([n], dtype="bfloat16", device="meta")
-    graph = lumen.make_graph(lambda m, a: m(a))(
-        UpcastNorm(weight, 1e-6), lumen.empty([8, n], dtype="bfloat16", device="meta")
-    )
+    # The norm's eps traced as a runtime scalar (a module float is baked in until varied).
+    args = (UpcastNorm(weight, 1e-6), lumen.empty([8, n], dtype="bfloat16", device="meta"))
+    graph = tracer._settled(lambda m, a: m(a), args, "cpu", {(0, ("eps",))}, set(), set(), portable=True, split=False)[
+        0
+    ]
     (step,) = lumen.graph_compiler.Plan(graph, device, parameters=[2], scalars=[1]).steps()
     assert step["label"].endswith("div → cast(float32 -> bfloat16) → broadcast_in_dim → mul"), step["label"]
     if device == "mps":

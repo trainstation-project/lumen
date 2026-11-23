@@ -7,6 +7,7 @@ from helpers import CUDA, MPS, TRITON_CUDA, meta
 import lumen
 import lumen.functional as F
 from lumen import prims
+from lumen.graph import tracer
 
 
 class _ScaledMatmul(lumen.nn.Module):
@@ -385,7 +386,9 @@ def test_matmul_epilogue_takes_runtime_scalars_by_value(device):
         np.testing.assert_allclose(out, (x @ w) * s, rtol=1e-5, atol=1e-5)
     if device != "mps":
         return
-    graph = lumen.make_graph(lambda m, a: m(a))(_ScaledMatmul(weight, 0.5), lumen.empty([16, 32], device="meta"))
+    # The scale traced as a runtime scalar, as the calls above made it.
+    args = (_ScaledMatmul(weight, 0.5), lumen.empty([16, 32], device="meta"))
+    graph = tracer._settled(lambda m, a: m(a), args, "cpu", {(0, ("s",))}, set(), set(), portable=True, split=False)[0]
     (step,) = lumen.graph_compiler.Plan(graph, "mps", parameters=[2], scalars=[1]).steps()
     assert ("s1", "float32", []) in step["inputs"] and "constant float &in" in step["fusion"]["source"]
 
