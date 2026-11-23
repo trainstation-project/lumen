@@ -17,8 +17,9 @@ pub(crate) trait Emit<'a> {
     fn value(&mut self, v: Var, idx: String) -> String;
 }
 
-/// A backend whose kernels compute `SwapPairs` (reading each element's partner at `j ^ 1`, or swapping a register
-/// tile's adjacent lanes): the graph compiler's `swap_pairs` pass rewrites pair swaps into it on these devices.
+/// A backend whose kernels compute `SwapPairs { distance }` (reading each element's partner at `j ^ distance`, or
+/// swapping a register tile's adjacent lanes): the graph compiler's `swap_pairs` pass rewrites partner swaps into it
+/// on these devices.
 pub(crate) trait SwapsPairs {}
 
 /// A backend whose kernels compute `Gather`: the graph compiler's `take_along_axis` pass lowers `take_along_axis` to a

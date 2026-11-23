@@ -53,8 +53,8 @@ A backend fills `Backend`: `fusible` (which nodes may join a fusion), `max_input
 `multi_output_fusion`, `reduction_epilogues`, `contraction_epilogues`, `dot_epilogue` (which dots run an
 epilogue), `expansion` (whether a GEMM epilogue may write into a concatenation's slot), `row_dot`
 (whether a GEMM plus row body runs as one kernel), `swap_epilogues` (whether a GEMM epilogue may take a
-`SwapPairs`, swapping the accumulator's adjacent lanes in registers: Triton yes, MPS not, its epilogue functor
-seeing one element), `combine_epilogues` (whether a split-K combine runs its GEMM's epilogue: Triton yes,
+`SwapPairs` of distance 1, swapping the accumulator's adjacent lanes in registers: Triton yes, MPS not, its
+epilogue functor seeing one element; other distances run after the GEMM), `combine_epilogues` (whether a split-K combine runs its GEMM's epilogue: Triton yes,
 MPS and CUDA not) and `update_epilogues` (whether an epilogue writes straight into an update's slot: Triton
 yes, MPS and CUDA not).
 

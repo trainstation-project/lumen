@@ -40,7 +40,7 @@ pass or the identity pass, which the pipeline skips.
 9. `linear_cross_entropy` - replace `cross_entropy(h @ w, target)` with one `LinearCrossEntropy` op [mps, triton].
 10. `fold_dot_reshapes` - fold a reshape flattening leading dims into a 2-D dot's lhs [tpu].
 11. `simplify` (`matched: true`) - full simplification, including structural rewrites [every device, CPU too].
-12. `swap_pairs` - pair swaps written as slices and a concatenation become `SwapPairs` (an interleaved rotary's partners, read at `j ^ 1` or swapped in a GEMM accumulator's registers) [mps, triton].
+12. `swap_pairs` - swaps of a last axis's partners written as slices and a concatenation become `SwapPairs { distance }`: adjacent pairs (`distance` 1, an interleaved rotary's), or each `d` elements' halves (`d / 2`, a rotate-half rotary's; a negated half becomes a sign multiply). Kernels read the partner at `j ^ distance`; a Triton GEMM accumulator swaps adjacent pairs in registers [mps, triton].
 13. `dot_strength` - vector-vector dots become multiply plus reduce-sum [mps, triton, tpu].
 14. `merge_dots` (`MergeDotsLate`) - dot merging after simplification, packing whole vector lanes [tpu].
 15. `neural_engine` - offload float16 GEMM regions over fixed weights to the Apple Neural Engine [mps].

@@ -636,13 +636,13 @@ impl<'a> Emit<'a> for Emitter<'a> {
                         let i = self.operand_index(node, idx);
                         return self.value(node.inputs[0], i);
                     }
-                    // Each element's partner: read at `idx ^ 1`, or, for a value computed from a register tile
-                    // (which can't be read elsewhere), the tile's adjacent lanes swapped.
-                    SwapPairs => {
+                    // Each element's partner: read at `idx ^ distance`, or, for a value computed from a register tile
+                    // (which can't be read elsewhere; only adjacent pairs fuse there), the tile's adjacent lanes swapped.
+                    SwapPairs { distance } => {
                         let x = node.inputs[0];
 
                         if !self.in_registers(x) {
-                            let i = self.index(format!("({idx}) ^ 1"));
+                            let i = self.index(format!("({idx}) ^ {distance}"));
                             return self.value(x, i);
                         }
 

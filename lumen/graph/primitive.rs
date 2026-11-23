@@ -325,9 +325,13 @@ pub enum Primitive {
     Transpose {
         permutation: Vec<usize>,
     },
-    /// Swaps each adjacent pair of last-axis elements, element `2i` with `2i + 1` (an even-length last axis): an
-    /// interleaved rotary embedding's pairing, which a kernel holding the pair in registers does in place.
-    SwapPairs,
+    /// Swaps each last-axis element `j` with its partner `j ^ distance` (`distance` a power of two, the last axis a
+    /// multiple of `2 * distance`): with `distance` 1 each adjacent pair (an interleaved rotary embedding's), with `d / 2`
+    /// the two halves of each `d` elements (a rotate-half rotary embedding's). A kernel holding both partners in
+    /// registers swaps them in place.
+    SwapPairs {
+        distance: usize,
+    },
     /// Static slice `[start, limit)` per dimension; `view` aliases the input's buffer.
     Slice {
         start_indices: Vec<usize>,
@@ -495,7 +499,7 @@ impl Primitive {
             Reshape { .. } => "reshape",
             BroadcastInDim { .. } => "broadcast_in_dim",
             Transpose { .. } => "transpose",
-            SwapPairs => "swap_pairs",
+            SwapPairs { .. } => "swap_pairs",
             Slice { .. } => "slice",
             DynamicSlice { .. } => "dynamic_slice",
             DynamicUpdateSlice => "dynamic_update_slice",
@@ -818,12 +822,16 @@ impl Primitive {
                 let shape: Vec<usize> = batch.chain(lhs_free).chain(rhs_free).collect();
                 Ok(TensorType::new(*output_dtype, &shape))
             }
-            SwapPairs => {
+            SwapPairs { distance } => {
                 let x = args[0];
 
                 match x.shape.last() {
-                    Some(n) if n % 2 == 0 => Ok(x.clone()),
-                    _ => err(format!("needs an even-length last axis, got {x}")),
+                    Some(n) if distance.is_power_of_two() && n.is_multiple_of(2 * distance) => {
+                        Ok(x.clone())
+                    }
+                    _ => err(format!(
+                        "needs a power-of-two distance and a last axis a multiple of twice it, got distance {distance} for {x}"
+                    )),
                 }
             }
             Reshape { new_sizes } => {
@@ -1282,6 +1290,7 @@ impl fmt::Display for Primitive {
                 Tuple(ranks),
                 Tuple(shape)
             ),
+            SwapPairs { distance } => write!(f, "[distance={distance}]"),
             Gather { axis } | ScatterAdd { axis } | TakeAlongAxis { axis } => {
                 write!(f, "[axis={axis}]")
             }

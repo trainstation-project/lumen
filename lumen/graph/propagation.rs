@@ -101,7 +101,7 @@ impl Primitive {
             }),
 
             // An op whose result has its first operand's axes, perhaps resized: that operand's names.
-            SwapPairs
+            SwapPairs { .. }
             | Cumsum { .. }
             | Slice { .. }
             | DynamicSlice { .. }
@@ -410,7 +410,7 @@ impl Primitive {
 
             // A swap of adjacent last-axis pairs: sharded along another axis (a shard of the last could split a
             // pair), or partial by any reduction (each commutes with a permutation).
-            SwapPairs => {
+            SwapPairs { .. } => {
                 let p = placements[0];
                 let last = shapes[0].len() - 1;
                 keep(matches!(p, Shard(d) if d != last) || matches!(p, Partial(_)))
