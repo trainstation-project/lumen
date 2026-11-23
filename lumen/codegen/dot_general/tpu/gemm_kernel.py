@@ -1,8 +1,17 @@
 """Pallas program for a TPU dot with a fused elementwise epilogue."""
 
+import lumen
 import lumen.functional as F
 from lumen.codegen.devices.tpu import computed, pallas
 from lumen.kernels import pallas as pl
+
+# Length of the SMEM row holding a cache update's fetched start row.
+SCALARS = 128
+
+
+def _bits(dtype):
+    """Bits of one element of ``dtype``."""
+    return {"bfloat16": 16, "float16": 16, "int16": 16, "uint16": 16, "int8": 8, "uint8": 8, "bool": 32}.get(dtype, 32)
 
 
 def program(spec):
@@ -13,11 +22,16 @@ def program(spec):
     ``operands`` and ``value`` (its result's) dtypes, ``blocks`` (bm, bn,
     bk), ``widths`` (its members: ranges of its rows if ``split_rows``, else of
     its columns, in order), ``inputs`` (its epilogue's other operands,
-    each ``[dtype, 0-d, member]``), ``nodes`` (its epilogue, as the
+    each ``[dtype, 0-d, member, raw]``: ``raw`` ones, a cache update's
+    cache and row, read whole), ``nodes`` (its epilogue, as the
     elementwise kernel's, its values the result, the inputs, then the
-    nodes) and ``outputs`` (each ``[value, member, dtype, n, start]``:
+    nodes), ``outputs`` (each ``[value, member, dtype, n, start, output]``:
     written at columns ``start`` on of a buffer ``n`` wide, or, ``n`` 0, a
-    buffer of its own). With ``together``, members of one width, each step
+    buffer of its own) and ``updates`` (each ``[output, value, member,
+    dtype, cache, pos, [b, heads, rows, w]]``: the member's value split into
+    heads ``w`` wide, written into rows ``pos`` on of input ``cache`` of that
+    shape, which the output is, after copying it there when it isn't
+    in place). With ``together``, members of one width, each step
     computes every member's block at its columns, from a stream of the rhs's
     blocks each, so the epilogue reads them all. ``views`` (the lhs's, the
     rhs's): each ``null`` or ``[rows, columns, row, column]``, the operand
@@ -30,7 +44,9 @@ def program(spec):
     t, tl = spec["transposed"], spec["lhs_transposed"]
     dtype, value = spec["operands"], spec["value"]
     mb, nb, kb = m // bm, n // bn, k // bk
-    widths, inputs, nodes, outputs, views = (spec[k] for k in ("widths", "inputs", "nodes", "outputs", "views"))
+    widths, inputs, nodes, outputs, views, updates = (
+        spec[k] for k in ("widths", "inputs", "nodes", "outputs", "views", "updates")
+    )
     rows_split, lhs_k, together = spec["split_rows"], spec["lhs_k"], spec["together"]
     # Members and lhs parts are tiled in whole blocks; these are their block offsets and counts.
     parts = spec["lhs"] or [k if lhs_k else m]
@@ -40,7 +56,7 @@ def program(spec):
     part_unit = bk if lhs_k else bm
     part_starts = [sum(parts[:p]) // part_unit for p in range(len(parts))]
     part_counts = [w // part_unit for w in parts]
-    blocked = [i for i, (_, scalar, _) in enumerate(inputs) if not scalar]
+    blocked = [i for i, (_, scalar, _, raw) in enumerate(inputs) if not scalar and not raw]
     split = len(parts) > 1
     results = len(widths)
     streams = results if together else 1
@@ -92,6 +108,67 @@ def program(spec):
             shape = (shape[0], *views[k][:2])
         return pallas.view(memory, row, shape, dtype)
 
+    def cache_writes(rows, memory, result, first, base):
+        """The writer of each cache update's block, its caches set up: each read in place, or copied into its
+        output first, and its rows' start read. ``first`` is the row of the first epilogue input, ``base`` the
+        first output's."""
+        caches, outs, at = [], [], []
+        for o, _, _, d, cache, pos, (b, heads, height, w) in updates:
+            source = pallas.view(memory, rows[first + cache], (b * heads, height, w), d)
+            target = pallas.view(result, rows[base + o], (b * heads, height, w), d)
+
+            @pl.when(rows[first + cache] != rows[base + o])
+            def _(source=source, target=target):
+                """Copies the cache into the output, which isn't it."""
+                pl.async_copy(source, target, pl.scratch(pl.SemaphoreType.DMA)).wait()
+
+            held = pl.scratch(pl.SMEM((1, SCALARS), "int32"))
+            pl.async_copy(
+                pallas.view(memory, rows[first + pos], (SCALARS,), "int32"),
+                held.at[0],
+                pl.scratch(pl.SemaphoreType.DMA),
+            ).wait()
+            caches.append(target)
+            at.append(held[0, 0])
+
+        def write(u, p, block):
+            """Writes ``block`` (member ``p``'s, at this grid step) into update ``u``'s cache: each head's rows by a
+            read, merge and write of the tile-aligned window holding them, the rows rolled into place. Every head's
+            window is read at once, then every head's written at once."""
+            _, _, _, d, _, _, (b, heads, height, w) = updates[u]
+            tile = 8 * (32 // _bits(d))
+            window = min(-(-(bm + tile - 1) // tile) * tile, height)
+            wide = "float32" if d.startswith(("float", "bfloat")) else "int32"
+            row = at[u] + pl.program_id(1) * bm
+            top = pl.multiple_of(F.minimum(F.maximum(row // tile * tile, 0), height - window), tile)
+            shift = row - top
+            count = bn // w
+            first_head = (pl.program_id(2) - starts[p]) * count
+            buffers = pl.scratch(pl.VMEM((count, window, w), d))
+            reads, stores = pl.scratch(pl.SemaphoreType.DMA((count,))), pl.scratch(pl.SemaphoreType.DMA((count,)))
+            inside = pl.broadcasted_iota("int32", (window, w), 0)
+            seen = (inside >= shift) & (inside < shift + bm)
+            targets = [
+                caches[u].at[pl.program_id(0) * heads + first_head + k, pl.ds(top, window)] for k in range(count)
+            ]
+            loads = [pl.make_async_copy(targets[k], buffers.at[k], reads.at[k]) for k in range(count)]
+            for c in loads:
+                c.start()
+            writes = []
+            for k in range(count):
+                loads[k].wait()
+                piece = block[:, k * w : (k + 1) * w].to(wide)
+                if window > bm:
+                    piece = F.cat([piece, lumen.zeros((window - bm, w), wide)], 0)
+                placed = pl.roll(piece, shift, 0)
+                buffers[k] = F.where(seen, placed, buffers[k].to(wide)).to(d)
+                writes.append(pl.make_async_copy(buffers.at[k], targets[k], stores.at[k]))
+                writes[-1].start()
+            for c in writes:
+                c.wait()
+
+        return write
+
     def needed(indices):
         """The values ``indices`` are computed from, and they."""
         first = results + len(inputs)
@@ -123,8 +200,8 @@ def program(spec):
         y = viewed(1, memory, rows[r], (batch, n, k) if t else (batch, k, n))
         # Scalar epilogue inputs are copied to VMEM once, up front.
         scalars = {}
-        for i, (d, scalar, _) in enumerate(inputs):
-            if scalar:
+        for i, (d, scalar, _, raw) in enumerate(inputs):
+            if scalar and not raw:
                 scalars[i] = pl.scratch(pl.VMEM((1,), d))
                 copy(pallas.view(memory, rows[r + 1 + i], (), d), scalars[i])
         read = {i: s[...] for i, s in scalars.items()}
@@ -137,8 +214,9 @@ def program(spec):
         base = r + 1 + len(inputs)
         outs = [
             pallas.view(result, rows[base + o], (batch * lead, m, whole) if whole else member_shape(p), d)
-            for o, (_, p, d, whole, _) in enumerate(outputs)
+            for _, p, d, whole, _, o in outputs
         ]
+        writes = cache_writes(rows, memory, result, r + 1, base)
 
         def lhs_spec(p):
             """Block spec of lhs part ``p``, its block index clamped into the part."""
@@ -190,20 +268,23 @@ def program(spec):
             return pl.BlockSpec((None, bm, bn), index)
 
         e_specs = [member_spec(inputs[i][2]) for i in blocked]
-        o_specs = [member_spec(p, at) for _, p, _, _, at in outputs]
+        o_specs = [member_spec(p, at) for _, p, _, _, at, _ in outputs]
 
         def finish(accs, blocks, obs):
             """Runs the epilogue on the accumulated ``accs`` and writes each output block of the current member."""
             products = [a.to(value) for a in accs] * (results // len(accs))
-            members = [0] if together else sorted({o[1] for o in outputs})
+            members = [0] if together else sorted({o[1] for o in outputs} | {u[2] for u in updates})
             for p in members:
                 written = [o for o, out in enumerate(outputs) if together or out[1] == p]
+                cached = [u for u, update in enumerate(updates) if update[2] == p]
 
-                def store(written=written):
+                def store(written=written, cached=cached, p=p):
                     """Computes the nodes the member's outputs need and writes them."""
-                    wanted = needed([outputs[o][0] for o in written])
+                    wanted = needed([outputs[o][0] for o in written] + [updates[u][1] for u in cached])
+                    # A raw input (a cache update's cache or row) is no value of the block.
                     values = products + [
-                        read[i] if i in read else blocks[blocked.index(i)][...] for i in range(len(inputs))
+                        read[i] if i in read else blocks[blocked.index(i)][...] if i in blocked else None
+                        for i in range(len(inputs))
                     ]
                     first = len(values)
                     values += [None] * len(nodes)
@@ -216,6 +297,8 @@ def program(spec):
                         )[-1]
                     for o in written:
                         obs[o][...] = values[outputs[o][0]].to(outputs[o][2])
+                    for u in cached:
+                        writes(u, p, values[updates[u][1]])
 
                 if len(members) == 1:
                     store()

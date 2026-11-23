@@ -22,7 +22,8 @@ impl LayoutCodegen for Tpu {
     }
 
     /// The program reshaping `from` into `to` by splitting its last dim `a * w` into `[a, w]` or merging it
-    /// back; other reshapes would move elements between tiles and are rejected.
+    /// back: the flat side `[lead, m, a * w]` and the tiled side `[lead * m, a, w]` (each side's leading dims
+    /// merged, so size-1 dims may come and go); other reshapes would move elements between tiles and are rejected.
     fn reshape(from: &TensorType, to: &TensorType) -> Result<(String, String), String> {
         let (f, t) = (&from.shape, &to.shape);
 
@@ -32,26 +33,27 @@ impl LayoutCodegen for Tpu {
             ))
         };
 
-        let split = t.len() == f.len() + 1;
+        // `(lead, m, a, w)` when `flat` is `[lead.., m, a * w]` and `tiled` is `[lead * m.., a, w]`.
+        let forms = |flat: &[usize], tiled: &[usize]| {
+            let (r, s) = (flat.len(), tiled.len());
 
-        let (flat, tiled) = match split {
-            true => (f, t),
-            false => (t, f),
+            if r < 2 || s < 2 {
+                return None;
+            }
+
+            let (a, w) = (tiled[s - 2], tiled[s - 1]);
+            let (m, lead) = (flat[r - 2], flat[..r - 2].iter().product::<usize>());
+            let rows = tiled[..s - 2].iter().product::<usize>();
+            (flat[r - 1] == a * w && rows == lead * m).then_some((lead, m, a, w))
         };
 
-        if tiled.len() != flat.len() + 1 || tiled.len() < 3 {
-            return failed();
-        }
+        // Splitting `from`'s last dim, else merging into `to`'s (with `a` 1, rows moving into slabs of their own).
+        let (split, (lead, m, a, w)) = match (forms(f, t), forms(t, f)) {
+            (Some(x), _) => (true, x),
+            (_, Some(x)) => (false, x),
+            _ => return failed(),
+        };
 
-        let r = flat.len();
-        let (a, w) = (tiled[r - 1], tiled[r]);
-
-        if flat[..r - 1] != tiled[..r - 1] || flat[r - 1] != a * w {
-            return failed();
-        }
-
-        let m = flat[r - 2];
-        let lead: usize = flat[..r - 2].iter().product();
         let rows = Layout::new(from.dtype, &[1, 1])?.rows;
 
         let bm = block(m, rows, 256)
@@ -94,11 +96,25 @@ pub(crate) fn concatenate(step: &StepBase) -> Result<Kernel, String> {
         unreachable!("a concatenate fusion")
     };
 
-    let Some(&Primitive::Concatenate { dimension, .. }) =
-        body.nodes().first().map(|n| &n.primitive)
+    let Some(node) = body
+        .nodes()
+        .iter()
+        .find(|n| matches!(n.primitive, Primitive::Concatenate { .. }))
     else {
         unreachable!("a concatenate fusion of one concatenation")
     };
+
+    let Primitive::Concatenate { dimension, .. } = node.primitive else {
+        unreachable!("a concatenation")
+    };
+
+    // Each operand's step input (a value concatenated twice is one input).
+    let operands: Vec<usize> = node
+        .inputs
+        .iter()
+        .map(|&v| body.inputs().iter().position(|&u| u == v))
+        .collect::<Option<_>>()
+        .ok_or("a concatenation on TPU of other than its fusion's inputs")?;
 
     let out = &step.output.1;
     let rank = out.shape.len();
@@ -110,10 +126,9 @@ pub(crate) fn concatenate(step: &StepBase) -> Result<Kernel, String> {
     }
 
     let layout = Layout::new(out.dtype, &out.shape)?;
-    let sizes: Vec<usize> = step
-        .inputs
+    let sizes: Vec<usize> = operands
         .iter()
-        .map(|(_, t)| t.shape[dimension])
+        .map(|&k| step.inputs[k].1.shape[dimension])
         .collect();
     let (_, m, n) = layout.padded();
     let bytes = layout.stored.size_of();
@@ -150,14 +165,75 @@ pub(crate) fn concatenate(step: &StepBase) -> Result<Kernel, String> {
     };
 
     let spec = format!(
-        "\"kind\": \"{kind}\", \"shape\": {:?}, \"dimension\": {dimension}, \"sizes\": {sizes:?}, \"block\": {block}, \"dtype\": \"{}\"",
+        "\"kind\": \"{kind}\", \"shape\": {:?}, \"dimension\": {dimension}, \"sizes\": {sizes:?}, \"operands\": {operands:?}, \"inputs\": {}, \"block\": {block}, \"dtype\": \"{}\"",
         out.shape,
+        step.inputs.len(),
         out.dtype.full_name()
     );
 
     let mut kernel = Kernel::new(
         "lumen.codegen.layout.tpu.concatenate",
         format!("concatenate_{kind}_{}x{}", sizes.len(), out.dtype),
+        spec,
+        Rows::Step,
+    );
+
+    kernel.context = Some(step.label.to_string());
+    Ok(kernel)
+}
+
+/// Most bytes of the tile-aligned window one step of the slice kernel stages.
+const SLICE_BYTES: usize = 8 << 20;
+
+/// The kernel of the lone slice `step` of a TPU-tiled tensor whose rows or columns start inside a tile (no elementwise
+/// plan reads it in whole tiles): per slab of the result, a DMA of the tile-aligned window of rows and columns the
+/// slice lies in, the slice's rows and columns then cut from it in registers.
+pub(crate) fn slice(step: &StepBase) -> Result<Kernel, String> {
+    let Primitive::Slice { start_indices, .. } = &step.primitive else {
+        unreachable!("a slice")
+    };
+
+    let (x, out) = (&step.inputs[0].1, &step.output.1);
+    let rank = out.shape.len();
+
+    if rank < 2 {
+        return Err(format!(
+            "a slice of {x} to fewer than 2 dimensions does not run on TPU yet"
+        ));
+    }
+
+    let rows = Layout::new(x.dtype, &x.shape)?.rows;
+
+    // The window `[first, first + size)` of whole `unit`s holding `[start, start + n)` (reaching past the axis's
+    // end into its last tile's padding, as the kernel's blocks pad it).
+    let window = |start: usize, n: usize, unit: usize| {
+        let first = start / unit * unit;
+        (first, (start + n).div_ceil(unit) * unit - first)
+    };
+
+    let (r, c) = (start_indices[rank - 2], start_indices[rank - 1]);
+    let (m, n) = (out.shape[rank - 2], out.shape[rank - 1]);
+    let (r0, rw) = window(r, m, rows);
+    let (c0, cw) = window(c, n, 128);
+    let padded = rw.div_ceil(rows) * rows * cw.div_ceil(128) * 128 * x.dtype.size_of();
+
+    if padded > SLICE_BYTES {
+        return Err(format!(
+            "a slice of {x} to {out} with a window wider than {SLICE_BYTES} bytes does not run on TPU yet"
+        ));
+    }
+
+    let spec = format!(
+        "\"shape\": {:?}, \"out\": {:?}, \"starts\": {:?}, \"window\": [{r0}, {rw}, {c0}, {cw}], \"dtype\": \"{}\"",
+        x.shape,
+        out.shape,
+        start_indices,
+        x.dtype.full_name()
+    );
+
+    let mut kernel = Kernel::new(
+        "lumen.codegen.layout.tpu.slice",
+        format!("slice_{}_{rw}x{cw}", x.dtype),
         spec,
         Rows::Step,
     );

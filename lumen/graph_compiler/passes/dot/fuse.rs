@@ -13,7 +13,8 @@
 //!   read only by dots as their lhs, not a graph output, and not an in-place concatenation (checked with
 //!   `place_concats::in_place_concats` and `codegen::fusion::tpu::slot_writes`). The fusion reads the concat's parts.
 //! - Elementwise epilogues, only with `contraction_epilogues`: later elementwise readers of the dot (or of a
-//!   slice, or of an earlier epilogue), claimed greedily in node order. Each must have its part's shape; its
+//!   slice, or of an earlier epilogue), and pair swaps within a block of `LANES` lanes, claimed greedily in node
+//!   order. Each must have its part's shape; its
 //!   other operands must be constants (rebuilt in the body), scalar broadcasts, or scalar or same-shape
 //!   values computed before the dot. Epilogues may combine several slices only when those are at most 4
 //!   equal-width slices along the last axis; otherwise a non-scalar extra operand serves one slice only.
@@ -158,6 +159,86 @@ struct Fused {
     outputs: Vec<Var>,
 }
 
+/// A part's value written into a cache by `dynamic_update_slice` node `u`, which its GEMM's epilogue writes.
+struct Update {
+    /// The part's value the cache takes.
+    value: Var,
+    /// The reshape, transpose and update nodes.
+    nodes: [usize; 3],
+    /// The constant zero starts' nodes.
+    constants: Vec<usize>,
+}
+
+/// The update node `u` makes, when it writes a part's value into a cache as the TPU GEMM's epilogue can: a value of
+/// shape `[b, s, h * w]` the fusion computes (`member`), reshaped to `[b, s, h, w]` and transposed to `[b, h, s, w]`
+/// (each read only there), written into a `[b, h, rows, w]` operand computed before the dot (`before`) from `[0, 0,
+/// pos, 0]`, `pos` a scalar computed before the dot too; `w` dividing `LANES`.
+fn update<D: FusesDots>(
+    graph: &Graph,
+    producer: &[Option<usize>],
+    users: &[Vec<usize>],
+    member: &HashMap<Var, usize>,
+    before: &impl Fn(Var) -> bool,
+    u: usize,
+) -> Option<Update> {
+    let nodes = graph.nodes();
+    let node = &nodes[u];
+
+    if !matches!(node.primitive, Primitive::DynamicUpdateSlice) || node.inputs.len() != 6 {
+        return None;
+    }
+
+    let made = |v: Var| producer[v].map(|k| (k, &nodes[k]));
+    let (t, transpose) = made(node.inputs[1])?;
+    let (r, reshape) = made(transpose.inputs[0])?;
+    let value = reshape.inputs[0];
+
+    let transposed = matches!(&transpose.primitive, Primitive::Transpose { permutation } if *permutation == [0, 2, 1, 3]);
+
+    let heads = &graph.type_of(reshape.output).shape;
+    let flat = &graph.type_of(value).shape;
+
+    let split = matches!(reshape.primitive, Primitive::Reshape { .. })
+        && heads.len() == 4
+        && flat.len() == 3
+        && flat[..2] == heads[..2]
+        && flat[2] == heads[2] * heads[3]
+        && D::LANES.is_multiple_of(heads[3]);
+
+    let alone = users[reshape.output] == [t] && users[transpose.output] == [u];
+    let (cache, pos) = (node.inputs[0], node.inputs[4]);
+
+    // The starts but the rows' are constant zeros, rebuilt in the body.
+    let mut constants = Vec::new();
+
+    for &v in [node.inputs[2], node.inputs[3], node.inputs[5]].iter() {
+        let (k, n) = made(v)?;
+
+        match n.primitive {
+            Primitive::Full {
+                fill_value: crate::Scalar::Int(0),
+                ..
+            } => constants.push(k),
+            _ => return None,
+        }
+    }
+
+    let fits = member.contains_key(&value)
+        && transposed
+        && split
+        && alone
+        && !member.contains_key(&cache)
+        && before(cache)
+        && before(pos)
+        && graph.type_of(pos).shape.is_empty();
+
+    fits.then_some(Update {
+        value,
+        nodes: [r, t, u],
+        constants,
+    })
+}
+
 /// Plans a fusion for every dot worth fusing, indexed by the dot's node.
 fn fused<D: FusesDots>(graph: &Graph, epilogues: bool) -> Vec<Option<Fused>> {
     let nodes = graph.nodes();
@@ -214,9 +295,12 @@ fn fused<D: FusesDots>(graph: &Graph, epilogues: bool) -> Vec<Option<Fused>> {
         let (mut inside, mut extras, mut absorbed) = (Vec::new(), Vec::new(), Vec::new());
         let mut read_by: HashMap<Var, usize> = HashMap::new();
 
+        // A pair swap whose partners share a block of lanes (twice its distance dividing them) runs in the epilogue too.
+        let swaps = |p: &Primitive| matches!(p, Primitive::SwapPairs { distance } if D::LANES.is_multiple_of(2 * distance));
+
         // Claim later elementwise readers of fusion values as epilogues, greedily in node order.
         for (u, un) in nodes.iter().enumerate().skip(d + 1) {
-            if !epilogues || claimed[u] || !elementwise(&un.primitive) {
+            if !epilogues || claimed[u] || !(elementwise(&un.primitive) || swaps(&un.primitive)) {
                 continue;
             }
 
@@ -316,6 +400,34 @@ fn fused<D: FusesDots>(graph: &Graph, epilogues: bool) -> Vec<Option<Fused>> {
             }
 
             for v in operands {
+                if !extras.contains(&v) {
+                    extras.push(v);
+                }
+            }
+        }
+
+        // A part's heads written into a cache: its value split into heads, put heads first and written at a row.
+        for (u, un) in nodes.iter().enumerate().skip(d + 1) {
+            let Some(chain) = update::<D>(graph, &producer, &users, &member, &before, u) else {
+                continue;
+            };
+
+            if !epilogues || chain.nodes.iter().any(|&k| claimed[k]) {
+                continue;
+            }
+
+            let p = member[&chain.value];
+
+            for &k in &chain.nodes {
+                claimed[k] = true;
+                absorbed.push(k);
+                inside.push(k);
+            }
+
+            inside.extend(chain.constants);
+            member.insert(un.output, p);
+
+            for v in [nodes[u].inputs[0], nodes[u].inputs[4]] {
                 if !extras.contains(&v) {
                     extras.push(v);
                 }

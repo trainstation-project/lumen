@@ -15,7 +15,7 @@ fn device_of(options: &TensorOptions) -> Device {
 }
 
 /// Bytes a `dtype` tensor of `shape` takes on `device`, including TPU tile padding.
-fn device_bytes(device: Device, dtype: DType, shape: &[usize]) -> usize {
+pub(crate) fn device_bytes(device: Device, dtype: DType, shape: &[usize]) -> usize {
     match device {
         Device::Tpu(_) => {
             crate::device::tpu::layout::bytes(dtype, shape).unwrap_or_else(|e| panic!("{e}"))
@@ -860,6 +860,16 @@ impl Tensor {
                 crate::runtime::kernel::mps::copy(self, src)?;
             }
 
+            return Ok(self);
+        }
+
+        #[cfg(lumen_tpu_linked)]
+        if let (Device::Tpu(a), Device::Tpu(b)) = (self.device(), src.device())
+            && a == b
+            && self.is_contiguous()
+            && src.is_contiguous()
+        {
+            crate::runtime::device_transfer::copy_tpu(self, src);
             return Ok(self);
         }
 

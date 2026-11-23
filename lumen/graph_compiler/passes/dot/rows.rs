@@ -18,7 +18,8 @@
 //!
 //! Slot after `fused_diamonds` (which makes the `row` fusions). Enabled with `normalization_diamonds`, and
 //! it only rewrites when `contraction_epilogues` is also on. It calls `dot_rows` with a rule that accepts
-//! inputs the TPU row kernel reads as `Kind::Full` rows, `fits` always true and `through` off.
+//! inputs the TPU row kernel reads as `Kind::Full` rows, `fits` always true and `through` on (a residual add between a
+//! projection and the next norm joins them, its sum an extra output).
 //!
 //! ## Triton: `WideRows`
 //!
@@ -66,6 +67,110 @@ fn plain(graph: &Graph, dot: &Node) -> bool {
         && *lhs_contracting == [lhs.shape.len() - 1]
         && rhs.shape.len() == 2
         && rhs_contracting.len() == 1
+}
+
+/// `graph` with each plain dot read only by a reshape that prepends size-1 dims to its result made in that shape
+/// itself, its lhs given the same size-1 dims (which move no data; a reshaped lhs reshaped once, from its operand): a
+/// projection's `[1, n]` reshaped to `[1, 1, n]` before its residual add becomes a dot of `[1, 1, n]`, which `dot_rows`
+/// then joins through the add.
+pub(crate) fn unit_results(graph: &Graph) -> Graph {
+    let nodes = graph.nodes();
+    let mut readers: Vec<Vec<usize>> = vec![Vec::new(); graph.types.len()];
+
+    for (i, node) in nodes.iter().enumerate() {
+        node.inputs.iter().for_each(|&v| readers[v].push(i));
+    }
+
+    // The size-1 dims to prepend to each dot's result, by its node.
+    let prepended = |d: &Node| -> Option<usize> {
+        let [r] = readers[d.output][..] else {
+            return None;
+        };
+
+        let to = &graph.type_of(nodes[r].output).shape;
+        let from = &graph.type_of(d.output).shape;
+        let extra = to.len().checked_sub(from.len()).filter(|&e| e > 0)?;
+
+        (matches!(nodes[r].primitive, Primitive::Reshape { .. })
+            && plain(graph, d)
+            && !graph.outputs().contains(&d.output)
+            && to[..extra].iter().all(|&s| s == 1)
+            && to[extra..] == from[..])
+            .then_some(extra)
+    };
+
+    if !nodes.iter().any(|n| prepended(n).is_some()) {
+        return graph.clone();
+    }
+
+    let mut out = Graph::new();
+    let mut map: Vec<Var> = vec![usize::MAX; graph.types.len()];
+
+    for &v in graph.inputs() {
+        map[v] = out.input(graph.type_of(v).clone());
+    }
+
+    let made = |v: Var| nodes.iter().find(|n| n.output == v);
+
+    for node in nodes {
+        out.set_origin(node);
+        let inputs: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
+
+        // The reshape of such a dot's result is that result now.
+        if matches!(node.primitive, Primitive::Reshape { .. })
+            && made(node.inputs[0]).is_some_and(|d| prepended(d).is_some())
+        {
+            map[node.output] = inputs[0];
+            continue;
+        }
+
+        let (primitive, inputs) = match (prepended(node), &node.primitive) {
+            (
+                Some(extra),
+                Primitive::DotGeneral {
+                    lhs_contracting,
+                    rhs_contracting,
+                    lhs_batch,
+                    rhs_batch,
+                    accum_dtype,
+                    output_dtype,
+                },
+            ) => {
+                let lhs = &graph.type_of(node.inputs[0]).shape;
+                let mut shape = vec![1; extra];
+                shape.extend(lhs);
+
+                // A reshaped lhs is reshaped once, from its operand.
+                let from = match made(node.inputs[0]) {
+                    Some(r) if matches!(r.primitive, Primitive::Reshape { .. }) => map[r.inputs[0]],
+                    _ => inputs[0],
+                };
+
+                let reshaped = out
+                    .apply(Primitive::Reshape { new_sizes: shape }, &[from])
+                    .expect("the lhs with size-1 dims");
+
+                let dot = Primitive::DotGeneral {
+                    lhs_contracting: lhs_contracting.iter().map(|&d| d + extra).collect(),
+                    rhs_contracting: rhs_contracting.clone(),
+                    lhs_batch: lhs_batch.clone(),
+                    rhs_batch: rhs_batch.clone(),
+                    accum_dtype: *accum_dtype,
+                    output_dtype: *output_dtype,
+                };
+
+                (dot, vec![reshaped, inputs[1]])
+            }
+            (_, p) => (p.clone(), inputs),
+        };
+
+        map[node.output] = out.apply(primitive, &inputs).expect("a node of the graph");
+        out.set_label(map[node.output], node.label);
+    }
+
+    let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
+    out.set_outputs(&outputs).expect("values of the graph");
+    out
 }
 
 /// A matched matmul and row: the dot's node, the elementwise node between them if any, and the row's
@@ -354,7 +459,7 @@ impl<D: FullRows> CompilerPass<DeviceModule<'_, D>> for DotRows {
     /// Fuses the module's dots into the row fusions reading their whole rows.
     fn apply(&mut self, m: &mut DeviceModule<'_, D>) -> Result<(), String> {
         if m.options.config.contraction_epilogues {
-            m.graph = dot_rows(&m.graph, D::full, |_| true, false);
+            m.graph = dot_rows(&unit_results(&m.graph), D::full, |_| true, true);
         }
 
         Ok(())

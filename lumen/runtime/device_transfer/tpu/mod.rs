@@ -43,6 +43,31 @@ pub(super) fn copy_h2d(dst: &Tensor, src: &Tensor) {
         .unwrap_or_else(|e| panic!("copying {nbytes} bytes to tpu:{index} failed: {e}"));
 }
 
+/// Launches a DMA kernel copying TPU tensor `src`'s tiles into TPU tensor `dst` on the same device: batched with the
+/// device's other launches, so nothing waits for it.
+pub(super) fn copy_d2d(dst: &Tensor, src: &Tensor) {
+    let Device::Tpu(index) = dst.device() else {
+        unreachable!("the TPU copy kernel runs on TPU tensors")
+    };
+
+    let rows = layout(dst).bytes().div_ceil(ROW);
+
+    let launched = TpuLaunch {
+        device: index,
+        module: "lumen.runtime.device_transfer.tpu",
+        kernel: "copy_d2d",
+        spec: format!("\"device_rows\": {rows}"),
+        rows: &[src.data_ptr().cast_const(), dst.data_ptr().cast_const()],
+        scalars: &[],
+        host: &[],
+        sparse: None,
+        lowered: None,
+    };
+
+    Tpu::launch(launched)
+        .unwrap_or_else(|e| panic!("copying {rows} rows on tpu:{index} failed: {e}"));
+}
+
 /// Runs `src`'s device's pending launches, reads its tiles back and untiles them into host tensor `dst`.
 pub(super) fn copy_d2h(dst: &Tensor, src: &Tensor) {
     let Device::Tpu(index) = src.device() else {

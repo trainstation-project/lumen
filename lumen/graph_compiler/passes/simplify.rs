@@ -90,7 +90,13 @@ fn rewrite(
                 return Some(Rewrite::Value(inputs[0]));
             }
 
+            // Two reshapes compose into one, or none when it gives back the inner one's operand.
             match node(inputs[0]) {
+                Some(Node {
+                    primitive: Reshape { .. },
+                    inputs: x,
+                    ..
+                }) if out.type_of(x[0]).shape == *new_sizes => Some(Rewrite::Value(x[0])),
                 Some(Node {
                     primitive: Reshape { .. },
                     inputs: x,

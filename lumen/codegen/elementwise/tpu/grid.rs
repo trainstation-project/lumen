@@ -235,8 +235,13 @@ pub(crate) fn plan(body: &Graph, window: usize) -> Result<Plan, String> {
         .collect::<Option<_>>()
         .ok_or("an operand no member reads")?;
 
+    // A pair swap reads within each block's last axis, which must hold every partner.
+    let swaps = crate::codegen::devices::tpu::swap_block(body);
+
     let fits = |blocks: &[usize]| {
-        reads.iter().all(|(t, m)| readable(t, m, blocks)) && window.is_multiple_of(blocks[rank - 1])
+        reads.iter().all(|(t, m)| readable(t, m, blocks))
+            && window.is_multiple_of(blocks[rank - 1])
+            && blocks[rank - 1].is_multiple_of(swaps)
     };
 
     let blocks = match rank {
@@ -256,16 +261,57 @@ pub(crate) fn plan(body: &Graph, window: usize) -> Result<Plan, String> {
                     .filter(|b| *b > 512),
             );
 
-            // Prefer the widest column block, then the tallest row block that fits.
-            'search: for bn in candidates(n, LANES, 2048) {
-                for &bm in &rows {
-                    let mut blocks = vec![1; rank];
-                    blocks[rank - 2] = bm;
-                    blocks[rank - 1] = bn;
+            // The whole rows as one block, when nothing smaller divides them in whole tiles.
+            if !rows.contains(&m) {
+                rows.push(m);
+            }
 
-                    if bm * bn <= BLOCK_ELEMENTS && fits(&blocks) {
-                        found = Some(blocks);
-                        break 'search;
+            // Leading blocks of 1; else (a transpose moving an operand's rows or lanes to a leading dim) each leading
+            // dim some operand tiles taken whole.
+            let tiled: Vec<usize> = (0..rank - 2)
+                .filter(|&d| {
+                    reads.iter().any(|(t, m)| {
+                        let r = t.shape.len();
+                        r >= 2 && m[r.saturating_sub(2)..].contains(&Dim::Out { d, offset: 0 })
+                    })
+                })
+                .collect();
+
+            let mut leads = vec![vec![1; rank - 2]];
+
+            // Each such dim whole, or (largest first) in whole tiles of rows.
+            for &d in &tiled {
+                let sizes = candidates(out.shape[d], 8, out.shape[d]);
+
+                leads = leads
+                    .iter()
+                    .flat_map(|l| {
+                        sizes.iter().map(move |&b| {
+                            let mut l = l.clone();
+                            l[d] = b;
+                            l
+                        })
+                    })
+                    .collect();
+            }
+
+            if !tiled.is_empty() {
+                leads.insert(0, vec![1; rank - 2]);
+            }
+
+            // Prefer the widest column block, then the tallest row block that fits.
+            'search: for lead in &leads {
+                let size: usize = lead.iter().product();
+
+                for bn in candidates(n, LANES, 2048) {
+                    for &bm in &rows {
+                        let mut blocks = lead.clone();
+                        blocks.extend([bm, bn]);
+
+                        if size * bm * bn <= BLOCK_ELEMENTS && fits(&blocks) {
+                            found = Some(blocks);
+                            break 'search;
+                        }
                     }
                 }
             }

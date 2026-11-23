@@ -49,7 +49,7 @@ impl Kind {
 }
 
 /// Whether `node` can join a TPU row fusion: 32-bit-or-narrower dtypes and an elementwise, reshape,
-/// broadcast or reduction primitive.
+/// broadcast or reduction primitive, or an iota along the rows' last axis (an argmax's column index).
 pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
     use Primitive::*;
 
@@ -59,11 +59,14 @@ pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
         .chain([&node.output])
         .all(|&v| graph.type_of(v).dtype.bits() <= 32);
 
+    let lanes = |dimension: usize| dimension + 1 == graph.type_of(node.output).shape.len();
+
     let row_op = crate::codegen::devices::tpu::fusible(&node.primitive)
         || matches!(
             node.primitive,
             Reshape { .. } | BroadcastInDim { .. } | ReduceSum { .. } | ReduceMax { .. }
-        );
+        )
+        || matches!(node.primitive, Iota { dimension, .. } if lanes(dimension));
 
     narrow && row_op
 }
@@ -142,6 +145,14 @@ pub(crate) fn kinds(body: &Graph) -> Option<Vec<Kind>> {
         }
     }
 
+    // Elements of a value of each kind.
+    let sized = |k: Kind| match k {
+        Kind::Full => rows * n,
+        Kind::PerRow => rows,
+        Kind::Lanes => n,
+        Kind::Scalar => 1,
+    };
+
     // Forward pass: settle each node output's kind from its operands.
     for node in nodes {
         let out = body.type_of(node.output);
@@ -155,7 +166,22 @@ pub(crate) fn kinds(body: &Graph) -> Option<Vec<Kind>> {
                 Some(k) => k,
             },
             Primitive::Reshape { .. } => kind[node.inputs[0]].or(by_size(out))?,
-            _ => kind[node.output].or(by_size(out))?,
+            // The widest operand kind of the output's size: one row's per-row value is no scalar.
+            _ => {
+                let from = node
+                    .inputs
+                    .iter()
+                    .filter_map(|&v| kind[v])
+                    .filter(|&k| sized(k) == out.numel())
+                    .max_by_key(|&k| match k {
+                        Kind::Full => 3,
+                        Kind::PerRow => 2,
+                        Kind::Lanes => 1,
+                        Kind::Scalar => 0,
+                    });
+
+                kind[node.output].or(from).or(by_size(out))?
+            }
         };
 
         kind[node.output] = Some(k);
@@ -167,12 +193,7 @@ pub(crate) fn kinds(body: &Graph) -> Option<Vec<Kind>> {
         }
     }
 
-    let size = |k: Kind| match k {
-        Kind::Full => rows * n,
-        Kind::PerRow => rows,
-        Kind::Lanes => n,
-        Kind::Scalar => 1,
-    };
+    let size = sized;
 
     // Every used value's size must match its kind; unused slots default to scalar.
     let mut known = Vec::with_capacity(kind.len());
@@ -228,7 +249,8 @@ pub(crate) fn readable(t: &TensorType, kind: Kind) -> bool {
 
     match kind {
         Kind::Full => rank >= 2 && stacked,
-        Kind::PerRow => rank >= 2 && t.shape[rank - 1] == 1 && stacked,
+        // One element sits at its buffer's start in any layout: a one-row value of any rank.
+        Kind::PerRow => (rank >= 2 && t.shape[rank - 1] == 1 && stacked) || t.numel() == 1,
         Kind::Lanes => rank == 1,
         Kind::Scalar => rank == 0,
     }
@@ -274,6 +296,7 @@ pub(crate) fn row_node(node: &Node, args: &[usize], kind: Kind) -> String {
         Primitive::ReduceMax { .. }
         | Primitive::Reshape { .. }
         | Primitive::BroadcastInDim { .. } => named(String::new()),
+        Primitive::Iota { dtype, .. } => named(format!("\"dtype\": \"{}\"", dtype.full_name())),
         // Splice the kind into the plain node's closing brace.
         p => {
             let plain = crate::codegen::devices::tpu::node(p, args);
@@ -363,7 +386,8 @@ impl RowCodegen for Tpu {
 }
 
 /// Picks how many of `rows` rows of `n` elements a step holds: a multiple of `unit` dividing `rows` within the
-/// ROW_BYTES budget (counted at 4 bytes an element), or all rows when there are fewer than `unit`.
+/// ROW_BYTES budget (counted at 4 bytes an element), or all rows when there are fewer than `unit` or no such multiple
+/// divides them and they fit twice the budget.
 #[cfg(lumen_tpu_linked)]
 pub(crate) fn block_rows(rows: usize, n: usize, unit: usize) -> Result<usize, String> {
     if rows < unit {
@@ -371,7 +395,10 @@ pub(crate) fn block_rows(rows: usize, n: usize, unit: usize) -> Result<usize, St
     }
 
     let cap = (ROW_BYTES / (n * 4)).max(unit);
-    block(rows, unit, cap).ok_or_else(|| "its rows have no block of whole tiles".into())
+
+    block(rows, unit, cap)
+        .or_else(|| (rows * n * 4 <= 2 * ROW_BYTES).then_some(rows))
+        .ok_or_else(|| "its rows have no block of whole tiles".into())
 }
 
 /// The kernel of the row fusion `step`.

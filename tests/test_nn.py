@@ -103,9 +103,10 @@ class ScaledNorm(lumen.nn.Module):
 
 @pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA, TPU], indirect=True)
 def test_float_fields_are_runtime_scalars(device):
-    """A module's float field is a runtime scalar: another value runs the same
-    plan (no trace, no kernel compiled), read by the kernel, not baked in; an
-    RMS norm with it is still one kernel on MPS."""
+    """A module's float field is baked in until a call passes another value:
+    it is then a runtime scalar, so later values run the same plan (no
+    trace, no kernel compiled), read by the kernel; an RMS norm with it is
+    still one kernel on MPS."""
     x, w = rand(8, 300) * 0.3, rand(300, seed=1)
     traces = []
 
@@ -125,8 +126,11 @@ def test_float_fields_are_runtime_scalars(device):
         out = lumen.to_numpy(f(ScaledNorm(weight, eps), lumen.from_numpy(x)))
         expected = w * x / np.sqrt((x.astype(np.float64) ** 2).mean(-1, keepdims=True) + eps)
         np.testing.assert_allclose(out, expected, rtol=1e-5, atol=1e-6)
-    assert len(traces) == 1
-    graph = lumen.make_graph(forward)(ScaledNorm(weight, 0.5), lumen.from_numpy(x))
+    assert len(traces) == 2
+    from lumen.graph import tracer
+
+    args = (ScaledNorm(weight, 0.5), lumen.from_numpy(x))
+    graph = tracer._settled(forward, args, "cpu", {(0, ("eps",))}, set(), set(), portable=True, split=False)[0]
     plan = lumen.graph_compiler.Plan(graph, device, parameters=[2], scalars=[1])
     workspace = lumen.Tensor.empty([plan.workspace_bytes], "uint8", device)
     inputs = [lumen.from_numpy(x).to(device), None, lumen.from_numpy(w).to(device)]
@@ -282,7 +286,7 @@ def test_scalars_written_from_scalars_alone_run_on_the_host():
         return x * 1.0
 
     s = _Seen(lumen.empty([3], device="meta"), 0.0, 1)
-    runtime = tracer._runtime({(0, ("step",))})
+    runtime = tracer._runtime({(0, ("step",)), (0, ("seen",))})
     args = (s, lumen.empty([3], device="meta"))
     _, _, (_, read, _, (_, _, host)), _, _, _ = tracer._trace(step, args, "cpu", runtime, split=True)
     assert (read, host) == ([(0, ("seen",))], [(0, ("step",))])

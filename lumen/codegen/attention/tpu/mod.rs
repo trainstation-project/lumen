@@ -225,6 +225,17 @@ impl AttentionCodegen for Tpu {
     fn forward(body: &Graph, a: &Attention, _: &Strides) -> Result<Self::Code, String> {
         unsupported(a.dtype)?;
 
+        // One query a head: the decode kernel, every head's query a row of one block.
+        if a.sq == 1 {
+            return decode(body, a);
+        }
+
+        if a.offset.is_some() {
+            return Err(
+                "flash attention on TPU: a runtime causal offset with more than one query".into(),
+            );
+        }
+
         if let Some(d) = &a.dropout {
             Self::dropout(d, a.dtype, a.sq, a.sk)?;
         }
@@ -806,6 +817,7 @@ pub(crate) fn step_kernel(step: &StepBase) -> Result<Kernel, String> {
 
     let module = match kind {
         "forward" => "lumen.codegen.attention.tpu.forward_kernel",
+        "decode" => "lumen.codegen.attention.tpu.decode_kernel",
         _ => "lumen.codegen.attention.tpu.backward_kernel",
     };
 
@@ -817,7 +829,116 @@ pub(crate) fn step_kernel(step: &StepBase) -> Result<Kernel, String> {
     ))
 }
 
-/// Flash-attention matching for TPU: scalar epilogue leaves, no extra scalars, static offsets.
+/// Block of keys the decode kernel takes at a time: the largest multiple of 128 up to 512 dividing `sk`, else `sk`.
+fn decode_block(sk: usize) -> usize {
+    (1..=4)
+        .rev()
+        .map(|i| i * LANES)
+        .find(|&b| b <= sk && sk.is_multiple_of(b))
+        .unwrap_or(sk)
+}
+
+/// The decode kernel's kind and spec for attention `a` of fusion `body`, one query a head (JAX's paged attention's
+/// form): its batch dims `[batch, heads]`, the query and output each batch index's `[heads, head dim]` matrix, the
+/// keys and values heads-major (`[batch, kv heads, keys, head dim]`, a query head reading kv head `head / group`), no
+/// epilogue or log-sum-exp; the causal diagonal plus a runtime offset (`offset`, an input's row) when it has one.
+fn decode(body: &Graph, a: &Attention) -> Result<(&'static str, String), String> {
+    let failed = |why: &str| Err(format!("attention decode on TPU: {why}"));
+
+    let &[b, n] = a.batch.as_slice() else {
+        return failed("batch dims other than [batch, heads]");
+    };
+
+    // Whether `acc` reads each batch index's `[heads, width]` matrix, the heads its rows.
+    let rows = |acc: &Access, width: usize| {
+        acc.offset == 0
+            && acc.col == 1
+            && acc.batch[1] == (width, 1)
+            && (b == 1 || acc.batch[0] == (n * width, 1))
+    };
+
+    // Whether `acc` reads the keys or values heads-major, returning their group (query heads a kv head).
+    let heads_major = |acc: &Access, width: usize| {
+        let (stride, group) = acc.batch[1];
+        let kv = n / group;
+
+        let fits = acc.offset == 0
+            && acc.col == 1
+            && acc.row == width
+            && stride == a.sk * width
+            && (b == 1 || acc.batch[0] == (kv * a.sk * width, 1));
+
+        fits.then_some(group)
+    };
+
+    // Its buffer's last two dims, whose tiles the kernel reads.
+    let matrix = |v: Var| {
+        body.type_of(v)
+            .shape
+            .iter()
+            .rev()
+            .take(2)
+            .rev()
+            .copied()
+            .collect::<Vec<_>>()
+    };
+
+    if !rows(&a.q, a.h) || matrix(a.q.base) != [n, a.h] {
+        return failed("a query other than each batch index's [heads, head dim] matrix");
+    }
+
+    let (Some(group), Some(v_group)) = (heads_major(&a.k, a.h), heads_major(&a.v, a.hv)) else {
+        return failed("keys or values other than heads-major [batch, kv heads, keys, head dim]");
+    };
+
+    if group != v_group || a.lse.is_some() || body.outputs().len() != 1 {
+        return failed("a log-sum-exp, extra outputs or keys and values of different groups");
+    }
+
+    let chain = path(body, a.out.base, 0)
+        .ok_or("attention decode on TPU: an output written through other than its layout")?;
+
+    if epilogue(&chain) {
+        return failed("an epilogue");
+    }
+
+    let (_, out) = written_at(body, &a.out, &a.batch, 0)?;
+
+    if !rows(&out, a.hv) || matrix(body.outputs()[0]) != [n, a.hv] {
+        return failed("an output other than each batch index's [heads, head dim] matrix");
+    }
+
+    let n_inputs = body.inputs().len();
+    let row = |acc: &Access| rows_of(body, acc, n_inputs);
+
+    let offset = match a.offset {
+        Some(v) => body
+            .inputs()
+            .iter()
+            .position(|&u| u == v)
+            .map_or("null".into(), |r| r.to_string()),
+        None => "null".into(),
+    };
+
+    let spec = format!(
+        "\"kind\": \"decode\", \"b\": {b}, \"n\": {n}, \"group\": {group}, \"sk\": {}, \"h\": {}, \"hv\": {},          \"bk\": {}, \"scores\": {}, \"causal\": {}, \"offset\": {offset}, \"q\": {}, \"k\": {}, \"v\": {}, \"o\": {n_inputs},          \"dtype\": \"{}\", \"o_dtype\": \"{}\"",
+        a.sk,
+        a.h,
+        a.hv,
+        decode_block(a.sk),
+        Tpu::score(&a.scores),
+        a.causal.map_or("null".into(), |c| c.to_string()),
+        row(&a.q),
+        row(&a.k),
+        row(&a.v),
+        a.dtype.full_name(),
+        a.out_dtype.full_name(),
+    );
+
+    Ok(("decode", spec))
+}
+
+/// Flash-attention matching for TPU: scalar epilogue leaves, no extra scalars, runtime offsets for decode.
 impl crate::graph_compiler::passes::attention::Attentions for DeviceModule<'_, Tpu> {
     const WITH_FUSE: bool = false;
 
@@ -845,9 +966,9 @@ impl crate::graph_compiler::passes::attention::Attentions for DeviceModule<'_, T
         "flash_attention".into()
     }
 
-    /// No: the TPU kernel's causal diagonal is fixed at compile time.
+    /// Yes: the decode kernel (one query a head) reads its causal offset at run time.
     fn runtime_offsets(&self) -> bool {
-        false
+        true
     }
 }
 

@@ -1412,8 +1412,8 @@ fn triton_gemv_rule_follows_mps() {
 }
 
 /// Each device's default pass list is the passes it implements (picked over the identity pass), in the one order:
-/// every device rejects what it has no kernel for; the CPU then only simplifies, CuTe merges dots and fuses attention,
-/// elementwise work and GEMM epilogues, Triton and TPU run their own versions.
+/// every device rejects what it has no kernel for; the CPU then only simplifies, CuTe merges dots, fuses attention and
+/// rotary pair swaps, elementwise work and GEMM epilogues, Triton and TPU run their own versions.
 #[test]
 fn devices_run_the_passes_they_implement() {
     use super::device::{Cpu, Cuda, Tpu, Triton};
@@ -1431,6 +1431,7 @@ fn devices_run_the_passes_they_implement() {
             "merge_dots",
             "flash_attention",
             "simplify",
+            "swap_pairs",
             "fusion",
             "alone"
         ]
@@ -1471,6 +1472,8 @@ fn devices_run_the_passes_they_implement() {
             "attention_layouts",
             "fold_dot_reshapes",
             "simplify",
+            "swap_pairs",
+            "sink_reshapes",
             "dot_strength",
             "merge_dots",
             "canonicalize_dots",

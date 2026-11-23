@@ -293,15 +293,19 @@ impl<S: Step + Clone> Plan for DevicePlan<S> {
             .zip(&self.inputs_at)
             .enumerate()
         {
-            // Arguments that sit on another device or share storage with a donated input are copied;
-            // unread or stridedly readable parameters are used as given.
+            // Arguments that sit on another device, share storage with a donated input or lie in the workspace where a
+            // step writes before the last reads them (an earlier call's result) are copied; unread or stridedly
+            // readable parameters are used as given.
             let donated =
                 |j: &usize| self.aliases.contains(&Some(*j)) && inputs[*j].shares_storage_with(t);
 
             match *at {
                 Buffer::Scalar(_) => params.push(t.to(Device::Cpu(0))),
                 _ if self.arguments[i]
-                    && (t.device() != device || (0..inputs.len()).any(|j| donated(&j))) =>
+                    && (t.device() != device
+                        || (0..inputs.len()).any(|j| donated(&j))
+                        || (t.shares_storage_with(workspace)
+                            && self.overwritten(i, within(workspace, t), device))) =>
                 {
                     params.push(copied(t, ty)?)
                 }
@@ -339,7 +343,46 @@ impl<S: Step + Clone> Plan for DevicePlan<S> {
     }
 }
 
+/// The byte range `[start, start + len)` of `workspace` tensor `t` (a view of it) spans on its device.
+fn within(workspace: &Tensor, t: &Tensor) -> (usize, usize) {
+    let start = t.storage_offset() * t.dtype().size_of() - workspace.storage_offset();
+    let len = crate::tensor::device_bytes(t.device(), t.dtype(), t.shape());
+    (start, len)
+}
+
 impl<S: Step + Clone> DevicePlan<S> {
+    /// Whether a step writes over workspace bytes `[start, start + len)` before the last step reading input `i` (which
+    /// reads an earlier call's result there): a step's output, further outputs or scratch on `device`.
+    fn overwritten(&self, i: usize, (start, len): (usize, usize), device: Device) -> bool {
+        let at = Buffer::Input(i);
+        let reads = |s: &S| s.inputs.iter().any(|&(b, _)| b == at);
+
+        let last = match self.outputs_at.contains(&at) {
+            true => self.steps.len(),
+            false => match self.steps.iter().rposition(reads) {
+                Some(k) => k,
+                None => return false,
+            },
+        };
+
+        let overlaps = |from: usize, bytes: usize| from < start + len && start < from + bytes;
+
+        let written = |(b, ty): &(Buffer, TensorType)| match *b {
+            Buffer::Workspace(from) => overlaps(
+                from,
+                crate::tensor::device_bytes(device, ty.dtype, &ty.shape),
+            ),
+            _ => false,
+        };
+
+        self.steps[..last].iter().any(|s| {
+            std::iter::once(&s.output)
+                .chain(&s.extra_outputs)
+                .any(written)
+                || s.scratch.is_some_and(|(from, bytes)| overlaps(from, bytes))
+        })
+    }
+
     /// Whether every step reading input `i` accepts it with `strides`, so it needn't be made
     /// contiguous first.
     fn reads_strided(&self, i: usize, strides: &[usize]) -> bool {

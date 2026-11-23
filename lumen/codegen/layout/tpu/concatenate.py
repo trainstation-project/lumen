@@ -9,7 +9,8 @@ from lumen.kernels import pallas as pl
 
 def program(spec):
     """The concatenation of ``spec``: operands ``sizes`` long along
-    ``dimension`` of the result ``shape``. ``kind`` ``dma`` copies each
+    ``dimension`` of the result ``shape``, each its step input
+    ``operands[k]`` (of ``inputs``; one value may be several operands). ``kind`` ``dma`` copies each
     operand into its slot (every slot starts on a tile); ``lanes`` (along the
     last axis) and ``rows`` (along the one before) build each ``block``-row
     or ``block``-column block of the result from its operands' blocks; an
@@ -17,6 +18,7 @@ def program(spec):
     result's."""
     shape, d, sizes, kind, block, dtype = (spec[k] for k in ("shape", "dimension", "sizes", "kind", "block", "dtype"))
     rank, count = len(shape), len(sizes)
+    operands_of, inputs = spec["operands"], spec["inputs"]
     starts = [sum(sizes[:k]) for k in range(count)]
     lead = math.prod(shape[:-2])
     m, n = shape[-2:]
@@ -34,10 +36,10 @@ def program(spec):
     def kernel(rows, memory, result):
         """Copies each operand into its slot of the result."""
         out_shape = slot(shape[d], 0)[0]
-        out = pallas.view(result, rows[count], out_shape, dtype)
+        out = pallas.view(result, rows[inputs], out_shape, dtype)
         # Each non-empty operand: its view, size and start.
         operands = [
-            (pallas.view(memory, rows[k], slot(size, 0)[0], dtype), size, start)
+            (pallas.view(memory, rows[operands_of[k]], slot(size, 0)[0], dtype), size, start)
             for k, (size, start) in enumerate(zip(sizes, starts))
             if size
         ]

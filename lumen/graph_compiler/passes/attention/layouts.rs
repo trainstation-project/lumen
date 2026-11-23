@@ -1,8 +1,9 @@
 //! Adapting attention fusions (both directions) to kernels that read and write whole tiles (TPU's): the
 //! `attention_layouts` pass, right after the attention passes. It merges the last two axes of outputs written with
 //! rows narrower than their last axis, folds reshape, sum and cast chains that read attention outputs into the
-//! fusion bodies, moves the backward's `delta` dot into the backward fusion (`delta_inside`), and checks the backend's
-//! attention kernels take every attention fusion.
+//! fusion bodies, moves the backward's `delta` dot into the backward fusion (`delta_inside`), gives a fusion the
+//! backend's kernels can't take its operands heads-major (`heads_major`), and checks the backend's attention kernels
+//! take every attention fusion.
 //!
 //! Devices: it runs, with `flash_attention`, on each device whose codegen implements `codegen::attention::TiledAttentions`
 //! (its attention-kernel check): TPU.
@@ -13,8 +14,13 @@ use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::{CompilerPass, attention};
 
-/// Indices of the attention fusion's outputs written with rows narrower than their last axis.
+/// Indices of the attention fusion's outputs written with rows narrower than their last axis (a forward attention of one
+/// query a head writes a matrix of its heads, its row stride no layout).
 fn unreadable(body: &Graph, forward: bool) -> Vec<usize> {
+    if forward && attention::of_body(body).is_some_and(|a| a.sq == 1) {
+        return Vec::new();
+    }
+
     let wide = |acc: &attention::Access| {
         let shape = &body.type_of(acc.base).shape;
         shape.len() >= 3 && acc.row != shape[shape.len() - 1]
@@ -205,9 +211,20 @@ fn reshaped_outputs(graph: &Graph) -> Graph {
             continue;
         }
 
-        // Forward fusions fold only their primary output.
+        // Forward fusions fold only their primary output; one of one query a head none (it writes its heads' matrix).
         let forward =
             matches!(&node.primitive, Primitive::Fusion { name, .. } if name == "flash_attention");
+
+        let single = match &node.primitive {
+            Primitive::Fusion { body, .. } => {
+                forward && attention::of_body(body).is_some_and(|a| a.sq == 1)
+            }
+            _ => false,
+        };
+
+        if single {
+            continue;
+        }
 
         let mut values = vec![(0, node.output)];
 
@@ -370,7 +387,7 @@ impl<D: TiledAttentions> CompilerPass<DeviceModule<'_, D>> for AttentionLayouts 
 
     /// Rewrites the graph's attention fusions for the backend's kernels and checks each.
     fn apply(&mut self, m: &mut DeviceModule<'_, D>) -> Result<(), String> {
-        m.graph = delta_inside(&reshaped_outputs(&merged_outputs(&m.graph)));
+        m.graph = heads_major::<D>(&delta_inside(&reshaped_outputs(&merged_outputs(&m.graph))));
         attentions::<D>(&m.graph)
     }
 }
@@ -518,5 +535,318 @@ fn delta_inside(graph: &Graph) -> Graph {
 
     let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
     out.set_outputs(&outputs).expect("values of the graph");
+    out
+}
+
+/// How operand `shape`, read through `acc` with `batch` extents, `seq` rows and `width` columns a head, is made
+/// heads-major: the shape its buffer factors into by the access's strides (largest first), and the permutation
+/// putting those factors in batch, row, column order; `None` when the strides don't factor the buffer (an offset, a
+/// gap, a repeat) or it already is heads-major.
+fn heads_layout(
+    shape: &[usize],
+    acc: &attention::Access,
+    batch: &[usize],
+    (seq, width): (usize, usize),
+) -> Option<(Vec<usize>, Vec<usize>)> {
+    if acc.offset != 0 || acc.batch.len() != batch.len() {
+        return None;
+    }
+
+    // Each factor's (stride, size, order in heads-major), dropping those of one element.
+    let mut factors: Vec<(usize, usize, usize)> = acc
+        .batch
+        .iter()
+        .zip(batch)
+        .enumerate()
+        .map(|(j, (&(stride, div), &n))| (stride, n / div, j))
+        .chain([
+            (acc.row, seq, batch.len()),
+            (acc.col, width, batch.len() + 1),
+        ])
+        .filter(|&(_, size, _)| size > 1)
+        .collect();
+
+    factors.sort_by_key(|f| std::cmp::Reverse(f.0));
+
+    // The factors must tile the buffer exactly, the last of stride 1.
+    let mut expected = 1;
+
+    for &(stride, size, _) in factors.iter().rev() {
+        if stride != expected {
+            return None;
+        }
+
+        expected *= size;
+    }
+
+    if expected != shape.iter().product::<usize>() {
+        return None;
+    }
+
+    let sizes: Vec<usize> = factors.iter().map(|f| f.1).collect();
+    let mut perm: Vec<usize> = (0..factors.len()).collect();
+    perm.sort_by_key(|&d| factors[d].2);
+
+    perm.iter()
+        .enumerate()
+        .any(|(d, &p)| d != p)
+        .then_some((sizes, perm))
+}
+
+/// An operand's factors (its buffer's shape by the access's strides) and the permutation making them heads-major.
+type Layout = (Vec<usize>, Vec<usize>);
+
+/// Gives each attention fusion the backend's kernels (`D::check`) can't take its q, k, v (and the backward's dO)
+/// heads-major: a reshape and transpose before the fusion write each such body input heads-major (`heads_layout`),
+/// and the body transposes and reshapes it back, so the kernel reads each head as one contiguous slab.
+fn heads_major<D: TiledAttentions>(graph: &Graph) -> Graph {
+    let nodes = graph.nodes();
+
+    // Per attention fusion node: its body inputs to lay out heads-major, each's factors and their permutation, and
+    // the body nodes of its first output's trailing layout chain to run after it instead.
+    let mut moved: Vec<Vec<(usize, Layout)>> = vec![Vec::new(); nodes.len()];
+    let mut trailing: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
+
+    for (i, node) in nodes.iter().enumerate() {
+        let Primitive::Fusion { name, body, .. } = &node.primitive else {
+            continue;
+        };
+
+        // Each operand's access, with the batch extents and its rows and columns a head.
+        let accesses = match name.as_str() {
+            "flash_attention" => attention::of_body(body).map(|a| {
+                let at = |acc, seq, width| (acc, a.batch.clone(), (seq, width));
+                vec![at(a.q, a.sq, a.h), at(a.k, a.sk, a.h), at(a.v, a.sk, a.hv)]
+            }),
+            "flash_attention_backward" => attention::backward_of_body(body).map(|b| {
+                let at = |acc, seq, width| (acc, b.batch.clone(), (seq, width));
+                vec![
+                    at(b.q, b.sq, b.h),
+                    at(b.k, b.sk, b.h),
+                    at(b.v, b.sk, b.hv),
+                    at(b.d_o, b.sq, b.hv),
+                ]
+            }),
+            _ => None,
+        };
+
+        let Some(accesses) = accesses.filter(|_| D::check(name, body).is_err()) else {
+            continue;
+        };
+
+        // One query a head writes its heads' matrix as laid out (`unreadable`): its chain stays.
+        if name == "flash_attention" && attention::of_body(body).is_some_and(|a| a.sq > 1) {
+            trailing[i] = layout_chain(body);
+        }
+
+        for (acc, batch, extents) in &accesses {
+            let Some(k) = body.inputs().iter().position(|&v| v == acc.base) else {
+                continue;
+            };
+
+            let shape = &body.type_of(acc.base).shape;
+            let layout = heads_layout(shape, acc, batch, *extents);
+
+            if let Some(layout) = layout.filter(|_| moved[i].iter().all(|(j, _)| *j != k)) {
+                moved[i].push((k, layout));
+            }
+        }
+    }
+
+    if moved.iter().all(Vec::is_empty) && trailing.iter().all(Vec::is_empty) {
+        return graph.clone();
+    }
+
+    let mut out = Graph::new();
+    let mut map: Vec<Var> = vec![0; graph.types.len()];
+
+    for &v in graph.inputs() {
+        map[v] = out.input(graph.type_of(v).clone());
+    }
+
+    // `FusionOutput` nodes read the fusion itself, not its first output's layout chain.
+    let mut own: Vec<Var> = vec![0; graph.types.len()];
+
+    for (i, node) in nodes.iter().enumerate() {
+        out.set_origin(node);
+
+        let mut inputs: Vec<Var> = node
+            .inputs
+            .iter()
+            .map(|&v| match node.primitive {
+                Primitive::FusionOutput { .. } => own[v],
+                _ => map[v],
+            })
+            .collect();
+
+        let primitive = match &node.primitive {
+            Primitive::Fusion { name, label, body }
+                if !moved[i].is_empty() || !trailing[i].is_empty() =>
+            {
+                for (k, (sizes, perm)) in &moved[i] {
+                    let factored = out
+                        .apply(
+                            Primitive::Reshape {
+                                new_sizes: sizes.clone(),
+                            },
+                            &[inputs[*k]],
+                        )
+                        .expect("the operand's factors");
+
+                    inputs[*k] = out
+                        .apply(
+                            Primitive::Transpose {
+                                permutation: perm.clone(),
+                            },
+                            &[factored],
+                        )
+                        .expect("the operand heads-major");
+                }
+
+                Primitive::Fusion {
+                    name: name.clone(),
+                    label,
+                    body: transposed_back(body, &moved[i], &trailing[i]),
+                }
+            }
+            p => p.clone(),
+        };
+
+        let v = out.apply(primitive, &inputs).expect("a node of the graph");
+        out.set_label(v, node.label);
+        (map[node.output], own[node.output]) = (v, v);
+
+        // The first output's layout chain, now after the fusion.
+        if let Primitive::Fusion { body, .. } = &node.primitive {
+            for &n in &trailing[i] {
+                map[node.output] = out
+                    .apply(body.nodes()[n].primitive.clone(), &[map[node.output]])
+                    .expect("the output's layout");
+            }
+        }
+    }
+
+    let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
+    out.set_outputs(&outputs).expect("values of the graph");
+    out
+}
+
+/// The body nodes of the transposes and reshapes ending in `body`'s first output, in order, when they hold a transpose
+/// and no other node or output reads their values: the attention written before them is heads-major.
+fn layout_chain(body: &Graph) -> Vec<usize> {
+    let nodes = body.nodes();
+    let mut chain = Vec::new();
+    let mut v = body.outputs()[0];
+
+    let read = |u: Var| nodes.iter().filter(|n| n.inputs.contains(&u)).count();
+
+    while let Some(n) = nodes.iter().position(|n| n.output == v) {
+        let layout = matches!(
+            nodes[n].primitive,
+            Primitive::Transpose { .. } | Primitive::Reshape { .. }
+        );
+
+        let alone = chain.is_empty() || (read(v) == 1 && !body.outputs().contains(&v));
+
+        if !layout || !alone {
+            break;
+        }
+
+        chain.push(n);
+        v = nodes[n].inputs[0];
+    }
+
+    chain.reverse();
+
+    match chain
+        .iter()
+        .any(|&n| matches!(nodes[n].primitive, Primitive::Transpose { .. }))
+    {
+        true => chain,
+        false => Vec::new(),
+    }
+}
+
+/// `body` with each input `k` of `moved` taken heads-major (its factors permuted) and turned back into its shape, and
+/// its first output the value before its `trailing` layout chain, which no longer runs in it.
+fn transposed_back(body: &Graph, moved: &[(usize, Layout)], trailing: &[usize]) -> Graph {
+    let mut out = Graph::new();
+    let mut map: Vec<Var> = vec![0; body.types.len()];
+
+    for (k, &v) in body.inputs().iter().enumerate() {
+        let ty = body.type_of(v);
+
+        map[v] = match moved.iter().find(|(j, _)| *j == k) {
+            Some((_, (sizes, perm))) => {
+                let shape: Vec<usize> = perm.iter().map(|&d| sizes[d]).collect();
+                out.input(crate::graph::TensorType::new(ty.dtype, &shape))
+            }
+            None => out.input(ty.clone()),
+        };
+    }
+
+    // Each moved input transposed back to its factors, after every input; a reshape reads the factors (a strided view
+    // the attention's accesses follow), any other node the factors reshaped to the input's shape.
+    let mut factors: Vec<Option<Var>> = vec![None; body.types.len()];
+
+    for (k, (_, perm)) in moved {
+        let v = body.inputs()[*k];
+        let mut inverse = vec![0; perm.len()];
+        perm.iter().enumerate().for_each(|(d, &p)| inverse[p] = d);
+
+        let factored = out
+            .apply(
+                Primitive::Transpose {
+                    permutation: inverse,
+                },
+                &[map[v]],
+            )
+            .expect("the operand's factors");
+
+        factors[v] = Some(factored);
+
+        let other = body
+            .nodes()
+            .iter()
+            .any(|n| n.inputs.contains(&v) && !matches!(n.primitive, Primitive::Reshape { .. }));
+
+        map[v] = match other || body.outputs().contains(&v) {
+            true => out
+                .apply(
+                    Primitive::Reshape {
+                        new_sizes: body.type_of(v).shape.clone(),
+                    },
+                    &[factored],
+                )
+                .expect("the operand as traced"),
+            false => factored,
+        };
+    }
+
+    for (n, node) in body.nodes().iter().enumerate() {
+        if trailing.contains(&n) {
+            continue;
+        }
+
+        let inputs: Vec<Var> = node
+            .inputs
+            .iter()
+            .map(|&v| match (&node.primitive, factors[v]) {
+                (Primitive::Reshape { .. }, Some(f)) => f,
+                _ => map[v],
+            })
+            .collect();
+        map[node.output] = out
+            .apply(node.primitive.clone(), &inputs)
+            .expect("a node of the body");
+    }
+
+    let mut outputs: Vec<Var> = body.outputs().iter().map(|&v| map[v]).collect();
+
+    if let Some(&first) = trailing.first() {
+        outputs[0] = map[body.nodes()[first].inputs[0]];
+    }
+
+    out.set_outputs(&outputs).expect("values of the body");
     out
 }

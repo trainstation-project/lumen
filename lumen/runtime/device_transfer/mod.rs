@@ -63,6 +63,15 @@ fn d2h_kernels(key: DispatchKey) -> Option<CopyKernel> {
     }
 }
 
+/// Copies contiguous TPU tensor `src` into contiguous TPU tensor `dst` of the same type on the same device, in device
+/// memory (batched with its other launches).
+#[cfg(lumen_tpu_linked)]
+pub fn copy_tpu(dst: &Tensor, src: &Tensor) {
+    if dst.numel() > 0 {
+        tpu::copy_d2d(dst, src);
+    }
+}
+
 /// Copies CPU tensor `src` into device tensor `dst` of the same dtype and size.
 pub fn copy_h2d(dst: &Tensor, src: &Tensor) {
     check(dst, src, src);

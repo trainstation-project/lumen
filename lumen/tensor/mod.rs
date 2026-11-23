@@ -14,4 +14,4 @@ pub mod tensor_options;
 mod tests;
 
 pub use tensor::Tensor;
-pub(crate) use tensor::{contiguous_strides, for_each_index};
+pub(crate) use tensor::{contiguous_strides, device_bytes, for_each_index};

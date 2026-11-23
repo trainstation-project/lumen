@@ -2,6 +2,7 @@
 //! runtime traces to Mosaic.
 
 pub(crate) mod grid;
+pub(crate) mod small;
 
 #[cfg(lumen_tpu_linked)]
 use std::collections::HashMap;
@@ -184,6 +185,7 @@ fn params(p: &Primitive) -> Vec<String> {
             format!("dtype=\"{}\"", dtype.full_name()),
         ],
         Primitive::Cast { new_dtype } => vec![format!("new_dtype=\"{}\"", new_dtype.full_name())],
+        Primitive::SwapPairs { distance } => vec![format!("distance={distance}")],
         Primitive::Unary(UnaryOp::ReducePrecision {
             exponent_bits,
             mantissa_bits,
@@ -884,8 +886,11 @@ impl ElementwiseCodegen for Tpu {
         // runs as that matrix: 2-d blocks fill every sublane of a vreg, which 1-d ones don't.
         let matrix;
 
+        // A pair swap reads within each block's last axis, which must hold every partner.
+        let swaps = crate::codegen::devices::tpu::swap_block(body);
+
         let out = match (out.shape.as_slice(), window) {
-            (&[n], None) if n.is_multiple_of(128 * tile_rows(&dtypes)?) => {
+            (&[n], None) if swaps == 1 && n.is_multiple_of(128 * tile_rows(&dtypes)?) => {
                 matrix = TensorType::new(out.dtype, &[n / 128, 128]);
                 &matrix
             }
@@ -901,6 +906,14 @@ impl ElementwiseCodegen for Tpu {
 
             blocks[2] = block(gcd(n, gcd(whole, start)), 128, 2048)
                 .ok_or("an elementwise fusion on TPU: a window of no whole columns' block")?;
+        }
+
+        if let Some(last) = blocks.last_mut().filter(|b| !b.is_multiple_of(swaps)) {
+            let n = *out.shape.last().expect("a swap's axis");
+
+            *last = block(n, swaps.max(128), 2048)
+                .filter(|b| b.is_multiple_of(swaps))
+                .ok_or("an elementwise fusion on TPU: a pair swap wider than its blocks")?;
         }
 
         // A leading block of 1 is left out of the kernel name.
