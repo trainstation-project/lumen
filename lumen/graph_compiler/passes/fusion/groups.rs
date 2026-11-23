@@ -141,7 +141,17 @@ fn planned(graph: &Graph) -> Groups {
 /// Rewrites `graph` with each planned group replaced by one fusion, named `reduction` when it reduces.
 pub(crate) fn elementwise_fusion(graph: &Graph) -> Graph {
     let nodes = graph.nodes();
-    let Groups { group, reduces } = planned(graph);
+    let Groups { mut group, reduces } = planned(graph);
+
+    // A slice alone in its group stays out: `place_views` may make it a view, else `alone` wraps it.
+    for (i, node) in nodes.iter().enumerate() {
+        if group[i] == Some(i)
+            && matches!(node.primitive, Primitive::Slice { .. })
+            && members(&group, i).len() == 1
+        {
+            group[i] = None;
+        }
+    }
 
     fused(
         graph,

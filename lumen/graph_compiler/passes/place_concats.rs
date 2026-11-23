@@ -5,7 +5,8 @@
 //!
 //! Devices: `place_concats` runs on each device whose module implements `codegen::fusion::Slots` (what its kernels can write
 //! through a slot's strides): MPS and Triton with `fuse`, TPU always (`Slots::WITH_FUSE`). `concats` runs where the
-//! module implements `codegen::fusion::Rechecks` (the slot rule after fusion): MPS. CPU and CUDA get the identity pass in both.
+//! module implements `codegen::fusion::Rechecks` (the slot rule after fusion): MPS and TPU. CPU and CUDA get the identity
+//! pass in both.
 //!
 //! The rule: `in_place_concats(graph, writes, worth)` returns the live concatenations where every operand is read only
 //! by that concatenation (ignoring `FusionOutput` readers), exactly once, is no program output, and is made by a

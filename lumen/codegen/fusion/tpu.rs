@@ -87,6 +87,26 @@ impl crate::codegen::fusion::Slots for DeviceModule<'_, Tpu> {
     }
 }
 
+/// TPU rechecks its in-place concatenations after fusion: an operand fusion made a reduction's, or an elementwise
+/// fusion's output other than its first (the only one its kernel writes into a window), is copied instead.
+impl crate::codegen::fusion::Rechecks for DeviceModule<'_, Tpu> {
+    /// What `fusion::tpu::slot_writes` accepts, an elementwise fusion's first output only.
+    fn written(
+        &self,
+        concat: &crate::graph::Node,
+        k: usize,
+        producer: &crate::graph::Node,
+        index: usize,
+    ) -> bool {
+        let first = match &producer.primitive {
+            Primitive::Fusion { name, .. } => name != "elementwise" || index == 0,
+            _ => true,
+        };
+
+        first && slot_writes(&self.graph, concat, k, producer)
+    }
+}
+
 /// TPU merges non-scalar `elementwise` fusions grouped by output shape, without `fuse` too. Here, where `Tpu` is built
 /// without the TPU linked too.
 impl crate::codegen::fusion::HorizontallyFuses for Tpu {

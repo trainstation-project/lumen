@@ -1,8 +1,8 @@
 //! TPU codegen: each planned step's kernel, generated once when the plan compiles and kept in the step's
 //! memo; the runtime lowers it once per device and launches it.
 
-use super::Tpu;
 use super::lowering::lowering;
+use super::{CONCATENATE, Tpu};
 use crate::codegen::elementwise::tpu::elementwise;
 use crate::codegen::gather::tpu::Gather;
 use crate::codegen::kernel::Runner;
@@ -82,6 +82,9 @@ pub(crate) fn kernel(step: &StepBase) -> Result<Option<Kernel>, String> {
             crate::codegen::dynamic_slice::tpu::kernel(step)
         }
         Primitive::Fusion { ref name, .. } if name == "elementwise" => elementwise(step),
+        Primitive::Fusion { ref name, .. } if name == CONCATENATE => {
+            crate::codegen::layout::tpu::concatenate(step).map(Some)
+        }
         Primitive::DotGeneral { .. } | Primitive::Fusion { .. } => {
             crate::codegen::dot_general::tpu::kernel(step)
         }

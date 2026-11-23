@@ -613,7 +613,8 @@ fn indexed(
     out: &TensorType,
     window: Option<(usize, usize)>,
 ) -> Result<Elementwise, String> {
-    let plan = plan(body, window.map_or(0, |w| w.1))
+    // Its column blocks divide both the window's start and the wider buffer's width.
+    let plan = plan(body, window.map_or(0, |(whole, start)| gcd(whole, start)))
         .map_err(|e| format!("an elementwise fusion on TPU: {e}"))?;
 
     // Grid dim `d` is named by its number: BLOCK_ID_d, BLOCK_SIZE_d, NUM_BLOCKS_d.
@@ -893,11 +894,12 @@ impl ElementwiseCodegen for Tpu {
 
         let mut blocks = blocks(&out.shape, &dtypes)?;
 
-        // A windowed output needs a column block that divides both the row width and the window start.
-        if let Some((_, start)) = window {
+        // A windowed output needs a column block that divides its row width, the window start and the wider
+        // buffer's width, so no block of the buffer reaches past its tiles.
+        if let Some((whole, start)) = window {
             let n = *out.shape.last().expect("a matrix");
 
-            blocks[2] = block(gcd(n, start), 128, 2048)
+            blocks[2] = block(gcd(n, gcd(whole, start)), 128, 2048)
                 .ok_or("an elementwise fusion on TPU: a window of no whole columns' block")?;
         }
 

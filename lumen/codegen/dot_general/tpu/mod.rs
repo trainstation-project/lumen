@@ -62,8 +62,8 @@ pub(crate) fn kernel(step: &StepBase) -> Result<Option<Kernel>, String> {
         p => codegen::spec(
             step,
             p,
-            &step.inputs[0].1,
-            &step.inputs[1].1,
+            [&step.inputs[0].1, &step.inputs[1].1],
+            [Some(0), Some(1)],
             out.dtype,
             None,
         )?,
@@ -148,5 +148,100 @@ impl crate::codegen::dot_general::FusesDots for Tpu {
         producer: &crate::graph::Node,
     ) -> bool {
         crate::codegen::fusion::tpu::slot_writes(graph, concat, k, producer)
+    }
+}
+
+/// How the TPU GEMM reads an operand that is a slice of a value: the `[slabs, rows, columns]` view of the value its
+/// blocks step through, from row `row` and column `column`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct SliceView {
+    /// Rows of each slab of the view: the value's, or for a matrix the ones up to the slice's end.
+    pub(crate) rows: usize,
+    /// Columns of the value.
+    pub(crate) columns: usize,
+    /// The slice's first row.
+    pub(crate) row: usize,
+    /// The slice's first column.
+    pub(crate) column: usize,
+}
+
+/// How the TPU GEMM reads `operand`, the slice from `starts` of a value laid out with contiguous `strides`, in
+/// place: when its leading dims are the value's (but for fewer of the first), its columns are the value's or
+/// start, span and lie in whole 128-lane tiles, and its rows are the value's or start and span whole tiles of rows
+/// (a matrix's may also be its first rows); else `None`.
+pub(crate) fn slice_view(
+    operand: &crate::graph::TensorType,
+    strides: &[usize],
+    starts: &[usize],
+) -> Option<SliceView> {
+    let r = operand.shape.len();
+
+    if r < 2 || strides.len() != r || starts.len() != r || strides[r - 1] != 1 {
+        return None;
+    }
+
+    let tile = crate::device::tpu::layout::Layout::new(operand.dtype, &[1, 1])
+        .ok()?
+        .rows;
+
+    // The value's extent along dim `d` past the first.
+    let extent = |d: usize| strides[d - 1] / strides[d];
+    let (m, n) = (operand.shape[r - 2], operand.shape[r - 1]);
+    let (row, column, columns) = (starts[r - 2], starts[r - 1], strides[r - 2]);
+
+    let whole = |start: usize, size: usize, of: usize, unit: usize| {
+        (start == 0 && size == of) || [start, size, of].iter().all(|v| v.is_multiple_of(unit))
+    };
+
+    if !whole(column, n, columns, crate::codegen::devices::tpu::LANES) {
+        return None;
+    }
+
+    let rows = match r {
+        // A matrix is viewed down to the slice's last row.
+        2 if row == 0 || (row.is_multiple_of(tile) && m.is_multiple_of(tile)) => row + m,
+        2 => return None,
+        _ => {
+            let leading = starts[..r - 2].iter().all(|&s| s == 0)
+                && (1..r - 2).all(|d| operand.shape[d] == extent(d));
+
+            if !(leading && whole(row, m, extent(r - 2), tile)) {
+                return None;
+            }
+
+            extent(r - 2)
+        }
+    };
+
+    Some(SliceView {
+        rows,
+        columns,
+        row,
+        column,
+    })
+}
+
+/// The TPU GEMM reads slices `slice_view` takes, in a step of its own or a `dot_general` fusion.
+impl crate::codegen::dot_general::StridedOperands for Tpu {
+    /// None: it reads a slice in place only knowing where the slice starts (`reads_slice`).
+    fn reads_strided(
+        _: &crate::graph::Primitive,
+        _: [&crate::graph::TensorType; 2],
+        _: usize,
+        _: &[usize],
+    ) -> bool {
+        false
+    }
+
+    /// Whether `kernel` is the GEMM's (`dot_general`) and `slice_view` takes the slice.
+    fn reads_slice(
+        kernel: &str,
+        _: &crate::graph::Primitive,
+        operands: [&crate::graph::TensorType; 2],
+        k: usize,
+        strides: &[usize],
+        starts: &[usize],
+    ) -> bool {
+        kernel == "dot_general" && slice_view(operands[k], strides, starts).is_some()
     }
 }

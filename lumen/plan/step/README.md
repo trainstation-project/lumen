@@ -46,7 +46,8 @@ launches themselves go through `runtime::kernel` and `runtime::stream`.
 ## Invariants
 
 - `check` rejects a plan on a device other than the one it was compiled for, and any `PallasCall` step off a TPU.
-- CPU and TPU plans reject any step reading an operand through a view (`viewed`); Triton and MPS steps say which
-  caller inputs they read at their given strides through `reads_strided`.
+- CPU plans reject any step reading an operand through a view (`viewed`); TPU plans any but a matmul's (a slice
+  `place_views` made a view), whose kernel takes its buffer from the start and the slice's start from its spec.
+  Triton and MPS steps say which caller inputs they read at their given strides through `reads_strided`.
 - Mutating an `MpsStep` through `DerefMut` drops its captured launches.
 - MPS rejects outputs with more elements than a `u32` index reaches.

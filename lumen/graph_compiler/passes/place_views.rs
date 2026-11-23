@@ -3,13 +3,13 @@
 //! `alone`, so the lone layout ops `alone` turns into elementwise fusions no longer include these slices.
 //!
 //! Devices: it runs on each device whose codegen implements `codegen::dot_general::StridedOperands` (its GEMM's rule for the
-//! operand layouts it reads in place): MPS (`dot_general::mps::reads_strided`) and Triton (any strides). CPU, CUDA and
-//! TPU get the identity pass.
+//! operand layouts it reads in place, `reads_slice`): MPS (`dot_general::mps::reads_strided`), Triton (any strides) and
+//! TPU (`dot_general::tpu::slice_view`: slices of whole tiles, in its GEMM kernel). CPU and CUDA get the identity pass.
 //!
 //! The rule: a `Slice` of one value is marked a view when its output is not a graph output, its input is not itself a
 //! slice already marked a view, and it has at least one reader, every reader being a `DotGeneral` whose rule accepts
-//! each operand slot reading the slice at the sliced input's contiguous strides, or a GEMM fusion where
-//! `fusion_reads_strided` holds: fusion input `k` read only by the body's GEMM dot (`codegen::kinds::gemm_dot`), as
+//! each operand slot reading the slice (from its starts, at the sliced input's contiguous strides), or a GEMM fusion
+//! where `fusion_reads_strided` holds: fusion input `k` read only by the body's GEMM dot (`codegen::kinds::gemm_dot`), as
 //! exactly one of its operands, in a layout the rule accepts. MPS codegen calls `fusion_reads_strided` too
 //! (`codegen::fusion::mps::fusion_reads_strided`, planning MPS steps).
 
@@ -21,11 +21,13 @@ use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::{CompilerPass, Module};
 use crate::tensor::contiguous_strides;
 
-/// Whether a dot (`Primitive`, its two operands' types) reads operand `k` laid out with `strides`.
-pub(crate) type ReadsStrided = fn(&Primitive, [&TensorType; 2], usize, &[usize]) -> bool;
+/// Whether a step running a kernel (its fusion's name, else its dot's) reads its dot's (`Primitive`, its two operands'
+/// types) operand `k` as the slice from `starts` (the last slice) of a value laid out with `strides`.
+pub(crate) type ReadsSlice =
+    fn(&str, &Primitive, [&TensorType; 2], usize, &[usize], &[usize]) -> bool;
 
 /// Marks each slice `dot_views` accepts as a view.
-pub(crate) fn place_views(graph: &mut Graph, reads: ReadsStrided) {
+pub(crate) fn place_views(graph: &mut Graph, reads: ReadsSlice) {
     for v in dot_views(graph, reads) {
         let node = graph.nodes.iter_mut().find(|n| n.output == v);
 
@@ -35,13 +37,15 @@ pub(crate) fn place_views(graph: &mut Graph, reads: ReadsStrided) {
     }
 }
 
-/// Outputs of slices whose readers are all dots or GEMM fusions able to read the sliced input's strides.
-fn dot_views(graph: &Graph, reads: ReadsStrided) -> Vec<Var> {
+/// Outputs of slices whose readers are all dots or GEMM fusions able to read the slice of the sliced input.
+fn dot_views(graph: &Graph, reads: ReadsSlice) -> Vec<Var> {
     let nodes = graph.nodes();
     let mut views = Vec::new();
 
     for node in nodes {
-        let (Primitive::Slice { .. }, &[x]) = (&node.primitive, node.inputs.as_slice()) else {
+        let (Primitive::Slice { start_indices, .. }, &[x]) =
+            (&node.primitive, node.inputs.as_slice())
+        else {
             continue;
         };
 
@@ -58,10 +62,21 @@ fn dot_views(graph: &Graph, reads: ReadsStrided) -> Vec<Var> {
         let in_place = readers.all(|n| match &n.primitive {
             Primitive::DotGeneral { .. } => {
                 let operands = [graph.type_of(n.inputs[0]), graph.type_of(n.inputs[1])];
-                (0..2).all(|k| n.inputs[k] != v || reads(&n.primitive, operands, k, &strides))
+                let kernel = n.primitive.name();
+
+                (0..2).all(|k| {
+                    n.inputs[k] != v
+                        || reads(kernel, &n.primitive, operands, k, &strides, start_indices)
+                })
             }
-            Primitive::Fusion { body, .. } => (0..n.inputs.len())
-                .all(|k| n.inputs[k] != v || fusion_reads_strided(body, k, &strides, reads)),
+            Primitive::Fusion { name, body, .. } => (0..n.inputs.len()).all(|k| {
+                let read =
+                    |dot: &Primitive, operands: [&TensorType; 2], side, strides: &[usize]| {
+                        reads(name, dot, operands, side, strides, start_indices)
+                    };
+
+                n.inputs[k] != v || fusion_reads_strided(body, k, &strides, read)
+            }),
             _ => false,
         });
 
@@ -78,7 +93,7 @@ pub(crate) fn fusion_reads_strided(
     body: &Graph,
     k: usize,
     strides: &[usize],
-    reads: ReadsStrided,
+    reads: impl Fn(&Primitive, [&TensorType; 2], usize, &[usize]) -> bool,
 ) -> bool {
     let (Some(dot), Some(&v)) = (gemm_dot(body), body.inputs().get(k)) else {
         return false;
@@ -104,14 +119,14 @@ pub(crate) fn fusion_reads_strided(
 /// Compiler pass marking each slice read only by GEMMs that stride through it (`reads`, the backend's
 /// matmul kernels' rule) a view.
 pub(crate) struct PlaceViews {
-    pub reads: ReadsStrided,
+    pub reads: ReadsSlice,
 }
 
 impl<D: StridedOperands> CompilerPass<DeviceModule<'_, D>> for PlaceViews {
     /// Always, reading strided operands as the device's GEMMs can.
     fn configured(_: &CompilerConfig) -> Option<Self> {
         Some(PlaceViews {
-            reads: D::reads_strided,
+            reads: D::reads_slice,
         })
     }
 

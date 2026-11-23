@@ -55,9 +55,9 @@ pass or the identity pass, which the pipeline skips.
 24. `place_concats` - let producers write directly into their concatenation slot [mps, triton, tpu].
 25. `fusion` - group elementwise chains, reductions, rows and epilogues into `Fusion` kernels [cuda, mps, triton, tpu].
 26. `wide_rows` - GEMMs feeding rows wider than a tile also write the row's partial reductions [triton].
-27. `place_views` - slices read only by GEMMs become strided views [mps, triton].
-28. `alone` - wrap leftover nodes that only a generated kernel can compute into one-node fusions [cuda, mps, triton].
-29. `concats` - copy the concatenations fusion could not place in place [mps].
+27. `place_views` - slices read only by GEMMs become strided views [mps, triton, tpu].
+28. `alone` - wrap leftover nodes that only a generated kernel can compute into one-node fusions [cuda, mps, triton, tpu].
+29. `concats` - copy the concatenations fusion could not place in place [mps, tpu].
 30. `horizontal_fusion` - merge independent small kernels of the same kind into one launch [triton, tpu].
 
 ## Other files
