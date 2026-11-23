@@ -95,9 +95,13 @@ fn groups(graph: &Graph, join: &[Join]) -> Groups {
     Groups { group, reduces }
 }
 
-/// Groups nodes, splitting off layout ops until every elementwise group's indexing can be planned.
-fn planned(graph: &Graph) -> Groups {
-    let mut join = vec![Join::Any; graph.nodes().len()];
+/// Groups nodes but the `held` ones (a small fusion's), splitting off layout ops until every elementwise group's
+/// indexing can be planned.
+fn planned(graph: &Graph, held: &[bool]) -> Groups {
+    let mut join: Vec<Join> = held
+        .iter()
+        .map(|&h| if h { Join::Bare } else { Join::Any })
+        .collect();
 
     loop {
         let groups = groups(graph, &join);
@@ -138,10 +142,147 @@ fn planned(graph: &Graph) -> Groups {
     }
 }
 
-/// Rewrites `graph` with each planned group replaced by one fusion, named `reduction` when it reduces.
-pub(crate) fn elementwise_fusion(graph: &Graph) -> Graph {
+/// Each node's small fusion (`codegen::elementwise::tpu::small`), by its root (its last node): the connected groups
+/// of two or more nodes the small kernel takes, each reading only graph inputs and other such nodes (so the group is
+/// computed from inputs alone), whose inputs and outputs it reads and writes whole, all joined into one fusion.
+fn small_groups(graph: &Graph) -> Vec<Option<usize>> {
+    use crate::codegen::elementwise::tpu::small::{buffer, takes};
+
     let nodes = graph.nodes();
-    let Groups { mut group, reduces } = planned(graph);
+    let mut producer: Vec<Option<usize>> = vec![None; graph.types.len()];
+    let mut readers: Vec<Vec<usize>> = vec![Vec::new(); graph.types.len()];
+
+    for (i, node) in nodes.iter().enumerate() {
+        producer[node.output] = Some(i);
+        node.inputs.iter().for_each(|&v| readers[v].push(i));
+    }
+
+    let mut ok = vec![false; nodes.len()];
+
+    for (i, node) in nodes.iter().enumerate() {
+        ok[i] = takes(graph, node)
+            && node
+                .inputs
+                .iter()
+                .all(|&v| producer[v].is_none_or(|k| ok[k]));
+    }
+
+    // Connected groups of taken nodes, by union-find.
+    let mut parent: Vec<usize> = (0..nodes.len()).collect();
+
+    fn find(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+
+    for (i, node) in nodes.iter().enumerate().filter(|&(i, _)| ok[i]) {
+        for &v in &node.inputs {
+            if let Some(k) = producer[v].filter(|&k| ok[k]) {
+                let (a, b) = (find(&mut parent, i), find(&mut parent, k));
+                parent[a] = b;
+            }
+        }
+    }
+
+    let mut members: Vec<Vec<usize>> = vec![Vec::new(); nodes.len()];
+
+    for i in (0..nodes.len()).filter(|&i| ok[i]) {
+        let r = find(&mut parent, i);
+        members[r].push(i);
+    }
+
+    let mut group = vec![None; nodes.len()];
+
+    for m in members.iter().filter(|m| m.len() >= 2) {
+        let inside = |k: usize| m.contains(&k);
+
+        let reads = m
+            .iter()
+            .flat_map(|&k| &nodes[k].inputs)
+            .filter(|&&v| producer[v].is_none_or(|k| !inside(k)));
+
+        let written = m
+            .iter()
+            .map(|&k| nodes[k].output)
+            .filter(|&v| graph.outputs().contains(&v) || readers[v].iter().any(|&r| !inside(r)));
+
+        let whole = reads.clone().all(|&v| buffer(graph.type_of(v), false))
+            && written.clone().all(|v| buffer(graph.type_of(v), true))
+            && written.count() > 0;
+
+        if whole {
+            m.iter().for_each(|&k| group[k] = Some(0));
+        }
+    }
+
+    // The groups read graph inputs alone, so they run as one kernel, rooted at their last node.
+    let root = (0..nodes.len()).rev().find(|&k| group[k].is_some());
+    group
+        .iter_mut()
+        .flatten()
+        .for_each(|r| *r = root.expect("a member"));
+    group
+}
+
+/// `graph` with the nodes `group` assigns a group moved to its start, in order (they read graph inputs alone).
+fn first(graph: &Graph, group: &[Option<usize>]) -> Graph {
+    if group.iter().all(Option::is_none) {
+        return graph.clone();
+    }
+
+    let nodes = graph.nodes();
+    let mut out = Graph::new();
+    let mut map: Vec<usize> = vec![usize::MAX; graph.types.len()];
+
+    for &v in graph.inputs() {
+        map[v] = out.input(graph.type_of(v).clone());
+    }
+
+    let order = (0..nodes.len())
+        .filter(|&k| group[k].is_some())
+        .chain((0..nodes.len()).filter(|&k| group[k].is_none()));
+
+    for k in order {
+        let node = &nodes[k];
+        out.set_origin(node);
+        let inputs: Vec<usize> = node.inputs.iter().map(|&v| map[v]).collect();
+        map[node.output] = out
+            .apply(node.primitive.clone(), &inputs)
+            .expect("a node of the graph");
+        out.set_label(map[node.output], node.label);
+    }
+
+    let outputs: Vec<usize> = graph.outputs().iter().map(|&v| map[v]).collect();
+    out.set_outputs(&outputs).expect("values of the graph");
+    out
+}
+
+/// Rewrites `graph` with each planned group replaced by one fusion, named `reduction` when it reduces, and each small
+/// group (`small_groups`) by a `small` fusion.
+pub(crate) fn elementwise_fusion(graph: &Graph) -> Graph {
+    // Small groups read graph inputs alone: they move to the start, so each fusion (at its last node) precedes every
+    // reader of its values.
+    let moved = first(graph, &small_groups(graph));
+    let graph = &moved;
+    let nodes = graph.nodes();
+    let small = small_groups(graph);
+    let held: Vec<bool> = small.iter().map(Option::is_some).collect();
+    let Groups { mut group, reduces } = planned(graph, &held);
+
+    for (i, &s) in small.iter().enumerate() {
+        if s.is_some() {
+            group[i] = s;
+        }
+    }
+
+    let mut readers: Vec<Vec<usize>> = vec![Vec::new(); graph.types.len()];
+
+    for (i, node) in nodes.iter().enumerate() {
+        node.inputs.iter().for_each(|&v| readers[v].push(i));
+    }
 
     // A slice alone in its group stays out: `place_views` may make it a view, else `alone` wraps it.
     for (i, node) in nodes.iter().enumerate() {
@@ -160,13 +301,26 @@ pub(crate) fn elementwise_fusion(graph: &Graph) -> Graph {
             // A reducing member leads the fusion so the kernel is built around it.
             let main = members.iter().find(|&&j| reducible(graph, &nodes[j]));
 
-            let name = match reduces[root] {
-                true => "reduction",
-                false => "elementwise",
+            let name = match (small[root].is_some(), reduces[root]) {
+                (true, _) => crate::codegen::elementwise::tpu::small::SMALL,
+                (_, true) => "reduction",
+                _ => "elementwise",
             };
 
             (name, *main.unwrap_or(&root))
         },
-        |_| Vec::new(),
+        // A small group's other values read outside it are its further outputs.
+        |root| match small[root] {
+            Some(_) => members(&group, root)
+                .into_iter()
+                .filter(|&k| k != root)
+                .map(|k| nodes[k].output)
+                .filter(|&v| {
+                    graph.outputs().contains(&v)
+                        || readers[v].iter().any(|&r| group[r] != Some(root))
+                })
+                .collect(),
+            None => Vec::new(),
+        },
     )
 }

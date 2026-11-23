@@ -2,6 +2,7 @@
 //! runtime traces to Mosaic.
 
 pub(crate) mod grid;
+pub(crate) mod small;
 
 #[cfg(lumen_tpu_linked)]
 use std::collections::HashMap;

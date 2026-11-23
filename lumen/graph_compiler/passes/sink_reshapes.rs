@@ -9,7 +9,8 @@
 //! - Its chain: the nodes after it reading `p` or the chain, each elementwise or a pair swap within `w`
 //!   (`2 * distance` dividing `w`), of `p`'s shape.
 //! - Each chain node is rebuilt on `q`'s shape. A constant of `p`'s shape is rebuilt at `q`'s, a scalar broadcast is
-//!   broadcast to `q`'s, and any other operand is reshaped to `q`'s.
+//!   broadcast to `q`'s, a row of one head broadcast over the heads (a rotary's table) becomes that row's copies side by
+//!   side (a lane concatenation, no relayout), and any other operand is reshaped to `q`'s.
 //! - A chain value read outside the chain (or a graph output) is reshaped back to `p`'s shape; `p` itself stays only
 //!   when something else reads it.
 //! - Operands reshaped to `q`'s shape that no matmul computes (a rotary's tables, its sign), with what computes them,
@@ -228,6 +229,50 @@ fn flattened(
                 )
                 .expect("the scalar broadcast flat");
         }
+        // A row of one head broadcast over the heads: that row's copies side by side (no relayout).
+        Some(Primitive::BroadcastInDim {
+            broadcast_dimensions,
+            ..
+        }) if heads_row(graph, made.expect("made"), broadcast_dimensions, wide) => {
+            let x = made.expect("made").inputs[0];
+            let xt = graph.type_of(x);
+            let rank = xt.shape.len();
+            let w = xt.shape[rank - 1];
+
+            let mut row = xt.shape[..rank - 2].to_vec();
+            row.push(w);
+
+            let row = out
+                .apply(Primitive::Reshape { new_sizes: row }, &[map[x]])
+                .expect("the head's row");
+
+            let copies = vec![row; wide.shape[wide.shape.len() - 1] / w];
+
+            let mut f = out
+                .apply(
+                    Primitive::Concatenate {
+                        dimension: rank - 2,
+                        in_place: false,
+                    },
+                    &copies,
+                )
+                .expect("the row's copies");
+
+            if out.type_of(f).shape != wide.shape {
+                f = out
+                    .apply(
+                        Primitive::BroadcastInDim {
+                            shape: wide.shape.clone(),
+                            broadcast_dimensions: (0..rank - 1).collect(),
+                        },
+                        &[f],
+                    )
+                    .expect("the copies over the rows");
+            }
+
+            hoist.push(f);
+            return f;
+        }
         _ => {
             let f = out
                 .apply(
@@ -244,6 +289,20 @@ fn flattened(
     };
 
     out.apply(primitive, &[]).expect("the constant flat")
+}
+
+/// Whether broadcast `node` (of `dims`) spreads one head's row over the heads: its operand of the result's rank, of size
+/// 1 along the heads axis and the head's width along the last, which flattened to `wide` is that row repeated.
+fn heads_row(graph: &Graph, node: &Node, dims: &[usize], wide: &TensorType) -> bool {
+    let (x, out) = (graph.type_of(node.inputs[0]), graph.type_of(node.output));
+    let rank = out.shape.len();
+
+    rank >= 2
+        && x.shape.len() == rank
+        && dims.iter().enumerate().all(|(k, &d)| k == d)
+        && x.shape[rank - 2] == 1
+        && x.shape[rank - 1] == out.shape[rank - 1]
+        && wide.shape.last() == Some(&(out.shape[rank - 2] * out.shape[rank - 1]))
 }
 
 /// `graph`, pruned, with the values `hoist` names and what computes them moved to its start, each whose computation

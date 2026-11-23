@@ -150,14 +150,18 @@ pub(crate) fn swapped(graph: &Graph) -> Option<Graph> {
 }
 
 /// `x` (a swap) times `-1` on the first `distance` elements of its last axis and `1` on the rest: the negated part of
-/// `concatenate([-hi, lo])`, an exact sign flip.
+/// `concatenate([-hi, lo])`, an exact sign flip. The sign is one row of the last axis broadcast over the others.
 fn signed(out: &mut Graph, x: Var, distance: usize) -> Var {
     let ty = out.type_of(x).clone();
     let last = ty.shape.len() - 1;
     let mut apply = |p: Primitive, args: &[Var]| out.apply(p, args).expect("the sign's nodes");
 
+    // One row: size 1 but along the last axis.
+    let mut row = vec![1; last];
+    row.push(ty.shape[last]);
+
     let full = |value: Scalar, dtype: DType| Primitive::Full {
-        shape: ty.shape.clone(),
+        shape: row.clone(),
         fill_value: value,
         dtype,
     };
@@ -165,7 +169,7 @@ fn signed(out: &mut Graph, x: Var, distance: usize) -> Var {
     let at = apply(
         Primitive::Iota {
             dtype: DType::I32,
-            shape: ty.shape.clone(),
+            shape: row.clone(),
             dimension: last,
         },
         &[],
@@ -176,5 +180,14 @@ fn signed(out: &mut Graph, x: Var, distance: usize) -> Var {
     let minus = apply(full(Scalar::Float(-1.0), ty.dtype), &[]);
     let plus = apply(full(Scalar::Float(1.0), ty.dtype), &[]);
     let sign = apply(Primitive::Select, &[first, minus, plus]);
-    apply(Primitive::Mul, &[x, sign])
+
+    let spread = apply(
+        Primitive::BroadcastInDim {
+            shape: ty.shape.clone(),
+            broadcast_dimensions: (0..=last).collect(),
+        },
+        &[sign],
+    );
+
+    apply(Primitive::Mul, &[x, spread])
 }

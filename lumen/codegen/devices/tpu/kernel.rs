@@ -81,6 +81,11 @@ pub(crate) fn kernel(step: &StepBase) -> Result<Option<Kernel>, String> {
         Primitive::Fusion { ref name, .. } if name == crate::graph::UPDATES => {
             crate::codegen::dynamic_slice::tpu::kernel(step)
         }
+        Primitive::Fusion { ref name, .. }
+            if name == crate::codegen::elementwise::tpu::small::SMALL =>
+        {
+            crate::codegen::elementwise::tpu::small::kernel(step).map(Some)
+        }
         Primitive::Fusion { ref name, .. } if name == "elementwise" => elementwise(step),
         Primitive::Fusion { ref name, .. } if name == CONCATENATE => {
             crate::codegen::layout::tpu::concatenate(step).map(Some)

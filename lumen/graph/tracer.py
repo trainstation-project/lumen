@@ -248,13 +248,23 @@ def _weights(args):
     return list(params.values())
 
 
+def _baked(slot, value):
+    """Whether the scalar ``value`` at ``slot`` ``(argument, path)`` is baked
+    in until a call passes it another value: an int or a bool, or a float
+    field of a module argument (a norm's ``eps``, a constant of the model
+    as ``jax.jit`` keeps a module's Python floats)."""
+    field = any(isinstance(p, str) for p in slot[1])
+    return type(value) in (int, bool) or (type(value) is float and field)
+
+
 def _runtime(dynamic):
-    """Which scalars are runtime: floats and numpy scalars, and the ints and
-    bools at the slots ``(argument, path)`` in ``dynamic``."""
+    """Which scalars are runtime: those ``_baked`` does not bake in (float
+    arguments, numpy scalars), and those at the slots ``(argument, path)`` in
+    ``dynamic``."""
 
     def runtime(slot, value):
         """Whether the scalar at ``slot`` is a runtime input rather than baked in."""
-        return type(value) not in (int, bool) or slot in dynamic
+        return not _baked(slot, value) or slot in dynamic
 
     return runtime
 
@@ -695,10 +705,12 @@ def compile(fn, device=None):
     and compiled into a static plan for ``device`` on its first call with
     each input signature (the tensor arguments' dtypes and shapes, and the
     values of the other arguments but floats), which every call then runs.
-    Float arguments, and float fields of module arguments, are runtime
-    scalars, as in ``jax.jit``: inputs of the plan, whose values each call
-    passes (another value reuses the plan), weakly typed (each takes its
-    tensor operand's dtype). Ints and the rest are static. ``device``
+    Float arguments are runtime scalars, as in ``jax.jit``: inputs of the
+    plan, whose values each call passes (another value reuses the plan),
+    weakly typed (each takes its tensor operand's dtype). Ints, bools and
+    float fields of module arguments (a norm's ``eps``) are static, baked
+    into the plan, until a call passes one another value: from then on it
+    is runtime too. ``device``
     defaults to the first tensor argument with data's (the CPU without
     any).
 
@@ -786,7 +798,7 @@ class Compiled:
         structure, slots, weights = walked or _walk(args)
         # An int or bool seen with two values across calls is made runtime instead of recompiling per value.
         for slot, value in slots:
-            if type(value) in (int, bool) and slot not in self._dynamic and slot not in self._pinned:
+            if _baked(slot, value) and slot not in self._dynamic and slot not in self._pinned:
                 if self._seen.setdefault(slot, (type(value), value)) != (type(value), value):
                     self._dynamic.add(slot)
         key = _keyed(structure, slots, _runtime(self._dynamic)), target, _compiler_flags()
