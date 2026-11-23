@@ -12,6 +12,8 @@ Rust (Python calls them as `_C.names` and `_C.strategies`):
 - `rules.rs`: strategy families many primitives share: elementwise ops by how far they are linear in their partial operands (`Linear`), reductions making a sharded reduced dim partial, the dim groups a reshape maps whole.
 - `strategies.rs`: `Primitive::strategies`, each primitive's sharding strategies on one mesh dim (PyTorch DTensor's: elementwise ops on operands sharded alike and partial ones as far as they are linear, reductions, `dot_general`'s einsum strategies, `transpose`, `reshape` and `broadcast_in_dim` where a sharded dim maps whole, `slice`, `dynamic_slice` and `cumsum` of other dims, `gather`, `take_along_axis`, `scatter_add`, `dynamic_update_slice` and `concatenate` of other dims or of partial sums, and a `gather` along a sharded dim as a masked lookup giving a partial sum, DTensor's `MaskPartial`; none for factories, custom kernels and collectives, which run replicated).
 
+- `python.rs` (with the `python` feature) binds `names` and `strategies` to Python, placements as `(kind, dim, op)` tuples.
+
 Both `names` and `strategies` `match` every primitive, so a new one must say how each flows through it.
 
 Python:

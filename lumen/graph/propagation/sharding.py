@@ -124,11 +124,11 @@ def propagate(name, operands, params):
     _, shape = _infer(name, operands, params)
     ins, out = _choose(name, specs, operands, params, shape)
     local = local_shape(shape, out)
-    moved = [moved(x, a, b) for x, a, b in zip(operands, specs, ins)]
+    shards = [moved(x, a, b) for x, a, b in zip(operands, specs, ins)]
     if name == "gather" and Shard(params["axis"]) in ins[0].placements:
-        result = _masked_gather(*moved, operands[0].shape, ins[0], params["axis"], local)
+        result = _masked_gather(*shards, operands[0].shape, ins[0], params["axis"], local)
     else:
-        result = prims.bind(name, *moved, **_local_params(name, params, local))
+        result = prims.bind(name, *shards, **_local_params(name, params, local))
     if result.shape != local:
         raise AssertionError(f"{name}: strategy {ins} -> {out} gave a local shape {result.shape}, not {local}")
     return placed(result, out, shape)

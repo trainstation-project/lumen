@@ -2,12 +2,16 @@
 //! graph built from them (`graph`), pruning (`prune`), in-place placement views (`placements`) and precision warnings
 //! (`precision`).
 
+#[cfg(feature = "python")]
+pub(crate) mod convert;
 mod graph;
 mod node;
 mod placements;
 mod precision;
 pub mod primitive;
 mod prune;
+#[cfg(feature = "python")]
+pub(crate) mod python;
 #[cfg(test)]
 pub(crate) mod tests;
 mod types;

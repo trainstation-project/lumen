@@ -12,6 +12,8 @@ The Rust graph the tracer builds and every pass rewrites: values, nodes and the 
 - `placements.rs`: `View`, `slot` and `placements`, the values stored inside another value's buffer (view slices and operands of in-place concatenates).
 - `precision.rs`: `precision_warnings`, accumulations rounded to a narrow dtype and later cast back up.
 - `primitive.rs` holds the `Primitive` enum with `UnaryOp`, `BinaryOp` and `Reduction`, their names, and `Primitive::infer`, the output type inference every `Graph::apply` runs. It also defines the label markers `FUSION_SEPARATOR`, `NEURAL_ENGINE` and `UPDATES` used in fused node names.
+- `python.rs` (with the `python` feature) binds `Graph` to Python as `lumen.graph._C.Graph` (`input`, `apply`, `prune`, `set_outputs`, `nodes`, `run` on the reference interpreter), and `scope_names`.
+- `convert.rs` (with the `python` feature) converts a primitive's name plus params dict to `Primitive` (`primitive`) and back (`primitive_dict`).
 - `tests.rs` holds unit tests of primitive type inference, graph display and the reference interpreter.
 
 ## Conventions

@@ -9,6 +9,8 @@
 
 mod names;
 mod placement;
+#[cfg(feature = "python")]
+pub(crate) mod python;
 mod rules;
 mod strategies;
 

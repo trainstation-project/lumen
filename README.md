@@ -26,8 +26,8 @@ print(lumen.to_numpy(y))
 Python frontend        lumen.Tensor (data), lumen.functional, lumen.nn.Module
       |  lumen.compile(fn, device=...)
       v
-Tracing                lumen/graph/tracer.py: TracedTensor records ops as
-      |                strict primitives (lumen.graph.prims) into a Graph
+Tracing                lumen/graph/tracing/tracer.py: TracedTensor records ops as
+      |                strict primitives (lumen.graph.tracing.prims) into a Graph
       v                (the jaxpr analogue, lumen/graph/)
 Autograd               lumen/autograd: JVP rules per primitive, linearize,
       |                transpose; grad / value_and_grad / vjp, and
