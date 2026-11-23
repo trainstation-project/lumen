@@ -89,6 +89,7 @@ pub(crate) fn kernel(step: &StepBase) -> Result<Option<Kernel>, String> {
             crate::codegen::dot_general::tpu::kernel(step)
         }
         Primitive::Reshape { .. } => crate::codegen::layout::tpu::kernel(step).map(Some),
+        Primitive::Slice { view: false, .. } => crate::codegen::layout::tpu::slice(step).map(Some),
         Primitive::Gather { .. } => crate::codegen::gather::tpu::kernel(step).map(Some),
         Primitive::TakeAlongAxis { .. } => {
             crate::codegen::gather::tpu::take_along_axis(step).map(Some)

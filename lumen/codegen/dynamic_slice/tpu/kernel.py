@@ -61,8 +61,10 @@ def program(spec):
     spanned = uc == cols
     strips = not spanned and width > 2 * STRIP
     blocks = urp // gm
+    # A flat operand (a vector viewed as its `[n / 128, 128]` tiles) takes one start index per update, split by row.
+    flat = spec.get("flat", False)
     # Ref order: operand, `count` updates, runtime start indices, output, then constant starts.
-    indices = 0 if fixed else count * rank
+    indices = 0 if fixed else count * (1 if flat else rank)
     output = 1 + count + indices
 
     def kernel(refs, memory, result):
@@ -119,7 +121,12 @@ def program(spec):
             _waited(fetched)
 
             def start(m, d):
-                """Runtime start of update `m` along dim `d`, clamped so the update fits."""
+                """Runtime start of update `m` along dim `d`, clamped so the update fits (of a flat operand, its
+                vector start's row or column)."""
+                if flat:
+                    n = shape[0] * shape[1]
+                    at = prims.min(prims.max(held[m, 0], _int(0)), _int(n - update[1]))
+                    return at // _int(shape[1]) if d == 0 else at % _int(shape[1])
                 return prims.min(prims.max(held[m * rank + d, 0], _int(0)), _int(shape[d] - update[d]))
 
         def one(m, waiting=False):

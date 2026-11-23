@@ -83,9 +83,10 @@ pub(crate) fn kernel(step: &StepBase) -> Result<Kernel, String> {
 
     let whole = |b: &usize| s.is_multiple_of(*b) && cw.is_multiple_of(*b);
 
+    // Else one block of every index of a window that spans the last dim (a block of the output's whole rows).
     let bm = match (1..=ROWS / tile).rev().map(|k| k * tile).find(whole) {
         Some(bm) => bm,
-        None if s < tile => s,
+        None if s < tile || (cw == s && s <= ROWS) => s,
         None => {
             return failed("a last dimension of indices not a multiple of the table's tile rows");
         }

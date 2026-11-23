@@ -21,7 +21,8 @@ use crate::plan::StepBase;
 /// The TPU code generator.
 pub(crate) struct Tpu;
 
-/// Whether `p` can run inside a plain elementwise TPU kernel (only scalar broadcasts among layout ops).
+/// Whether `p` can run inside a plain elementwise TPU kernel (only scalar broadcasts among layout ops; a pair swap
+/// within each block's last axis, its blocks a multiple of twice the distance, `swap_block`).
 pub(crate) fn fusible(p: &Primitive) -> bool {
     use Primitive::*;
 
@@ -51,8 +52,25 @@ pub(crate) fn fusible(p: &Primitive) -> bool {
             | Select
             | Unary(_)
             | Binary(_)
+            | SwapPairs { .. }
     )
 }
+
+/// The width every last-axis block of a kernel computing `body` must be a multiple of: twice its widest pair swap's
+/// distance (1 without one), so each element's partner is in its block.
+pub(crate) fn swap_block(body: &crate::graph::Graph) -> usize {
+    body.nodes()
+        .iter()
+        .filter_map(|n| match n.primitive {
+            Primitive::SwapPairs { distance } => Some(2 * distance),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(1)
+}
+
+/// TPU kernels swap pairs within a block's last axis (two lane rotations and a select, in `kernels::pallas::mosaic`).
+impl crate::codegen::emitter::SwapsPairs for Tpu {}
 
 /// The JSON node `{"name", "params", "args"}` the Python kernels rebuild `p` from, with `args` indexing earlier values.
 pub(crate) fn node(p: &Primitive, args: &[usize]) -> String {
@@ -78,6 +96,7 @@ pub(crate) fn node(p: &Primitive, args: &[usize]) -> String {
         }
         Primitive::BroadcastInDim { .. } => "\"broadcast_dimensions\": []".into(),
         Primitive::Cast { new_dtype } => format!("\"new_dtype\": \"{}\"", new_dtype.full_name()),
+        Primitive::SwapPairs { distance } => format!("\"distance\": {distance}"),
         Primitive::Unary(UnaryOp::ReducePrecision {
             exponent_bits,
             mantissa_bits,

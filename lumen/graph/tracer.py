@@ -825,8 +825,10 @@ class Compiled:
                 entries.append((Plan(graph, "meta"), None))
             return graph, entries[0][0], None, out, logical
         params = [i for i, (kind, _) in enumerate(layout) if kind == "weight"]
-        # Under CUDA graphs, runtime scalars are device inputs the kernels read, so a replay reads each call's.
-        scalars = [] if _graphed(target) else [i for i, (kind, _) in enumerate(layout) if kind in _SCALARS]
+        # Under CUDA graphs, runtime scalars are device inputs the kernels read, so a replay reads each call's; TPU
+        # kernels read every input from device memory too.
+        by_value = not _graphed(target) and _device_type(target) != "tpu"
+        scalars = [i for i, (kind, _) in enumerate(layout) if kind in _SCALARS] if by_value else []
 
         def inputs_for(plan):
             """The plan's inputs for this call, or None if a packed weight block cannot be read in place."""

@@ -817,6 +817,36 @@ impl Emitter<'_> {
                 self.unary("arith.ori", &[&t, &f], "", out)
             }
             Select => self.unary("arith.select", &[a, &args[1], &args[2]], "", out),
+            // Each last-axis element `j` takes its partner `j ^ distance`: the value rotated down by `distance` where
+            // `j`'s `distance` bit is clear, up by it where set; both rotations stay within the block's last axis.
+            SwapPairs { distance } if a.1.shape.len() >= 2 => {
+                let rank = a.1.shape.len();
+                let n = a.1.shape[rank - 1];
+                let rotate = format!("dimension = {} : si32", rank - 1);
+                let int = TensorType::new(DType::I32, &[]);
+                let lanes = TensorType::new(DType::I32, &a.1.shape);
+
+                let up = (self.constant(&Scalar::Int((n - distance) as i64), &int), int.clone());
+                let down = (self.constant(&Scalar::Int(*distance as i64), &int), int);
+                let next = self.apply("tpu.dynamic_rotate", &[a, &up], &rotate, out);
+                let previous = self.apply("tpu.dynamic_rotate", &[a, &down], &rotate, out);
+
+                let lane = self
+                    .op(
+                        "tpu.iota",
+                        &[],
+                        &format!("dimensions = array<i32: {}>", rank - 1),
+                        &[value_type(&lanes)],
+                    )
+                    .remove(0);
+
+                let lane = (lane, lanes.clone());
+                let bit = self.splat(Scalar::Int(*distance as i64), &lanes);
+                let zero = self.splat(Scalar::Int(0), &lanes);
+                let set = self.apply("arith.andi", &[&lane, &bit], "", &lanes);
+                let clear = self.compare(&set, &zero, 0);
+                self.unary("arith.select", &[&clear, &next, &previous], "", out)
+            }
             TakeAlongAxis { axis } => {
                 let rank = a.1.shape.len();
 

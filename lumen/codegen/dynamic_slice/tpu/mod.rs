@@ -276,7 +276,8 @@ impl DynamicSliceCodegen for Tpu {
 }
 
 /// The `dynamic_update_slice` kernel for `step`: one update at runtime int32 starts, or a fusion of
-/// several updates at constant starts (clamped into range here); `None` when the update is empty.
+/// several updates at constant starts (clamped into range here); a vector's one element as its tile matrix's
+/// (`flat`); `None` when the update is empty.
 #[cfg(lumen_tpu_linked)]
 pub(crate) fn kernel(step: &StepBase) -> Result<Option<Kernel>, String> {
     let (operand, update) = (&step.inputs[0].1, &step.inputs[1].1);
@@ -296,20 +297,54 @@ pub(crate) fn kernel(step: &StepBase) -> Result<Option<Kernel>, String> {
         return Ok(None);
     }
 
-    let p = match &step.primitive {
-        Primitive::Fusion { body, .. } => Tpu::updates(body, &())?,
-        _ => Tpu::update(operand, update, &[], &())?,
+    // A vector of whole tiles is stored as its `[n / 128, 128]` matrix: one element updates it as that matrix's at
+    // its start's row and column (`flat`).
+    let flat = operand.shape.len() == 1;
+
+    let p = match (&step.primitive, flat) {
+        (Primitive::Fusion { body, .. }, false) => Tpu::updates(body, &())?,
+        (_, false) => Tpu::update(operand, update, &[], &())?,
+        (primitive, true) => {
+            let n = operand.shape[0];
+            let rows = Layout::new(operand.dtype, &[1, 1])?.rows;
+
+            if update.shape != [1] || !n.is_multiple_of(LANES * rows) {
+                return failed("a dynamic_update_slice of a vector other than one element into whole tiles");
+            }
+
+            let tiles = TensorType::new(operand.dtype, &[n / LANES, LANES]);
+            let one = TensorType::new(update.dtype, &[1, 1]);
+
+            let fixed: Option<Vec<i32>> = match primitive {
+                Primitive::Fusion { body, .. } => Some(
+                    starts(body, operand, update)
+                        .into_iter()
+                        .flat_map(|s| [s / LANES as i32, s % LANES as i32])
+                        .collect(),
+                ),
+                _ => None,
+            };
+
+            let count = fixed.as_ref().map_or(1, |f| f.len() / 2);
+
+            program(&tiles, &one, fixed, count)?
+        }
+    };
+
+    let spec = match flat {
+        true => format!("{}, \"flat\": true", p.spec),
+        false => p.spec,
     };
 
     // The kernel copies the operand first unless it is updated in place, in the output's buffer.
     let mut kernel = Kernel::new(
         "lumen.codegen.dynamic_slice.tpu.kernel",
         p.kernel,
-        format!("{}, \"copy\": false", p.spec),
+        format!("{spec}, \"copy\": false"),
         Rows::Step,
     );
 
-    kernel.copied = Some(format!("{}, \"copy\": true", p.spec));
+    kernel.copied = Some(format!("{spec}, \"copy\": true"));
     kernel.scalars = p.scalars;
     kernel.context = Some(step.label.to_string());
     Ok(Some(kernel))
