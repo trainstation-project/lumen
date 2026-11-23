@@ -566,7 +566,7 @@ fn heads_layout(
         .filter(|&(_, size, _)| size > 1)
         .collect();
 
-    factors.sort_by(|a, b| b.0.cmp(&a.0));
+    factors.sort_by_key(|f| std::cmp::Reverse(f.0));
 
     // The factors must tile the buffer exactly, the last of stride 1.
     let mut expected = 1;
