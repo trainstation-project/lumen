@@ -278,16 +278,12 @@ class _Buffered:
         """The copy of ``block`` from its HBM window to VMEM slot ``window``
         (``to_hbm``: back): of the rows within the operand alone where it
         reaches past the operand's tiles (the rest of the slot undefined,
-        as Pallas leaves it), which takes the block where it is traced (a
-        block covering its whole axis at 0)."""
+        as Pallas leaves it), which takes the block where it is traced."""
         from lumen.kernels import pallas as pl
 
         hbm, part = [], []
         for d, (b, size, element) in enumerate(zip(block, self.sizes, self.elements)):
             start = b if element is not None else b * size
-            # A block covering the whole axis has one index, 0, wherever it is traced.
-            if element is None and size >= self.ref.shape[d]:
-                start = 0
             if self.clip is not None and self.clip[d]:
                 if not isinstance(start, int):
                     raise NotImplementedError(
