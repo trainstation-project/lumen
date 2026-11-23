@@ -28,6 +28,20 @@ pub(crate) struct Epilogue {
     pub(crate) nodes: Vec<String>,
     /// Each body output's value index, piece and dtype.
     pub(crate) outputs: Vec<(usize, usize, DType)>,
+    /// Per body output, the cache it writes the piece's heads into, when it is a `dynamic_update_slice` of one.
+    pub(crate) updates: Vec<Option<Update>>,
+}
+
+/// A body output that writes its piece's heads into a cache: `dynamic_update_slice(cache, transpose(reshape(value,
+/// [b, s, heads, width]), [0, 2, 1, 3]), 0, 0, pos, 0)`, the cache `[b, heads, rows, width]`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Update {
+    /// The extra input holding the cache.
+    pub(crate) cache: usize,
+    /// The extra input holding the scalar row the heads' rows start at.
+    pub(crate) pos: usize,
+    /// The cache's batch, heads, rows and head width.
+    pub(crate) shape: [usize; 4],
 }
 
 impl Epilogue {
@@ -93,6 +107,8 @@ impl Epilogue {
         let (mut widths, mut nodes) = (Vec::new(), Vec::new());
         let mut readers: HashMap<Var, usize> = HashMap::new();
         let mut together = false;
+        let mut updates: HashMap<Var, Update> = HashMap::new();
+        let extra = |v: Var| extras.iter().position(|&u| u == v).expect("an extra input");
 
         if slices.is_empty() {
             widths.push(shape[axis]);
@@ -112,6 +128,33 @@ impl Epilogue {
                 widths.push(limit_indices[axis] - start_indices[axis]);
                 continue;
             }
+            // A cache update's heads reshape and transpose move no values of the piece: they read as it.
+            if matches!(
+                node.primitive,
+                Primitive::Reshape { .. } | Primitive::Transpose { .. }
+            ) {
+                value.insert(node.output, value[&node.inputs[0]]);
+                member.insert(node.output, member[&node.inputs[0]]);
+                continue;
+            }
+
+            if let Primitive::DynamicUpdateSlice = node.primitive {
+                let shape = &body.type_of(node.output).shape;
+
+                updates.insert(
+                    node.output,
+                    Update {
+                        cache: extra(node.inputs[0]),
+                        pos: extra(node.inputs[4]),
+                        shape: [shape[0], shape[1], shape[2], shape[3]],
+                    },
+                );
+
+                value.insert(node.output, value[&node.inputs[1]]);
+                member.insert(node.output, member[&node.inputs[1]]);
+                continue;
+            }
+
             let args: Vec<usize> = node.inputs.iter().map(|v| value[v]).collect();
 
             nodes.push(crate::codegen::devices::tpu::node(&node.primitive, &args));
@@ -163,6 +206,11 @@ impl Epilogue {
                 .iter()
                 .map(|v| (value[v], member[v], body.type_of(*v).dtype))
                 .collect(),
+            updates: body
+                .outputs()
+                .iter()
+                .map(|v| updates.get(v).copied())
+                .collect(),
         };
 
         (epilogue, dot)
@@ -179,6 +227,7 @@ impl Epilogue {
             inputs: Vec::new(),
             nodes: Vec::new(),
             outputs: vec![(0, 0, output)],
+            updates: vec![None],
         }
     }
 }
@@ -409,11 +458,35 @@ pub(crate) fn spec(
         ));
     }
 
+    // A cache update's cache and row are read whole, not in blocks; its output is written by DMA, not streamed.
+    let raw: Vec<bool> = (0..e.inputs.len())
+        .map(|i| {
+            e.updates
+                .iter()
+                .flatten()
+                .any(|u| u.cache == i || u.pos == i)
+        })
+        .collect();
+
+    if e.updates.iter().flatten().next().is_some() && (e.together || e.rows) {
+        return Err(
+            "dot_general on TPU: a cache update of pieces fused together or of rows".into(),
+        );
+    }
+
     let streams: Vec<DType> = e
         .outputs
         .iter()
-        .map(|o| o.2)
-        .chain(e.inputs.iter().filter(|i| !i.1).map(|i| i.0))
+        .zip(&e.updates)
+        .filter(|(_, u)| u.is_none())
+        .map(|(o, _)| o.2)
+        .chain(
+            e.inputs
+                .iter()
+                .zip(&raw)
+                .filter(|(i, raw)| !i.1 && !**raw)
+                .map(|(i, _)| i.0),
+        )
         .collect();
 
     let values = match e.nodes.is_empty() {
@@ -510,18 +583,48 @@ pub(crate) fn spec(
     let inputs_spec: Vec<String> = e
         .inputs
         .iter()
-        .map(|(d, scalar, p)| format!("[\"{}\", {scalar}, {p}]", d.full_name()))
+        .zip(&raw)
+        .map(|((d, scalar, p), raw)| format!("[\"{}\", {scalar}, {p}, {raw}]", d.full_name()))
         .collect();
 
+    // Each output streamed in blocks, with its index among the body's outputs.
     let outputs_spec: Vec<String> = e
         .outputs
         .iter()
         .zip(&windows)
-        .map(|((v, p, d), w)| {
+        .enumerate()
+        .filter(|(o, _)| e.updates[*o].is_none())
+        .map(|(o, ((v, p, d), w))| {
             let (whole, start) = w.unwrap_or((0, 0));
-            format!("[{v}, {p}, \"{}\", {whole}, {start}]", d.full_name())
+            format!("[{v}, {p}, \"{}\", {whole}, {start}, {o}]", d.full_name())
         })
         .collect();
+
+    // Each cache update: its output, value, piece, dtype, cache and row inputs, and the cache's shape.
+    let updates_spec: Vec<String> = e
+        .updates
+        .iter()
+        .enumerate()
+        .filter_map(|(o, u)| u.map(|u| (o, u)))
+        .map(|(o, u)| {
+            let (v, p, d) = e.outputs[o];
+
+            if !bn.is_multiple_of(u.shape[3]) {
+                return Err(format!(
+                    "dot_general on TPU: a cache update of heads {} wide in blocks of {bn} columns",
+                    u.shape[3]
+                ));
+            }
+
+            Ok(format!(
+                "[{o}, {v}, {p}, \"{}\", {}, {}, {:?}]",
+                d.full_name(),
+                u.cache,
+                u.pos,
+                u.shape
+            ))
+        })
+        .collect::<Result<_, String>>()?;
 
     let views_spec: Vec<String> = views
         .iter()
@@ -534,7 +637,7 @@ pub(crate) fn spec(
     let spec = format!(
         "\"batch\": {}, \"lead\": {}, \"m\": {}, \"n\": {}, \"k\": {}, \"transposed\": {}, \"lhs_transposed\": {}, \"lhs\": {:?}, \"lhs_k\": {lhs_k}, \"together\": {}, \"split_rows\": {}, \
          \"operands\": \"{}\", \"value\": \"{}\", \"blocks\": [{bm}, {bn}, {bk}], \"widths\": {:?}, \
-         \"inputs\": [{}], \"nodes\": [{}], \"outputs\": [{}], \"views\": [{}]",
+         \"inputs\": [{}], \"nodes\": [{}], \"outputs\": [{}], \"views\": [{}], \"updates\": [{}]",
         f.batch,
         f.lead,
         f.m,
@@ -552,6 +655,7 @@ pub(crate) fn spec(
         e.nodes.join(", "),
         outputs_spec.join(", "),
         views_spec.join(", "),
+        updates_spec.join(", "),
     );
 
     Ok((
