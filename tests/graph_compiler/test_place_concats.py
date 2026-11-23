@@ -56,9 +56,10 @@ def test_concatenated_operands_are_written_in_place(device, f, shapes, steps):
 
 
 def _rotary(x, cos, sin):
-    """Rotary embedding's rotate-half and multiply-add: its concatenate is read only by elementwise ops."""
-    half = x.shape[-1] // 2
-    rotated = F.cat([-x[..., half:], x[..., :half]], -1)
+    """A rotary-like rotation of the last axis by a quarter (not a half: `swap_pairs` would take that) and a
+    multiply-add: its concatenate of slices and a negation is read only by elementwise ops."""
+    quarter = x.shape[-1] // 4
+    rotated = F.cat([-x[..., 3 * quarter :], x[..., : 3 * quarter]], -1)
     return x * cos + rotated * sin
 
 
@@ -66,7 +67,7 @@ def _rotary(x, cos, sin):
 def test_concatenates_read_elementwise_fuse_into_their_readers(device):
     """A concatenate of cheap operands (slices, a negation) read only by
     elementwise ops is not placed: fusion builds it in registers inside its
-    readers' kernel, so rotary's rotate-half and multiply-add are one kernel
+    readers' kernel, so the rotation and multiply-add are one kernel
     with no concatenate step and no buffer for it. The CPU's values."""
     arrays = [rand(4, 8, 64, seed=k) for k in range(3)]
     try:
