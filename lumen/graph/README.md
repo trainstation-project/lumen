@@ -12,9 +12,9 @@ The traced dataflow graph and the Python tracer that builds it. This is the star
 
 - `mod.rs` declares the subfolders and re-exports `ir`.
 - `custom.rs` is the bridge from a `custom_call` kernel at run time back to the Python function registered for it (`set_hook`, `call`).
-- `python.rs` builds the `lumen.graph._C` native module: the `Graph` class (`ir/python.rs`), `names` and `strategies` (`propagation/python.rs`), and the custom-op hook (`_register_custom_op`, the function `custom.rs` calls).
+- `python.rs` builds the `lumen.graph._C` native module: the custom-op hook (`_register_custom_op`, the function `custom.rs` calls) and `FUSION_SEPARATOR`. The graph (`ir/python.rs`, `lumen.graph.ir._C`) and the propagation rules (`propagation/python.rs`, `lumen.graph.propagation._C`) register modules of their own.
 - `__init__.py` exports `Graph`, `TracedTensor`, `compile`, `make_graph` and `prims`.
-- `_C.pyi` types the native module.
+- `_C.pyi` types `lumen.graph._C`; each subfolder's `_C.pyi` types its own module.
 
 ## How it works
 

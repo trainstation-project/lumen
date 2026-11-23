@@ -1,6 +1,4 @@
-from typing import Any, Sequence
-
-from lumen.tensor._C import Tensor
+from typing import Any
 
 FUSION_SEPARATOR: str
 """What a fusion's label joins its primitives' names with (``mul → tanh → add``)."""
@@ -8,63 +6,3 @@ FUSION_SEPARATOR: str
 def _register_custom_op(f: Any) -> int:
     """Keep custom op function ``f`` (called with its operands as tensors
     when its step runs): its handle (``lumen.custom_op``)."""
-
-def names(
-    name: str,
-    params: dict[str, Any],
-    operands: Sequence[tuple[Sequence[int], Sequence[str] | None]],
-    shape: Sequence[int],
-) -> list[str] | None:
-    """The axis names of primitive ``name``'s (with ``params``) result of ``shape`` on ``operands`` (each a shape
-    and its names, if named), by ``Primitive::names``; a ValueError when the operands' names conflict."""
-
-def strategies(
-    name: str,
-    params: dict[str, Any],
-    placements: Sequence[tuple[str, int, str]],
-    shapes: Sequence[Sequence[int]],
-    shape: Sequence[int],
-) -> list[tuple[list[tuple[str, int, str]], tuple[str, int, str]]]:
-    """Primitive ``name``'s (with global ``params``) sharding strategies along one mesh dimension, its operands
-    placed there as ``placements`` (each ``(kind, dim, op)``: ``("shard", dim, "")``, ``("replicate", 0, "")``
-    or ``("partial", 0, op)``) with global ``shapes``, its result of global ``shape``, by
-    ``Primitive::strategies``: each the operands' placements and the result's."""
-
-class Graph:
-    """A graph of primitive ops, built by tracing (``lumen/graph/``)."""
-
-    def __init__(self) -> None: ...
-    def input(self, dtype: str, shape: Sequence[int]) -> int: ...
-    def apply(self, name: str, inputs: Sequence[int], params: dict[str, Any] | None = None) -> int: ...
-    def type_of(self, var: int) -> tuple[str, list[int]]: ...
-    def inputs(self) -> list[int]: ...
-    def outputs(self) -> list[int]: ...
-    def attentions(self) -> list[dict[str, Any]]:
-        """The attentions traced so far, as the compiler matches them: each
-        dot's operands, the second dot's value (``dot``) and the output
-        (``out``: its cast to the operands' dtype, if one rounds it), the
-        softmax's max and sum, the score chain, the causal offset and the
-        values it computes."""
-
-    def rms_norms(self) -> list[dict[str, Any]]:
-        """The RMS norms written out as primitives so far: each one's operand
-        ``x``, output ``out``, rows' ``rms`` (``1 / rms`` where ``inverse``)
-        and the values it computes (``members``)."""
-
-    def prune(self) -> list[int | None]:
-        """Remove the nodes no output depends on; each value's new number,
-        or None if removed."""
-
-    def precision_warnings(self) -> list[tuple[int, int, str]]:
-        """A warning for each dot or sum rounded to a narrower dtype than it
-        accumulates in, then cast back up: its output, the cast's, the
-        message."""
-
-    def nodes(self) -> list[dict[str, Any]]:
-        """Each node: ``primitive``, ``text`` (with its parameters),
-        ``fusion`` (``kernel``, ``body``, Metal ``source``; or None),
-        ``inputs`` and ``output`` values, ``scope`` (its ``record_function``
-        ranges) and ``sources`` (the ``(file, line)``s that traced it)."""
-
-    def set_outputs(self, outputs: Sequence[int]) -> None: ...
-    def run(self, inputs: Sequence[Tensor]) -> list[Tensor]: ...

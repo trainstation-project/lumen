@@ -1,7 +1,6 @@
 """Python wrappers that record each lumen primitive into the graph being traced."""
 
-from lumen.graph import _C
-from lumen.graph.propagation import sharding
+from lumen.graph.propagation import _C, sharding
 from lumen.graph.tracing import tracer
 
 __all__ = [

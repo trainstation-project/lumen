@@ -1,5 +1,6 @@
-//! The `lumen.graph._C` native module: the graph (`ir::python`), the propagation rules (`propagation::python`) and the
-//! hook calling a `custom_call` kernel's Python function (`custom`).
+//! The `lumen.graph._C` native module: the hook calling a `custom_call` kernel's Python function (`custom`) and the
+//! fusion label separator. The graph (`lumen.graph.ir._C`) and the propagation rules (`lumen.graph.propagation._C`)
+//! have modules of their own.
 
 use pyo3::prelude::*;
 
@@ -38,11 +39,9 @@ fn call_custom_op(kernel: usize, args: &[crate::Tensor]) -> Result<(), String> {
     })
 }
 
-/// Adds the graph bindings to `lumen.graph._C` and installs the custom-op call hook.
+/// Adds the custom-op registration and `FUSION_SEPARATOR` to `lumen.graph._C` and installs the custom-op call hook.
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     crate::graph::custom::set_hook(call_custom_op);
     m.add_function(wrap_pyfunction!(_register_custom_op, m)?)?;
-    crate::graph::propagation::python::register(m)?;
-    m.add_class::<crate::graph::ir::python::PyGraph>()?;
     m.add("FUSION_SEPARATOR", crate::graph::FUSION_SEPARATOR)
 }

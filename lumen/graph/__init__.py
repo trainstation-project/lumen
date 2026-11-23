@@ -1,6 +1,6 @@
 """Graph tracing package: the Rust `Graph`, the Python tracer and `compile`, and the primitive ops."""
 
-from lumen.graph._C import Graph
+from lumen.graph.ir._C import Graph
 
 # isort: off
 from lumen.graph.tracing.tracer import TracedTensor, compile, make_graph

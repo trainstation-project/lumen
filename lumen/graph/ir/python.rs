@@ -1,4 +1,4 @@
-//! Python bindings for building, inspecting and running a graph: the `Graph` class of `lumen.graph._C`.
+//! Python bindings for building, inspecting and running a graph: the `Graph` class of `lumen.graph.ir._C`.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -230,4 +230,9 @@ impl PyGraph {
 /// The range names of a profiler scope, outermost first.
 pub(crate) fn scope_names(scope: crate::graph::Scope) -> Vec<&'static str> {
     scope.iter().map(|r| r.name).collect()
+}
+
+/// Adds the `Graph` class to `lumen.graph.ir._C`.
+pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<PyGraph>()
 }

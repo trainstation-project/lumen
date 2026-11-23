@@ -1,7 +1,7 @@
 from typing import Any, Sequence
 
 from lumen.device._C import DeviceLike
-from lumen.graph._C import Graph
+from lumen.graph.ir._C import Graph
 from lumen.tensor._C import Tensor
 
 class Plan:

@@ -1,4 +1,4 @@
-//! Python bindings for the propagation rules: `names` and `strategies` of `lumen.graph._C`.
+//! Python bindings for the propagation rules: `names` and `strategies` of `lumen.graph.propagation._C`.
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -94,7 +94,7 @@ fn strategies(
         .collect())
 }
 
-/// Adds `names` and `strategies` to `m`.
+/// Adds `names` and `strategies` to `lumen.graph.propagation._C`.
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(names, m)?)?;
     m.add_function(wrap_pyfunction!(strategies, m)?)
