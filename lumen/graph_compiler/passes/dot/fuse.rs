@@ -13,7 +13,8 @@
 //!   read only by dots as their lhs, not a graph output, and not an in-place concatenation (checked with
 //!   `place_concats::in_place_concats` and `codegen::fusion::tpu::slot_writes`). The fusion reads the concat's parts.
 //! - Elementwise epilogues, only with `contraction_epilogues`: later elementwise readers of the dot (or of a
-//!   slice, or of an earlier epilogue), claimed greedily in node order. Each must have its part's shape; its
+//!   slice, or of an earlier epilogue), and pair swaps within a block of `LANES` lanes, claimed greedily in node
+//!   order. Each must have its part's shape; its
 //!   other operands must be constants (rebuilt in the body), scalar broadcasts, or scalar or same-shape
 //!   values computed before the dot. Epilogues may combine several slices only when those are at most 4
 //!   equal-width slices along the last axis; otherwise a non-scalar extra operand serves one slice only.
@@ -214,9 +215,12 @@ fn fused<D: FusesDots>(graph: &Graph, epilogues: bool) -> Vec<Option<Fused>> {
         let (mut inside, mut extras, mut absorbed) = (Vec::new(), Vec::new(), Vec::new());
         let mut read_by: HashMap<Var, usize> = HashMap::new();
 
+        // A pair swap whose partners share a block of lanes (twice its distance dividing them) runs in the epilogue too.
+        let swaps = |p: &Primitive| matches!(p, Primitive::SwapPairs { distance } if D::LANES.is_multiple_of(2 * distance));
+
         // Claim later elementwise readers of fusion values as epilogues, greedily in node order.
         for (u, un) in nodes.iter().enumerate().skip(d + 1) {
-            if !epilogues || claimed[u] || !elementwise(&un.primitive) {
+            if !epilogues || claimed[u] || !(elementwise(&un.primitive) || swaps(&un.primitive)) {
                 continue;
             }
 

@@ -567,6 +567,12 @@ impl<'a> Emit<'a> for Emitter<'a> {
                         let i = self.operand_index(node, idx);
                         return self.value(node.inputs[0], i);
                     }
+                    // Each element's partner, read at `idx ^ distance`: out of order across a thread's elements.
+                    SwapPairs { distance } => {
+                        self.scattered = true;
+                        let i = self.index(format!("({idx}) ^ {distance}"));
+                        return self.value(node.inputs[0], i);
+                    }
                     Full { fill_value, .. } => constant(ty.dtype, *fill_value),
                     // The output is `[outer, picks, after]`: read the pick, then the operand's row it names.
                     Gather { axis } => {
@@ -652,3 +658,6 @@ impl<'a> Emit<'a> for Emitter<'a> {
 
 /// CuTe kernels gather (a fused `Gather`, read through the emitter).
 impl crate::codegen::emitter::Gathers for Cuda {}
+
+/// CuTe kernels read each element's partner at `j ^ distance` (in an elementwise kernel; no GEMM epilogue swaps).
+impl crate::codegen::emitter::SwapsPairs for Cuda {}

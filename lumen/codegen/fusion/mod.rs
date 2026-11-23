@@ -37,6 +37,11 @@ pub(crate) trait Slots: crate::graph_compiler::passes::Module {
     }
 }
 
+/// A module whose split of a last axis is a copy (TPU's tiled layout): the graph compiler's `sink_reshapes` pass computes
+/// a matmul product's elementwise readers (with a pair swap) before the reshape splitting its last axis, so they stay
+/// in the GEMM's epilogue.
+pub(crate) trait SinksReshapes: crate::graph_compiler::passes::Module {}
+
 /// A module whose fusion may leave a concatenation it was to write in place unable to be (the graph compiler's
 /// `concats` pass, after fusion): `written` is the slot rule then; each concatenation unmarked gets a kernel of its own,
 /// named as `Lone::kernel` names one-node fusions.

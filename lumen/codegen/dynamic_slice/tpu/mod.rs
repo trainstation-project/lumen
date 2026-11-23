@@ -309,7 +309,9 @@ pub(crate) fn kernel(step: &StepBase) -> Result<Option<Kernel>, String> {
             let rows = Layout::new(operand.dtype, &[1, 1])?.rows;
 
             if update.shape != [1] || !n.is_multiple_of(LANES * rows) {
-                return failed("a dynamic_update_slice of a vector other than one element into whole tiles");
+                return failed(
+                    "a dynamic_update_slice of a vector other than one element into whole tiles",
+                );
             }
 
             let tiles = TensorType::new(operand.dtype, &[n / LANES, LANES]);

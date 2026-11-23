@@ -872,7 +872,16 @@ fn decode(body: &Graph, a: &Attention) -> Result<(&'static str, String), String>
     };
 
     // Its buffer's last two dims, whose tiles the kernel reads.
-    let matrix = |v: Var| body.type_of(v).shape.iter().rev().take(2).rev().copied().collect::<Vec<_>>();
+    let matrix = |v: Var| {
+        body.type_of(v)
+            .shape
+            .iter()
+            .rev()
+            .take(2)
+            .rev()
+            .copied()
+            .collect::<Vec<_>>()
+    };
 
     if !rows(&a.q, a.h) || matrix(a.q.base) != [n, a.h] {
         return failed("a query other than each batch index's [heads, head dim] matrix");
@@ -886,7 +895,8 @@ fn decode(body: &Graph, a: &Attention) -> Result<(&'static str, String), String>
         return failed("a log-sum-exp, extra outputs or keys and values of different groups");
     }
 
-    let chain = path(body, a.out.base, 0).ok_or("attention decode on TPU: an output written through other than its layout")?;
+    let chain = path(body, a.out.base, 0)
+        .ok_or("attention decode on TPU: an output written through other than its layout")?;
 
     if epilogue(&chain) {
         return failed("an epilogue");

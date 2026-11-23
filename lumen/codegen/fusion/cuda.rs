@@ -15,7 +15,7 @@ pub(crate) const ELEMENTWISE: &str = "elementwise";
 const DOT_GENERAL: &str = "dot_general";
 
 /// Whether `node` can be computed inside a CUDA elementwise kernel: an elementwise or layout op
-/// (or a fill, an iota, a concatenation or a gather) of dtypes CuTe has.
+/// (or a fill, an iota, a concatenation, a pair swap or a gather) of dtypes CuTe has.
 pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
     use crate::graph::{BinaryOp, UnaryOp};
     use Primitive::*;
@@ -43,6 +43,7 @@ pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
         | Full { .. }
         | Iota { .. }
         | Concatenate { .. }
+        | SwapPairs { .. }
         | Gather { .. } => true,
         Unary(op) => !matches!(
             op,

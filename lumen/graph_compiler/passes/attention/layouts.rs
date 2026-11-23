@@ -559,7 +559,10 @@ fn heads_layout(
         .zip(batch)
         .enumerate()
         .map(|(j, (&(stride, div), &n))| (stride, n / div, j))
-        .chain([(acc.row, seq, batch.len()), (acc.col, width, batch.len() + 1)])
+        .chain([
+            (acc.row, seq, batch.len()),
+            (acc.col, width, batch.len() + 1),
+        ])
         .filter(|&(_, size, _)| size > 1)
         .collect();
 

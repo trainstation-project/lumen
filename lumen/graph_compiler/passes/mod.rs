@@ -26,6 +26,7 @@ pub(crate) mod preserve_precision;
 #[cfg_attr(not(feature = "python"), allow(dead_code))]
 pub(crate) mod rms_norm;
 pub(crate) mod simplify;
+pub(crate) mod sink_reshapes;
 pub(crate) mod swap_pairs;
 #[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
 pub(crate) mod take_along_axis;

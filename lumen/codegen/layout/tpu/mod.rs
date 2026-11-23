@@ -197,7 +197,9 @@ pub(crate) fn slice(step: &StepBase) -> Result<Kernel, String> {
     let rank = out.shape.len();
 
     if rank < 2 {
-        return Err(format!("a slice of {x} to fewer than 2 dimensions does not run on TPU yet"));
+        return Err(format!(
+            "a slice of {x} to fewer than 2 dimensions does not run on TPU yet"
+        ));
     }
 
     let rows = Layout::new(x.dtype, &x.shape)?.rows;
@@ -216,7 +218,9 @@ pub(crate) fn slice(step: &StepBase) -> Result<Kernel, String> {
     let padded = rw.div_ceil(rows) * rows * cw.div_ceil(128) * 128 * x.dtype.size_of();
 
     if padded > SLICE_BYTES {
-        return Err(format!("a slice of {x} to {out} with a window wider than {SLICE_BYTES} bytes does not run on TPU yet"));
+        return Err(format!(
+            "a slice of {x} to {out} with a window wider than {SLICE_BYTES} bytes does not run on TPU yet"
+        ));
     }
 
     let spec = format!(

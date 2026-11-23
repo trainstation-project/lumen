@@ -226,6 +226,11 @@ macro_rules! pipeline {
             ))
             .push($crate::graph_compiler::pipeline::pick!(
                 $device,
+                $crate::graph_compiler::passes::sink_reshapes::SinkReshapes,
+                config
+            ))
+            .push($crate::graph_compiler::pipeline::pick!(
+                $device,
                 $crate::graph_compiler::passes::dot::strength::DotStrength,
                 config
             ))

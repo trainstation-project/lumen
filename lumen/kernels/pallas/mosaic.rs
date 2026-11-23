@@ -826,7 +826,10 @@ impl Emitter<'_> {
                 let int = TensorType::new(DType::I32, &[]);
                 let lanes = TensorType::new(DType::I32, &a.1.shape);
 
-                let up = (self.constant(&Scalar::Int((n - distance) as i64), &int), int.clone());
+                let up = (
+                    self.constant(&Scalar::Int((n - distance) as i64), &int),
+                    int.clone(),
+                );
                 let down = (self.constant(&Scalar::Int(*distance as i64), &int), int);
                 let next = self.apply("tpu.dynamic_rotate", &[a, &up], &rotate, out);
                 let previous = self.apply("tpu.dynamic_rotate", &[a, &down], &rotate, out);

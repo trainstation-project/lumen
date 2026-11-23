@@ -120,3 +120,6 @@ impl crate::codegen::fusion::HorizontallyFuses for Tpu {
         crate::codegen::fusion::tpu::horizontal_candidate(graph, node)
     }
 }
+
+/// TPU's split of a last axis moves elements between tiles: a projection's readers run before it, in the epilogue.
+impl crate::codegen::fusion::SinksReshapes for DeviceModule<'_, Tpu> {}
