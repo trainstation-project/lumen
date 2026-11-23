@@ -261,6 +261,11 @@ pub(crate) fn plan(body: &Graph, window: usize) -> Result<Plan, String> {
                     .filter(|b| *b > 512),
             );
 
+            // The whole rows as one block, when nothing smaller divides them in whole tiles.
+            if !rows.contains(&m) {
+                rows.push(m);
+            }
+
             // Leading blocks of 1; else (a transpose moving an operand's rows or lanes to a leading dim) each leading
             // dim some operand tiles taken whole.
             let tiled: Vec<usize> = (0..rank - 2)
@@ -274,10 +279,24 @@ pub(crate) fn plan(body: &Graph, window: usize) -> Result<Plan, String> {
 
             let mut leads = vec![vec![1; rank - 2]];
 
+            // Each such dim whole, or (largest first) in whole tiles of rows.
+            for &d in &tiled {
+                let sizes = candidates(out.shape[d], 8, out.shape[d]);
+
+                leads = leads
+                    .iter()
+                    .flat_map(|l| {
+                        sizes.iter().map(move |&b| {
+                            let mut l = l.clone();
+                            l[d] = b;
+                            l
+                        })
+                    })
+                    .collect();
+            }
+
             if !tiled.is_empty() {
-                let mut whole = vec![1; rank - 2];
-                tiled.iter().for_each(|&d| whole[d] = out.shape[d]);
-                leads.push(whole);
+                leads.insert(0, vec![1; rank - 2]);
             }
 
             // Prefer the widest column block, then the tallest row block that fits.

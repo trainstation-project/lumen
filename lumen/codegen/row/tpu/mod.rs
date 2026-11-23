@@ -363,7 +363,8 @@ impl RowCodegen for Tpu {
 }
 
 /// Picks how many of `rows` rows of `n` elements a step holds: a multiple of `unit` dividing `rows` within the
-/// ROW_BYTES budget (counted at 4 bytes an element), or all rows when there are fewer than `unit`.
+/// ROW_BYTES budget (counted at 4 bytes an element), or all rows when there are fewer than `unit` or no such multiple
+/// divides them and they fit twice the budget.
 #[cfg(lumen_tpu_linked)]
 pub(crate) fn block_rows(rows: usize, n: usize, unit: usize) -> Result<usize, String> {
     if rows < unit {
@@ -371,7 +372,10 @@ pub(crate) fn block_rows(rows: usize, n: usize, unit: usize) -> Result<usize, St
     }
 
     let cap = (ROW_BYTES / (n * 4)).max(unit);
-    block(rows, unit, cap).ok_or_else(|| "its rows have no block of whole tiles".into())
+
+    block(rows, unit, cap)
+        .or_else(|| (rows * n * 4 <= 2 * ROW_BYTES).then_some(rows))
+        .ok_or_else(|| "its rows have no block of whole tiles".into())
 }
 
 /// The kernel of the row fusion `step`.
