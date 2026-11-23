@@ -7,7 +7,7 @@ from helpers import CPU, MPS, TPU, TRITON_CUDA
 
 import lumen
 import lumen.functional as F
-from lumen.graph._C import FUSION_SEPARATOR
+from lumen.graph.ir._C import FUSION_SEPARATOR
 from lumen.profiler import ProfilerActivity, profile, record_function
 
 

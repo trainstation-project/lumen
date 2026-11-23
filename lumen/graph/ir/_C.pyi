@@ -2,6 +2,9 @@ from typing import Any, Sequence
 
 from lumen.tensor._C import Tensor
 
+FUSION_SEPARATOR: str
+"""What a fusion's label joins its primitives' names with (``mul → tanh → add``)."""
+
 class Graph:
     """A graph of primitive ops, built by tracing (``lumen/graph/``)."""
 

@@ -232,7 +232,8 @@ pub(crate) fn scope_names(scope: crate::graph::Scope) -> Vec<&'static str> {
     scope.iter().map(|r| r.name).collect()
 }
 
-/// Adds the `Graph` class to `lumen.graph.ir._C`.
+/// Adds the `Graph` class and `FUSION_SEPARATOR` to `lumen.graph.ir._C`.
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PyGraph>()
+    m.add_class::<PyGraph>()?;
+    m.add("FUSION_SEPARATOR", crate::graph::FUSION_SEPARATOR)
 }

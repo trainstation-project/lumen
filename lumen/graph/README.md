@@ -6,15 +6,13 @@ The traced dataflow graph and the Python tracer that builds it. This is the star
 
 - `ir/`: the Rust graph (`Graph`, `Node`, `TensorType`, `Var`) and its primitives (`Primitive`, their type inference). `mod.rs` re-exports it, so the rest of the crate names them `crate::graph::Graph`.
 - `propagation/`: how each primitive's result names and sharding follow from its operands' (Rust), and the Python that runs primitives on sharded operands by those rules (`sharding.py`, with `cost.py`, `redistribute.py` and `gradients.py`).
+- `custom/`: the bridge from a `custom_call` kernel at run time back to the Python function registered for it.
 - `tracing/`: the Python tracer (`TracedTensor`, `compile`, `make_graph`) and the primitive wrappers (`prims`) that record nodes.
 
 ## Files
 
-- `mod.rs` declares the subfolders and re-exports `ir`.
-- `custom.rs` is the bridge from a `custom_call` kernel at run time back to the Python function registered for it (`set_hook`, `call`).
-- `python.rs` builds the `lumen.graph._C` native module: the custom-op hook (`_register_custom_op`, the function `custom.rs` calls) and `FUSION_SEPARATOR`. The graph (`ir/python.rs`, `lumen.graph.ir._C`) and the propagation rules (`propagation/python.rs`, `lumen.graph.propagation._C`) register modules of their own.
+- `mod.rs` declares the Rust subfolders and re-exports `ir`.
 - `__init__.py` exports `Graph`, `TracedTensor`, `compile`, `make_graph` and `prims`.
-- `_C.pyi` types `lumen.graph._C`; each subfolder's `_C.pyi` types its own module.
 
 ## How it works
 

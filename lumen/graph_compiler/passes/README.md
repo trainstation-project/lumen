@@ -67,5 +67,5 @@ pass or the identity pass, which the pipeline skips.
 - `elementwise.rs` - building elementwise fusion bodies from node groups (used by fusion).
 - `multi_output.rs` - `Readers`: a fusion also writes a value other fusions read as an extra output.
 - `rms_norm.rs` - `rms_norms` detects RMS norms written as primitives, so autograd can differentiate
-  them from saved `1 / rms` (called from `graph/python.rs`, not a pipeline pass).
+  them from saved `1 / rms` (called from `graph/ir/python.rs`, not a pipeline pass).
 - `dot/` - the dot passes (`canonicalize`, `fold_reshapes`, `fuse`, `rows`, `split_k`, `strength`).

@@ -20,7 +20,7 @@ const PACKAGES: [(&str, Register); 15] = [
     ("profiler", crate::profiler::python::register),
     ("runtime.stream", crate::runtime::stream::python::register),
     ("custom_op", crate::custom_op::python::register),
-    ("graph", crate::graph::python::register),
+    ("graph.custom", crate::graph::custom::python::register),
     ("graph.ir", crate::graph::ir::python::register),
     (
         "graph.propagation",

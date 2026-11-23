@@ -5,7 +5,7 @@ import functools
 import inspect
 
 from lumen.custom_op._C import MetalKernel, _register_kernel, _registered_ops, _unregister_kernel
-from lumen.graph._C import _register_custom_op
+from lumen.graph.custom._C import _register_custom_op
 from lumen.graph.tracing import prims, tracer
 from lumen.graph.tracing.tracer import TracedTensor
 
