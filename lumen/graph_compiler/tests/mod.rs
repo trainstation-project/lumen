@@ -597,6 +597,72 @@ fn pair_swaps_become_swap_pairs() {
     }
 }
 
+/// A swap of each head's halves (a rotate-half rotary's `cat([x[.., d/2:], x[.., :d/2]])`) becomes one `SwapPairs` of
+/// distance `d / 2`, and with the first half negated (`cat([-x[.., d/2:], x[.., :d/2]])`) that swap times a sign; each
+/// computes the same values. Halves of a non-power-of-two width keep their slices.
+#[test]
+fn half_swaps_become_swap_pairs_of_half_the_width() {
+    let build = |d: usize, negated: bool| {
+        let mut g = Graph::new();
+        let x = g.input(ty(&[3, 2, d]));
+
+        let half = |g: &mut Graph, from: usize| {
+            apply(
+                g,
+                Slice {
+                    start_indices: vec![0, 0, from],
+                    limit_indices: vec![3, 2, from + d / 2],
+                    view: false,
+                },
+                &[x],
+            )
+        };
+
+        let high = half(&mut g, d / 2);
+        let high = if negated {
+            apply(&mut g, Neg, &[high])
+        } else {
+            high
+        };
+        let low = half(&mut g, 0);
+
+        let swapped = apply(
+            &mut g,
+            Concatenate {
+                dimension: 2,
+                in_place: false,
+            },
+            &[high, low],
+        );
+
+        g.set_outputs(&[swapped]).unwrap();
+        g
+    };
+
+    for (d, negated) in [(8, false), (8, true), (128, true)] {
+        let g = build(d, negated);
+        let rewritten = super::passes::swap_pairs::swapped(&g).expect("a half swap");
+        let names = names(&rewritten);
+        assert!(
+            names.contains(&"swap_pairs") && !names.contains(&"concatenate"),
+            "{rewritten}"
+        );
+        assert!(
+            rewritten
+                .to_string()
+                .contains(&format!("distance={}", d / 2)),
+            "{rewritten}"
+        );
+
+        let input = [data(&[3, 2, d], 1)];
+        let want = reference::run(&g, &input).unwrap();
+        let got = reference::run(&rewritten, &input).unwrap();
+        assert_eq!(want[0].to_vec::<f32>(), got[0].to_vec::<f32>());
+    }
+
+    assert!(super::passes::swap_pairs::swapped(&build(12, false)).is_none());
+}
+
 /// A value copied to the host and straight back splits the plan into device, host and device stages.
 #[test]
 fn values_copied_back_at_once_pass_through_a_host_stage() {

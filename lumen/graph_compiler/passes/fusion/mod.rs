@@ -36,8 +36,8 @@ pub(crate) struct Backend {
     pub expansion: fn(&Graph, &Node, &Node) -> bool,
     /// Whether a fusion body of a GEMM and the normalization row reading it runs as one kernel.
     pub row_dot: fn(&Graph) -> bool,
-    /// Whether a GEMM epilogue can swap adjacent pairs of its accumulator (`SwapPairs`, an interleaved rotary's
-    /// partners), which each thread holds side by side.
+    /// Whether a GEMM epilogue can swap adjacent pairs of its accumulator (`SwapPairs` of distance 1, an interleaved
+    /// rotary's partners), which each thread holds side by side; other distances run after the GEMM.
     pub swap_epilogues: bool,
     /// Whether a split-K combine (the sum of a dot's chunk products) runs a GEMM's epilogue after it, column
     /// regions included, as the dot would unsplit.

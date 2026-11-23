@@ -36,7 +36,7 @@ pub(crate) fn fusible(graph: &Graph, node: &Node) -> bool {
             | Reshape { .. }
             | BroadcastInDim { .. }
             | Transpose { .. }
-            | SwapPairs
+            | SwapPairs { .. }
             | Slice { .. }
             | Full { .. }
             | Iota { .. }

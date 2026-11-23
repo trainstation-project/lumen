@@ -130,7 +130,11 @@ pub(crate) fn primitive(name: &str, params: &Bound<'_, PyDict>) -> PyResult<Prim
             shape: dims("shape")?,
             broadcast_dimensions: dims("broadcast_dimensions")?,
         },
-        "swap_pairs" => SwapPairs,
+        "swap_pairs" => SwapPairs {
+            distance: params
+                .get_item("distance")?
+                .map_or(Ok(1), |d| d.extract::<usize>())?,
+        },
         "transpose" => Transpose {
             permutation: dims("permutation")?,
         },
@@ -429,6 +433,7 @@ fn params_of<'py>(py: Python<'py>, p: &Primitive) -> PyResult<Bound<'py, PyDict>
 
     match p {
         Cast { new_dtype } => d.set_item("new_dtype", dtype(new_dtype))?,
+        SwapPairs { distance } => d.set_item("distance", *distance)?,
         ReduceSum { axes, accum_dtype } => {
             d.set_item("axes", axes.clone())?;
             d.set_item("accum_dtype", dtype(accum_dtype))?;

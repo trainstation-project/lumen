@@ -47,6 +47,32 @@ def test_pair_swaps_run_as_swap_pairs(device):
         assert "swap_pairs" in label and "concatenate" not in label and "slice" not in label, label
 
 
+def rotate_half(x, cos, sin):
+    """A rotate-half rotary embedding: each head's halves swapped, the first negated."""
+    d = x.shape[-1] // 2
+    return x * cos + F.cat([-x[..., d:], x[..., :d]], dim=-1) * sin
+
+
+def rotate_half_numpy(x, cos, sin):
+    """`rotate_half` in NumPy."""
+    d = x.shape[-1] // 2
+    return x * cos + np.concatenate([-x[..., d:], x[..., :d]], -1) * sin
+
+
+@pytest.mark.parametrize("device", [CPU, MPS, TRITON_CUDA], indirect=True)
+def test_half_swaps_run_as_swap_pairs(device):
+    """A rotate-half rotary's swap of each head's halves (two slices, a negation and a concatenation) is one
+    `swap_pairs` of distance `d / 2` times a sign on MPS and Triton (no slices, no concatenate), fused with the
+    rotary's multiplies into one kernel; NumPy's values on every device."""
+    arrays = [rand(4, 8, 128, seed=k) for k in range(3)]
+    args = on(device, *arrays)
+    got = lumen.to_numpy(lumen.compile(rotate_half)(*args).to("cpu"))
+    np.testing.assert_allclose(got, rotate_half_numpy(*arrays), rtol=1e-6, atol=1e-6)
+    if device != "cpu":
+        (label,) = labels(rotate_half, args, device)
+        assert "swap_pairs" in label and "concatenate" not in label and "slice" not in label, label
+
+
 @pytest.mark.parametrize("device", [MPS, TRITON_CUDA], indirect=True)
 def test_swap_pairs_run_in_triton_gemm_epilogues(device):
     """A rotary embedding of a matmul's product runs in the GEMM's epilogue on Triton: the accumulator tile's

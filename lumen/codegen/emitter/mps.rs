@@ -178,14 +178,14 @@ impl<'a> Emitter<'a> {
                         let i = self.operand_index(node, idx);
                         return self.value(node.inputs[0], i);
                     }
-                    // Each element's partner, read at `idx ^ 1` (MPS keeps pair swaps out of GEMM epilogues, whose
+                    // Each element's partner, read at `idx ^ distance` (MPS keeps pair swaps out of GEMM epilogues, whose
                     // functor sees one element).
-                    SwapPairs => {
+                    SwapPairs { distance } => {
                         if self.invariant[node.inputs[0]] {
                             return self.value(node.inputs[0], idx);
                         }
 
-                        let i = self.index(format!("({idx}) ^ 1"));
+                        let i = self.index(format!("({idx}) ^ {distance}"));
                         return self.value(node.inputs[0], i);
                     }
                     Gather { axis } => {

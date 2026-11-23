@@ -351,9 +351,10 @@ def transpose(x, permutation):
     return bind("transpose", x, permutation=tuple(permutation))
 
 
-def swap_pairs(x):
-    """``x`` with each adjacent pair along its last axis (even length) swapped: element ``2i`` with ``2i + 1``."""
-    return bind("swap_pairs", x)
+def swap_pairs(x, distance=1):
+    """``x`` with each last-axis element ``j`` swapped with ``j ^ distance`` (a power of two; the last axis a multiple
+    of twice it): with 1, each adjacent pair; with ``d / 2``, the two halves of each ``d`` elements."""
+    return bind("swap_pairs", x, distance=distance)
 
 
 def slice(x, start_indices, limit_indices):

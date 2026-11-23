@@ -274,7 +274,7 @@ fn regions_along<'a>(
 fn epilogue_read(body: &Graph, v: Var) -> bool {
     readers_of(body, v).iter().any(|r| match r.primitive {
         Primitive::Reshape { .. } => epilogue_read(body, r.output),
-        ref p => crate::graph_compiler::elementwise(p) || matches!(p, Primitive::SwapPairs),
+        ref p => crate::graph_compiler::elementwise(p) || matches!(p, Primitive::SwapPairs { .. }),
     })
 }
 
