@@ -541,7 +541,7 @@ fn delta_inside(graph: &Graph) -> Graph {
 /// How operand `shape`, read through `acc` with `batch` extents, `seq` rows and `width` columns a head, is made
 /// heads-major: the shape its buffer factors into by the access's strides (largest first), and the permutation
 /// putting those factors in batch, row, column order; `None` when the strides don't factor the buffer (an offset, a
-/// gap, a repeat) or it already is heads-major.
+/// gap, a repeat) or it already is heads-major, its buffer's last two dims its last two factors.
 fn heads_layout(
     shape: &[usize],
     acc: &attention::Access,
@@ -587,10 +587,12 @@ fn heads_layout(
     let mut perm: Vec<usize> = (0..factors.len()).collect();
     perm.sort_by_key(|&d| factors[d].2);
 
-    perm.iter()
-        .enumerate()
-        .any(|(d, &p)| d != p)
-        .then_some((sizes, perm))
+    // Moved when the factors aren't heads-major, or are but the buffer's last two dims (the tiles the kernels read)
+    // aren't its last two factors (a decode query read from a projection's flat row).
+    let tail = |dims: &[usize]| dims[dims.len().saturating_sub(2)..].to_vec();
+    let moves = perm.iter().enumerate().any(|(d, &p)| d != p) || tail(shape) != tail(&sizes);
+
+    moves.then_some((sizes, perm))
 }
 
 /// An operand's factors (its buffer's shape by the access's strides) and the permutation making them heads-major.

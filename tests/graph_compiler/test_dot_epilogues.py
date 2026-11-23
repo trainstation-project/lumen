@@ -2,7 +2,7 @@
 
 import numpy as np
 import pytest
-from helpers import CUDA, MPS, TRITON_CUDA, meta
+from helpers import CUDA, MPS, TPU, TRITON_CUDA, meta, rand
 
 import lumen
 import lumen.functional as F
@@ -635,3 +635,62 @@ def test_linear_reordering_keeps_a_norm_in_its_profiler_range():
     (projection,) = [s for s in steps if s["label"].endswith("broadcast_in_dim → mul")]
     assert norm["scope"] == ["norm"], (norm["label"], norm["scope"])
     assert projection["scope"] == ["projection"], (projection["label"], projection["scope"])
+
+
+class _Attention(lumen.nn.Module):
+    """Llama's attention projections: 4 query heads and 2 key and value heads, 64 wide."""
+
+    wq: lumen.Tensor
+    wk: lumen.Tensor
+    wv: lumen.Tensor
+
+
+def _heads_attention(m, x, pos, cache_k, cache_v):
+    """Llama's attention over `x`'s tokens from `pos`: projections split into heads, the keys and values written
+    into heads-major caches at `pos`, then causal attention (over the caches for one token)."""
+    seq = x.shape[1]
+    project = lambda w, heads: F.matmul(x, w.t(), "float32", "bfloat16").reshape(1, seq, heads, 64)  # noqa: E731
+    q, k, v = project(m.wq, 4), project(m.wk, 2), project(m.wv, 2)
+    cache_k.narrow(2, pos, seq).copy_(k.transpose(1, 2))
+    cache_v.narrow(2, pos, seq).copy_(v.transpose(1, 2))
+    if seq > 1:
+        return F.flash_attention(q, k, v, is_causal=True)
+    return F.attention_decode(q, cache_k.transpose(1, 2), cache_v.transpose(1, 2), pos)
+
+
+@pytest.mark.parametrize("device", [TPU], indirect=True)
+@pytest.mark.parametrize("seq", [1, 16])
+def test_matmul_writes_attention_heads(device, seq):
+    """On TPU, where splitting a row into heads moves them into rows of their own, the merged projections' GEMM
+    writes each head's columns where attention reads them: heads-major for a prefill's flash attention, a
+    decode step's query as the rows of one matrix, and the keys and values into the caches at `pos`: no reshape,
+    transpose or update kernels. The CPU's attention and caches."""
+    bf16 = lambda *s, seed, scale=1.0: lumen.from_numpy(rand(*s, seed=seed) * scale).to(dtype="bfloat16")  # noqa: E731
+    weights = dict(wq=bf16(256, 256, seed=0), wk=bf16(128, 256, seed=1), wv=bf16(128, 256, seed=2))
+    x = bf16(1, seq, 256, seed=3, scale=256**-0.5)
+
+    def run(device):
+        """The attention and both caches of one call on `device` (its module traced on meta tensors first, as a
+        module's weights are), and the compiled function."""
+        m = _Attention(**{k: meta(*v.shape, dtype="bfloat16") for k, v in weights.items()})
+        caches = [bf16(1, 2, 32, 64, seed=4).to(device), bf16(1, 2, 32, 64, seed=5).to(device)]
+        f = lumen.compile(_heads_attention, device=device)
+        traced = [meta(*a.shape, dtype=a.dtype) for a in [x, *caches]]
+        f(m, traced[0], meta(dtype="int32"), *traced[1:])
+        m.load_state_dict(weights)
+        out = f(m, x.to(device), lumen.tensor(5, dtype=lumen.int32, device=device), *caches)
+        return f, [lumen.to_numpy(t.to("cpu").to(dtype="float32")) for t in (out, *caches)]
+
+    _, want = run("cpu")
+    try:
+        f, got = run(device)
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    for g, w in zip(got, want, strict=True):
+        np.testing.assert_allclose(g, w, rtol=2e-2, atol=2e-2)
+    steps = [s["label"] for s in list(f._plans.values())[-1][6][0][0].steps()]
+    gemm, attention, *rest = steps
+    assert gemm.startswith("3x dot_general") and gemm.count("dynamic_update_slice") == 2, steps
+    assert attention == "flash_attention", steps
+    # Flash attention's heads-major result is put back in token order for the caller.
+    assert rest == (["transpose"] if seq > 1 else []), steps
