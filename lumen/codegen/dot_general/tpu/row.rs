@@ -79,8 +79,8 @@ pub(crate) fn kernel(step: &StepBase) -> Result<Kernel, String> {
         )));
     }
 
-    let lhs_rows =
-        lhs.shape.len() == 2 || lhs.shape[lhs.shape.len() - 2].is_multiple_of(tile(lhs.dtype)?);
+    // The lhs stacks its rows as the row operands do (one slab, or slabs of whole tiles).
+    let lhs_rows = readable(lhs, Kind::Full);
 
     let operands = row.inputs()[1..].iter().chain(row.outputs());
 
@@ -130,10 +130,16 @@ pub(crate) fn kernel(step: &StepBase) -> Result<Kernel, String> {
     let bk = block(k, 128, cap)
         .ok_or_else(|| failed(&format!("K ({k}) at most {cap} or a multiple of 128")))?;
 
-    // Prefer the largest row block, trying a smaller K block before a smaller row block.
+    // K blocks from the cap's down to 128 (a wide row streams `bk x n` rhs blocks).
+    let ks: Vec<usize> = [bk, 512, 256, 128]
+        .into_iter()
+        .filter_map(|cap| block(k, 128, cap.min(bk)))
+        .collect();
+
+    // Prefer the largest row block, trying smaller K blocks before a smaller row block.
     let (bm, bk) = candidates(ROWS)
         .into_iter()
-        .flat_map(|bm| [bk, block(k, 128, 512).unwrap_or(bk)].map(|bk| (bm, bk)))
+        .flat_map(|bm| ks.iter().map(move |&bk| (bm, bk)))
         .find(|&(bm, bk)| footprint(bm, bk) <= VMEM)
         .ok_or_else(|| {
             failed(&format!(

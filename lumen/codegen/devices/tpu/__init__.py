@@ -38,6 +38,9 @@ def per_row(nodes, values, shapes):
             values.append(x if tuple(x.shape) == shape else prims.broadcast_in_dim(x, shape, (0, 1)))
         elif name == "full":
             values.append(prims.full(shape, params["fill_value"], params["dtype"]))
+        elif name == "iota":
+            # An iota along the rows' last axis: each element's column.
+            values.append(prims.iota(params["dtype"], shape, len(shape) - 1))
         else:
             values.append(prims.bind(name, *args, **params))
     return values
