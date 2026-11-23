@@ -2,7 +2,7 @@
 
 import numpy as np
 import pytest
-from helpers import MPS, TRITON_CUDA, rand
+from helpers import MPS, TPU, TRITON_CUDA, rand
 
 import lumen
 import lumen.functional as F
@@ -80,3 +80,55 @@ def test_concatenates_read_elementwise_fuse_into_their_readers(device):
     got = lumen.to_numpy(lumen.compile(_rotary)(*args))
     want = lumen.to_numpy(lumen.compile(_rotary)(*(lumen.from_numpy(v) for v in arrays)))
     np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-5)
+
+
+def _exp_first(x, y, axis):
+    """The concatenation along ``axis`` of ``exp(x)`` and the input ``y``, which no kernel makes."""
+    return F.cat([F.exp(x), y], axis)
+
+
+def _dots(x, a, b):
+    """Two matmuls of ``x`` concatenated along their columns, the second's slot a block past the first."""
+    return F.cat([F.matmul(x, a, "float32", "float32"), F.matmul(x, b, "float32", "float32")], -1)
+
+
+def _scaled(x, y):
+    """Two elementwise fusions concatenated along their columns."""
+    return F.cat([F.exp(x), y * 2.0], -1)
+
+
+@pytest.mark.parametrize("device", [TPU], indirect=True)
+@pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
+@pytest.mark.parametrize(
+    "f, shapes, steps",
+    [
+        (lambda x, y: _exp_first(x, y, -1), [(64, 256), (64, 128)], ["exp", "concatenate"]),
+        (lambda x, y: _exp_first(x, y, -1), [(64, 192), (64, 64)], ["exp", "concatenate"]),
+        (lambda x, y: _exp_first(x, y, 0), [(32, 128), (16, 128)], ["exp", "concatenate"]),
+        (lambda x, y: _exp_first(x, y, 0), [(12, 256), (20, 256)], ["exp", "concatenate"]),
+        (lambda x, y: _exp_first(x, y, 1), [(2, 3, 16, 128), (2, 1, 16, 128)], ["exp", "concatenate"]),
+        (_scaled, [(64, 256), (64, 384)], ["exp", "mul"]),
+        (_dots, [(64, 256), (256, 256), (256, 384)], ["dot_general", "dot_general"]),
+    ],
+    ids=["lanes", "lanes-unaligned", "rows", "rows-unaligned", "leading", "elementwise-slots", "dot-slots"],
+)
+def test_tpu_concatenates(device, dtype, f, shapes, steps):
+    """On TPU, a concatenation its operands' kernels can't write in place
+    (an input, an axis other than the last, a width of no whole lanes) is
+    copied by a kernel of its own: DMAs into slots starting on tiles, else
+    blocks of the result built from its operands'. Operands kernels make
+    along the last axis are written straight into their slots, whose
+    blocks divide the result's width. The CPU's values."""
+    if dtype == "bfloat16" and f is _dots:
+        pytest.skip("the float32 matmul takes float32 operands")
+    arrays = [rand(*s, seed=k) / 8 for k, s in enumerate(shapes)]
+    args = [lumen.from_numpy(v).to(dtype=dtype) for v in arrays]
+    try:
+        on = [a.to(device) for a in args]
+    except RuntimeError as e:
+        pytest.skip(str(e))
+    plan = lumen.graph_compiler.Plan(lumen.make_graph(f)(*on), device)
+    assert [s["label"] for s in plan.steps()] == steps
+    got = lumen.to_numpy(lumen.compile(f)(*on).to("cpu").to(dtype="float32"))
+    want = lumen.to_numpy(lumen.compile(f)(*args).to(dtype="float32"))
+    np.testing.assert_allclose(got, want, rtol=1e-2, atol=1e-2)

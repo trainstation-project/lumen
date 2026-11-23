@@ -43,6 +43,20 @@ pub(crate) trait StridedOperands {
         k: usize,
         strides: &[usize],
     ) -> bool;
+
+    /// Whether a step running `kernel` (its fusion's name, else its dot's) reads `dot`'s operand `k` as the slice
+    /// from `starts` of a value laid out with `strides`; by default, from any start in any kernel, as
+    /// `reads_strided` accepts.
+    fn reads_slice(
+        _kernel: &str,
+        dot: &crate::graph::Primitive,
+        operands: [&crate::graph::TensorType; 2],
+        k: usize,
+        strides: &[usize],
+        _starts: &[usize],
+    ) -> bool {
+        Self::reads_strided(dot, operands, k, strides)
+    }
 }
 
 /// A backend whose matmuls merge into packed blocks (the graph compiler's `merge_dots`, `merge_dots_late` and

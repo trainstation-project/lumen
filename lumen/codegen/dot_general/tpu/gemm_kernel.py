@@ -19,14 +19,18 @@ def program(spec):
     written at columns ``start`` on of a buffer ``n`` wide, or, ``n`` 0, a
     buffer of its own). With ``together``, members of one width, each step
     computes every member's block at its columns, from a stream of the rhs's
-    blocks each, so the epilogue reads them all. Its scalars are the rows
-    of the lhs's parts, the rhs, the inputs and the outputs."""
+    blocks each, so the epilogue reads them all. ``views`` (the lhs's, the
+    rhs's): each ``null`` or ``[rows, columns, row, column]``, the operand
+    a slice from ``row`` and ``column`` of a value whose buffer it reads,
+    viewed with slabs of ``rows`` rows and ``columns`` columns. Its scalars
+    are the rows of the lhs's parts, the rhs, the inputs and the
+    outputs."""
     batch, lead, m, n, k = spec["batch"], spec["lead"], spec["m"], spec["n"], spec["k"]
     bm, bn, bk = spec["blocks"]
     t, tl = spec["transposed"], spec["lhs_transposed"]
     dtype, value = spec["operands"], spec["value"]
     mb, nb, kb = m // bm, n // bn, k // bk
-    widths, inputs, nodes, outputs = spec["widths"], spec["inputs"], spec["nodes"], spec["outputs"]
+    widths, inputs, nodes, outputs, views = (spec[k] for k in ("widths", "inputs", "nodes", "outputs", "views"))
     rows_split, lhs_k, together = spec["split_rows"], spec["lhs_k"], spec["together"]
     # Members and lhs parts are tiled in whole blocks; these are their block offsets and counts.
     parts = spec["lhs"] or [k if lhs_k else m]
@@ -66,6 +70,28 @@ def program(spec):
         numbers = (([0], [1 if t else 0]), ([], []))
         return pl.dot_general(xb[...], yb[...], numbers, preferred_element_type="float32")
 
+    def shifted(k, index, block):
+        """Block index map ``index`` of operand ``k`` (blocks ``block`` of
+        its rows and columns), stepping from its slice's start when it
+        reads a view."""
+        if views[k] is None:
+            return index
+        _, _, row, column = views[k]
+
+        def at(*grid):
+            """The block of grid step ``grid`` in the viewed value."""
+            b, i, j = index(*grid)
+            return b, i + row // block[0], j + column // block[1]
+
+        return at
+
+    def viewed(k, memory, row, shape):
+        """Operand ``k`` of ``shape``, at ``row`` of ``memory``: its
+        buffer's value with the view's rows and columns when it reads one."""
+        if views[k] is not None:
+            shape = (shape[0], *views[k][:2])
+        return pallas.view(memory, row, shape, dtype)
+
     def needed(indices):
         """The values ``indices`` are computed from, and they."""
         first = results + len(inputs)
@@ -92,9 +118,9 @@ def program(spec):
             free, contracting = (m, size) if lhs_k else (size, k)
             return (batch * lead, contracting, free) if tl else (batch * lead, free, contracting)
 
-        xs = [pallas.view(memory, rows[p], lhs_shape(size), dtype) for p, size in enumerate(parts)]
+        xs = [viewed(0, memory, rows[p], lhs_shape(size)) for p, size in enumerate(parts)]
         r = len(parts)
-        y = pallas.view(memory, rows[r], (batch, n, k) if t else (batch, k, n), dtype)
+        y = viewed(1, memory, rows[r], (batch, n, k) if t else (batch, k, n))
         # Scalar epilogue inputs are copied to VMEM once, up front.
         scalars = {}
         for i, (d, scalar, _) in enumerate(inputs):
@@ -126,7 +152,8 @@ def program(spec):
                     i = clamp(i, start, count)
                 return (b, s, i) if tl else (b, i, s)
 
-            return pl.BlockSpec((None, bk, bm) if tl else (None, bm, bk), index)
+            block = (bk, bm) if tl else (bm, bk)
+            return pl.BlockSpec((None, *block), shifted(0, index, block))
 
         x_specs = [lhs_spec(p) for p in range(len(parts))]
 
@@ -140,7 +167,8 @@ def program(spec):
                     j = j + at
                 return (rhs_batch(b), j, s) if t else (rhs_batch(b), s, j)
 
-            return pl.BlockSpec((None, bn, bk) if t else (None, bk, bn), index)
+            block = (bn, bk) if t else (bk, bn)
+            return pl.BlockSpec((None, *block), shifted(1, index, block))
 
         y_specs = [rhs_spec(p) for p in range(streams)]
 

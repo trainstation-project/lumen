@@ -20,4 +20,5 @@ a fusion of its own, how its fused bodies are named, and the helpers other passe
   (no reduction epilogues, no rows, `dot_epilogue` from `dot_general::cuda::epilogue`), fusions named
   `dot_general` or `elementwise`. With `fuse`.
 - `tpu.rs` — TPU: its `Fuses` runs `passes::fusion::groups` (planned groups), always; `horizontal_candidate`,
-  `HORIZONTAL_BUFFERS` and `slot_writes`.
+  `HORIZONTAL_BUFFERS` and `slot_writes`. Its `Rechecks` copies a slot whose operand fusion made a reduction's, or
+  an elementwise fusion's output other than its first (the only one that kernel writes into a window).

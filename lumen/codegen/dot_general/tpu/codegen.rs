@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use crate::DType;
 use crate::codegen::devices::tpu::{Tpu, window};
 use crate::codegen::dot_general::GemmCodegen;
-use crate::codegen::dot_general::tpu::{block, caps};
+use crate::codegen::dot_general::tpu::{SliceView, block, caps, slice_view};
 use crate::device::tpu::layout::Layout;
 use crate::graph::{Graph, Node, Primitive, TensorType, Var};
 use crate::plan::StepBase;
@@ -300,13 +300,42 @@ fn tile_rows(dtype: DType, what: &str) -> Result<usize, String> {
     }
 }
 
-/// The Pallas kernel's name and spec for the dot `dot` of `lhs` and `rhs`, computing `value`s, of the plan
-/// step `step`, followed by `epilogue` (writing the dot output unchanged when `None`).
+/// How the GEMM reads `operand`, step input `k` when it is one, through the input's view: the slice of the value
+/// the view's offset starts (`slice_view`); `None` when it reads the input's own buffer.
+fn viewed(
+    step: &StepBase,
+    k: Option<usize>,
+    operand: &TensorType,
+) -> Result<Option<SliceView>, String> {
+    let Some(view) = k.and_then(|k| step.views[k].as_ref()) else {
+        return Ok(None);
+    };
+
+    let strides = &view.strides;
+
+    // Each dim's start: the offset's whole strides, within the value's extent past the first dim.
+    let starts: Vec<usize> = (0..strides.len())
+        .map(|d| match d {
+            0 => view.offset / strides[0],
+            _ => view.offset / strides[d] % (strides[d - 1] / strides[d]),
+        })
+        .collect();
+
+    slice_view(operand, strides, &starts)
+        .map(Some)
+        .ok_or_else(|| {
+            format!("dot_general on TPU: an operand {operand} read as a view of no whole tiles")
+        })
+}
+
+/// The Pallas kernel's name and spec for the dot `dot` of `lhs` and `rhs` (step inputs `operands`, when they are
+/// ones), computing `value`s, of the plan step `step`, followed by `epilogue` (writing the dot output unchanged
+/// when `None`).
 pub(crate) fn spec(
     step: &StepBase,
     dot: &Primitive,
-    lhs: &TensorType,
-    rhs: &TensorType,
+    [lhs, rhs]: [&TensorType; 2],
+    operands: [Option<usize>; 2],
     value: DType,
     epilogue: Option<Epilogue>,
 ) -> Result<(String, String), String> {
@@ -327,6 +356,24 @@ pub(crate) fn spec(
             };
 
     let lhs_m = !e.lhs.is_empty() && !lhs_k;
+    let views = [
+        viewed(step, operands[0], lhs)?,
+        viewed(step, operands[1], rhs)?,
+    ];
+
+    // A view's blocks step from its slice's first row and column, and through its value's rows and columns.
+    let along = |k: usize, rows: bool| {
+        views[k].map_or(Vec::new(), |v| match rows {
+            true => vec![v.row, v.rows],
+            false => vec![v.column, v.columns],
+        })
+    };
+
+    let (on_m, on_k, on_n) = (
+        along(0, !f.lhs_transposed),
+        [along(0, f.lhs_transposed), along(1, !f.transposed)].concat(),
+        along(1, f.transposed),
+    );
 
     let gcd_of = |n: usize, parts: &[usize], on: bool| match on {
         true => parts.iter().fold(n, |g, &w| gcd(g, w)),
@@ -340,11 +387,20 @@ pub(crate) fn spec(
         return Err("dot_general on TPU: members of rows written into a wider buffer".into());
     }
 
-    // Blocks must divide every member and window start so none straddles two members.
-    let starts: Vec<usize> = windows.iter().flatten().map(|w| w.1).collect();
-    let unit_n = gcd_of(gcd_of(f.n, &e.widths, !e.rows), &starts, true);
-    let whole_m = gcd_of(gcd_of(f.m, &e.widths, e.rows), &e.lhs, lhs_m);
-    let whole_k = gcd_of(f.k, &e.lhs, lhs_k);
+    // Blocks must divide every member, window start and windowed buffer's width, so none straddles two members
+    // or reaches past a buffer's tiles.
+    let starts: Vec<usize> = windows.iter().flatten().flat_map(|w| [w.0, w.1]).collect();
+    let unit_n = gcd_of(
+        gcd_of(gcd_of(f.n, &e.widths, !e.rows), &starts, true),
+        &on_n,
+        true,
+    );
+    let whole_m = gcd_of(
+        gcd_of(gcd_of(f.m, &e.widths, e.rows), &e.lhs, lhs_m),
+        &on_m,
+        true,
+    );
+    let whole_k = gcd_of(gcd_of(f.k, &e.lhs, lhs_k), &on_k, true);
 
     if lhs.dtype != rhs.dtype || accum_dtype != DType::F32 {
         return Err(format!(
@@ -467,10 +523,18 @@ pub(crate) fn spec(
         })
         .collect();
 
+    let views_spec: Vec<String> = views
+        .iter()
+        .map(|v| match v {
+            Some(v) => format!("[{}, {}, {}, {}]", v.rows, v.columns, v.row, v.column),
+            None => "null".into(),
+        })
+        .collect();
+
     let spec = format!(
         "\"batch\": {}, \"lead\": {}, \"m\": {}, \"n\": {}, \"k\": {}, \"transposed\": {}, \"lhs_transposed\": {}, \"lhs\": {:?}, \"lhs_k\": {lhs_k}, \"together\": {}, \"split_rows\": {}, \
          \"operands\": \"{}\", \"value\": \"{}\", \"blocks\": [{bm}, {bn}, {bk}], \"widths\": {:?}, \
-         \"inputs\": [{}], \"nodes\": [{}], \"outputs\": [{}]",
+         \"inputs\": [{}], \"nodes\": [{}], \"outputs\": [{}], \"views\": [{}]",
         f.batch,
         f.lead,
         f.m,
@@ -487,6 +551,7 @@ pub(crate) fn spec(
         inputs_spec.join(", "),
         e.nodes.join(", "),
         outputs_spec.join(", "),
+        views_spec.join(", "),
     );
 
     Ok((
@@ -512,12 +577,13 @@ impl GemmCodegen for Tpu {
     ) -> Result<(String, String), String> {
         let (epilogue, _) = Epilogue::of(body);
         let ty = |v: Var| body.type_of(v);
+        let input = |v: Var| body.inputs().iter().position(|&u| u == v);
 
         spec(
             step,
             &dot.primitive,
-            ty(dot.inputs[0]),
-            ty(dot.inputs[1]),
+            [ty(dot.inputs[0]), ty(dot.inputs[1])],
+            [input(dot.inputs[0]), input(dot.inputs[1])],
             ty(dot.output).dtype,
             Some(epilogue),
         )

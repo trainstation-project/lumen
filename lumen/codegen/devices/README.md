@@ -20,6 +20,8 @@ kernel family needs lives in that family (`codegen/<family>/<device>`).
   - `node`: the JSON `{name, params, args}` that Python kernels rebuild a primitive from.
   - `window`/`window_at`: an output written into a column window of a wider matrix.
   - `LANES` (128).
+  - `Lone`: `alone` wraps each concatenation not written in place into a `CONCATENATE` fusion
+    (`layout::tpu::concatenate`) and each slice `place_views` made no view into an `elementwise` one.
   The fusion and dot passes in `graph_compiler/passes` use these too.
 - `tpu/kernel.rs` — TPU (Pallas) codegen, built only with the TPU linked and re-exported from `tpu`: the per-step `Kernel` spec, the kernel each step runs (`kernel`), and the `Pallas` and `Nothing` kernels.
 - `tpu/lowering.rs` — lowers TPU kernels to Mosaic by calling `lumen.codegen.devices.tpu.pallas`, cached per (module, spec) and per device. It fails without Python.

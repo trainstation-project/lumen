@@ -1,7 +1,8 @@
 # layout
 
 Code generation for moving elements between layouts. This covers transposes fused with elementwise ops,
-staged through tiles so reads and writes are both coalesced, and TPU reshapes of TPU-tiled tensors.
+staged through tiles so reads and writes are both coalesced, and TPU reshapes and concatenations of TPU-tiled
+tensors.
 Other layout ops (reshape, broadcast, slice) are views or index arithmetic inside elementwise kernels.
 
 ## Files
@@ -10,7 +11,7 @@ Other layout ops (reshape, broadcast, slice) are views or index arithmetic insid
   share. The trait has two methods: `transpose(body, by_value, options)` and `reshape(from, to)`.
 - `mps/` — `mod.rs` and `transpose.rs`, the Metal tiled transpose.
 - `triton/` — `mod.rs` and `kernel.py`, the Triton transpose template.
-- `tpu/` — `mod.rs` and `kernel.py`, the Pallas reshape.
+- `tpu/` — `mod.rs`, `kernel.py` (the Pallas reshape) and `concatenate.py` (the Pallas concatenation).
 
 There is no CUDA layout code.
 
@@ -52,6 +53,10 @@ elementwise kernels. A reshape is supported only when it splits a last dimension
 or merges them back. Any other reshape that moves elements between tiles fails. `kernel(step)` wraps it
 as module `lumen.codegen.layout.tpu.kernel` with `Rows::Step`. `codegen/devices/tpu` uses that for
 `Reshape` steps, and the `Pallas` kernel launches it. `kernel.py::program(spec)` copies `bm`-row blocks
-between the flat and tiled forms.
+between the flat and tiled forms. `concatenate(step)` encodes a `concatenate` fusion (one concatenation not written
+in place, `codegen/devices/tpu`'s `Lone`) as module `lumen.codegen.layout.tpu.concatenate`: `dma` DMAs each operand
+into its slot when every slot starts on a tile (a leading axis, or whole tiles of rows or lanes before the last
+operand); otherwise `lanes` (last axis) or `rows` (the one before) builds each block of the result from its operands'
+blocks under `CONCAT_BYTES`.
 
 None of these backends defines a Kernel struct or configs for this family.

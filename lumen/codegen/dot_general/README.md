@@ -90,9 +90,13 @@ steps, and the autotuner times its configs.
 ## tpu
 
 - `mod.rs`: `block` and `caps` choose block sizes; `kernel` builds the step's `codegen::devices::tpu::Kernel` for module
-  `lumen.codegen.dot_general.tpu.gemm_kernel`.
+  `lumen.codegen.dot_general.tpu.gemm_kernel`. `slice_view` is which slices the GEMM reads in place (`StridedOperands`,
+  for `place_views`): leading dims whole (a prefix of the first), columns whole or in whole 128-lane tiles, rows whole
+  or in whole tiles of rows (a matrix's first rows too). It gives the `SliceView` the kernel steps through.
 - `codegen.rs`: `GemmCodegen for Tpu`, `Epilogue` (concatenated lhs, output slices, epilogue nodes) and `spec`,
-  which fits blocks into an 88 MiB VMEM budget; only float32 and bfloat16 operands.
+  which fits blocks into an 88 MiB VMEM budget; only float32 and bfloat16 operands. Blocks divide each output
+  window's start and width, and each viewed operand's slice start and value extent; the spec's `views` holds each
+  operand's `SliceView`, whose block indices the kernel offsets by the slice's start.
 - `row.rs`: `kernel` for `dot_row` fusions; each block of up to 1024 rows computes the full `n`-wide output in
   VMEM and applies the row nodes.
 - `gemm_kernel.py`, `row_kernel.py`: the Pallas `program(spec)` for each.

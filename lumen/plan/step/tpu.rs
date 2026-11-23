@@ -4,7 +4,7 @@
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
-use super::{unsupported, viewed};
+use super::unsupported;
 use crate::Device;
 use crate::codegen::devices::tpu::Kernel;
 use crate::codegen::kernel::Runner;
@@ -64,21 +64,46 @@ impl Step for TpuStep {
             unreachable!("a TPU plan runs on a TPU")
         };
 
+        // A view's kernel reads its whole buffer from the start, at the slice its spec holds.
+        let inputs = self
+            .inputs
+            .iter()
+            .chain(&self.extra_outputs)
+            .map(|s| buffers.pointer(s).cast_const())
+            .collect();
+
         let pointers = Pointers {
             index,
-            inputs: buffers.args(self),
+            inputs,
             output: buffers.pointer(&self.output),
         };
 
         self.kernel.run(self, self.tuned.as_ref(), &pointers)
     }
 
-    /// Errors unless `device` is a TPU, no step reads runtime scalars or an operand through a view.
+    /// Errors unless `device` is a TPU, no step reads runtime scalars, and only matmuls (`place_views`) read an
+    /// operand through a view.
     fn check(steps: &[Self], device: Device) -> Result<(), String> {
         let runs = |d| matches!(d, Device::Tpu(_));
 
-        if let Some(e) = unsupported(steps, device, runs, "a TPU").or_else(|| viewed(steps)) {
+        if let Some(e) = unsupported(steps, device, runs, "a TPU") {
             return Err(e);
+        }
+
+        let gemm = |s: &Self| match &s.primitive {
+            Primitive::DotGeneral { .. } => true,
+            Primitive::Fusion { name, .. } => name == "dot_general",
+            _ => false,
+        };
+
+        if let Some(step) = steps
+            .iter()
+            .find(|s| !gemm(s) && s.views.iter().any(Option::is_some))
+        {
+            return Err(format!(
+                "{}: operands read as views run on TPU only in a matmul",
+                step.label
+            ));
         }
 
         let scalar = steps.iter().find(|s| {

@@ -1480,6 +1480,9 @@ fn devices_run_the_passes_they_implement() {
             "fuse_dots",
             "place_concats",
             "fusion",
+            "place_views",
+            "alone",
+            "concats",
             "horizontal_fusion",
         ]
     );

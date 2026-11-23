@@ -216,7 +216,8 @@ fn candidates(n: usize, unit: usize, cap: usize) -> Vec<usize> {
 }
 
 /// Picks blocks for the elementwise `body` that every operand and the output read in whole tiles, with
-/// the last block dividing `window` (the output's column offset in a wider matrix).
+/// the last block dividing `window` (for an output in a wider matrix, its column offset's and the matrix width's
+/// common divisor).
 pub(crate) fn plan(body: &Graph, window: usize) -> Result<Plan, String> {
     let maps = maps(body)?;
     let root = body.outputs()[0];
