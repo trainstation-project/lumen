@@ -56,7 +56,9 @@ code generated per fusion so the fixed kernels can read and write its operands i
   - `config.rs`: `blocks` picks query and key block sizes (multiples of 128 lanes, capped at 1024 / 4096).
   - `mod.rs`: `AttentionCodegen for Tpu` builds the spec: each operand checked to be read or written as whole tiles
     per head, epilogues limited to reshapes, sums and casts reading scalar inputs; only float32 and bfloat16, no
-    dropout. `step_kernel` is called from `codegen/devices/tpu` for fusions named `flash_attention*` and runs under the
+    dropout. The forward writes heads narrower than 128 lanes in token order too, several to a 128-lane block (the
+    output's `pack`): its grid runs query blocks outermost, so a block's heads run back to back, each writing its
+    lanes before the block is written back. `step_kernel` is called from `codegen/devices/tpu` for fusions named `flash_attention*` and runs under the
     generic `Pallas` Kernel.
 
 ## Conventions

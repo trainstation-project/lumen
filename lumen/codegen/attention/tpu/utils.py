@@ -190,15 +190,17 @@ def views(memory, result, rows, ops):
 
 
 def matrix(spec, op, height, width, block_of):
-    """Block spec of `(height, width)` tiles of operand `op`, placed by `block_of(*ids) -> (batch ids, row block)`."""
+    """Block spec of `(height, width)` tiles of operand `op`, placed by `block_of(*ids) -> (batch ids, row block)`;
+    `(height, width * pack)` when its `pack` heads share each block's lanes."""
+    pack = op.get("pack", 1)
 
     def index(*ids):
         """Block index `(slab, row block, column)` for grid ids `ids`."""
         g, i = block_of(*ids)
         slab, column = head(spec, op, g)
-        return slab, i, column
+        return slab, i, div(column, pack)
 
-    return pl.BlockSpec((None, height, width), index)
+    return pl.BlockSpec((None, height, width * pack), index)
 
 
 def vector(spec, op, height, block_of):

@@ -11,17 +11,20 @@ from lumen.codegen.attention.tpu.utils import (
     broadcast,
     by_mask,
     chunk,
+    head,
     heads,
 )
 from lumen.codegen.attention.tpu.utils import key_block as fetched
 from lumen.codegen.attention.tpu.utils import (
     masked,
     matrix,
+    mod,
     mul,
     scored,
     tile,
     vector,
     views,
+    when,
     zeros,
 )
 from lumen.codegen.devices.tpu import computed, pallas
@@ -37,7 +40,9 @@ def program(spec):
     rounded to ``o_dtype``: written as ``o`` and, through ``epilogue`` (its
     ``nodes`` on the output block, the scalars it reads by row), as ``e``;
     the rows' log-sum-exp too if ``lse``. A causal mask skips the blocks
-    past the diagonal, and their copies."""
+    past the diagonal, and their copies. Outputs whose ``pack`` heads share
+    each 128-lane block get each head's value in its lanes, the query
+    block outermost on the grid so a block's heads run back to back."""
     BLOCK_SIZE_M, BLOCK_SIZE_N = spec["blocks"]
     bkc = chunk(BLOCK_SIZE_N)
     NUM_BLOCKS_M, NUM_BLOCKS_N = spec["sq"] // BLOCK_SIZE_M, spec["sk"] // BLOCK_SIZE_N
@@ -50,7 +55,16 @@ def program(spec):
         """Key block fetched for query block `BLOCK_ID_M` at step `BLOCK_ID_N`."""
         return fetched(spec, BLOCK_ID_M, BLOCK_ID_N)
 
-    grid = (*heads(spec), NUM_BLOCKS_M, NUM_BLOCKS_N)
+    # Heads sharing an output block (its `pack`) run back to back, its query block outermost, so the block stays
+    # in VMEM until all of them have written their lanes.
+    packed = any(x.get("pack", 1) > 1 for x in outs)
+    grid = (NUM_BLOCKS_M, *heads(spec), NUM_BLOCKS_N) if packed else (*heads(spec), NUM_BLOCKS_M, NUM_BLOCKS_N)
+
+    def split(ids):
+        """`(batch ids, query block, key step)` of grid ids `ids`."""
+        if packed:
+            return tuple(ids[1:-1]), ids[0], ids[-1]
+        return tuple(ids[:-2]), ids[-2], ids[-1]
 
     def kernel(rows, memory, result, m_ref, l_ref, acc_ref):
         """Pipelines the attention blocks over the grid, reading `rows` of `memory` and writing into `result`."""
@@ -67,8 +81,8 @@ def program(spec):
             copy(pallas.view(memory, rows[row], (), dtype), s)
             scalars.append(s)
         ops = [(q, False), (k, False), (v, False)] + [(x, True) for x in outs] + ([(lse, True)] if lse else [])
-        query_rows = lambda *ids: (ids[:-2], ids[-2])  # noqa: E731
-        key_rows = lambda *ids: (ids[:-2], key_block(ids[-2], ids[-1]))  # noqa: E731
+        query_rows = lambda *ids: split(ids)[:2]  # noqa: E731
+        key_rows = lambda *ids: (split(ids)[0], key_block(*split(ids)[1:]))  # noqa: E731
         in_specs = [matrix(spec, q, BLOCK_SIZE_M, h, query_rows), matrix(spec, k, BLOCK_SIZE_N, h, key_rows)]
         in_specs.append(matrix(spec, v, BLOCK_SIZE_N, hv, key_rows))
         out_specs = [matrix(spec, x, BLOCK_SIZE_M, hv, query_rows) for x in outs]
@@ -77,8 +91,22 @@ def program(spec):
 
         def body(qb, kb, vb, *rest):
             """Accumulates one key block into the running softmax and output, finalizing after the last."""
-            ids = [pl.program_id(a) for a in range(len(grid))]
-            BLOCK_ID_BATCH, BLOCK_ID_M, BLOCK_ID_N = tuple(ids[:-2]), ids[-2], ids[-1]
+            BLOCK_ID_BATCH, BLOCK_ID_M, BLOCK_ID_N = split([pl.program_id(a) for a in range(len(grid))])
+
+            def store(x, ref, value):
+                """Writes `value` into output `x`'s block `ref`: into its head's lanes when heads share the block."""
+                pack = x.get("pack", 1)
+                if pack == 1:
+                    ref[...] = value
+                    return
+                lane = mod(head(spec, x, BLOCK_ID_BATCH)[1], pack)
+                for p in range(pack):
+
+                    def write(p=p):
+                        """Writes `value` into lanes `p * hv` on."""
+                        ref[:, p * hv : (p + 1) * hv] = value
+
+                    when(lane == p, write)
 
             @pl.when(BLOCK_ID_N == 0)
             def _():
@@ -120,12 +148,11 @@ def program(spec):
                 value = (acc_ref[...] * tile(1.0 / total, hv)).to(spec["o_dtype"])
                 for x, ref in zip(outs, rest):
                     if x is o:
-                        ref[...] = value.to(ref.dtype)
+                        store(x, ref, value.to(ref.dtype))
                         continue
                     values = [value] + [s[...] for s in scalars]
-                    ref[...] = computed(epilogue["nodes"], values, (BLOCK_SIZE_M, hv))[epilogue["result"]].to(
-                        ref.dtype
-                    )
+                    result = computed(epilogue["nodes"], values, (BLOCK_SIZE_M, hv))[epilogue["result"]]
+                    store(x, ref, result.to(ref.dtype))
                 if lse:
                     rest[len(outs)][...] = (F.log(total) + m_ref[...])[:, :1].to(rest[len(outs)].dtype)
 

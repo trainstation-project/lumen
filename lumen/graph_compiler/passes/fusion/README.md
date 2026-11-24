@@ -41,7 +41,8 @@ before `wide_rows`, `place_views`, `alone`, `concats` and `horizontal`; it consu
 - `groups.rs` — fusion by planned groups (TPU's own, not the shared driver): plans groups back to front,
   splitting off layout ops until every group's indexing can be planned, and turns the groups into
   `elementwise` or `reduction` fusions (a reducing member leads). A slice alone in its group stays out, for
-  `place_views` to view or `alone` to wrap.
+  `place_views` to view or `alone` to wrap; so does a reshape alone that keeps every element in its tile (a leading
+  unit axis added or dropped), which the plan runs as a view of its operand's buffer.
 
 The `Fusion` pass (in `mod.rs`) runs each device's fusion, `codegen::fusion::Fuses::fuse`, on every device whose codegen
 implements `Fuses`: MPS, Triton and CUDA (with `fuse`) and TPU (always, `WITH_FUSE` off). Each backend's fusion,

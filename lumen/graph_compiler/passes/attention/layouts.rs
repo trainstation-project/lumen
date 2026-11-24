@@ -600,7 +600,9 @@ type Layout = (Vec<usize>, Vec<usize>);
 
 /// Gives each attention fusion the backend's kernels (`D::check`) can't take its q, k, v (and the backward's dO)
 /// heads-major: a reshape and transpose before the fusion write each such body input heads-major (`heads_layout`),
-/// and the body transposes and reshapes it back, so the kernel reads each head as one contiguous slab.
+/// and the body transposes and reshapes it back, so the kernel reads each head as one contiguous slab. A forward
+/// attention's output stays written through its layout chain when the kernels take that once the inputs are moved;
+/// else the chain runs after the fusion.
 fn heads_major<D: TiledAttentions>(graph: &Graph) -> Graph {
     let nodes = graph.nodes();
 
@@ -636,11 +638,6 @@ fn heads_major<D: TiledAttentions>(graph: &Graph) -> Graph {
             continue;
         };
 
-        // One query a head writes its heads' matrix as laid out (`unreadable`): its chain stays.
-        if name == "flash_attention" && attention::of_body(body).is_some_and(|a| a.sq > 1) {
-            trailing[i] = layout_chain(body);
-        }
-
         for (acc, batch, extents) in &accesses {
             let Some(k) = body.inputs().iter().position(|&v| v == acc.base) else {
                 continue;
@@ -652,6 +649,17 @@ fn heads_major<D: TiledAttentions>(graph: &Graph) -> Graph {
             if let Some(layout) = layout.filter(|_| moved[i].iter().all(|(j, _)| *j != k)) {
                 moved[i].push((k, layout));
             }
+        }
+
+        // The output's layout chain runs after the fusion only if the kernel can't write through it once the inputs
+        // are heads-major; one query a head writes its heads' matrix as laid out (`unreadable`): its chain stays.
+        let inputs_only = transposed_back(body, &moved[i], &[]);
+
+        if name == "flash_attention"
+            && attention::of_body(body).is_some_and(|a| a.sq > 1)
+            && D::check(name, &inputs_only).is_err()
+        {
+            trailing[i] = layout_chain(body);
         }
     }
 
