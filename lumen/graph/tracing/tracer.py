@@ -797,6 +797,9 @@ class Compiled:
         self._baked = {}
         self._hosts, self._pending = {}, []
         self._fast = {}
+        # Each plan's inputs with its weights placed and packed, by plan: ``(plan, weights, their ids, inputs, the
+        # positions each call fills)`` (``_prepare``).
+        self._resolved = {}
         # CUDA graphs by plan (``config.compiler.cuda_graphs``): each plan's graph, its staged
         # arguments, the addresses it was captured at and its outputs, or None once it cannot capture.
         self._graphs, self._warm = {}, set()
@@ -810,23 +813,29 @@ class Compiled:
         arguments, then the weights placed, and their blocks)."""
         target = self._named or _device(args, None)
         structure, slots, weights = walked or _walk(args)
-        # An int or bool seen with two values across calls is made runtime instead of recompiling per value.
+        # An int or bool seen with two values across calls is made runtime instead of recompiling per value. Each
+        # scalar's runtime flag (``_runtime``) is worked out in the same pass.
+        flags = []
         for slot, value in slots:
-            if _baked(slot, value) and slot not in self._dynamic and slot not in self._pinned:
+            baked = _baked(slot, value)
+            if baked and slot not in self._dynamic and slot not in self._pinned:
                 if self._seen.setdefault(slot, (type(value), value)) != (type(value), value):
                     self._dynamic.add(slot)
-        key = _keyed(structure, slots, _runtime(self._dynamic)), target, _compiler_flags()
+            flags.append(not baked or slot in self._dynamic)
+        scalars_key = tuple(("scalar", type(v)) if f else ("static", type(v), v) for (_, v), f in zip(slots, flags))
+        key = (structure, scalars_key), target, _compiler_flags()
         result = None
         if key not in self._plans:
             result = _settled(self._fn, args, target, self._dynamic, self._pinned, self._proven)
             structure, slots, weights = _walk(args)
-            key = _keyed(structure, slots, _runtime(self._dynamic)), target, _compiler_flags()
+            runtime = _runtime(self._dynamic)
+            flags = [runtime(slot, v) for slot, v in slots]
+            key = _keyed(structure, slots, runtime), target, _compiler_flags()
         if result is not None:
             self._plans[key] = (*result, [])
         graph, out, written_all, drawn, _, layout, entries = self._plans[key]
         host_graph, n_hoisted, host_slots = written_all[3]
-        runtime = _runtime(self._dynamic)
-        runtime_slots = [(slot, v) for slot, v in slots if runtime(slot, v)]
+        runtime_slots = [sv for sv, f in zip(slots, flags) if f]
         raw = [Tensor.full([], _plain(v), _scalar_dtype(target, v)) for _, v in runtime_slots]
         self._pending[:] = []
         hoisted = []
@@ -856,15 +865,29 @@ class Compiled:
         by_value = not _graphed(target) and _device_type(target) != "tpu"
         scalars = [i for i, (kind, _) in enumerate(layout) if kind in _SCALARS] if by_value else []
 
+        held = [id(w) for w in weights]
+
         def inputs_for(plan):
-            """The plan's inputs for this call, or None if a packed weight block cannot be read in place."""
+            """The plan's inputs for this call, or None if a packed weight block cannot be read in place. A plan's
+            placed weights and packed blocks are kept (``_resolved``) and reused while a call passes the same
+            weights: a weight's placement never changes once made."""
+            resolved = self._resolved.get(id(plan))
+            if resolved is not None and resolved[0] is plan and resolved[2] == held:
+                inputs = resolved[3].copy()
+                for i in resolved[4]:
+                    inputs[i] = logical[i]
+                return inputs
             blocks = []
             for (positions, dimension), regions in zip(plan.packed, plan.interleaved):
                 block = _pack([logical[i] for i in positions], dimension, target, regions)
                 if block is None:
                     return None
                 blocks.append(block)
-            return [v._placed(target) if kind == "weight" else v for (kind, _), v in zip(layout, logical)] + blocks
+            inputs = [v._placed(target) if kind == "weight" else v for (kind, _), v in zip(layout, logical)] + blocks
+            others = [i for i, (kind, _) in enumerate(layout) if kind != "weight"]
+            # The weights are kept too, so no other tensor can take their ids.
+            self._resolved[id(plan)] = (plan, weights, held, inputs.copy(), others)
+            return inputs
 
         # Reuse the first cached plan whose packed weight blocks this call's weights can fill.
         for plan, workspace in entries:
