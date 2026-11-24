@@ -96,7 +96,10 @@ steps, and the autotuner times its configs.
 - `codegen.rs`: `GemmCodegen for Tpu`, `Epilogue` (concatenated lhs, output slices, epilogue nodes) and `spec`,
   which fits blocks into an 88 MiB VMEM budget; only float32 and bfloat16 operands. Blocks divide each output
   window's start and width, and each viewed operand's slice start and value extent; the spec's `views` holds each
-  operand's `SliceView`, whose block indices the kernel offsets by the slice's start.
+  operand's `SliceView`, whose block indices the kernel offsets by the slice's start. Outputs written by heads
+  (`Update`, the spec's `updates`) aren't streamed: the kernel DMAs each head's columns as rows of their own into a
+  KV cache from a runtime row, into a heads-major output from row 0, or, for one row, into one `[heads, width]`
+  matrix (a decode query).
 - `row.rs`: `kernel` for `dot_row` fusions; each block of up to 1024 rows computes the full `n`-wide output in
   VMEM and applies the row nodes.
 - `gemm_kernel.py`, `row_kernel.py`: the Pallas `program(spec)` for each.
