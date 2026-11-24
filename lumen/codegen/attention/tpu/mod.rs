@@ -901,7 +901,8 @@ fn decode_block(sk: usize) -> usize {
 }
 
 /// The decode kernel's kind and spec for attention `a` of fusion `body`, one query a head (JAX's paged attention's
-/// form): its batch dims `[batch, heads]`, the query and output each batch index's `[heads, head dim]` matrix, the
+/// form): its batch dims `[batch, heads]`, the query and output each batch index's `[heads, head dim]` matrix (the
+/// output may instead be its `[1, heads * head dim]` row, `flat`, as the output projection reads it), the
 /// keys and values heads-major (`[batch, kv heads, keys, head dim]`, a query head reading kv head `head / group`), no
 /// epilogue or log-sum-exp; the causal diagonal plus a runtime offset (`offset`, an input's row) when it has one.
 fn decode(body: &Graph, a: &Attention) -> Result<(&'static str, String), String> {
@@ -966,8 +967,13 @@ fn decode(body: &Graph, a: &Attention) -> Result<(&'static str, String), String>
 
     let (_, out) = written_at(body, &a.out, &a.batch, 0)?;
 
-    if !rows(&out, a.hv) || matrix(body.outputs()[0]) != [n, a.hv] {
-        return failed("an output other than each batch index's [heads, head dim] matrix");
+    // Each batch index's heads as the rows of a matrix, or side by side in one row (`flat`), as a projection reads them.
+    let flat = matrix(body.outputs()[0]) == [1, n * a.hv];
+
+    if !rows(&out, a.hv) || !(flat || matrix(body.outputs()[0]) == [n, a.hv]) {
+        return failed(
+            "an output other than each batch index's [heads, head dim] matrix or [1, heads * head dim] row",
+        );
     }
 
     let n_inputs = body.inputs().len();
@@ -983,7 +989,7 @@ fn decode(body: &Graph, a: &Attention) -> Result<(&'static str, String), String>
     };
 
     let spec = format!(
-        "\"kind\": \"decode\", \"b\": {b}, \"n\": {n}, \"group\": {group}, \"sk\": {}, \"h\": {}, \"hv\": {},          \"bk\": {}, \"scores\": {}, \"causal\": {}, \"offset\": {offset}, \"q\": {}, \"k\": {}, \"v\": {}, \"o\": {n_inputs},          \"dtype\": \"{}\", \"o_dtype\": \"{}\"",
+        "\"kind\": \"decode\", \"b\": {b}, \"n\": {n}, \"group\": {group}, \"sk\": {}, \"h\": {}, \"hv\": {},          \"bk\": {}, \"scores\": {}, \"causal\": {}, \"offset\": {offset}, \"q\": {}, \"k\": {}, \"v\": {}, \"o\": {n_inputs},          \"flat\": {flat}, \"dtype\": \"{}\", \"o_dtype\": \"{}\"",
         a.sk,
         a.h,
         a.hv,

@@ -33,8 +33,9 @@ def program(spec):
     seen when ``j <= causal + offset`` (``offset`` a runtime int32 input,
     when given; none masked without ``causal``). Blocks no query sees are
     skipped (their copies too). The result, rounded to ``o_dtype``, is each
-    batch index's ``[n, hv]`` matrix. Its scalars are the inputs' rows,
-    then the output's."""
+    batch index's ``[n, hv]`` matrix, or with ``flat`` its ``[1, n * hv]``
+    row, each head's row stored into its lanes. Its scalars are the inputs'
+    rows, then the output's."""
     b, n, group, sk, h, hv, bk = (spec[k] for k in ("b", "n", "group", "sk", "h", "hv", "bk"))
     causal, offset, dtype = spec["causal"], spec["offset"], spec["dtype"]
     kv, blocks = n // group, sk // bk
@@ -44,7 +45,8 @@ def program(spec):
         q = pallas.view(memory, rows[spec["q"]], (b, n, h), dtype)
         k = pallas.view(memory, rows[spec["k"]], (b * kv, sk, h), dtype)
         v = pallas.view(memory, rows[spec["v"]], (b * kv, sk, hv), dtype)
-        o = pallas.view(result, rows[spec["o"]], (b, n, hv), spec["o_dtype"])
+        flat = spec["flat"]
+        o = pallas.view(result, rows[spec["o"]], (b, 1, n * hv) if flat else (b, n, hv), spec["o_dtype"])
 
         # The last key seen: the causal diagonal plus the runtime offset (all keys without a causal mask).
         if causal is None:
@@ -66,7 +68,7 @@ def program(spec):
         q_spec = pl.BlockSpec((None, n, h), lambda i, j: (i, 0, 0))
         k_spec = pl.BlockSpec((kv, bk, h), lambda i, j: (i, minimum(j, last), 0))
         v_spec = pl.BlockSpec((kv, bk, hv), lambda i, j: (i, minimum(j, last), 0))
-        o_spec = pl.BlockSpec((None, n, hv), lambda i, j: (i, 0, 0))
+        o_spec = pl.BlockSpec((None, 1, n * hv) if flat else (None, n, hv), lambda i, j: (i, 0, 0))
 
         def body(qb, kb, vb, ob):
             """Folds key block `j` of every kv head into the running softmax, writing the output after the last."""
@@ -99,8 +101,13 @@ def program(spec):
 
             @pl.when(j == blocks - 1)
             def _():
-                """Normalizes and writes the output."""
-                ob[...] = (acc_ref[...] * tile(1.0 / l_ref[...], hv)).to(ob.dtype)
+                """Normalizes and writes the output: its rows, or each head's row into its lanes of one row."""
+                value = (acc_ref[...] * tile(1.0 / l_ref[...], hv)).to(ob.dtype)
+                if not flat:
+                    ob[...] = value
+                    return
+                for i in range(n):
+                    ob[:, i * hv : (i + 1) * hv] = value[i : i + 1, :]
 
         grid = (b, blocks)
         pl.emit_pipeline(body, grid=grid, in_specs=[q_spec, k_spec, v_spec], out_specs=[o_spec])(q, k, v, o)

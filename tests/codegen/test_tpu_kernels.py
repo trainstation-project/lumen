@@ -680,6 +680,34 @@ def test_attention_writes_its_heads_where_the_output_projection_reads_them(h):
     np.testing.assert_allclose(got, want, atol=3e-2 * np.abs(want).max())
 
 
+@pytest.mark.parametrize("h", [64, 128])
+def test_decode_attention_writes_its_heads_as_the_output_projections_row(h):
+    """A decode step's attention (one query a head) writes its heads side by side in the row the output projection
+    reads, not as the rows of a matrix: no reshape kernel between attention and the projection. The CPU's values."""
+    n, nkv, tokens, pos = 4, 2, 32, 5
+    rng = np.random.default_rng(0)
+    q = rng.standard_normal([1, 1, n, h], dtype=np.float32)
+    caches = [rng.standard_normal([1, nkv, tokens, h], dtype=np.float32) for _ in range(2)]
+    wo = rng.standard_normal([256, n * h], dtype=np.float32) / np.sqrt(n * h)
+
+    def step(q, cache_k, cache_v, wo, pos):
+        """Returns decode attention of ``q`` over the caches' keys up to ``pos``, heads merged and projected."""
+        a = F.attention_decode(q, cache_k.transpose(1, 2), cache_v.transpose(1, 2), pos)
+        return F.matmul(a.reshape(1, 1, n * h), wo.t(), "float32", "bfloat16")
+
+    def run(device):
+        """``step``'s result on ``device``, and its compiled function."""
+        f = lumen.compile(step, device=device)
+        args = [lumen.from_numpy(a).to(dtype="bfloat16").to(device) for a in (q, *caches, wo)]
+        return f, floats(f(*args, lumen.tensor(pos, dtype=lumen.int32, device=device)))
+
+    _, want = run("cpu")
+    f, got = run("tpu")
+    np.testing.assert_allclose(got, want, rtol=2e-2, atol=2e-2)
+    labels = [s["label"] for s in list(f._plans.values())[-1][6][0][0].steps()]
+    assert labels[labels.index("flash_attention") + 1 :] == ["dot_general → cast(float32 -> bfloat16)"], labels
+
+
 def test_dump_code_writes_each_launchs_pallas_and_mosaic(tmp_path):
     """``dump_code`` writes each launch's Mosaic MLIR and a Pallas script that rebuilds it: an elementwise fusion's script
     is its generated program."""
