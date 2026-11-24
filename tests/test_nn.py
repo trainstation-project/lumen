@@ -90,6 +90,36 @@ def test_module_weights_are_placed_once_and_shared(device):
         g(Affine(lumen.zeros([4, 4]), lumen.zeros([4])), lumen.from_numpy(x))
 
 
+def test_a_module_arguments_walk_is_cached_while_it_holds():
+    """A call reuses a module argument's walk (its structure and weights) while its lists hold the same elements and
+    its fields the same values, re-reading its scalars: a layer swapped into its list, or a new scale, is still seen.
+    The cache doesn't keep the module alive."""
+    import gc
+
+    from lumen.graph.tracing import tracer
+
+    x = rand(2, 4)
+    eye = np.eye(4, dtype=np.float32)
+    model = Stack([Affine(meta(4, 4), meta(4))], 0.5)
+    f = lumen.compile(lambda model, x: model(x), device="cpu")
+    f(model, meta(2, 4))
+    model.load_state_dict({"layers.0.w": lumen.from_numpy(eye), "layers.0.b": lumen.zeros([4])})
+    np.testing.assert_allclose(lumen.to_numpy(f(model, lumen.from_numpy(x))), x * 0.5, rtol=1e-6)
+    walk = tracer._MODULE_WALKS[model]
+    model.scale = 2.0
+    np.testing.assert_allclose(lumen.to_numpy(f(model, lumen.from_numpy(x))), x * 2, rtol=1e-6)
+    assert tracer._MODULE_WALKS[model] is walk
+    swapped = Affine(meta(4, 4), meta(4))
+    model.layers[0] = swapped
+    f(model, meta(2, 4))
+    swapped.load_state_dict({"w": lumen.from_numpy(eye * 3), "b": lumen.zeros([4])})
+    np.testing.assert_allclose(lumen.to_numpy(f(model, lumen.from_numpy(x))), x * 6, rtol=1e-6)
+    assert tracer._MODULE_WALKS[model] is not walk
+    del model, walk
+    gc.collect()
+    assert len(tracer._MODULE_WALKS) == 0
+
+
 class ScaledNorm(lumen.nn.Module):
     """RMS norm written out by hand."""
 

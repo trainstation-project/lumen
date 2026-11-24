@@ -11,11 +11,13 @@ import math
 import os
 import sys
 import warnings
+import weakref
 from typing import Sequence
 
 from lumen import nn
 from lumen.config._C import config
 from lumen.graph.ir._C import Graph
+from lumen.graph.tracing import _C as _tracing
 from lumen.graph.tracing import prims
 from lumen.graph_compiler._C import Plan
 from lumen.tensor import names as _names
@@ -253,8 +255,14 @@ def _baked(slot, value):
     in until a call passes it another value: an int or a bool, or a float
     field of a module argument (a norm's ``eps``, a constant of the model
     as ``jax.jit`` keeps a module's Python floats)."""
-    field = any(isinstance(p, str) for p in slot[1])
-    return type(value) in (int, bool) or (type(value) is float and field)
+    kind = type(value)
+    return kind is int or kind is bool or (kind is float and _in_field(slot[1]))
+
+
+@functools.lru_cache(maxsize=None)
+def _in_field(path):
+    """Whether ``path`` passes through a module field (a name, not an index)."""
+    return any(isinstance(p, str) for p in path)
 
 
 def _runtime(dynamic):
@@ -584,39 +592,39 @@ _FIELDS = {}
 _SCALAR = ("scalar",)
 
 
+class _Structure(tuple):
+    """A module argument's walked structure: a tuple hashed once, since a cached walk (``_C.ModuleWalk``) is keyed into
+    plans on every call."""
+
+    def __hash__(self):
+        """The tuple's hash, computed on first use."""
+        h = self.__dict__.get("hash")
+        if h is None:
+            h = self.__dict__["hash"] = tuple.__hash__(self)
+        return h
+
+
+def _field_names(cls):
+    """The field names of module class ``cls``, in order (looked up once a class)."""
+    names = _FIELDS.get(cls)
+    if names is None:
+        names = _FIELDS[cls] = tuple(f.name for f in dataclasses.fields(cls))
+    return names
+
+
+# Each module argument's walk (a ``_C.ModuleWalk``), while the module lives and its walk holds.
+_MODULE_WALKS = weakref.WeakKeyDictionary()
+
+_WALKER = _tracing.Walker(nn.Module, nn.is_scalar, _SCALAR, _field_names, _Structure, _MODULE_WALKS)
+
+
 def _walk(args):
-    """One pass over ``args``: their structure, hashable (``nn.structure``'s, a
-    marker at each scalar, and which module tensors share storage); each
-    scalar's ``(slot, value)`` (``_slots``); and the modules' weights, each
-    once, in order (``_weights``)."""
-    slots, ids, params = [], [], {}
-
-    def walk(x, i, path, module):
-        """The structure of ``x``, at ``path`` of argument ``i`` (inside a module when ``module``)."""
-        if isinstance(x, Tensor):
-            if module:
-                if not x._is_parameter:
-                    raise TypeError(
-                        f"a module's weights must be whole meta tensors, got a {x.device} tensor of shape {x.shape}"
-                    )
-                ids.append(x.storage_id)
-                params.setdefault(x.storage_id, x)
-            return ("tensor", x.dtype, tuple(x.shape), x.names, x.placement)
-        if isinstance(x, nn.Module):
-            names = _FIELDS.get(type(x))
-            if names is None:
-                names = _FIELDS[type(x)] = tuple(f.name for f in dataclasses.fields(x))
-            return (type(x), tuple((n, walk(getattr(x, n), i, (*path, n), True)) for n in names))
-        if isinstance(x, (list, tuple)):
-            return (type(x), tuple(walk(v, i, (*path, k), module) for k, v in enumerate(x)))
-        if nn.is_scalar(x):
-            slots.append(((i, path), x))
-            return _SCALAR
-        return ("static", x)
-
-    structure = tuple(walk(a, i, (), False) for i, a in enumerate(args))
-    shared = tuple(ids.index(k) for k in ids)
-    return (structure, shared), slots, list(params.values())
+    """One pass over ``args`` (``_C.Walker.walk``): their structure, hashable
+    (``nn.structure``'s, a marker at each scalar, and which module tensors
+    share storage); each scalar's ``(slot, value)`` (``_slots``); and the
+    modules' weights, each once, in order (``_weights``). A module
+    argument's walk is cached and only its scalars re-read while it holds."""
+    return _WALKER.walk(tuple(args))
 
 
 def _keyed(structure, slots, runtime):
