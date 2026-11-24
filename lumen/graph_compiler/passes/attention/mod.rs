@@ -880,7 +880,7 @@ fn unit_reshape(inner: &[usize], outer: &[usize]) -> Option<Vec<Option<usize>>> 
 
 /// Re-expresses per-dim `(stride, divisor)` of a view of shape `from` after reshaping it to `shape`,
 /// or `None` when the result isn't a strided view.
-fn reshaped(
+pub(crate) fn reshaped(
     from: &[usize],
     dims: &[(usize, usize)],
     shape: &[usize],

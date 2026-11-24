@@ -18,6 +18,10 @@
 //!   other operands must be constants (rebuilt in the body), scalar broadcasts, or scalar or same-shape
 //!   values computed before the dot. Epilogues may combine several slices only when those are at most 4
 //!   equal-width slices along the last axis; otherwise a non-scalar extra operand serves one slice only.
+//! - Heads moved into place, only with `contraction_epilogues`: the reshapes and transposes reading a fusion value of
+//!   shape `[.., s, h * w]`, its other dims of one (`w` dividing `LANES`), when each of their values read outside is heads-major (`[.., h, s,
+//!   w]`: attention's operands) or is written into a cache by a `dynamic_update_slice` at `[0, 0, pos, 0]`, the cache
+//!   and `pos` computed before the dot. The GEMM writes each head's columns as rows of their own (`Heads`).
 //!
 //! A dot with nothing to absorb, or whose members are not read outside the fusion, stays as it is.
 //!
@@ -37,6 +41,7 @@ use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::CompilerPass;
 use crate::graph_compiler::passes::place_concats::in_place_concats;
 use crate::graph_compiler::{CompilerConfig, elementwise};
+use crate::tensor::contiguous_strides;
 use std::collections::HashMap;
 
 /// Most equal-width slices of one dot an epilogue may combine.
@@ -159,62 +164,74 @@ struct Fused {
     outputs: Vec<Var>,
 }
 
-/// A part's value written into a cache by `dynamic_update_slice` node `u`, which its GEMM's epilogue writes.
-struct Update {
-    /// The part's value the cache takes.
-    value: Var,
-    /// The reshape, transpose and update nodes.
-    nodes: [usize; 3],
-    /// The constant zero starts' nodes.
+/// A part's heads moved into place by the GEMM's epilogue: the reshapes and transposes reading a value of shape `[.., s,
+/// h * w]` (its other dims of one) the fusion computes (its chain), each value of theirs read outside the chain being heads-major (`[.., h, s,
+/// w]`, the GEMM writing each head's columns as rows of their own) or written into a cache by an update.
+struct Heads {
+    /// The chain's reshape and transpose nodes.
+    nodes: Vec<usize>,
+    /// The `dynamic_update_slice` nodes writing chain values into caches.
+    updates: Vec<usize>,
+    /// The constant zero starts' nodes the updates read.
     constants: Vec<usize>,
 }
 
-/// The update node `u` makes, when it writes a part's value into a cache as the TPU GEMM's epilogue can: a value of
-/// shape `[b, s, h * w]` the fusion computes (`member`), reshaped to `[b, s, h, w]` and transposed to `[b, h, s, w]`
-/// (each read only there), written into a `[b, h, rows, w]` operand computed before the dot (`before`) from `[0, 0,
-/// pos, 0]`, `pos` a scalar computed before the dot too; `w` dividing `LANES`.
-fn update<D: FusesDots>(
+/// Whether `dims` (per-dim `(stride, divisor)` of a value of `shape`, over a `[.., s, n]` value's elements) lays the
+/// value out by heads `w` wide, as the GEMM writes them: heads-major (its last two dims the rows `s` and the head's `w`
+/// columns, every other dim of one element or the heads, `n / w` of them), or, for one row (`s` 1), the heads as the
+/// rows of one matrix (its last two dims the heads and their columns, every other of one element).
+fn heads_major(shape: &[usize], dims: &[(usize, usize)], s: usize, n: usize, w: usize) -> bool {
+    let rank = shape.len();
+
+    if rank < 2 || dims.iter().any(|&(_, d)| d != 1) {
+        return false;
+    }
+
+    let columns = shape[rank - 1] == w && dims[rank - 1].0 == 1;
+    let rows = shape[rank - 2] == s && (s == 1 || dims[rank - 2].0 == n);
+
+    let others = (0..rank - 2)
+        .filter(|&d| shape[d] != 1)
+        .map(|d| (shape[d], dims[d].0))
+        .collect::<Vec<_>>();
+
+    let major = rows && others == [(n / w, w)];
+    let matrix =
+        s == 1 && n > w && shape[rank - 2] == n / w && dims[rank - 2].0 == w && others.is_empty();
+
+    columns && (major || matrix)
+}
+
+/// The update node `u` makes when it writes chain value `x` (heads-major `[b, h, s, w]`) into a cache as the GEMM's
+/// epilogue can: `dynamic_update_slice(cache, x, 0, 0, pos, 0)`, the cache `[b, h, rows, w]` and the scalar `pos`
+/// computed before the dot (`before`); returns the constant zero starts' nodes.
+fn update(
     graph: &Graph,
     producer: &[Option<usize>],
-    users: &[Vec<usize>],
     member: &HashMap<Var, usize>,
     before: &impl Fn(Var) -> bool,
     u: usize,
-) -> Option<Update> {
-    let nodes = graph.nodes();
-    let node = &nodes[u];
+    x: Var,
+) -> Option<Vec<usize>> {
+    let node = &graph.nodes()[u];
 
-    if !matches!(node.primitive, Primitive::DynamicUpdateSlice) || node.inputs.len() != 6 {
+    if !matches!(node.primitive, Primitive::DynamicUpdateSlice)
+        || node.inputs.len() != 6
+        || node.inputs[1] != x
+        || graph.type_of(x).shape.len() != 4
+    {
         return None;
     }
 
-    let made = |v: Var| producer[v].map(|k| (k, &nodes[k]));
-    let (t, transpose) = made(node.inputs[1])?;
-    let (r, reshape) = made(transpose.inputs[0])?;
-    let value = reshape.inputs[0];
-
-    let transposed = matches!(&transpose.primitive, Primitive::Transpose { permutation } if *permutation == [0, 2, 1, 3]);
-
-    let heads = &graph.type_of(reshape.output).shape;
-    let flat = &graph.type_of(value).shape;
-
-    let split = matches!(reshape.primitive, Primitive::Reshape { .. })
-        && heads.len() == 4
-        && flat.len() == 3
-        && flat[..2] == heads[..2]
-        && flat[2] == heads[2] * heads[3]
-        && D::LANES.is_multiple_of(heads[3]);
-
-    let alone = users[reshape.output] == [t] && users[transpose.output] == [u];
     let (cache, pos) = (node.inputs[0], node.inputs[4]);
 
     // The starts but the rows' are constant zeros, rebuilt in the body.
     let mut constants = Vec::new();
 
     for &v in [node.inputs[2], node.inputs[3], node.inputs[5]].iter() {
-        let (k, n) = made(v)?;
+        let k = producer[v]?;
 
-        match n.primitive {
+        match graph.nodes()[k].primitive {
             Primitive::Full {
                 fill_value: crate::Scalar::Int(0),
                 ..
@@ -223,18 +240,126 @@ fn update<D: FusesDots>(
         }
     }
 
-    let fits = member.contains_key(&value)
-        && transposed
-        && split
-        && alone
-        && !member.contains_key(&cache)
+    let fits = !member.contains_key(&cache)
         && before(cache)
         && before(pos)
         && graph.type_of(pos).shape.is_empty();
 
-    fits.then_some(Update {
-        value,
-        nodes: [r, t, u],
+    fits.then_some(constants)
+}
+
+/// The heads chain (see `Heads`) reading fusion value `v`, when every value of it read outside is heads-major or
+/// updates a cache; `w` the head width, dividing `LANES`.
+fn heads<D: FusesDots>(
+    graph: &Graph,
+    producer: &[Option<usize>],
+    users: &[Vec<usize>],
+    member: &HashMap<Var, usize>,
+    claimed: &[bool],
+    before: &impl Fn(Var) -> bool,
+    v: Var,
+) -> Option<Heads> {
+    use crate::graph_compiler::passes::attention::reshaped;
+
+    let nodes = graph.nodes();
+    let shape = &graph.type_of(v).shape;
+    let rank = shape.len();
+
+    if rank < 2 || shape[..rank - 2].iter().any(|&d| d != 1) {
+        return None;
+    }
+
+    let (s, n) = (shape[rank - 2], shape[rank - 1]);
+
+    let layout = |k: usize| {
+        !claimed[k]
+            && matches!(
+                nodes[k].primitive,
+                Primitive::Reshape { .. } | Primitive::Transpose { .. }
+            )
+    };
+
+    // The chain's values with their layout over `v`'s elements, walked forward from `v`.
+    let mut dims: HashMap<Var, Vec<(usize, usize)>> = HashMap::new();
+    dims.insert(
+        v,
+        contiguous_strides(shape)
+            .into_iter()
+            .map(|t| (t, 1))
+            .collect(),
+    );
+
+    let mut chain: Vec<usize> = Vec::new();
+    let mut stack = vec![v];
+
+    while let Some(x) = stack.pop() {
+        for &k in users[x].iter().filter(|&&k| layout(k)) {
+            let node = &nodes[k];
+            let from = &graph.type_of(x).shape;
+            let to = &graph.type_of(node.output).shape;
+
+            let out = match &node.primitive {
+                Primitive::Transpose { permutation } => {
+                    Some(permutation.iter().map(|&p| dims[&x][p]).collect())
+                }
+                _ => reshaped(from, &dims[&x], to),
+            };
+
+            if let Some(out) = out
+                && !chain.contains(&k)
+            {
+                chain.push(k);
+                dims.insert(node.output, out);
+                stack.push(node.output);
+            }
+        }
+    }
+
+    // The head width: the last dim of the chain's values read outside it.
+    let (mut updates, mut constants, mut w) = (Vec::new(), Vec::new(), None);
+
+    for &k in &chain {
+        let x = nodes[k].output;
+        let to = &graph.type_of(x).shape;
+        let outside: Vec<usize> = users[x]
+            .iter()
+            .copied()
+            .filter(|u| !chain.contains(u))
+            .collect();
+
+        if outside.is_empty() && !graph.outputs().contains(&x) {
+            continue;
+        }
+
+        let width = *to.last()?;
+
+        if !D::LANES.is_multiple_of(width)
+            || !n.is_multiple_of(width)
+            || w.is_some_and(|w| w != width)
+        {
+            return None;
+        }
+
+        w = Some(width);
+
+        if !heads_major(to, &dims[&x], s, n, width) {
+            return None;
+        }
+
+        for u in outside {
+            if let Some(zeros) = update(graph, producer, member, before, u, x) {
+                updates.push(u);
+                constants.extend(zeros);
+            }
+        }
+    }
+
+    w?;
+    chain.sort_unstable();
+
+    Some(Heads {
+        nodes: chain,
+        updates,
         constants,
     })
 }
@@ -406,30 +531,37 @@ fn fused<D: FusesDots>(graph: &Graph, epilogues: bool) -> Vec<Option<Fused>> {
             }
         }
 
-        // A part's heads written into a cache: its value split into heads, put heads first and written at a row.
-        for (u, un) in nodes.iter().enumerate().skip(d + 1) {
-            let Some(chain) = update::<D>(graph, &producer, &users, &member, &before, u) else {
+        // A part's heads moved into place: its value split into heads and put heads first, as attention reads them and
+        // caches hold them.
+        let mut values: Vec<Var> = member.keys().copied().collect();
+        values.sort_unstable();
+
+        for v in values {
+            if !epilogues {
+                break;
+            }
+
+            let Some(h) = heads::<D>(graph, &producer, &users, &member, &claimed, &before, v)
+            else {
                 continue;
             };
 
-            if !epilogues || chain.nodes.iter().any(|&k| claimed[k]) {
-                continue;
-            }
+            let p = member[&v];
 
-            let p = member[&chain.value];
-
-            for &k in &chain.nodes {
+            for &k in h.nodes.iter().chain(&h.updates) {
                 claimed[k] = true;
                 absorbed.push(k);
                 inside.push(k);
+                member.insert(nodes[k].output, p);
             }
 
-            inside.extend(chain.constants);
-            member.insert(un.output, p);
+            inside.extend(h.constants);
 
-            for v in [nodes[u].inputs[0], nodes[u].inputs[4]] {
-                if !extras.contains(&v) {
-                    extras.push(v);
+            for &u in &h.updates {
+                for v in [nodes[u].inputs[0], nodes[u].inputs[4]] {
+                    if !extras.contains(&v) {
+                        extras.push(v);
+                    }
                 }
             }
         }
@@ -439,6 +571,7 @@ fn fused<D: FusesDots>(graph: &Graph, epilogues: bool) -> Vec<Option<Fused>> {
         }
 
         inside.sort_unstable();
+        inside.dedup();
 
         let read_outside =
             |v: Var| graph.outputs().contains(&v) || users[v].iter().any(|u| !absorbed.contains(u));

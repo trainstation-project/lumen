@@ -15,7 +15,7 @@ matmul with what surrounds it. This folder only groups them; each file is its ow
 | `canonicalize.rs` | `CanonicalizeDots`: transposes operands a matmul kernel can't read as laid out; also exports `matmul_order` (MPS's GEMM codegen) | `DotLayouts` (`readable`) | MPS, TPU |
 | `rows.rs` | `DotRows` (with `normalization_diamonds`): a matmul fused into the `row` fusion reading its whole rows; the shared `dot_rows` | `FullRows` (`full`) | TPU |
 | `wide_rows.rs` | `WideRows` (with `fuse`, `normalization_diamonds` and `linear_reordering`): rows too wide for one GEMM tile get the GEMM writing their reductions' partials | `PartialRows` (`partial_tile`, `gemv`) | Triton |
-| `fuse.rs` | `FuseDots`: dot fusion with slices, a stacked lhs and epilogues | `FusesDots` (`LANES`, `slot_writes`) | TPU |
+| `fuse.rs` | `FuseDots`: dot fusion with slices, a stacked lhs, epilogues and heads (the reshapes and transposes splitting a value into attention heads, and KV cache updates, written by the GEMM) | `FusesDots` (`LANES`, `slot_writes`) | TPU |
 
 ## Order in the pipeline
 

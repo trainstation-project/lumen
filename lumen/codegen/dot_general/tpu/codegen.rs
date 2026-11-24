@@ -28,20 +28,25 @@ pub(crate) struct Epilogue {
     pub(crate) nodes: Vec<String>,
     /// Each body output's value index, piece and dtype.
     pub(crate) outputs: Vec<(usize, usize, DType)>,
-    /// Per body output, the cache it writes the piece's heads into, when it is a `dynamic_update_slice` of one.
+    /// Per body output written by heads rather than streamed: a cache its piece's heads are written into (a
+    /// `dynamic_update_slice` of one), or its own heads-major value (`fuse::Heads`).
     pub(crate) updates: Vec<Option<Update>>,
 }
 
-/// A body output that writes its piece's heads into a cache: `dynamic_update_slice(cache, transpose(reshape(value,
-/// [b, s, heads, width]), [0, 2, 1, 3]), 0, 0, pos, 0)`, the cache `[b, heads, rows, width]`.
+/// A body output its piece's heads are written into, each head's columns as rows of their own: a cache, `[b, heads,
+/// rows, width]`, written from a runtime row (`dynamic_update_slice(cache, heads, 0, 0, pos, 0)`), the heads-major
+/// value itself (`[.., heads, s, width]`), written from row 0, or, for one row, the heads as one matrix's rows
+/// (`[.., heads, width]`, `matrix`).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Update {
-    /// The extra input holding the cache.
-    pub(crate) cache: usize,
-    /// The extra input holding the scalar row the heads' rows start at.
-    pub(crate) pos: usize,
+    /// The extra input holding the cache, if it is one.
+    pub(crate) cache: Option<usize>,
+    /// The extra input holding the scalar row the heads' rows start at, if they don't start at 0.
+    pub(crate) pos: Option<usize>,
     /// The cache's batch, heads, rows and head width.
     pub(crate) shape: [usize; 4],
+    /// Whether the heads are the rows of one matrix (one row of the piece).
+    pub(crate) matrix: bool,
 }
 
 impl Epilogue {
@@ -144,9 +149,10 @@ impl Epilogue {
                 updates.insert(
                     node.output,
                     Update {
-                        cache: extra(node.inputs[0]),
-                        pos: extra(node.inputs[4]),
+                        cache: Some(extra(node.inputs[0])),
+                        pos: Some(extra(node.inputs[4])),
                         shape: [shape[0], shape[1], shape[2], shape[3]],
+                        matrix: false,
                     },
                 );
 
@@ -179,6 +185,34 @@ impl Epilogue {
                     together |= readers.get(&v).is_some_and(|&q| q != p) && extras.contains(&v);
                     readers.entry(v).or_insert(p);
                 }
+            }
+        }
+
+        // A heads-major output (a reshape or transpose of a piece) is written by heads from row 0.
+        for &v in body.outputs() {
+            let laid = all.iter().any(|n| {
+                n.output == v
+                    && matches!(
+                        n.primitive,
+                        Primitive::Reshape { .. } | Primitive::Transpose { .. }
+                    )
+            });
+
+            if laid {
+                let shape = &body.type_of(v).shape;
+                let rows = body.type_of(dot.output).shape[body.type_of(dot.output).shape.len() - 2];
+                let (s, w) = (shape[shape.len() - 2], shape[shape.len() - 1]);
+                let heads = widths[member[&v]] / w;
+
+                updates.insert(
+                    v,
+                    Update {
+                        cache: None,
+                        pos: None,
+                        shape: [1, heads, rows, w],
+                        matrix: s != rows,
+                    },
+                );
             }
         }
 
@@ -464,7 +498,7 @@ pub(crate) fn spec(
             e.updates
                 .iter()
                 .flatten()
-                .any(|u| u.cache == i || u.pos == i)
+                .any(|u| u.cache == Some(i) || u.pos == Some(i))
         })
         .collect();
 
@@ -600,7 +634,8 @@ pub(crate) fn spec(
         })
         .collect();
 
-    // Each cache update: its output, value, piece, dtype, cache and row inputs, and the cache's shape.
+    // Each output written by heads: its output, value, piece, dtype, cache and row inputs (or null), its shape, and
+    // whether the heads are one matrix's rows.
     let updates_spec: Vec<String> = e
         .updates
         .iter()
@@ -616,12 +651,15 @@ pub(crate) fn spec(
                 ));
             }
 
+            let index = |i: Option<usize>| i.map_or("null".into(), |i| i.to_string());
+
             Ok(format!(
-                "[{o}, {v}, {p}, \"{}\", {}, {}, {:?}]",
+                "[{o}, {v}, {p}, \"{}\", {}, {}, {:?}, {}]",
                 d.full_name(),
-                u.cache,
-                u.pos,
-                u.shape
+                index(u.cache),
+                index(u.pos),
+                u.shape,
+                u.matrix
             ))
         })
         .collect::<Result<_, String>>()?;

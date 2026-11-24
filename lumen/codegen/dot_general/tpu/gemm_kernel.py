@@ -31,7 +31,9 @@ def program(spec):
     dtype, cache, pos, [b, heads, rows, w]]``: the member's value split into
     heads ``w`` wide, written into rows ``pos`` on of input ``cache`` of that
     shape, which the output is, after copying it there when it isn't
-    in place). With ``together``, members of one width, each step
+    in place; or, ``cache`` and ``pos`` null, into the output's own rows
+    from 0, heads-major; or, with the last flag, of one row, as the rows
+    of one ``[heads, w]`` matrix a batch index). With ``together``, members of one width, each step
     computes every member's block at its columns, from a stream of the rhs's
     blocks each, so the epilogue reads them all. ``views`` (the lhs's, the
     rhs's): each ``null`` or ``[rows, columns, row, column]``, the operand
@@ -109,13 +111,18 @@ def program(spec):
         return pallas.view(memory, row, shape, dtype)
 
     def cache_writes(rows, memory, result, first, base):
-        """The writer of each cache update's block, its caches set up: each read in place, or copied into its
-        output first, and its rows' start read. ``first`` is the row of the first epilogue input, ``base`` the
-        first output's."""
+        """The writer of each block written by heads, its targets set up: a cache read in place, or copied into
+        its output first, its rows' start read; a heads-major output written from row 0. ``first`` is the row of
+        the first epilogue input, ``base`` the first output's."""
         caches, outs, at = [], [], []
-        for o, _, _, d, cache, pos, (b, heads, height, w) in updates:
+        for o, _, _, d, cache, pos, (b, heads, height, w), matrix in updates:
+            shape = (b, heads, w) if matrix else (b * heads, height, w)
+            target = pallas.view(result, rows[base + o], shape, d)
+            caches.append(target)
+            if cache is None:
+                at.append(0)
+                continue
             source = pallas.view(memory, rows[first + cache], (b * heads, height, w), d)
-            target = pallas.view(result, rows[base + o], (b * heads, height, w), d)
 
             @pl.when(rows[first + cache] != rows[base + o])
             def _(source=source, target=target):
@@ -128,14 +135,15 @@ def program(spec):
                 held.at[0],
                 pl.scratch(pl.SemaphoreType.DMA),
             ).wait()
-            caches.append(target)
             at.append(held[0, 0])
 
         def write(u, p, block):
             """Writes ``block`` (member ``p``'s, at this grid step) into update ``u``'s cache: each head's rows by a
             read, merge and write of the tile-aligned window holding them, the rows rolled into place. Every head's
             window is read at once, then every head's written at once."""
-            _, _, _, d, _, _, (b, heads, height, w) = updates[u]
+            _, _, _, d, _, _, (b, heads, height, w), matrix = updates[u]
+            if matrix:
+                return heads_rows(u, p, block)
             tile = 8 * (32 // _bits(d))
             window = min(-(-(bm + tile - 1) // tile) * tile, height)
             wide = "float32" if d.startswith(("float", "bfloat")) else "int32"
@@ -166,6 +174,34 @@ def program(spec):
                 writes[-1].start()
             for c in writes:
                 c.wait()
+
+        def heads_rows(u, p, block):
+            """Writes row 0 of ``block`` (member ``p``'s, at this grid step, of one row) as rows of update ``u``'s
+            matrix, one a head: its heads gathered into rows, then read, merged and written as the tile-aligned
+            window of the matrix holding them."""
+            _, _, _, d, _, _, (b, heads, height, w), _ = updates[u]
+            tile = 8 * (32 // _bits(d))
+            count = bn // w
+            window = min(-(-(count + tile - 1) // tile) * tile, heads)
+            wide = "float32" if d.startswith(("float", "bfloat")) else "int32"
+            first_head = (pl.program_id(2) - starts[p]) * count
+            top = pl.multiple_of(F.minimum(first_head // tile * tile, heads - window), tile)
+            shift = first_head - top
+            index = pl.broadcasted_iota("int32", (count, w), 0)
+            piece = lumen.zeros((count, w), wide)
+            for k in range(count):
+                row = block[0:1, k * w : (k + 1) * w].to(wide).expand((count, w))
+                piece = F.where(index == k, row, piece)
+            if window > count:
+                piece = F.cat([piece, lumen.zeros((window - count, w), wide)], 0)
+            placed = pl.roll(piece, shift, 0)
+            inside = pl.broadcasted_iota("int32", (window, w), 0)
+            seen = (inside >= shift) & (inside < shift + count)
+            target = caches[u].at[pl.program_id(0), pl.ds(top, window)]
+            buffer = pl.scratch(pl.VMEM((window, w), d))
+            pl.async_copy(target, buffer, pl.scratch(pl.SemaphoreType.DMA)).wait()
+            buffer[...] = F.where(seen, placed, buffer[...].to(wide)).to(d)
+            pl.async_copy(buffer, target, pl.scratch(pl.SemaphoreType.DMA)).wait()
 
         return write
 
