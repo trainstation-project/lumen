@@ -96,7 +96,12 @@ impl ModuleWalk {
         for (list, snapshot) in &self.lists {
             let list = list.bind(py);
 
-            if list.len() != snapshot.len() || list.iter().zip(snapshot).any(|(v, &k)| v.as_ptr() as usize != k) {
+            if list.len() != snapshot.len()
+                || list
+                    .iter()
+                    .zip(snapshot)
+                    .any(|(v, &k)| v.as_ptr() as usize != k)
+            {
                 return Ok(false);
             }
         }
@@ -160,7 +165,9 @@ impl Walker {
     /// Whether `x` is a scalar a compiled function can take at runtime: a Python float, int or bool (not a subclass),
     /// else as `nn.is_scalar` says (a numpy scalar).
     fn is_scalar(&self, x: &Bound<'_, PyAny>) -> PyResult<bool> {
-        if x.is_exact_instance_of::<PyFloat>() || x.is_exact_instance_of::<PyInt>() || x.is_exact_instance_of::<PyBool>()
+        if x.is_exact_instance_of::<PyFloat>()
+            || x.is_exact_instance_of::<PyInt>()
+            || x.is_exact_instance_of::<PyBool>()
         {
             return Ok(true);
         }
@@ -190,7 +197,12 @@ impl Walker {
 
         // A path one step further: `(*path, key)`.
         let further = |key: &Bound<'py, PyAny>| -> PyResult<Bound<'py, PyTuple>> {
-            PyTuple::new(py, path.iter().chain(std::iter::once(key.clone())).collect::<Vec<_>>())
+            PyTuple::new(
+                py,
+                path.iter()
+                    .chain(std::iter::once(key.clone()))
+                    .collect::<Vec<_>>(),
+            )
         };
 
         if x.cast::<PyTensor>().is_ok() {
@@ -207,7 +219,12 @@ impl Walker {
                 found.tensors.push(x.clone());
             }
 
-            let shape = PyTuple::new(py, x.getattr("shape")?.try_iter()?.collect::<PyResult<Vec<_>>>()?)?;
+            let shape = PyTuple::new(
+                py,
+                x.getattr("shape")?
+                    .try_iter()?
+                    .collect::<PyResult<Vec<_>>>()?,
+            )?;
 
             return Ok(PyTuple::new(
                 py,
@@ -229,11 +246,19 @@ impl Walker {
             for n in names.try_iter()? {
                 let n = n?;
                 let value = x.getattr(n.cast::<PyString>()?)?;
-                let sub = self.tree(&value, i, &further(&n)?, true, Some((x, &n)), found, record)?;
+                let sub =
+                    self.tree(&value, i, &further(&n)?, true, Some((x, &n)), found, record)?;
                 fields.push(PyTuple::new(py, [n, sub])?.into_any());
             }
 
-            return Ok(PyTuple::new(py, [x.get_type().into_any(), PyTuple::new(py, fields)?.into_any()])?.into_any());
+            return Ok(PyTuple::new(
+                py,
+                [
+                    x.get_type().into_any(),
+                    PyTuple::new(py, fields)?.into_any(),
+                ],
+            )?
+            .into_any());
         }
 
         if x.is_instance_of::<PyList>() || x.is_instance_of::<PyTuple>() {
@@ -246,10 +271,22 @@ impl Walker {
 
             for (k, v) in x.try_iter()?.enumerate() {
                 let k = k.into_pyobject(py)?.into_any();
-                items.push(self.tree(&v?, i, &further(&k)?, module, Some((x, &k)), found, record)?);
+                items.push(self.tree(
+                    &v?,
+                    i,
+                    &further(&k)?,
+                    module,
+                    Some((x, &k)),
+                    found,
+                    record,
+                )?);
             }
 
-            return Ok(PyTuple::new(py, [x.get_type().into_any(), PyTuple::new(py, items)?.into_any()])?.into_any());
+            return Ok(PyTuple::new(
+                py,
+                [x.get_type().into_any(), PyTuple::new(py, items)?.into_any()],
+            )?
+            .into_any());
         }
 
         let scalar = self.is_scalar(x)?;
@@ -259,17 +296,27 @@ impl Walker {
 
             if holder.is_instance(self.module.bind(py))? {
                 let value = (!scalar).then(|| x.clone().unbind());
-                r.leaves.push((held, key.cast::<PyString>()?.clone().unbind(), value));
+                r.leaves
+                    .push((held, key.cast::<PyString>()?.clone().unbind(), value));
             }
 
             if scalar {
-                r.scalars.push((path.clone().unbind(), r.holder(holder), key.clone().unbind()));
+                r.scalars.push((
+                    path.clone().unbind(),
+                    r.holder(holder),
+                    key.clone().unbind(),
+                ));
             }
         }
 
         if scalar {
-            let slot = PyTuple::new(py, [i.into_pyobject(py)?.into_any(), path.clone().into_any()])?;
-            found.slots.push(PyTuple::new(py, [slot.into_any(), x.clone()])?.into_any());
+            let slot = PyTuple::new(
+                py,
+                [i.into_pyobject(py)?.into_any(), path.clone().into_any()],
+            )?;
+            found
+                .slots
+                .push(PyTuple::new(py, [slot.into_any(), x.clone()])?.into_any());
             return Ok(self.marker.bind(py).clone());
         }
 
@@ -301,7 +348,15 @@ impl Walker {
             lists: Vec::new(),
         });
 
-        let structure = self.tree(module, 0, &PyTuple::empty(py), false, None, &mut found, &mut record)?;
+        let structure = self.tree(
+            module,
+            0,
+            &PyTuple::empty(py),
+            false,
+            None,
+            &mut found,
+            &mut record,
+        )?;
         let record = record.expect("the record");
 
         let walk = Bound::new(
@@ -364,31 +419,61 @@ impl Walker {
 
         for (i, a) in args.iter().enumerate() {
             if !a.is_instance(self.module.bind(py))? {
-                structure.push(self.tree(&a, i, &PyTuple::empty(py), false, None, &mut found, &mut None)?);
+                structure.push(self.tree(
+                    &a,
+                    i,
+                    &PyTuple::empty(py),
+                    false,
+                    None,
+                    &mut found,
+                    &mut None,
+                )?);
                 continue;
             }
 
             let walk = self.module_walk(&a)?;
             let walk = walk.borrow();
-            structure.push(walk.structure.as_ref().expect("a walked structure").bind(py).clone());
+            structure.push(
+                walk.structure
+                    .as_ref()
+                    .expect("a walked structure")
+                    .bind(py)
+                    .clone(),
+            );
             found.ids.extend(&walk.ids);
-            found.tensors.extend(walk.tensors.iter().map(|t| t.bind(py).clone()));
+            found
+                .tensors
+                .extend(walk.tensors.iter().map(|t| t.bind(py).clone()));
 
             for (path, holder, key) in &walk.scalars {
                 let holder = holder.bind(&a);
 
-                let value = match holder.is_instance_of::<PyList>() || holder.is_instance_of::<PyTuple>() {
-                    true => holder.get_item(key.bind(py))?,
-                    false => holder.getattr(key.bind(py).cast::<PyString>()?)?,
-                };
+                let value =
+                    match holder.is_instance_of::<PyList>() || holder.is_instance_of::<PyTuple>() {
+                        true => holder.get_item(key.bind(py))?,
+                        false => holder.getattr(key.bind(py).cast::<PyString>()?)?,
+                    };
 
-                let slot = PyTuple::new(py, [i.into_pyobject(py)?.into_any(), path.bind(py).clone().into_any()])?;
-                found.slots.push(PyTuple::new(py, [slot.into_any(), value])?.into_any());
+                let slot = PyTuple::new(
+                    py,
+                    [
+                        i.into_pyobject(py)?.into_any(),
+                        path.bind(py).clone().into_any(),
+                    ],
+                )?;
+                found
+                    .slots
+                    .push(PyTuple::new(py, [slot.into_any(), value])?.into_any());
             }
         }
 
         let mut first: HashMap<usize, usize> = HashMap::new();
-        let shared: Vec<usize> = found.ids.iter().enumerate().map(|(n, &k)| *first.entry(k).or_insert(n)).collect();
+        let shared: Vec<usize> = found
+            .ids
+            .iter()
+            .enumerate()
+            .map(|(n, &k)| *first.entry(k).or_insert(n))
+            .collect();
         let mut seen = HashSet::new();
         let mut weights = Vec::new();
 
@@ -398,8 +483,18 @@ impl Walker {
             }
         }
 
-        let walked = PyTuple::new(py, [PyTuple::new(py, structure)?.into_any(), PyTuple::new(py, shared)?.into_any()])?;
-        Ok((walked, PyList::new(py, found.slots)?, PyList::new(py, weights)?))
+        let walked = PyTuple::new(
+            py,
+            [
+                PyTuple::new(py, structure)?.into_any(),
+                PyTuple::new(py, shared)?.into_any(),
+            ],
+        )?;
+        Ok((
+            walked,
+            PyList::new(py, found.slots)?,
+            PyList::new(py, weights)?,
+        ))
     }
 }
 
