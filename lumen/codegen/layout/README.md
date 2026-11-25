@@ -54,7 +54,7 @@ or merges them back. Any other reshape that moves elements between tiles fails. 
 as module `lumen.codegen.layout.tpu.kernel` with `Rows::Step`. `codegen/devices/tpu` uses that for
 `Reshape` steps, and the `Pallas` kernel launches it. `kernel.py::program(spec)` copies `bm`-row blocks
 between the flat and tiled forms. `concatenate(step)` encodes a `concatenate` fusion (one concatenation not written
-in place, `codegen/devices/tpu`'s `Lone`) as module `lumen.codegen.layout.tpu.concatenate`: `dma` DMAs each operand
+in place, TPU's `Lone` in `graph_compiler/passes/alone`) as module `lumen.codegen.layout.tpu.concatenate`: `dma` DMAs each operand
 into its slot when every slot starts on a tile (a leading axis, or whole tiles of rows or lanes before the last
 operand); otherwise `lanes` (last axis) or `rows` (the one before) builds each block of the result from its operands'
 blocks under `CONCAT_BYTES`.
