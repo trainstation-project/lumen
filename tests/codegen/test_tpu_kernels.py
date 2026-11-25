@@ -653,6 +653,61 @@ def test_an_attentions_elementwise_consumers_are_its_epilogue(training):
         np.testing.assert_array_equal(a, w)
 
 
+@pytest.mark.parametrize("h", [64, 128])
+def test_attention_writes_its_heads_where_the_output_projection_reads_them(h):
+    """Attention writes its heads in token order, where the output projection reads them: 128-wide heads a lane
+    block each, 64-wide ones two to a block, written one after the other. No transpose or reshape kernel runs
+    between attention and the projection. The same values as numpy."""
+    b, s, n, nkv = 1, 256, 4, 2
+    rng = np.random.default_rng(0)
+    q = tpu(rng.standard_normal([b, s, n * h], dtype=np.float32), "bfloat16")
+    k, v = (tpu(rng.standard_normal([b, s, nkv * h], dtype=np.float32), "bfloat16") for _ in range(2))
+    wo = tpu(rng.standard_normal([256, n * h], dtype=np.float32) / np.sqrt(n * h), "bfloat16")
+
+    def block(q, k, v, wo):
+        """Returns causal flash attention over ``q``, ``k``, ``v`` split into heads, heads merged and projected."""
+        heads = [t.reshape(b, s, -1, h) for t in (q, k, v)]
+        a = F.flash_attention(*heads, is_causal=True).reshape(b, s, n * h)
+        return F.matmul(a, wo.t(), "float32", "bfloat16")
+
+    meta = [lumen.empty(list(t.shape), str(t.dtype), "meta") for t in (q, k, v, wo)]
+    labels = [st["label"] for st in lumen.graph_compiler.Plan(lumen.make_graph(block)(*meta), "tpu").steps()]
+    assert labels[labels.index("flash_attention") + 1 :] == ["dot_general → cast(float32 -> bfloat16)"], labels
+    got = floats(lumen.compile(block)(q, k, v, wo))
+    q, k, v, wo = (floats(t) for t in (q, k, v, wo))
+    attention = _attention_reference(*[t.reshape(b, s, -1, h) for t in (q, k, v)], True).reshape(b, s, n * h)
+    want = attention @ wo.T
+    np.testing.assert_allclose(got, want, atol=3e-2 * np.abs(want).max())
+
+
+@pytest.mark.parametrize("h", [64, 128])
+def test_decode_attention_writes_its_heads_as_the_output_projections_row(h):
+    """A decode step's attention (one query a head) writes its heads side by side in the row the output projection
+    reads, not as the rows of a matrix: no reshape kernel between attention and the projection. The CPU's values."""
+    n, nkv, tokens, pos = 4, 2, 32, 5
+    rng = np.random.default_rng(0)
+    q = rng.standard_normal([1, 1, n, h], dtype=np.float32)
+    caches = [rng.standard_normal([1, nkv, tokens, h], dtype=np.float32) for _ in range(2)]
+    wo = rng.standard_normal([256, n * h], dtype=np.float32) / np.sqrt(n * h)
+
+    def step(q, cache_k, cache_v, wo, pos):
+        """Returns decode attention of ``q`` over the caches' keys up to ``pos``, heads merged and projected."""
+        a = F.attention_decode(q, cache_k.transpose(1, 2), cache_v.transpose(1, 2), pos)
+        return F.matmul(a.reshape(1, 1, n * h), wo.t(), "float32", "bfloat16")
+
+    def run(device):
+        """``step``'s result on ``device``, and its compiled function."""
+        f = lumen.compile(step, device=device)
+        args = [lumen.from_numpy(a).to(dtype="bfloat16").to(device) for a in (q, *caches, wo)]
+        return f, floats(f(*args, lumen.tensor(pos, dtype=lumen.int32, device=device)))
+
+    _, want = run("cpu")
+    f, got = run("tpu")
+    np.testing.assert_allclose(got, want, rtol=2e-2, atol=2e-2)
+    labels = [s["label"] for s in list(f._plans.values())[-1][6][0][0].steps()]
+    assert labels[labels.index("flash_attention") + 1 :] == ["dot_general → cast(float32 -> bfloat16)"], labels
+
+
 def test_dump_code_writes_each_launchs_pallas_and_mosaic(tmp_path):
     """``dump_code`` writes each launch's Mosaic MLIR and a Pallas script that rebuilds it: an elementwise fusion's script
     is its generated program."""

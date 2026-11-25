@@ -139,19 +139,33 @@ def program(spec):
 
         def write(u, p, block):
             """Writes ``block`` (member ``p``'s, at this grid step) into update ``u``'s cache: each head's rows by a
-            read, merge and write of the tile-aligned window holding them, the rows rolled into place. Every head's
-            window is read at once, then every head's written at once."""
-            _, _, _, d, _, _, (b, heads, height, w), matrix = updates[u]
+            read, merge and write of the tile-aligned window holding them, the rows rolled into place, or, when they
+            fill whole tiles of a heads-major output, written as they are. Every head's window is read at once, then
+            every head's written at once."""
+            _, _, _, d, cache, _, (b, heads, height, w), matrix = updates[u]
             if matrix:
                 return heads_rows(u, p, block)
             tile = 8 * (32 // _bits(d))
+            count = bn // w
+            first_head = (pl.program_id(2) - starts[p]) * count
+            # A heads-major output (no cache: from row 0) whose row blocks fill whole tiles, or are all its rows: each
+            # head's rows are written as they are, nothing around them to keep.
+            if cache is None and height % bm == 0 and (bm == height or bm % tile == 0):
+                buffers, stores = pl.scratch(pl.VMEM((count, bm, w), d)), pl.scratch(pl.SemaphoreType.DMA((count,)))
+                writes = []
+                for k in range(count):
+                    target = caches[u].at[pl.program_id(0) * heads + first_head + k, pl.ds(pl.program_id(1) * bm, bm)]
+                    buffers[k] = block[:, k * w : (k + 1) * w].to(d)
+                    writes.append(pl.make_async_copy(buffers.at[k], target, stores.at[k]))
+                    writes[-1].start()
+                for c in writes:
+                    c.wait()
+                return
             window = min(-(-(bm + tile - 1) // tile) * tile, height)
             wide = "float32" if d.startswith(("float", "bfloat")) else "int32"
             row = at[u] + pl.program_id(1) * bm
             top = pl.multiple_of(F.minimum(F.maximum(row // tile * tile, 0), height - window), tile)
             shift = row - top
-            count = bn // w
-            first_head = (pl.program_id(2) - starts[p]) * count
             buffers = pl.scratch(pl.VMEM((count, window, w), d))
             reads, stores = pl.scratch(pl.SemaphoreType.DMA((count,))), pl.scratch(pl.SemaphoreType.DMA((count,)))
             inside = pl.broadcasted_iota("int32", (window, w), 0)

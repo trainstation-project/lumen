@@ -11,11 +11,13 @@ import math
 import os
 import sys
 import warnings
+import weakref
 from typing import Sequence
 
 from lumen import nn
 from lumen.config._C import config
 from lumen.graph.ir._C import Graph
+from lumen.graph.tracing import _C as _tracing
 from lumen.graph.tracing import prims
 from lumen.graph_compiler._C import Plan
 from lumen.tensor import names as _names
@@ -253,8 +255,14 @@ def _baked(slot, value):
     in until a call passes it another value: an int or a bool, or a float
     field of a module argument (a norm's ``eps``, a constant of the model
     as ``jax.jit`` keeps a module's Python floats)."""
-    field = any(isinstance(p, str) for p in slot[1])
-    return type(value) in (int, bool) or (type(value) is float and field)
+    kind = type(value)
+    return kind is int or kind is bool or (kind is float and _in_field(slot[1]))
+
+
+@functools.lru_cache(maxsize=None)
+def _in_field(path):
+    """Whether ``path`` passes through a module field (a name, not an index)."""
+    return any(isinstance(p, str) for p in path)
 
 
 def _runtime(dynamic):
@@ -584,39 +592,39 @@ _FIELDS = {}
 _SCALAR = ("scalar",)
 
 
+class _Structure(tuple):
+    """A module argument's walked structure: a tuple hashed once, since a cached walk (``_C.ModuleWalk``) is keyed into
+    plans on every call."""
+
+    def __hash__(self):
+        """The tuple's hash, computed on first use."""
+        h = self.__dict__.get("hash")
+        if h is None:
+            h = self.__dict__["hash"] = tuple.__hash__(self)
+        return h
+
+
+def _field_names(cls):
+    """The field names of module class ``cls``, in order (looked up once a class)."""
+    names = _FIELDS.get(cls)
+    if names is None:
+        names = _FIELDS[cls] = tuple(f.name for f in dataclasses.fields(cls))
+    return names
+
+
+# Each module argument's walk (a ``_C.ModuleWalk``), while the module lives and its walk holds.
+_MODULE_WALKS = weakref.WeakKeyDictionary()
+
+_WALKER = _tracing.Walker(nn.Module, nn.is_scalar, _SCALAR, _field_names, _Structure, _MODULE_WALKS)
+
+
 def _walk(args):
-    """One pass over ``args``: their structure, hashable (``nn.structure``'s, a
-    marker at each scalar, and which module tensors share storage); each
-    scalar's ``(slot, value)`` (``_slots``); and the modules' weights, each
-    once, in order (``_weights``)."""
-    slots, ids, params = [], [], {}
-
-    def walk(x, i, path, module):
-        """The structure of ``x``, at ``path`` of argument ``i`` (inside a module when ``module``)."""
-        if isinstance(x, Tensor):
-            if module:
-                if not x._is_parameter:
-                    raise TypeError(
-                        f"a module's weights must be whole meta tensors, got a {x.device} tensor of shape {x.shape}"
-                    )
-                ids.append(x.storage_id)
-                params.setdefault(x.storage_id, x)
-            return ("tensor", x.dtype, tuple(x.shape), x.names, x.placement)
-        if isinstance(x, nn.Module):
-            names = _FIELDS.get(type(x))
-            if names is None:
-                names = _FIELDS[type(x)] = tuple(f.name for f in dataclasses.fields(x))
-            return (type(x), tuple((n, walk(getattr(x, n), i, (*path, n), True)) for n in names))
-        if isinstance(x, (list, tuple)):
-            return (type(x), tuple(walk(v, i, (*path, k), module) for k, v in enumerate(x)))
-        if nn.is_scalar(x):
-            slots.append(((i, path), x))
-            return _SCALAR
-        return ("static", x)
-
-    structure = tuple(walk(a, i, (), False) for i, a in enumerate(args))
-    shared = tuple(ids.index(k) for k in ids)
-    return (structure, shared), slots, list(params.values())
+    """One pass over ``args`` (``_C.Walker.walk``): their structure, hashable
+    (``nn.structure``'s, a marker at each scalar, and which module tensors
+    share storage); each scalar's ``(slot, value)`` (``_slots``); and the
+    modules' weights, each once, in order (``_weights``). A module
+    argument's walk is cached and only its scalars re-read while it holds."""
+    return _WALKER.walk(tuple(args))
 
 
 def _keyed(structure, slots, runtime):
@@ -789,6 +797,9 @@ class Compiled:
         self._baked = {}
         self._hosts, self._pending = {}, []
         self._fast = {}
+        # Each plan's inputs with its weights placed and packed, by plan: ``(plan, weights, their ids, inputs, the
+        # positions each call fills)`` (``_prepare``).
+        self._resolved = {}
         # CUDA graphs by plan (``config.compiler.cuda_graphs``): each plan's graph, its staged
         # arguments, the addresses it was captured at and its outputs, or None once it cannot capture.
         self._graphs, self._warm = {}, set()
@@ -802,23 +813,29 @@ class Compiled:
         arguments, then the weights placed, and their blocks)."""
         target = self._named or _device(args, None)
         structure, slots, weights = walked or _walk(args)
-        # An int or bool seen with two values across calls is made runtime instead of recompiling per value.
+        # An int or bool seen with two values across calls is made runtime instead of recompiling per value. Each
+        # scalar's runtime flag (``_runtime``) is worked out in the same pass.
+        flags = []
         for slot, value in slots:
-            if _baked(slot, value) and slot not in self._dynamic and slot not in self._pinned:
+            baked = _baked(slot, value)
+            if baked and slot not in self._dynamic and slot not in self._pinned:
                 if self._seen.setdefault(slot, (type(value), value)) != (type(value), value):
                     self._dynamic.add(slot)
-        key = _keyed(structure, slots, _runtime(self._dynamic)), target, _compiler_flags()
+            flags.append(not baked or slot in self._dynamic)
+        scalars_key = tuple(("scalar", type(v)) if f else ("static", type(v), v) for (_, v), f in zip(slots, flags))
+        key = (structure, scalars_key), target, _compiler_flags()
         result = None
         if key not in self._plans:
             result = _settled(self._fn, args, target, self._dynamic, self._pinned, self._proven)
             structure, slots, weights = _walk(args)
-            key = _keyed(structure, slots, _runtime(self._dynamic)), target, _compiler_flags()
+            runtime = _runtime(self._dynamic)
+            flags = [runtime(slot, v) for slot, v in slots]
+            key = _keyed(structure, slots, runtime), target, _compiler_flags()
         if result is not None:
             self._plans[key] = (*result, [])
         graph, out, written_all, drawn, _, layout, entries = self._plans[key]
         host_graph, n_hoisted, host_slots = written_all[3]
-        runtime = _runtime(self._dynamic)
-        runtime_slots = [(slot, v) for slot, v in slots if runtime(slot, v)]
+        runtime_slots = [sv for sv, f in zip(slots, flags) if f]
         raw = [Tensor.full([], _plain(v), _scalar_dtype(target, v)) for _, v in runtime_slots]
         self._pending[:] = []
         hoisted = []
@@ -848,15 +865,29 @@ class Compiled:
         by_value = not _graphed(target) and _device_type(target) != "tpu"
         scalars = [i for i, (kind, _) in enumerate(layout) if kind in _SCALARS] if by_value else []
 
+        held = [id(w) for w in weights]
+
         def inputs_for(plan):
-            """The plan's inputs for this call, or None if a packed weight block cannot be read in place."""
+            """The plan's inputs for this call, or None if a packed weight block cannot be read in place. A plan's
+            placed weights and packed blocks are kept (``_resolved``) and reused while a call passes the same
+            weights: a weight's placement never changes once made."""
+            resolved = self._resolved.get(id(plan))
+            if resolved is not None and resolved[0] is plan and resolved[2] == held:
+                inputs = resolved[3].copy()
+                for i in resolved[4]:
+                    inputs[i] = logical[i]
+                return inputs
             blocks = []
             for (positions, dimension), regions in zip(plan.packed, plan.interleaved):
                 block = _pack([logical[i] for i in positions], dimension, target, regions)
                 if block is None:
                     return None
                 blocks.append(block)
-            return [v._placed(target) if kind == "weight" else v for (kind, _), v in zip(layout, logical)] + blocks
+            inputs = [v._placed(target) if kind == "weight" else v for (kind, _), v in zip(layout, logical)] + blocks
+            others = [i for i, (kind, _) in enumerate(layout) if kind != "weight"]
+            # The weights are kept too, so no other tensor can take their ids.
+            self._resolved[id(plan)] = (plan, weights, held, inputs.copy(), others)
+            return inputs
 
         # Reuse the first cached plan whose packed weight blocks this call's weights can fill.
         for plan, workspace in entries:

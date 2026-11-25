@@ -4,6 +4,7 @@
 use crate::codegen::devices::tpu::fusible;
 use crate::codegen::elementwise::tpu::grid::{layout, plan};
 use crate::codegen::reduction::tpu::reducible;
+use crate::device::tpu::layout::same;
 use crate::graph::{Graph, Primitive};
 use crate::graph_compiler::passes::elementwise::{body, fused, members};
 
@@ -290,12 +291,18 @@ pub(crate) fn elementwise_fusion(graph: &Graph) -> Graph {
         node.inputs.iter().for_each(|&v| readers[v].push(i));
     }
 
-    // A slice alone in its group stays out: `place_views` may make it a view, else `alone` wraps it.
+    // A slice alone in its group stays out: `place_views` may make it a view, else `alone` wraps it. So does a reshape
+    // keeping every element in its tile (a leading unit axis added or dropped): the plan reads its input's memory as it.
     for (i, node) in nodes.iter().enumerate() {
-        if group[i] == Some(i)
-            && matches!(node.primitive, Primitive::Slice { .. })
-            && members(&group, i).len() == 1
-        {
+        let view = match node.primitive {
+            Primitive::Slice { .. } => true,
+            Primitive::Reshape { .. } => {
+                same(graph.type_of(node.inputs[0]), graph.type_of(node.output))
+            }
+            _ => false,
+        };
+
+        if group[i] == Some(i) && view && members(&group, i).len() == 1 {
             group[i] = None;
         }
     }

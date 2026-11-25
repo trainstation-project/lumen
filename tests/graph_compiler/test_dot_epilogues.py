@@ -692,5 +692,6 @@ def test_matmul_writes_attention_heads(device, seq):
     gemm, attention, *rest = steps
     assert gemm.startswith("3x dot_general") and gemm.count("dynamic_update_slice") == 2, steps
     assert attention == "flash_attention", steps
-    # Flash attention's heads-major result is put back in token order for the caller.
-    assert rest == (["transpose"] if seq > 1 else []), steps
+    # Flash attention writes token order; the caller's `[1, seq, heads, 64]` splits each row into heads, rows of
+    # their own on TPU. A projection reading the heads merged needs no such step.
+    assert rest == (["reshape"] if seq > 1 else []), steps

@@ -1,7 +1,7 @@
 //! Adapting attention fusions (both directions) to kernels that read and write whole tiles (TPU's): the
 //! `attention_layouts` pass, right after the attention passes. It merges the last two axes of outputs written with
 //! rows narrower than their last axis, folds reshape, sum and cast chains that read attention outputs into the
-//! fusion bodies, moves the backward's `delta` dot into the backward fusion (`delta_inside`), gives a fusion the
+//! fusion bodies (a decode attention's only when its kernel writes the result, `takes`), moves the backward's `delta` dot into the backward fusion (`delta_inside`), gives a fusion the
 //! backend's kernels can't take its operands heads-major (`heads_major`), and checks the backend's attention kernels
 //! take every attention fusion.
 //!
@@ -151,8 +151,9 @@ fn merged_outputs(graph: &Graph) -> Graph {
     out
 }
 
-/// Folds reshape, sum and cast chains reading attention outputs into the fusion bodies.
-fn reshaped_outputs(graph: &Graph) -> Graph {
+/// Folds reshape, sum and cast chains reading attention outputs into the fusion bodies. A forward fusion of one query a
+/// head writes its heads' matrix as laid out unless the backend's kernels (`takes`) write its chain's result instead.
+fn reshaped_outputs(graph: &Graph, takes: impl Fn(&str, &Graph) -> bool) -> Graph {
     let nodes = graph.nodes();
     let mut readers: Vec<Vec<usize>> = vec![Vec::new(); graph.types.len()];
     let mut parts: Vec<Vec<usize>> = vec![Vec::new(); graph.types.len()];
@@ -211,18 +212,32 @@ fn reshaped_outputs(graph: &Graph) -> Graph {
             continue;
         }
 
-        // Forward fusions fold only their primary output; one of one query a head none (it writes its heads' matrix).
+        // Forward fusions fold only their primary output; one of one query a head only a chain its kernel writes (its
+        // heads in one row), else none (it writes its heads' matrix).
         let forward =
             matches!(&node.primitive, Primitive::Fusion { name, .. } if name == "flash_attention");
 
-        let single = match &node.primitive {
-            Primitive::Fusion { body, .. } => {
-                forward && attention::of_body(body).is_some_and(|a| a.sq == 1)
-            }
-            _ => false,
-        };
+        if let Primitive::Fusion { name, body, .. } = &node.primitive
+            && forward
+            && attention::of_body(body).is_some_and(|a| a.sq == 1)
+        {
+            let chain = chain(node.output);
+            let mut folded = body.clone();
+            let mut outputs = folded.outputs().to_vec();
 
-        if single {
+            for &r in &chain {
+                outputs[0] = folded
+                    .apply(nodes[r].primitive.clone(), &[outputs[0]])
+                    .expect("the output's layout");
+            }
+
+            folded.set_outputs(&outputs).expect("the body's values");
+
+            if !chain.is_empty() && takes(name, &folded) {
+                chain.iter().for_each(|&r| skipped[r] = true);
+                by_fusion[i].push((0, chain));
+            }
+
             continue;
         }
 
@@ -357,6 +372,35 @@ fn graph_producer(graph: &Graph, v: Var) -> usize {
         .expect("a node's value")
 }
 
+/// Whether the backend's kernels (`D::check`) take the attention fusion `name` of `body` once `heads_major` has laid out
+/// its inputs.
+fn takes<D: TiledAttentions>(name: &str, body: &Graph) -> bool {
+    let mut graph = Graph::new();
+
+    let inputs: Vec<Var> = body
+        .inputs()
+        .iter()
+        .map(|&v| graph.input(body.type_of(v).clone()))
+        .collect();
+
+    let fusion = Primitive::Fusion {
+        name: name.into(),
+        label: crate::graph::intern(name.into()),
+        body: body.clone(),
+    };
+
+    let value = graph.apply(fusion, &inputs).expect("the fusion alone");
+    graph.set_outputs(&[value]).expect("its value");
+
+    heads_major::<D>(&graph)
+        .nodes()
+        .iter()
+        .all(|n| match &n.primitive {
+            Primitive::Fusion { name, body, .. } => D::check(name, body).is_ok(),
+            _ => true,
+        })
+}
+
 /// Checks that the backend's attention kernels (`D::check`) take every attention fusion left in `graph`.
 fn attentions<D: TiledAttentions>(graph: &Graph) -> Result<(), String> {
     for node in graph.nodes() {
@@ -387,7 +431,8 @@ impl<D: TiledAttentions> CompilerPass<DeviceModule<'_, D>> for AttentionLayouts 
 
     /// Rewrites the graph's attention fusions for the backend's kernels and checks each.
     fn apply(&mut self, m: &mut DeviceModule<'_, D>) -> Result<(), String> {
-        m.graph = heads_major::<D>(&delta_inside(&reshaped_outputs(&merged_outputs(&m.graph))));
+        let reshaped = reshaped_outputs(&merged_outputs(&m.graph), takes::<D>);
+        m.graph = heads_major::<D>(&delta_inside(&reshaped));
         attentions::<D>(&m.graph)
     }
 }
@@ -600,7 +645,9 @@ type Layout = (Vec<usize>, Vec<usize>);
 
 /// Gives each attention fusion the backend's kernels (`D::check`) can't take its q, k, v (and the backward's dO)
 /// heads-major: a reshape and transpose before the fusion write each such body input heads-major (`heads_layout`),
-/// and the body transposes and reshapes it back, so the kernel reads each head as one contiguous slab.
+/// and the body transposes and reshapes it back, so the kernel reads each head as one contiguous slab. A forward
+/// attention's output stays written through its layout chain when the kernels take that once the inputs are moved;
+/// else the chain runs after the fusion.
 fn heads_major<D: TiledAttentions>(graph: &Graph) -> Graph {
     let nodes = graph.nodes();
 
@@ -636,11 +683,6 @@ fn heads_major<D: TiledAttentions>(graph: &Graph) -> Graph {
             continue;
         };
 
-        // One query a head writes its heads' matrix as laid out (`unreadable`): its chain stays.
-        if name == "flash_attention" && attention::of_body(body).is_some_and(|a| a.sq > 1) {
-            trailing[i] = layout_chain(body);
-        }
-
         for (acc, batch, extents) in &accesses {
             let Some(k) = body.inputs().iter().position(|&v| v == acc.base) else {
                 continue;
@@ -652,6 +694,17 @@ fn heads_major<D: TiledAttentions>(graph: &Graph) -> Graph {
             if let Some(layout) = layout.filter(|_| moved[i].iter().all(|(j, _)| *j != k)) {
                 moved[i].push((k, layout));
             }
+        }
+
+        // The output's layout chain runs after the fusion only if the kernel can't write through it once the inputs
+        // are heads-major; one query a head writes its heads' matrix as laid out (`unreadable`): its chain stays.
+        let inputs_only = transposed_back(body, &moved[i], &[]);
+
+        if name == "flash_attention"
+            && attention::of_body(body).is_some_and(|a| a.sq > 1)
+            && D::check(name, &inputs_only).is_err()
+        {
+            trailing[i] = layout_chain(body);
         }
     }
 

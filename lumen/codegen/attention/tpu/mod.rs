@@ -41,11 +41,15 @@ struct Operand {
 ///
 /// `matrix` is the sequence length of a per-head matrix, `None` for a per-head vector such as the
 /// log-sum-exp. Fails unless every head starts at a whole slab and a whole head-width column.
+///
+/// With `shared` (the forward kernel's outputs), heads narrower than 128 lanes may share a 128-lane block (its
+/// `pack`): consecutive heads fill each block's lanes in order, as the kernel writes them one after another.
 fn view(
     name: &str,
     op: &Operand,
     batch: &[usize],
     matrix: Option<usize>,
+    shared: bool,
 ) -> Result<String, String> {
     let shape = &op.ty.shape;
 
@@ -87,7 +91,14 @@ fn view(
         None => 1,
     };
 
-    if matrix.is_some() && !(op.width.is_multiple_of(LANES) || op.width == width) {
+    let narrow = op.width < LANES && LANES.is_multiple_of(op.width) && width.is_multiple_of(LANES);
+
+    let pack = match matrix {
+        Some(_) if shared && narrow => LANES / op.width,
+        _ => 1,
+    };
+
+    if matrix.is_some() && pack == 1 && !(op.width.is_multiple_of(LANES) || op.width == width) {
         return failed("a head dimension that is neither a multiple of 128 nor its rows' width");
     }
 
@@ -102,6 +113,13 @@ fn view(
     }
 
     let heads: usize = batch.iter().product();
+
+    if !heads.is_multiple_of(pack) {
+        return failed("heads that don't fill their shared 128-lane blocks");
+    }
+
+    // Each run of `pack` heads' (slab, 128-lane block).
+    let mut blocks: Vec<(usize, usize)> = Vec::new();
 
     // Check every head's start lands where the per-dim slab and column steps put it.
     for g in 0..heads {
@@ -119,6 +137,24 @@ fn view(
         if !whole || !at.2.is_multiple_of(unit) || at.2 + unit > width {
             return failed("heads that are not whole tiles of their operand");
         }
+
+        if pack == 1 {
+            continue;
+        }
+
+        // A run's first head opens a block no other run writes; the rest join it at the next lanes.
+        let block = (at.0, at.2 / LANES);
+        let first = g.is_multiple_of(pack);
+        let joins = blocks.last() == Some(&block);
+        let opens = first && !blocks.contains(&block);
+
+        if (at.2 % LANES) / unit != g % pack || (first && !opens) || (!first && !joins) {
+            return failed("heads that don't fill their shared 128-lane blocks in order");
+        }
+
+        if first {
+            blocks.push(block);
+        }
     }
 
     let shown: Vec<String> = dims
@@ -127,7 +163,8 @@ fn view(
         .collect();
 
     Ok(format!(
-        "{{\"row\": {}, \"dtype\": \"{}\", \"view\": [{slabs}, {rows}, {width}], \"at\": [{l0}, {}], \"dims\": [{}]}}",
+        "{{\"row\": {}, \"dtype\": \"{}\", \"view\": [{slabs}, {rows}, {width}], \"at\": [{l0}, {}], \"dims\": [{}], \
+         \"pack\": {pack}}}",
         op.row,
         op.ty.dtype.full_name(),
         c0 / unit,
@@ -241,9 +278,9 @@ impl AttentionCodegen for Tpu {
         }
 
         let views = [
-            view("q", &operand(body, &a.q, a.h), &a.batch, Some(a.sq))?,
-            view("k", &operand(body, &a.k, a.h), &a.batch, Some(a.sk))?,
-            view("v", &operand(body, &a.v, a.hv), &a.batch, Some(a.sk))?,
+            view("q", &operand(body, &a.q, a.h), &a.batch, Some(a.sq), false)?,
+            view("k", &operand(body, &a.k, a.h), &a.batch, Some(a.sk), false)?,
+            view("v", &operand(body, &a.v, a.hv), &a.batch, Some(a.sk), false)?,
         ];
 
         // The log-sum-exp, when produced, is the last output.
@@ -261,6 +298,7 @@ impl AttentionCodegen for Tpu {
                 &output(body, k, acc, a.hv),
                 &a.batch,
                 Some(a.sq),
+                true,
             )?;
 
             match epilogue(&chain) {
@@ -273,7 +311,13 @@ impl AttentionCodegen for Tpu {
             Some(k) => {
                 let ty = body.type_of(body.outputs()[k]).clone();
                 let acc = per_head(&ty, &a.batch);
-                view("the log-sum-exp", &output(body, k, acc, 1), &a.batch, None)?
+                view(
+                    "the log-sum-exp",
+                    &output(body, k, acc, 1),
+                    &a.batch,
+                    None,
+                    false,
+                )?
             }
             None => "null".into(),
         };
@@ -312,11 +356,23 @@ impl AttentionCodegen for Tpu {
         }
 
         let ins = [
-            view("q", &operand(body, &b.q, b.h), &b.batch, Some(b.sq))?,
-            view("k", &operand(body, &b.k, b.h), &b.batch, Some(b.sk))?,
-            view("v", &operand(body, &b.v, b.hv), &b.batch, Some(b.sk))?,
-            view("dO", &operand(body, &b.d_o, b.hv), &b.batch, Some(b.sq))?,
-            view("the log-sum-exp", &operand(body, &b.lse, 1), &b.batch, None)?,
+            view("q", &operand(body, &b.q, b.h), &b.batch, Some(b.sq), false)?,
+            view("k", &operand(body, &b.k, b.h), &b.batch, Some(b.sk), false)?,
+            view("v", &operand(body, &b.v, b.hv), &b.batch, Some(b.sk), false)?,
+            view(
+                "dO",
+                &operand(body, &b.d_o, b.hv),
+                &b.batch,
+                Some(b.sq),
+                false,
+            )?,
+            view(
+                "the log-sum-exp",
+                &operand(body, &b.lse, 1),
+                &b.batch,
+                None,
+                false,
+            )?,
         ];
 
         // Delta is either a body input or rowsum(dO * o), which the kernel recomputes from o.
@@ -326,12 +382,12 @@ impl AttentionCodegen for Tpu {
 
                 format!(
                     "\"delta\": null, \"o\": {}",
-                    view("o", &operand(body, &o, b.hv), &b.batch, Some(b.sq))?
+                    view("o", &operand(body, &o, b.hv), &b.batch, Some(b.sq), false)?
                 )
             }
             _ => format!(
                 "\"delta\": {}",
-                view("delta", &operand(body, &b.delta, 1), &b.batch, None)?
+                view("delta", &operand(body, &b.delta, 1), &b.batch, None, false)?
             ),
         };
 
@@ -348,7 +404,13 @@ impl AttentionCodegen for Tpu {
          -> Result<String, String> {
             let (_, acc) = out.as_ref().expect("an output");
             let (k, acc) = written(body, acc, &b.batch)?;
-            view(name, &output(body, k, acc, width), &b.batch, Some(seq))
+            view(
+                name,
+                &output(body, k, acc, width),
+                &b.batch,
+                Some(seq),
+                false,
+            )
         };
 
         let outs = match kind {
@@ -839,7 +901,8 @@ fn decode_block(sk: usize) -> usize {
 }
 
 /// The decode kernel's kind and spec for attention `a` of fusion `body`, one query a head (JAX's paged attention's
-/// form): its batch dims `[batch, heads]`, the query and output each batch index's `[heads, head dim]` matrix, the
+/// form): its batch dims `[batch, heads]`, the query and output each batch index's `[heads, head dim]` matrix (the
+/// output may instead be its `[1, heads * head dim]` row, `flat`, as the output projection reads it), the
 /// keys and values heads-major (`[batch, kv heads, keys, head dim]`, a query head reading kv head `head / group`), no
 /// epilogue or log-sum-exp; the causal diagonal plus a runtime offset (`offset`, an input's row) when it has one.
 fn decode(body: &Graph, a: &Attention) -> Result<(&'static str, String), String> {
@@ -904,8 +967,13 @@ fn decode(body: &Graph, a: &Attention) -> Result<(&'static str, String), String>
 
     let (_, out) = written_at(body, &a.out, &a.batch, 0)?;
 
-    if !rows(&out, a.hv) || matrix(body.outputs()[0]) != [n, a.hv] {
-        return failed("an output other than each batch index's [heads, head dim] matrix");
+    // Each batch index's heads as the rows of a matrix, or side by side in one row (`flat`), as a projection reads them.
+    let flat = matrix(body.outputs()[0]) == [1, n * a.hv];
+
+    if !rows(&out, a.hv) || !(flat || matrix(body.outputs()[0]) == [n, a.hv]) {
+        return failed(
+            "an output other than each batch index's [heads, head dim] matrix or [1, heads * head dim] row",
+        );
     }
 
     let n_inputs = body.inputs().len();
@@ -921,7 +989,7 @@ fn decode(body: &Graph, a: &Attention) -> Result<(&'static str, String), String>
     };
 
     let spec = format!(
-        "\"kind\": \"decode\", \"b\": {b}, \"n\": {n}, \"group\": {group}, \"sk\": {}, \"h\": {}, \"hv\": {},          \"bk\": {}, \"scores\": {}, \"causal\": {}, \"offset\": {offset}, \"q\": {}, \"k\": {}, \"v\": {}, \"o\": {n_inputs},          \"dtype\": \"{}\", \"o_dtype\": \"{}\"",
+        "\"kind\": \"decode\", \"b\": {b}, \"n\": {n}, \"group\": {group}, \"sk\": {}, \"h\": {}, \"hv\": {},          \"bk\": {}, \"scores\": {}, \"causal\": {}, \"offset\": {offset}, \"q\": {}, \"k\": {}, \"v\": {}, \"o\": {n_inputs},          \"flat\": {flat}, \"dtype\": \"{}\", \"o_dtype\": \"{}\"",
         a.sk,
         a.h,
         a.hv,
