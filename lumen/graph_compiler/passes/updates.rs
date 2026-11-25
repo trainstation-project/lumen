@@ -2,9 +2,9 @@
 //! each update written into the previous one's result: one kernel writing every update into the operand. It runs
 //! after `dot_rows` and before `diamonds`.
 //!
-//! Devices: it runs on each device whose codegen implements `codegen::dynamic_slice::UpdateChains`, with that
-//! backend's chain lengths: MPS (2 to 29 updates, Metal binding 31 buffers, two of them the operand and the
-//! output) and Triton (2 or more) under `fuse`, TPU (1 or more) always. CPU and CUDA get the identity pass.
+//! Devices: each device's pass list (`graph_compiler::pipeline`) gives its chain lengths: MPS (2 to 29 updates, Metal
+//! binding 31 buffers, two of them the operand and the output) and Triton (2 or more) under `fuse`, TPU (1 or more)
+//! always. CPU and CUDA don't run it.
 //!
 //! The rewrite:
 //! - An update qualifies when every start index is a scalar `i32` integer fill (a compile-time constant).
@@ -19,9 +19,7 @@
 //! `fusion::mps` keeps `updates` fusions out of horizontal fusion.
 
 use crate::DType;
-use crate::codegen::dynamic_slice::UpdateChains;
 use crate::graph::{Graph, Node, Primitive, UPDATES, Var, intern};
-use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::{CompilerPass, Module};
 use crate::tensor::scalar::Scalar;
@@ -155,15 +153,7 @@ pub(crate) struct Updates {
     pub(crate) most: usize,
 }
 
-impl<D: UpdateChains> CompilerPass<DeviceModule<'_, D>> for Updates {
-    /// With `fuse` where `WITH_FUSE`, else always; chains as long as the device takes.
-    fn configured(config: &CompilerConfig) -> Option<Self> {
-        (config.fuse || !D::WITH_FUSE).then_some(Updates {
-            least: D::LEAST,
-            most: D::MOST,
-        })
-    }
-
+impl<D> CompilerPass<DeviceModule<'_, D>> for Updates {
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "dynamic_update_slices"

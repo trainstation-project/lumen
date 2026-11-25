@@ -2,9 +2,9 @@
 //! when the GEMM kernel can read the operand at the parent's strides. It runs after `fusion` and `wide_rows` and before
 //! `alone`, so the lone layout ops `alone` turns into elementwise fusions no longer include these slices.
 //!
-//! Devices: it runs on each device whose codegen implements `codegen::dot_general::StridedOperands` (its GEMM's rule for the
-//! operand layouts it reads in place, `reads_slice`): MPS (`dot_general::mps::reads_strided`), Triton (any strides) and
-//! TPU (`dot_general::tpu::slice_view`: slices of whole tiles, in its GEMM kernel). CPU and CUDA get the identity pass.
+//! Devices: it runs on each device implementing `StridedOperands` (its GEMM's rule for the operand layouts it reads in
+//! place, `reads_slice`, in `<device>.rs`): MPS (`dot_general::mps::reads_strided`), Triton (any strides) and TPU
+//! (`dot_general::tpu::slice_view`: slices of whole tiles, in its GEMM kernel). CPU and CUDA don't run it.
 //!
 //! The rule: a `Slice` of one value is marked a view when its output is not a graph output, its input is not itself a
 //! slice already marked a view, and it has at least one reader, every reader being a `DotGeneral` whose rule accepts
@@ -13,7 +13,11 @@
 //! exactly one of its operands, in a layout the rule accepts. MPS codegen calls `fusion_reads_strided` too
 //! (`codegen::fusion::mps::fusion_reads_strided`, planning MPS steps).
 
-use crate::codegen::dot_general::StridedOperands;
+#[cfg(lumen_mps_linked)]
+mod mps;
+mod tpu;
+mod triton;
+
 use crate::codegen::kinds::gemm_dot;
 use crate::graph::{Graph, Primitive, TensorType, Var};
 use crate::graph_compiler::CompilerConfig;
@@ -113,6 +117,32 @@ pub(crate) fn fusion_reads_strided(
             reads(&dot.primitive, operands, side, strides)
         }
         _ => false,
+    }
+}
+
+/// A backend's GEMM telling the `place_views` pass which operand layouts it reads in place: slices only such GEMMs read
+/// become strided views instead of copies.
+pub(crate) trait StridedOperands {
+    /// Whether the GEMM reads `dot`'s operand `k` (of the two `operands`' types) laid out with `strides`.
+    fn reads_strided(
+        dot: &crate::graph::Primitive,
+        operands: [&crate::graph::TensorType; 2],
+        k: usize,
+        strides: &[usize],
+    ) -> bool;
+
+    /// Whether a step running `kernel` (its fusion's name, else its dot's) reads `dot`'s operand `k` as the slice
+    /// from `starts` of a value laid out with `strides`; by default, from any start in any kernel, as
+    /// `reads_strided` accepts.
+    fn reads_slice(
+        _kernel: &str,
+        dot: &crate::graph::Primitive,
+        operands: [&crate::graph::TensorType; 2],
+        k: usize,
+        strides: &[usize],
+        _starts: &[usize],
+    ) -> bool {
+        Self::reads_strided(dot, operands, k, strides)
     }
 }
 

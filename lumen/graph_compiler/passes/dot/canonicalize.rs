@@ -18,10 +18,9 @@
 //! `matmul_order` is also used by MPS's GEMM codegen (`codegen::dot_general::mps`) to read operands in the
 //! same `[batch, M, K]` / `[batch, K, N]` form. Tests construct the pass directly with `mps::reads_contiguous`.
 //!
-//! Devices: it runs, always, on each device whose codegen implements `codegen::dot_general::DotLayouts` (which operand layouts its
+//! Devices: it runs, always, on each device implementing `DotLayouts` (which operand layouts its
 //! matmul kernels read as laid out): MPS (what its GEMM reads at contiguous strides) and TPU (batch dims leading, one
-//! contracting dim placed as its kernel reads it). The others get the identity pass.
-use crate::codegen::dot_general::DotLayouts;
+//! contracting dim placed as its kernel reads it).
 use crate::graph::ir::primitive::free_dims;
 use crate::graph::{Graph, Primitive, TensorType, Var};
 use crate::graph_compiler::CompilerConfig;
@@ -69,6 +68,17 @@ pub(crate) fn matmul_order(p: &Primitive, lhs_rank: usize, rhs_rank: usize) -> M
         lhs_split: (nb, nb + lhs_free.len()),
         rhs_split: (nb, nb + nk),
     }
+}
+
+/// A backend telling the `canonicalize_dots` pass which matmul operands its kernels read as laid out;
+/// the others are transposed into a form they can first.
+pub(crate) trait DotLayouts {
+    /// Whether the matmul kernels read operand `k` of `dot` (over `operands`) as laid out.
+    fn readable(
+        dot: &crate::graph::Primitive,
+        operands: [&crate::graph::TensorType; 2],
+        k: usize,
+    ) -> bool;
 }
 
 /// Compiler pass running `canonicalize_dots` on the module's graph with the backend's `readable`.

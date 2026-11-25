@@ -2,9 +2,8 @@
 //! materializes the `[b, v]` logits. It runs after the attention passes and before `fold_dot_reshapes`;
 //! `chunked_cross_entropy`, earlier in the list, reuses its matcher (`Found`, `matched` and `uses` are `pub(super)`).
 //!
-//! Devices: it runs, with `fuse` and `fused_linear_cross_entropy`, on each device whose codegen implements
-//! `codegen::dot_general::LinearCrossEntropies` (a fused linear cross-entropy kernel): MPS and Triton. CPU, CUDA and TPU get the
-//! identity pass.
+//! Devices: it runs, with `fuse` and `fused_linear_cross_entropy`, on the devices with a fused linear cross-entropy
+//! kernel: MPS and Triton.
 //!
 //! The pattern, for an unbatched dot computing float32 logits (float32 accumulation and output) from 2-D hidden states
 //! `h` (`[b, d]`, contracted on dim 1) and a 2-D weight `w` of the same float dtype (`[v, d]`, or `[d, v]` when the dot
@@ -24,7 +23,6 @@
 //!
 //! Every other node is copied with its label; replaced nodes pass their origins to the new ones.
 
-use crate::codegen::dot_general::LinearCrossEntropies;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
@@ -338,7 +336,7 @@ fn row_offsets_plus(
 /// Compiler pass running [`linear_cross_entropy`].
 pub(crate) struct LinearCrossEntropy;
 
-impl<D: LinearCrossEntropies> CompilerPass<DeviceModule<'_, D>> for LinearCrossEntropy {
+impl<D> CompilerPass<DeviceModule<'_, D>> for LinearCrossEntropy {
     /// With `fuse` and `fused_linear_cross_entropy`.
     fn configured(config: &CompilerConfig) -> Option<Self> {
         (config.fuse && config.fused_linear_cross_entropy).then_some(LinearCrossEntropy)

@@ -1,6 +1,6 @@
 //! `FoldDotReshapes` (pass name `fold_dot_reshapes`) lets a matmul read a rank-3+ activation directly
 //! instead of through a reshape that flattens it to a matrix. It runs after `linear_cross_entropy` and
-//! just before the matched `Simplify`, early in the one pass list.
+//! just before the matched `Simplify`.
 //!
 //! ## Rewrite
 //!
@@ -16,9 +16,7 @@
 //!
 //! Nodes it doesn't rewrite are copied with their labels and origins.
 //!
-//! Devices: it runs, always, on each device whose codegen implements `codegen::dot_general::FoldsDotReshapes`: TPU. The others get
-//! the identity pass.
-use crate::codegen::dot_general::FoldsDotReshapes;
+//! Devices: TPU runs it, always: its matmul kernel takes the folded dots.
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
@@ -27,7 +25,7 @@ use crate::graph_compiler::passes::{CompilerPass, Module};
 /// Compiler pass running [`fold_dot_reshapes`].
 pub(crate) struct FoldDotReshapes;
 
-impl<D: FoldsDotReshapes> CompilerPass<DeviceModule<'_, D>> for FoldDotReshapes {
+impl<D> CompilerPass<DeviceModule<'_, D>> for FoldDotReshapes {
     /// Always.
     fn configured(_: &CompilerConfig) -> Option<Self> {
         Some(FoldDotReshapes)

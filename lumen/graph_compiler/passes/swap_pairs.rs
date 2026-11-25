@@ -8,10 +8,11 @@
 //! value is in registers (a GEMM accumulator), swaps the partners in place; slices and a concatenation would need the
 //! value in memory.
 //!
-//! Devices: it runs on each device whose codegen implements `codegen::emitter::SwapsPairs` (MPS and Triton), right
-//! after the full `simplify`. Other devices keep the slices and concatenation.
+//! Devices: it runs on every device but the CPU, right after the full `simplify`: MPS and Triton kernels read each
+//! element's partner at `j ^ distance` (a Triton GEMM accumulator swaps adjacent lanes), CuTe kernels too (in an
+//! elementwise kernel), TPU kernels swap pairs within a block's last axis (two lane rotations and a select, in
+//! `kernels::pallas::mosaic`). The CPU keeps the slices and concatenation.
 
-use crate::codegen::emitter::SwapsPairs;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
@@ -21,7 +22,7 @@ use crate::{DType, Scalar};
 /// Compiler pass turning each pair swap written with slices and a concatenation into `SwapPairs`.
 pub(crate) struct SwapPairs;
 
-impl<D: SwapsPairs> CompilerPass<DeviceModule<'_, D>> for SwapPairs {
+impl<D> CompilerPass<DeviceModule<'_, D>> for SwapPairs {
     /// Always.
     fn configured(_: &CompilerConfig) -> Option<Self> {
         Some(SwapPairs)

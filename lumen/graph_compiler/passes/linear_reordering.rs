@@ -7,9 +7,9 @@
 //! traced program's in the last bits; `linear_reordering` (off by default) turns it on. It runs after
 //! `neural_engine` and before `split_k`, so the later fusion passes see the factor after the matmul.
 //!
-//! Devices: it runs on each device whose GEMM codegen implements `codegen::dot_general::RowTile` (the widest row
-//! one GEMM tile holds whole), taking that as its `tile`: MPS (`codegen/dot_general/mps/row.rs`, `ROW_TILE`) and Triton
-//! (`codegen/dot_general/triton`, `ROW_TILE`). CPU, CUDA and TPU get the identity pass.
+//! Devices: MPS and Triton run it, each list (`graph_compiler::pipeline`) giving the widest row one of its GEMM tiles
+//! holds whole as its `tile`: MPS's `codegen/dot_general/mps/row.rs` `ROW_TILE`, Triton's `codegen/dot_general/triton`
+//! `ROW_TILE`.
 //!
 //! The rewrite:
 //! - Matmuls considered (`plain`): unbatched float matmuls of a rank-2+ lhs contracted on its last axis (or a
@@ -27,7 +27,6 @@
 //!   to the original output dtype. The graph is pruned afterwards.
 
 use crate::DType;
-use crate::codegen::dot_general::RowTile;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
@@ -317,14 +316,16 @@ pub(crate) struct LinearReordering {
     pub(crate) tile: Option<usize>,
 }
 
-impl<D: RowTile> CompilerPass<DeviceModule<'_, D>> for LinearReordering {
-    /// With `linear_reordering`, rows limited to the device's GEMM tile.
-    fn configured(config: &CompilerConfig) -> Option<Self> {
-        config.linear_reordering.then_some(LinearReordering {
-            tile: Some(D::ROW_TILE),
-        })
+impl LinearReordering {
+    /// The pass with `linear_reordering`, rows limited to a device's GEMM `tile`.
+    pub(crate) fn configured_with(config: &CompilerConfig, tile: usize) -> Option<Self> {
+        config
+            .linear_reordering
+            .then_some(LinearReordering { tile: Some(tile) })
     }
+}
 
+impl<D> CompilerPass<DeviceModule<'_, D>> for LinearReordering {
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "linear_reordering"

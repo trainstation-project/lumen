@@ -27,8 +27,8 @@
 //!
 //! ## Backend answers (`Attentions` trait, in each backend's codegen)
 //!
-//! It runs, with `flash_attention`, on each device whose module implements `Attentions` (`fuse` too where
-//! `WITH_FUSE`, every device but TPU).
+//! It runs, with `flash_attention`, on each device whose module implements `Attentions` (in `<device>.rs`), with
+//! `fuse` too on every device but TPU.
 //!
 //! - MPS - epilogues when `contraction_epilogues` is on; by-value scalars from the module; kernel
 //!   names requested as `Kernel::Attention`; runtime causal offsets allowed.
@@ -774,8 +774,6 @@ impl<'a> Matcher<'a> {
 
 /// A module whose backend can generate flash-attention kernels.
 pub(crate) trait Attentions: Module {
-    /// Whether it fuses attention only with `fuse`; else whenever `flash_attention` is on.
-    const WITH_FUSE: bool = true;
     /// Whether elementwise epilogues may be fused into the attention.
     fn contraction_epilogues(&self) -> bool;
     /// Which epilogues the backend accepts: by default any leaf, without reshapes.
@@ -804,9 +802,9 @@ pub(crate) trait Attentions: Module {
 pub(crate) struct FlashAttention;
 
 impl<M: Attentions> CompilerPass<M> for FlashAttention {
-    /// With `flash_attention` (and `fuse` where `WITH_FUSE`).
+    /// With `flash_attention`.
     fn configured(config: &CompilerConfig) -> Option<Self> {
-        (config.flash_attention && (config.fuse || !M::WITH_FUSE)).then_some(FlashAttention)
+        config.flash_attention.then_some(FlashAttention)
     }
 
     /// Pass name used in profiler ranges and dumps.

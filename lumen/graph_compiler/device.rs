@@ -1,6 +1,6 @@
 //! The devices the graph compiler targets and the one module every device's passes rewrite: each device is a type
-//! implementing [`Device`], its answers to each pass living beside the pass (`passes/<pass>/<device>.rs`), so the
-//! compiler is one pass list (`pipeline::pipeline!`) and one `compile!` for every device.
+//! implementing [`Device`], with its own pass list (`pipeline::Passes`, `pipeline/<device>.rs`) and its answers to each
+//! pass beside the pass (`passes/<pass>/<device>.rs`); one `compile!` runs them for every device.
 
 use super::passes::Module;
 use super::passes::diamonds::{Row, RowsModule};
@@ -83,8 +83,8 @@ impl<D> RowsModule for DeviceModule<'_, D> {
     }
 }
 
-/// A device the graph compiler targets: its name and how its passed graph becomes a plan (its passes are the ones
-/// it implements beside each pass, `passes/<pass>/<device>.rs`; `pipeline::pipeline!` picks them).
+/// A device the graph compiler targets: its name and how its passed graph becomes a plan (its passes are its
+/// `pipeline::Passes` list).
 pub(crate) trait Device: Sized + 'static {
     /// The device's name, in profiler ranges and dump files.
     const NAME: &'static str;
@@ -96,7 +96,7 @@ pub(crate) trait Device: Sized + 'static {
     ) -> Result<Box<dyn Plan>, String>;
 }
 
-/// Compiles `graph` for concrete device `$device` (a `crate::Device`, `$at`) under `$options`: runs the one pass
+/// Compiles `graph` for concrete device `$device` (a `crate::Device`, `$at`) under `$options`: runs the device's pass
 /// list, then lowers the result to a plan.
 macro_rules! compile {
     ($device:ty, $graph:expr, $at:expr, $options:expr) => {{
@@ -105,7 +105,8 @@ macro_rules! compile {
         let options: &$crate::graph_compiler::Options = $options;
         let mut module =
             $crate::graph_compiler::device::DeviceModule::<$device>::new($graph, options);
-        $crate::graph_compiler::pipeline::pipeline!($device, &options.config).run(&mut module)?;
+        <$device as $crate::graph_compiler::pipeline::Passes>::passes(&options.config)
+            .run(&mut module)?;
         <$device>::lower(module, $at)
     }};
 }

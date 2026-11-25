@@ -17,12 +17,11 @@
 //!   move to the start of the graph, so they are computed before the dot (`dot::fuse` reads only such values in an
 //!   epilogue). Equal ones (a rotary's tables in every layer) are then computed once (`cse`).
 //!
-//! Devices: it runs, always, on each device whose fusion implements `codegen::fusion::SinksReshapes` (TPU). Elsewhere
-//! the split is a view the epilogue reads through.
+//! Devices: TPU runs it, always: there splitting a last axis is a copy (its tiled layout). Elsewhere the split is a
+//! view the epilogue reads through.
 
-use crate::codegen::fusion::SinksReshapes;
 use crate::graph::{Graph, Node, Primitive, TensorType, Var};
-use crate::graph_compiler::passes::CompilerPass;
+use crate::graph_compiler::passes::{CompilerPass, Module};
 use crate::graph_compiler::{CompilerConfig, elementwise};
 
 /// A split reshape and the chain computed before it instead.
@@ -375,7 +374,7 @@ fn hoisted(graph: &Graph, hoist: &[Var]) -> Graph {
 /// splitting its last axis.
 pub(crate) struct SinkReshapes;
 
-impl<M: SinksReshapes> CompilerPass<M> for SinkReshapes {
+impl<M: Module> CompilerPass<M> for SinkReshapes {
     /// Always.
     fn configured(_: &CompilerConfig) -> Option<Self> {
         Some(SinkReshapes)

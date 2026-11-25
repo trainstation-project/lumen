@@ -1,11 +1,13 @@
-//! Fusion by planned groups (TPU's): plans which nodes fuse together into `elementwise` and `reduction` kernels,
+//! TPU's fusion, by planned groups: plans which nodes fuse together into `elementwise` and `reduction` kernels,
 //! splitting off layout ops until every group's indexing can be planned, and turns the groups into fusions, a
-//! reducing member leading. `codegen::fusion::tpu` runs it as TPU's fusion.
+//! reducing member leading.
+
 use crate::codegen::devices::tpu::fusible;
 use crate::codegen::elementwise::tpu::grid::{layout, plan};
 use crate::codegen::reduction::tpu::reducible;
 use crate::device::tpu::layout::same;
 use crate::graph::{Graph, Primitive};
+use crate::graph_compiler::device::{DeviceModule, Tpu};
 use crate::graph_compiler::passes::elementwise::{body, fused, members};
 
 /// How a node may join the fusion group of its readers.
@@ -336,4 +338,13 @@ pub(crate) fn elementwise_fusion(graph: &Graph) -> Graph {
             None => Vec::new(),
         },
     )
+}
+
+/// TPU's fusion (the `fusion` pass): its planned groups.
+impl super::Fuses for Tpu {
+    /// Rewrites the graph with each planned group fused into an `elementwise` or `reduction` fusion.
+    fn fuse(m: &mut DeviceModule<'_, Tpu>) -> Result<(), String> {
+        m.graph = elementwise_fusion(&m.graph);
+        Ok(())
+    }
 }

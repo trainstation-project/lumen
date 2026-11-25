@@ -17,12 +17,11 @@
 //!   chunks, and a `Cast` follows when the original output dtype differs from the accumulator.
 //! - The new nodes are labelled `dot_general (split-K)` and `reduce_sum (split-K)`.
 //!
-//! Devices: it runs, with `split_k`, on each device whose codegen implements `codegen::dot_general::SplitsK` (its tiles, target,
+//! Devices: it runs, with `split_k`, on each device implementing `SplitsK` (its tiles, target,
 //! the products it keeps whole and a chunk count it prefers): MPS (tiles counted with the GEMM's `float_groups`, a
 //! target of 256 threadgroups, GEMV and skinny products of at most 4 rows kept whole, MLX's preferred chunks) and
 //! Triton (tiles of the untuned GEMM config, a target of 128 tiles, matrix-vector products kept whole for the GEMV
-//! kernel; partials always summed by a reduction, so results stay deterministic). The others get the identity pass.
-use crate::codegen::dot_general::SplitsK;
+//! kernel; partials always summed by a reduction, so results stay deterministic).
 use crate::graph::{Graph, Primitive, TensorType, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
@@ -201,6 +200,27 @@ pub(crate) fn split<D: SplitsK>(graph: &Graph) -> Graph {
     };
 
     split_k(graph, &rules)
+}
+
+/// A backend's rules for the `split_k` pass: its tiles, the tiles it aims for, the products it keeps
+/// whole and a chunk count it prefers.
+pub(crate) trait SplitsK {
+    /// Tiles a split aims to fill the GPU with; a matmul of half as many or more is not split.
+    const TARGET: usize;
+    /// Output tiles an `m` x `n` matmul runs as.
+    fn tiles(m: usize, n: usize) -> usize;
+    /// Whether a dot of these operand and output types runs on a kernel of its own, unsplit.
+    fn unsplit(
+        dot: &crate::graph::Primitive,
+        lhs: &crate::graph::TensorType,
+        rhs: &crate::graph::TensorType,
+        out: &crate::graph::TensorType,
+    ) -> bool;
+    /// A chunk count it would rather split an `m` x `n` output with contraction `k` into (the larger of it and the
+    /// target's is used); by default none.
+    fn chunks(_m: usize, _n: usize, _k: usize) -> Option<usize> {
+        None
+    }
 }
 
 /// Compiler pass splitting long-K matmuls with too few output tiles, by the device's rules.

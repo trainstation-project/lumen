@@ -1,7 +1,7 @@
 //! `DotStrength` (pass name `dot_strength`) rewrites dots between vectors (batched inner products, such as
 //! attention backward's delta read through transposes) as an elementwise multiply and a reduce-sum, so they
 //! run as elementwise/reduction fusions instead of a matmul kernel. It runs right after the matched
-//! `Simplify` and before `merge_dots_late`.
+//! `Simplify` and before TPU merges its dots.
 //!
 //! ## Rewrite
 //!
@@ -20,10 +20,8 @@
 //!
 //! Integer dots and dots with any non-trivial free dimension are copied unchanged.
 //!
-//! Devices: it runs, always, on each device whose codegen implements `codegen::dot_general::InnerProducts`: MPS, Triton and TPU.
-//! CPU and CUDA get the identity pass.
+//! Devices: MPS, Triton and TPU run it, always (their elementwise and reduction fusions take the products).
 use crate::DType;
-use crate::codegen::dot_general::InnerProducts;
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
@@ -139,7 +137,7 @@ fn reshaped(out: &mut Graph, v: Var, shape: &[usize]) -> Var {
 /// Compiler pass running [`reduce_vector_dots`].
 pub(crate) struct DotStrength;
 
-impl<D: InnerProducts> CompilerPass<DeviceModule<'_, D>> for DotStrength {
+impl<D> CompilerPass<DeviceModule<'_, D>> for DotStrength {
     /// Always.
     fn configured(_: &CompilerConfig) -> Option<Self> {
         Some(DotStrength)

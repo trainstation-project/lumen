@@ -2,18 +2,29 @@
 //! with a readable error and changes nothing otherwise. It is the first pass in the list, so it sees the graph
 //! exactly as traced.
 //!
-//! Devices: every device's codegen implements `codegen::devices::Supports` (its check of the graph): the CPU (`reference`:
-//! no Pallas kernels), CUDA (`codegen/devices/cuda`: ops and dtypes the CuTe DSL backend has kernels for), MPS
-//! (`codegen/devices/mps`: float64 and float8 values, bfloat16 transcendentals, dots of two dtypes), Triton
-//! (`codegen/devices/triton`: float16 and bfloat16 transcendentals, which libdevice lacks) and TPU
-//! (`codegen/devices/tpu`: float16, cumsum, scatter-add and random bits). "Transcendental" is
+//! Devices: every device implements `Supports` (its check of the graph, in `<device>.rs`): the CPU (no Pallas
+//! kernels), CUDA (ops and dtypes the CuTe DSL backend has kernels for), MPS (float64 and float8 values, bfloat16
+//! transcendentals, dots of two dtypes), Triton (float16 and bfloat16 transcendentals, which libdevice lacks) and TPU
+//! (float16, cumsum, scatter-add and random bits). "Transcendental" is
 //! `Primitive::is_transcendental`; the operand checked is a node's first input (or its output when it has none).
 
-use crate::codegen::devices::Supports;
+mod cpu;
+mod cuda;
+#[cfg(lumen_mps_linked)]
+mod mps;
+mod tpu;
+mod triton;
+
 use crate::graph::Graph;
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::{CompilerPass, Module};
+
+/// A device telling the `unsupported` pass which graphs it has no kernels for.
+pub(crate) trait Supports {
+    /// The error for the first op of `graph` this backend has no kernel for, if any.
+    fn check(graph: &crate::graph::Graph) -> Result<(), String>;
+}
 
 /// A pass failing on a graph `check` rejects, leaving the graph as it is otherwise.
 pub(crate) struct Unsupported {

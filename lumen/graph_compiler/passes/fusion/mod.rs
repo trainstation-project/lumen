@@ -1,5 +1,5 @@
 //! Fusion shared by the GPU backends: groups elementwise chains, reductions, normalization rows
-//! and GEMM epilogues into `Fusion` nodes, each compiled by the backend to one kernel. `mps` and `triton`
+//! and GEMM epilogues into `Fusion` nodes, each compiled by the backend to one kernel. `cuda`, `mps` and `triton`
 //! run it with their kernels' limits; `tpu` groups nodes into the TPU's elementwise and reduction kernels.
 
 use crate::graph::{Graph, Node, Primitive, Var};
@@ -7,12 +7,16 @@ use crate::graph_compiler::passes::diamonds::Row;
 pub(crate) use crate::graph_compiler::{constant, elementwise, label};
 
 mod analysis;
+mod cuda;
 mod dot_epilogues;
 mod emit;
-pub(crate) mod groups;
 mod hosts;
+#[cfg(lumen_mps_linked)]
+pub(crate) mod mps;
 mod reduction_epilogues;
 mod rows;
+mod tpu;
+mod triton;
 
 /// What a backend brings to fusion: the nodes its kernels compute, their limits, the fusions it
 /// turns on, and the GEMM shapes its kernels take.
@@ -111,17 +115,23 @@ pub(crate) fn fuse(
     )
 }
 
-/// The fusion pass: each device's fusion (`codegen::fusion::Fuses::fuse`, in its codegen), on every device whose codegen
-/// implements `Fuses`.
+/// A backend's fusion (the `fusion` pass): the shared fusion with its limits and kernel names (MPS,
+/// Triton, CUDA) or a fusion of its own (TPU's planned groups).
+pub(crate) trait Fuses: Sized {
+    /// Fuses module `m`'s graph.
+    fn fuse(m: &mut crate::graph_compiler::device::DeviceModule<'_, Self>) -> Result<(), String>;
+}
+
+/// The fusion pass: each device's fusion (`Fuses::fuse`, in `<device>.rs`), on every device implementing `Fuses`.
 pub(crate) struct Fusion;
 
-impl<D: crate::codegen::fusion::Fuses>
+impl<D: Fuses>
     crate::graph_compiler::passes::CompilerPass<crate::graph_compiler::device::DeviceModule<'_, D>>
     for Fusion
 {
-    /// With `fuse` where `WITH_FUSE`, else always.
-    fn configured(config: &crate::graph_compiler::CompilerConfig) -> Option<Self> {
-        (config.fuse || !D::WITH_FUSE).then_some(Fusion)
+    /// Always.
+    fn configured(_: &crate::graph_compiler::CompilerConfig) -> Option<Self> {
+        Some(Fusion)
     }
 
     /// Pass name used in profiler ranges and dumps.

@@ -37,9 +37,8 @@
 //! The GEMM's values may be read elsewhere only after the row; its `FusionOutput` readers are renumbered
 //! past the partials.
 //!
-//! Devices: `dot_rows` runs, with `normalization_diamonds`, on each device whose codegen implements `codegen::row::FullRows`
+//! Devices: `dot_rows` runs, with `normalization_diamonds`, on each device implementing `FullRows`
 //! (which row-body inputs its row kernel reads as whole rows): TPU. Triton's wide rows are `dot::wide_rows`.
-use crate::codegen::row::FullRows;
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
 use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::CompilerPass;
@@ -440,6 +439,13 @@ pub(crate) fn dot_rows(
     let outputs: Vec<Var> = graph.outputs().iter().map(|&v| map[v]).collect();
     out.set_outputs(&outputs).expect("values of the graph");
     out
+}
+
+/// A backend whose row kernel reads some of a row body's inputs as whole rows (TPU's): the `dot_rows`
+/// pass fuses the matmuls making them into the row.
+pub(crate) trait FullRows {
+    /// Whether the row kernel reads input `at` of row body `body` as whole rows.
+    fn full(body: &crate::graph::Graph, at: usize) -> bool;
 }
 
 /// Fuses dots into the row fusions that read them when contraction epilogues are enabled.

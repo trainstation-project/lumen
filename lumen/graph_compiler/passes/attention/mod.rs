@@ -10,8 +10,13 @@ use crate::tensor::contiguous_strides;
 use std::collections::HashMap;
 
 mod backward;
+mod cuda;
 mod forward;
 pub(crate) mod layouts;
+#[cfg(lumen_mps_linked)]
+mod mps;
+mod tpu;
+mod triton;
 
 #[cfg(lumen_mps_linked)]
 pub(crate) use backward::backward_of_body_into;

@@ -1411,19 +1411,19 @@ fn triton_gemv_rule_follows_mps() {
     assert!(!gemv(&dot(0), &ty(&[1, 2048]), &ty(&[2048, 3072])));
 }
 
-/// Each device's default pass list is the passes it implements (picked over the identity pass), in the one order:
-/// every device rejects what it has no kernel for; the CPU then only simplifies, CuTe merges dots, fuses attention and
-/// rotary pair swaps, elementwise work and GEMM epilogues, Triton and TPU run their own versions.
+/// Each device's default pass list (`pipeline/<device>.rs`), in the shared order: every device rejects what it has no
+/// kernel for; the CPU then only simplifies, CuTe merges dots, fuses attention and rotary pair swaps, elementwise work
+/// and GEMM epilogues, Triton and TPU run their own lists.
 #[test]
-fn devices_run_the_passes_they_implement() {
+fn devices_run_the_passes_they_list() {
     use super::device::{Cpu, Cuda, Tpu, Triton};
-    use super::pipeline::pipeline;
+    use super::pipeline::Passes;
 
     let config = super::CompilerConfig::default();
 
-    assert_eq!(pipeline!(Cpu, &config).names(), ["unsupported", "simplify"]);
+    assert_eq!(Cpu::passes(&config).names(), ["unsupported", "simplify"]);
     assert_eq!(
-        pipeline!(Cuda, &config).names(),
+        Cuda::passes(&config).names(),
         [
             "unsupported",
             "take_along_axis",
@@ -1438,7 +1438,7 @@ fn devices_run_the_passes_they_implement() {
     );
 
     assert_eq!(
-        pipeline!(Triton, &config).names(),
+        Triton::passes(&config).names(),
         [
             "unsupported",
             "take_along_axis",
@@ -1463,7 +1463,7 @@ fn devices_run_the_passes_they_implement() {
     );
 
     assert_eq!(
-        pipeline!(Tpu, &config).names(),
+        Tpu::passes(&config).names(),
         [
             "unsupported",
             "merge_dots_backward",

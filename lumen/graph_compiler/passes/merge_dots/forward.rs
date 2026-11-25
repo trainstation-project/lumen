@@ -4,12 +4,10 @@
 use std::collections::HashMap;
 
 use crate::DType;
-use crate::codegen::dot_general::MergesDots;
 use crate::graph::ir::primitive::free_dims;
 use crate::graph::{Graph, Node, Primitive, TensorType, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
-use crate::graph_compiler::passes::merge_dots::MergeDotsLate;
 use crate::graph_compiler::passes::merge_dots::backward::{
     Interleaving, arrange, interleaved_gradients,
 };
@@ -830,16 +828,14 @@ pub(crate) struct MergeDots {
     pub(crate) target: Target,
 }
 
-impl<D: MergesDots> CompilerPass<DeviceModule<'_, D>> for MergeDots {
-    /// With `merge_dots` (and `fuse` where `WITH_FUSE`), early on a device merging then, packing for its `target`.
-    fn configured(config: &CompilerConfig) -> Option<Self> {
-        let on = config.merge_dots && (config.fuse || !D::WITH_FUSE) && !D::LATE;
-
-        on.then(|| MergeDots {
-            target: D::target(),
-        })
+impl MergeDots {
+    /// The pass with `merge_dots`, packing for a device's `target`.
+    pub(crate) fn configured_with(config: &CompilerConfig, target: Target) -> Option<Self> {
+        config.merge_dots.then_some(MergeDots { target })
     }
+}
 
+impl<D> CompilerPass<DeviceModule<'_, D>> for MergeDots {
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "merge_dots"
@@ -862,29 +858,5 @@ impl<D: MergesDots> CompilerPass<DeviceModule<'_, D>> for MergeDots {
         let (p, i) = m.blocks();
         (*p, *i) = (packed, interleaved);
         Ok(())
-    }
-}
-
-/// The same merge, late (once the graph is simplified) on a device merging then (`MergesDots::LATE`, TPU's).
-impl<D: MergesDots> CompilerPass<DeviceModule<'_, D>> for MergeDotsLate {
-    /// With `merge_dots` (and `fuse` where `WITH_FUSE`), late on a device merging then.
-    fn configured(config: &CompilerConfig) -> Option<Self> {
-        let on = config.merge_dots && (config.fuse || !D::WITH_FUSE) && D::LATE;
-
-        on.then(|| {
-            MergeDotsLate(MergeDots {
-                target: D::target(),
-            })
-        })
-    }
-
-    /// Pass name used in profiler ranges and dumps.
-    fn name(&self) -> &'static str {
-        "merge_dots"
-    }
-
-    /// Merges dots as the early merge does.
-    fn apply(&mut self, m: &mut DeviceModule<'_, D>) -> Result<(), String> {
-        self.0.apply(m)
     }
 }

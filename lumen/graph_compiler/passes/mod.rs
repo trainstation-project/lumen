@@ -14,7 +14,6 @@ pub(crate) mod dot;
 pub(crate) mod elementwise;
 pub(crate) mod fusion;
 pub(crate) mod horizontal;
-pub(crate) mod identity;
 #[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
 pub(crate) mod linear_cross_entropy;
 pub(crate) mod linear_reordering;
@@ -52,19 +51,13 @@ pub(crate) trait CompilerPass<M> {
     fn name(&self) -> &'static str;
     /// Rewrites `module` in place.
     fn apply(&mut self, module: &mut M) -> Result<(), String>;
-    /// This pass as a device's pipeline runs it under `config` (its gate, and anything it takes from the device's
-    /// codegen), or `None`, the default, for the identity pass: a device whose module the pass isn't implemented
-    /// for, or a pass that doesn't say, runs nothing in its slot (`pipeline::pick!`).
+    /// This pass as a device's pass list adds it by type under `config` (`Pipeline::pass`: its gate, and the
+    /// device's answers it takes), or `None` when off. By default `None`: a pass a list builds itself (`add`).
     fn configured(config: &CompilerConfig) -> Option<Self>
     where
         Self: Sized,
     {
         let _ = config;
         None
-    }
-
-    /// Whether the pass does nothing (`identity::Identity`), so a pipeline skips it.
-    fn is_empty(&self) -> bool {
-        false
     }
 }
