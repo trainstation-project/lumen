@@ -5,7 +5,6 @@
 //! is. Off by default: the forward then computes more precisely than the traced program.
 
 use crate::graph::{Graph, Primitive, Var};
-use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::passes::{CompilerPass, Module};
 
 /// For each value, the value it round-trips (`x` for `cast(cast(x, b), a)` with `x` of dtype `a`, both
@@ -47,11 +46,6 @@ fn round_trips(graph: &Graph) -> Vec<Option<(Var, bool)>> {
 pub(crate) struct PreservePrecision;
 
 impl<M: Module> CompilerPass<M> for PreservePrecision {
-    /// With `preserve_precision`.
-    fn configured(config: &CompilerConfig) -> Option<Self> {
-        config.preserve_precision.then_some(PreservePrecision)
-    }
-
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "preserve_precision"

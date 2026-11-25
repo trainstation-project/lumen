@@ -44,35 +44,50 @@ impl Passes for Triton {
         };
 
         vec![
-            Self::pass::<PreservePrecision>(true, config),
+            Self::add(config.preserve_precision, PreservePrecision),
             Self::add(true, Cse),
             Self::add(true, Simplify { matched: false }),
-            Self::pass::<Unsupported>(true, config),
-            Self::pass::<TakeAlongAxis>(true, config),
-            Self::pass::<ChunkedCrossEntropy>(true, config),
-            Self::pass::<MergeDotsBackward>(fuse, config),
+            Self::add(true, Unsupported::of::<Self>()),
+            Self::add(true, TakeAlongAxis),
+            Self::add(
+                fuse && config.fused_linear_cross_entropy,
+                ChunkedCrossEntropy,
+            ),
+            Self::add(fuse && config.merge_dots, MergeDotsBackward),
             Self::add(fuse && config.merge_dots, MergeDots { target }),
-            Self::pass::<FlashAttention>(fuse, config),
-            Self::pass::<FlashAttentionBackward>(fuse, config),
-            Self::pass::<LinearCrossEntropy>(true, config),
+            Self::add(fuse && config.flash_attention, FlashAttention),
+            Self::add(fuse && config.flash_attention, FlashAttentionBackward),
+            Self::add(
+                fuse && config.fused_linear_cross_entropy,
+                LinearCrossEntropy,
+            ),
             Self::add(true, Simplify { matched: true }),
-            Self::pass::<SwapPairs>(true, config),
-            Self::pass::<DotStrength>(true, config),
+            Self::add(true, SwapPairs),
+            Self::add(true, DotStrength),
             Self::add(
                 config.linear_reordering,
                 LinearReordering {
                     tile: Some(row_tile),
                 },
             ),
-            Self::pass::<SplitK>(true, config),
+            Self::add(config.split_k, SplitK),
             Self::add(fuse, updates),
-            Self::pass::<Diamonds>(true, config),
-            Self::pass::<PlaceConcats>(fuse, config),
-            Self::pass::<Fusion>(fuse, config),
-            Self::pass::<WideRows>(true, config),
-            Self::pass::<PlaceViews>(true, config),
-            Self::pass::<Alone>(true, config),
-            Self::pass::<HorizontalFusion>(fuse, config),
+            Self::add(
+                fuse && config.normalization_diamonds,
+                Diamonds::of::<Self>(),
+            ),
+            Self::add(fuse, PlaceConcats),
+            Self::add(fuse, Fusion),
+            Self::add(
+                fuse && config.normalization_diamonds && config.linear_reordering,
+                WideRows,
+            ),
+            Self::add(true, PlaceViews::of::<Self>()),
+            Self::add(true, Alone),
+            Self::add(
+                fuse && config.horizontal_fusion,
+                HorizontalFusion::of::<Self>(),
+            ),
         ]
     }
 }

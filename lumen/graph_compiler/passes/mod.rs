@@ -51,13 +51,4 @@ pub(crate) trait CompilerPass<M> {
     fn name(&self) -> &'static str;
     /// Rewrites `module` in place.
     fn apply(&mut self, module: &mut M) -> Result<(), String>;
-    /// This pass as a device's pass list adds it by type under `config` (`Passes::pass`: its gate, and the
-    /// device's answers it takes), or `None` when off. By default `None`: a pass a list builds itself (`add`).
-    fn configured(config: &CompilerConfig) -> Option<Self>
-    where
-        Self: Sized,
-    {
-        let _ = config;
-        None
-    }
 }

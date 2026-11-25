@@ -46,7 +46,6 @@ mod tpu;
 mod triton;
 
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
-use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::{CompilerPass, Module};
 use crate::graph_compiler::{constant, elementwise};
@@ -1289,15 +1288,17 @@ pub(crate) struct Diamonds {
     pub partials: Partials,
 }
 
-impl<D: NormalizationRows> CompilerPass<DeviceModule<'_, D>> for Diamonds {
-    /// With `fuse` and `normalization_diamonds`, fusing what the device's rows take.
-    fn configured(config: &CompilerConfig) -> Option<Self> {
-        (config.fuse && config.normalization_diamonds).then_some(Diamonds {
+impl Diamonds {
+    /// The pass, fusing the rows device `D`'s kernels take.
+    pub(crate) fn of<D: NormalizationRows>() -> Self {
+        Diamonds {
             fusible: D::fusible,
             partials: D::PARTIALS,
-        })
+        }
     }
+}
 
+impl<D: NormalizationRows> CompilerPass<DeviceModule<'_, D>> for Diamonds {
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "normalization_diamonds"
@@ -1329,15 +1330,17 @@ pub(crate) struct FusedDiamonds {
     pub fits: fn(&Graph) -> bool,
 }
 
-impl<D: FusedRows> CompilerPass<DeviceModule<'_, D>> for FusedDiamonds {
-    /// With `normalization_diamonds`, rows the device's kernels fit.
-    fn configured(config: &CompilerConfig) -> Option<Self> {
-        config.normalization_diamonds.then_some(FusedDiamonds {
+impl FusedDiamonds {
+    /// The pass, with the rows device `D`'s row kernel fits.
+    pub(crate) fn of<D: FusedRows>() -> Self {
+        FusedDiamonds {
             fusible: D::fusible,
             fits: D::fits,
-        })
+        }
     }
+}
 
+impl<D: FusedRows> CompilerPass<DeviceModule<'_, D>> for FusedDiamonds {
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "normalization_diamonds"

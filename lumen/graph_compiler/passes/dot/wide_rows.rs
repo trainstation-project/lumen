@@ -6,9 +6,9 @@
 use crate::codegen::kinds::gemm_dot;
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
 use crate::graph_compiler::device::DeviceModule;
+use crate::graph_compiler::elementwise;
 use crate::graph_compiler::passes::CompilerPass;
 use crate::graph_compiler::passes::diamonds::tile_reductions;
-use crate::graph_compiler::{CompilerConfig, elementwise};
 
 /// Name of a GEMM writing a row's operand and its first reductions' partials.
 const DOT_PARTIALS: &str = "dot_partials";
@@ -308,12 +308,6 @@ pub(crate) trait PartialRows {
 pub(crate) struct WideRows;
 
 impl<D: PartialRows> CompilerPass<DeviceModule<'_, D>> for WideRows {
-    /// With `fuse`, `normalization_diamonds` and `linear_reordering`.
-    fn configured(config: &CompilerConfig) -> Option<Self> {
-        (config.fuse && config.normalization_diamonds && config.linear_reordering)
-            .then_some(WideRows)
-    }
-
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "wide_rows"

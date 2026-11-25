@@ -129,11 +129,6 @@ impl<D: Fuses>
     crate::graph_compiler::passes::CompilerPass<crate::graph_compiler::device::DeviceModule<'_, D>>
     for Fusion
 {
-    /// Always.
-    fn configured(_: &crate::graph_compiler::CompilerConfig) -> Option<Self> {
-        Some(Fusion)
-    }
-
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "fusion"

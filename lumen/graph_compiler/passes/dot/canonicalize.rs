@@ -23,7 +23,6 @@
 //! contracting dim placed as its kernel reads it).
 use crate::graph::ir::primitive::free_dims;
 use crate::graph::{Graph, Primitive, TensorType, Var};
-use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::{CompilerPass, Module};
 
@@ -86,14 +85,16 @@ pub(crate) struct CanonicalizeDots {
     pub readable: Readable,
 }
 
-impl<D: DotLayouts> CompilerPass<DeviceModule<'_, D>> for CanonicalizeDots {
-    /// Always, with the layouts the device's matmuls read.
-    fn configured(_: &CompilerConfig) -> Option<Self> {
-        Some(CanonicalizeDots {
+impl CanonicalizeDots {
+    /// The pass, the matmul layouts device `D` reads.
+    pub(crate) fn of<D: DotLayouts>() -> Self {
+        CanonicalizeDots {
             readable: D::readable,
-        })
+        }
     }
+}
 
+impl<D: DotLayouts> CompilerPass<DeviceModule<'_, D>> for CanonicalizeDots {
     fn name(&self) -> &'static str {
         "canonicalize_dots"
     }

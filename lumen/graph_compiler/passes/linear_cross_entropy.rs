@@ -24,7 +24,6 @@
 //! Every other node is copied with its label; replaced nodes pass their origins to the new ones.
 
 use crate::graph::{Graph, Node, Primitive, Var};
-use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::{CompilerPass, Module};
 use crate::{DType, Scalar};
@@ -337,11 +336,6 @@ fn row_offsets_plus(
 pub(crate) struct LinearCrossEntropy;
 
 impl<D> CompilerPass<DeviceModule<'_, D>> for LinearCrossEntropy {
-    /// With `fuse` and `fused_linear_cross_entropy`.
-    fn configured(config: &CompilerConfig) -> Option<Self> {
-        (config.fuse && config.fused_linear_cross_entropy).then_some(LinearCrossEntropy)
-    }
-
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "linear_cross_entropy"

@@ -41,8 +41,8 @@
 //! (which row-body inputs its row kernel reads as whole rows): TPU. Triton's wide rows are `dot::wide_rows`.
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
 use crate::graph_compiler::device::DeviceModule;
+use crate::graph_compiler::elementwise;
 use crate::graph_compiler::passes::CompilerPass;
-use crate::graph_compiler::{CompilerConfig, elementwise};
 
 /// Whether a row fusion's body reads its input `at` as whole rows, so a matmul can feed it.
 pub(crate) type Joins = fn(&Graph, usize) -> bool;
@@ -452,11 +452,6 @@ pub(crate) trait FullRows {
 pub(crate) struct DotRows;
 
 impl<D: FullRows> CompilerPass<DeviceModule<'_, D>> for DotRows {
-    /// With `normalization_diamonds`.
-    fn configured(config: &CompilerConfig) -> Option<Self> {
-        (config.normalization_diamonds).then_some(DotRows)
-    }
-
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "dot_rows"

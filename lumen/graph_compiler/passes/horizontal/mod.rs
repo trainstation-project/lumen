@@ -32,7 +32,6 @@ mod triton;
 
 use crate::codegen::layout::{MAX_HEROES, transpose_tiling};
 use crate::graph::{Graph, Node, Primitive, Scope, Var, intern};
-use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::{CompilerPass, Module};
 use std::collections::HashMap;
@@ -582,17 +581,19 @@ pub(crate) struct HorizontalFusion {
     pub name: &'static str,
 }
 
-impl<D: HorizontallyFuses> CompilerPass<DeviceModule<'_, D>> for HorizontalFusion {
-    /// With `horizontal_fusion`, grouping as the device does.
-    fn configured(config: &CompilerConfig) -> Option<Self> {
-        config.horizontal_fusion.then_some(HorizontalFusion {
+impl HorizontalFusion {
+    /// The pass, merging what device `D` merges, grouped as it groups them.
+    pub(crate) fn of<D: HorizontallyFuses>() -> Self {
+        HorizontalFusion {
             candidate: D::candidate,
             grouping: D::GROUPING,
             buffers: D::BUFFERS,
             name: "elementwise",
-        })
+        }
     }
+}
 
+impl<D: HorizontallyFuses> CompilerPass<DeviceModule<'_, D>> for HorizontalFusion {
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "horizontal_fusion"

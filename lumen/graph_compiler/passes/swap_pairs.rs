@@ -14,7 +14,6 @@
 //! `kernels::pallas::mosaic`). The CPU keeps the slices and concatenation.
 
 use crate::graph::{Graph, Node, Primitive, Var};
-use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::{CompilerPass, Module};
 use crate::{DType, Scalar};
@@ -23,11 +22,6 @@ use crate::{DType, Scalar};
 pub(crate) struct SwapPairs;
 
 impl<D> CompilerPass<DeviceModule<'_, D>> for SwapPairs {
-    /// Always.
-    fn configured(_: &CompilerConfig) -> Option<Self> {
-        Some(SwapPairs)
-    }
-
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "swap_pairs"

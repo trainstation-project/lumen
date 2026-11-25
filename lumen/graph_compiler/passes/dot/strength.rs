@@ -23,7 +23,6 @@
 //! Devices: MPS, Triton and TPU run it, always (their elementwise and reduction fusions take the products).
 use crate::DType;
 use crate::graph::{Graph, Primitive, Var};
-use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::{CompilerPass, Module};
 
@@ -138,11 +137,6 @@ fn reshaped(out: &mut Graph, v: Var, shape: &[usize]) -> Var {
 pub(crate) struct DotStrength;
 
 impl<D> CompilerPass<DeviceModule<'_, D>> for DotStrength {
-    /// Always.
-    fn configured(_: &CompilerConfig) -> Option<Self> {
-        Some(DotStrength)
-    }
-
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "dot_strength"

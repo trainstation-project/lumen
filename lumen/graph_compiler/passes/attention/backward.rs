@@ -48,7 +48,6 @@ use std::collections::HashMap;
 use super::{Access, Dropout, Matcher, Score, Strides, body_of, fits32};
 use crate::DType;
 use crate::graph::{Graph, Primitive, Var};
-use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::passes::{CompilerPass, Module};
 
 /// A matched flash-attention backward: gradients of Q, K and V from the transposed scores `S^T`.
@@ -537,11 +536,6 @@ pub(crate) trait AttentionBackwards: Module {
 pub(crate) struct FlashAttentionBackward;
 
 impl<M: AttentionBackwards> CompilerPass<M> for FlashAttentionBackward {
-    /// With `flash_attention`.
-    fn configured(config: &CompilerConfig) -> Option<Self> {
-        config.flash_attention.then_some(FlashAttentionBackward)
-    }
-
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "flash_attention_backward"

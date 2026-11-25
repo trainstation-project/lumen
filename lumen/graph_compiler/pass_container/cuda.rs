@@ -28,18 +28,18 @@ impl Passes for Cuda {
         };
 
         vec![
-            Self::pass::<PreservePrecision>(true, config),
+            Self::add(config.preserve_precision, PreservePrecision),
             Self::add(true, Cse),
             Self::add(true, Simplify { matched: false }),
-            Self::pass::<Unsupported>(true, config),
-            Self::pass::<TakeAlongAxis>(true, config),
-            Self::pass::<MergeDotsBackward>(fuse, config),
+            Self::add(true, Unsupported::of::<Self>()),
+            Self::add(true, TakeAlongAxis),
+            Self::add(fuse && config.merge_dots, MergeDotsBackward),
             Self::add(fuse && config.merge_dots, MergeDots { target }),
-            Self::pass::<FlashAttention>(fuse, config),
+            Self::add(fuse && config.flash_attention, FlashAttention),
             Self::add(true, Simplify { matched: true }),
-            Self::pass::<SwapPairs>(true, config),
-            Self::pass::<Fusion>(fuse, config),
-            Self::pass::<Alone>(true, config),
+            Self::add(true, SwapPairs),
+            Self::add(fuse, Fusion),
+            Self::add(true, Alone),
         ]
     }
 }

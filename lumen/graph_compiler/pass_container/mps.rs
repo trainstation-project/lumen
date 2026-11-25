@@ -43,36 +43,48 @@ impl Passes for Mps {
         let row_tile = crate::codegen::dot_general::mps::row::ROW_TILE;
 
         vec![
-            Self::pass::<PreservePrecision>(true, config),
+            Self::add(config.preserve_precision, PreservePrecision),
             Self::add(true, Cse),
             Self::add(true, Simplify { matched: false }),
-            Self::pass::<Unsupported>(true, config),
-            Self::pass::<TakeAlongAxis>(true, config),
-            Self::pass::<ChunkedCrossEntropy>(true, config),
-            Self::pass::<MergeDotsBackward>(fuse && config.contraction_epilogues, config),
+            Self::add(true, Unsupported::of::<Self>()),
+            Self::add(true, TakeAlongAxis),
+            Self::add(
+                fuse && config.fused_linear_cross_entropy,
+                ChunkedCrossEntropy,
+            ),
+            Self::add(
+                fuse && config.contraction_epilogues && config.merge_dots,
+                MergeDotsBackward,
+            ),
             Self::add(fuse && config.merge_dots, MergeDots { target }),
-            Self::pass::<FlashAttention>(fuse, config),
-            Self::pass::<FlashAttentionBackward>(fuse, config),
-            Self::pass::<LinearCrossEntropy>(true, config),
+            Self::add(fuse && config.flash_attention, FlashAttention),
+            Self::add(fuse && config.flash_attention, FlashAttentionBackward),
+            Self::add(
+                fuse && config.fused_linear_cross_entropy,
+                LinearCrossEntropy,
+            ),
             Self::add(true, Simplify { matched: true }),
-            Self::pass::<SwapPairs>(true, config),
-            Self::pass::<DotStrength>(true, config),
-            Self::pass::<NeuralEngine>(true, config),
+            Self::add(true, SwapPairs),
+            Self::add(true, DotStrength),
+            Self::add(config.neural_engine, NeuralEngine),
             Self::add(
                 config.linear_reordering,
                 LinearReordering {
                     tile: Some(row_tile),
                 },
             ),
-            Self::pass::<SplitK>(true, config),
-            Self::pass::<CanonicalizeDots>(true, config),
+            Self::add(config.split_k, SplitK),
+            Self::add(true, CanonicalizeDots::of::<Self>()),
             Self::add(fuse, Updates { least: 2, most: 29 }),
-            Self::pass::<Diamonds>(true, config),
-            Self::pass::<PlaceConcats>(fuse, config),
-            Self::pass::<Fusion>(fuse, config),
-            Self::pass::<PlaceViews>(true, config),
-            Self::pass::<Alone>(true, config),
-            Self::pass::<Concats>(true, config),
+            Self::add(
+                fuse && config.normalization_diamonds,
+                Diamonds::of::<Self>(),
+            ),
+            Self::add(fuse, PlaceConcats),
+            Self::add(fuse, Fusion),
+            Self::add(true, PlaceViews::of::<Self>()),
+            Self::add(true, Alone),
+            Self::add(true, Concats),
         ]
     }
 }

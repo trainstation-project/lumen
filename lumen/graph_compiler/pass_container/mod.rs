@@ -28,18 +28,8 @@ pub(crate) trait Passes: Device {
     /// The device's passes under `config`, in order; a `None` is a pass that is off.
     fn passes<'a>(config: &CompilerConfig) -> Vec<Option<Pass<DeviceModule<'a, Self>>>>;
 
-    /// Pass `P` when `enable` (the device's own condition, such as running it only with `fuse`; `true` for always),
-    /// as `config` configures it (`CompilerPass::configured`), unless that turns it off.
-    fn pass<'a, P: CompilerPass<DeviceModule<'a, Self>> + 'static>(
-        enable: bool,
-        config: &CompilerConfig,
-    ) -> Option<Pass<DeviceModule<'a, Self>>> {
-        let pass = enable.then(|| P::configured(config)).flatten();
-        pass.map(|pass| Box::new(pass) as Pass<_>)
-    }
-
-    /// `pass`, built by the list itself (its settings, or values the device gives it), when `enable` (its config flag
-    /// and the device's own condition; `true` for always).
+    /// `pass` when `enable`: its config flags and the device's own conditions (running it only with `fuse`); `true`
+    /// for always.
     fn add<'a>(
         enable: bool,
         pass: impl CompilerPass<DeviceModule<'a, Self>> + 'static,

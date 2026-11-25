@@ -9,7 +9,6 @@
 //! check, in `attention/<device>.rs`): TPU.
 
 use crate::graph::{Graph, Node, Primitive, Var};
-use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::{CompilerPass, attention};
 
@@ -425,11 +424,6 @@ pub(crate) trait TiledAttentions {
 pub(crate) struct AttentionLayouts;
 
 impl<D: TiledAttentions> CompilerPass<DeviceModule<'_, D>> for AttentionLayouts {
-    /// With `flash_attention`.
-    fn configured(config: &CompilerConfig) -> Option<Self> {
-        (config.flash_attention).then_some(AttentionLayouts)
-    }
-
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "attention_layouts"

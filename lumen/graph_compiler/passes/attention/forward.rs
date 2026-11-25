@@ -49,7 +49,6 @@
 use super::{Access, Dropout, Matcher, Score, Strides, body_of, fits32};
 use crate::DType;
 use crate::graph::{FUSION_SEPARATOR, Graph, Primitive, Var};
-use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::passes::simplify::rounds;
 use crate::graph_compiler::passes::{CompilerPass, Module};
 
@@ -802,11 +801,6 @@ pub(crate) trait Attentions: Module {
 pub(crate) struct FlashAttention;
 
 impl<M: Attentions> CompilerPass<M> for FlashAttention {
-    /// With `flash_attention`.
-    fn configured(config: &CompilerConfig) -> Option<Self> {
-        config.flash_attention.then_some(FlashAttention)
-    }
-
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "flash_attention"

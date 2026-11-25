@@ -6,7 +6,6 @@
 use crate::DType;
 use crate::graph::ir::primitive::free_dims;
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
-use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::elementwise;
 use crate::graph_compiler::passes::merge_dots::forward::{Layout, used_dims};
@@ -309,11 +308,6 @@ fn through(dot: &Primitive, lhs: bool, permutation: &[usize]) -> Option<Primitiv
 pub(crate) struct MergeDotsBackward;
 
 impl<D> CompilerPass<DeviceModule<'_, D>> for MergeDotsBackward {
-    /// With `merge_dots`.
-    fn configured(config: &CompilerConfig) -> Option<Self> {
-        config.merge_dots.then_some(MergeDotsBackward)
-    }
-
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "merge_dots_backward"

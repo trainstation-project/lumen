@@ -21,8 +21,8 @@
 //! view the epilogue reads through.
 
 use crate::graph::{Graph, Node, Primitive, TensorType, Var};
+use crate::graph_compiler::elementwise;
 use crate::graph_compiler::passes::{CompilerPass, Module};
-use crate::graph_compiler::{CompilerConfig, elementwise};
 
 /// A split reshape and the chain computed before it instead.
 struct Chain {
@@ -375,11 +375,6 @@ fn hoisted(graph: &Graph, hoist: &[Var]) -> Graph {
 pub(crate) struct SinkReshapes;
 
 impl<M: Module> CompilerPass<M> for SinkReshapes {
-    /// Always.
-    fn configured(_: &CompilerConfig) -> Option<Self> {
-        Some(SinkReshapes)
-    }
-
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "sink_reshapes"
