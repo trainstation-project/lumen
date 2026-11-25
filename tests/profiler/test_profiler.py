@@ -182,16 +182,17 @@ def _trace(prof):
         os.remove(path)
 
 
-@pytest.mark.mps
-def test_kernels_record_their_steps_types():
-    """Metal kernels carry their step's input and output types."""
+@pytest.mark.parametrize("device", [MPS, TPU], indirect=True)
+def test_kernels_record_their_steps_types(device):
+    """Metal and TPU kernels carry their step's input and output types."""
     try:
-        x = lumen.ones([4, 8], device="mps")
+        x = lumen.ones([4, 8], device=device)
     except RuntimeError as e:
         pytest.skip(str(e))
     f = lumen.compile(lambda x: F.exp(x * 2.0))
     f(x)
-    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.MPS], record_shapes=True) as prof:
+    activity = ProfilerActivity.MPS if device == "mps" else ProfilerActivity.TPU
+    with profile(activities=[ProfilerActivity.CPU, activity], record_shapes=True) as prof:
         f(x)
     kernels = [e for e in prof.events() if e["kind"] == "gpu" and not e["name"].startswith("copy")]
     assert kernels and all(k["outputs"] == [("float32", [4, 8])] for k in kernels)

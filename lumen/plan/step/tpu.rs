@@ -58,7 +58,8 @@ impl DerefMut for TpuStep {
 }
 
 impl Step for TpuStep {
-    /// Runs the step's kernel on its TPU's buffers, launched into the device's batch.
+    /// Runs the step's kernel on its TPU's buffers, launched into the device's batch; profiled, its kernel is timed
+    /// under the step's label with its types.
     fn run(&self, buffers: &Buffers) -> Result<(), String> {
         let Device::Tpu(index) = buffers.device else {
             unreachable!("a TPU plan runs on a TPU")
@@ -78,7 +79,12 @@ impl Step for TpuStep {
             output: buffers.pointer(&self.output),
         };
 
-        self.kernel.run(self, self.tuned.as_ref(), &pointers)
+        crate::profiler::next_launch(self.label, || self.io_types());
+        let ran = self.kernel.run(self, self.tuned.as_ref(), &pointers);
+
+        // A step that launched nothing leaves no label for the next step's kernel.
+        crate::profiler::clear_next_launch();
+        ran
     }
 
     /// Errors unless `device` is a TPU, no step reads runtime scalars, and only matmuls (`place_views`) read an
