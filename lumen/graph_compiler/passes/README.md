@@ -19,47 +19,45 @@ its own pass list (`graph_compiler/pipeline/<device>.rs`); the passes are shared
 - A condition of a device's own (running a pass only with `fuse`) is in its list (`Pipeline::pass_if`), not the
   pass.
 
-## Frontend (every device, before staging)
-
-1. `preserve_precision` - drop `cast(cast(x, b), a)` round trips for forward readers (flag
-   `preserve_precision`).
-2. `cse` - common subexpression elimination (never of custom calls or collectives: each collective is a message every process must issue).
-3. `simplify` (`matched: false`) - algebraic simplification without structural rewrites (identities, such as an
-   update as large as its operand being the update).
-
 ## Device passes, in order (devices whose lists add it in brackets)
 
-1. `unsupported` - reject ops the device has no kernel for [cpu, cuda, mps, triton, tpu].
-2. `take_along_axis` - lower `take_along_axis` to a flat `gather` [cuda, mps, triton].
-3. `chunked_cross_entropy` - replay a cross entropy per row chunk when the logits are already chunked [mps, triton].
-4. `merge_dots_backward` - merge gradient dots that share an operand [cuda, mps, triton, tpu].
-5. `merge_dots` - merge forward dots sharing an operand into one dot against a packed weight block [cuda, mps, triton].
-6. `flash_attention` - replace `softmax(QK^T)V` with a `flash_attention` fusion [cuda, mps, triton, tpu].
-7. `flash_attention_backward` - replace attention gradients with backward fusions [mps, triton, tpu].
-8. `attention_layouts` - fold attention output layout chains and `delta` into the fusions [tpu].
-9. `linear_cross_entropy` - replace `cross_entropy(h @ w, target)` with one `LinearCrossEntropy` op [mps, triton].
-10. `fold_dot_reshapes` - fold a reshape flattening leading dims into a 2-D dot's lhs [tpu].
-11. `simplify` (`matched: true`) - full simplification, including structural rewrites [every device, CPU too].
-12. `swap_pairs` - swaps of a last axis's partners written as slices and a concatenation become `SwapPairs { distance }`: adjacent pairs (`distance` 1, an interleaved rotary's), or each `d` elements' halves (`d / 2`, a rotate-half rotary's; a negated half becomes a sign multiply). Kernels read the partner at `j ^ distance`; a Triton GEMM accumulator swaps adjacent pairs in registers [cuda, mps, triton, tpu].
-13. `sink_reshapes` - compute a matmul product's elementwise readers before the reshape splitting its last axis, so they stay in the GEMM's epilogue [tpu].
-14. `dot_strength` - vector-vector dots become multiply plus reduce-sum [mps, triton, tpu].
-15. `merge_dots` - TPU's dot merging, after simplification, packing whole vector lanes [tpu].
-16. `neural_engine` - offload float16 GEMM regions over fixed weights to the Apple Neural Engine [mps].
-17. `linear_reordering` - move a per-row or per-column factor of a matmul operand to its output [mps, triton].
-18. `split_k` - split long-K, few-tile matmuls into partial products over K chunks [mps, triton].
-19. `canonicalize_dots` - transpose dot operands into the layout the matmul kernels read [mps, tpu].
-20. `normalization_diamonds` (`FusedDiamonds`) - replace normalization rows with `row` fusions [tpu].
-21. `dot_rows` - fuse a matmul into the `row` fusion that reads its whole rows [tpu].
-22. `dynamic_update_slices` (`Updates`) - chains of `dynamic_update_slice` become one in-place fusion [mps, triton, tpu].
-23. `normalization_diamonds` (`Diamonds`) - find normalization rows and keep them for fusion [mps, triton].
-24. `fuse_dots` - fuse TPU matmuls with their slices, stacked lhs and epilogues [tpu].
-25. `place_concats` - let producers write directly into their concatenation slot [mps, triton, tpu].
-26. `fusion` - group elementwise chains, reductions, rows and epilogues into `Fusion` kernels [cuda, mps, triton, tpu].
-27. `wide_rows` - GEMMs feeding rows wider than a tile also write the row's partial reductions [triton].
-28. `place_views` - slices read only by GEMMs become strided views [mps, triton, tpu].
-29. `alone` - wrap leftover nodes that only a generated kernel can compute into one-node fusions [cuda, mps, triton, tpu].
-30. `concats` - copy the concatenations fusion could not place in place [mps, tpu].
-31. `horizontal_fusion` - merge independent small kernels of the same kind into one launch [triton, tpu].
+1. `preserve_precision` - drop `cast(cast(x, b), a)` round trips for forward readers (flag `preserve_precision`);
+   before CSE, which would share the casts forward and gradient readers keep apart [every device].
+2. `cse` - common subexpression elimination (never of custom calls or collectives: each collective is a message
+   every process must issue) [every device].
+3. `simplify` (`matched: false`) - algebraic simplification without structural rewrites (identities, such as an
+   update as large as its operand being the update) [every device].
+4. `unsupported` - reject ops the device has no kernel for [cpu, cuda, mps, triton, tpu].
+5. `take_along_axis` - lower `take_along_axis` to a flat `gather` [cuda, mps, triton].
+6. `chunked_cross_entropy` - replay a cross entropy per row chunk when the logits are already chunked [mps, triton].
+7. `merge_dots_backward` - merge gradient dots that share an operand [cuda, mps, triton, tpu].
+8. `merge_dots` - merge forward dots sharing an operand into one dot against a packed weight block [cuda, mps, triton].
+9. `flash_attention` - replace `softmax(QK^T)V` with a `flash_attention` fusion [cuda, mps, triton, tpu].
+10. `flash_attention_backward` - replace attention gradients with backward fusions [mps, triton, tpu].
+11. `attention_layouts` - fold attention output layout chains and `delta` into the fusions [tpu].
+12. `linear_cross_entropy` - replace `cross_entropy(h @ w, target)` with one `LinearCrossEntropy` op [mps, triton].
+13. `fold_dot_reshapes` - fold a reshape flattening leading dims into a 2-D dot's lhs [tpu].
+14. `simplify` (`matched: true`) - full simplification, including structural rewrites [every device, CPU too].
+15. `swap_pairs` - swaps of a last axis's partners written as slices and a concatenation become `SwapPairs { distance }`: adjacent pairs (`distance` 1, an interleaved rotary's), or each `d` elements' halves (`d / 2`, a rotate-half rotary's; a negated half becomes a sign multiply). Kernels read the partner at `j ^ distance`; a Triton GEMM accumulator swaps adjacent pairs in registers [cuda, mps, triton, tpu].
+16. `sink_reshapes` - compute a matmul product's elementwise readers before the reshape splitting its last axis, so they stay in the GEMM's epilogue [tpu].
+17. `dot_strength` - vector-vector dots become multiply plus reduce-sum [mps, triton, tpu].
+18. `merge_dots` - TPU's dot merging, after simplification, packing whole vector lanes [tpu].
+19. `neural_engine` - offload float16 GEMM regions over fixed weights to the Apple Neural Engine [mps].
+20. `linear_reordering` - move a per-row or per-column factor of a matmul operand to its output [mps, triton].
+21. `split_k` - split long-K, few-tile matmuls into partial products over K chunks [mps, triton].
+22. `canonicalize_dots` - transpose dot operands into the layout the matmul kernels read [mps, tpu].
+23. `normalization_diamonds` (`FusedDiamonds`) - replace normalization rows with `row` fusions [tpu].
+24. `dot_rows` - fuse a matmul into the `row` fusion that reads its whole rows [tpu].
+25. `dynamic_update_slices` (`Updates`) - chains of `dynamic_update_slice` become one in-place fusion [mps, triton, tpu].
+26. `normalization_diamonds` (`Diamonds`) - find normalization rows and keep them for fusion [mps, triton].
+27. `fuse_dots` - fuse TPU matmuls with their slices, stacked lhs and epilogues [tpu].
+28. `place_concats` - let producers write directly into their concatenation slot [mps, triton, tpu].
+29. `fusion` - group elementwise chains, reductions, rows and epilogues into `Fusion` kernels [cuda, mps, triton, tpu].
+30. `wide_rows` - GEMMs feeding rows wider than a tile also write the row's partial reductions [triton].
+31. `place_views` - slices read only by GEMMs become strided views [mps, triton, tpu].
+32. `alone` - wrap leftover nodes that only a generated kernel can compute into one-node fusions [cuda, mps, triton, tpu].
+33. `concats` - copy the concatenations fusion could not place in place [mps, tpu].
+34. `horizontal_fusion` - merge independent small kernels of the same kind into one launch [triton, tpu].
 
 ## Other files
 

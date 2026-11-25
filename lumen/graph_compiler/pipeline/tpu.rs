@@ -7,6 +7,7 @@ use crate::graph_compiler::device::{Device, DeviceModule, Tpu};
 use crate::graph_compiler::passes::alone::Alone;
 use crate::graph_compiler::passes::attention::layouts::AttentionLayouts;
 use crate::graph_compiler::passes::attention::{FlashAttention, FlashAttentionBackward};
+use crate::graph_compiler::passes::cse::Cse;
 use crate::graph_compiler::passes::diamonds::FusedDiamonds;
 use crate::graph_compiler::passes::dot::{
     canonicalize::CanonicalizeDots, fold_reshapes::FoldDotReshapes, fuse::FuseDots, rows::DotRows,
@@ -17,6 +18,7 @@ use crate::graph_compiler::passes::horizontal::HorizontalFusion;
 use crate::graph_compiler::passes::merge_dots::{MergeDots, MergeDotsBackward, Target};
 use crate::graph_compiler::passes::place_concats::{Concats, PlaceConcats};
 use crate::graph_compiler::passes::place_views::PlaceViews;
+use crate::graph_compiler::passes::preserve_precision::PreservePrecision;
 use crate::graph_compiler::passes::simplify::Simplify;
 use crate::graph_compiler::passes::sink_reshapes::SinkReshapes;
 use crate::graph_compiler::passes::swap_pairs::SwapPairs;
@@ -41,6 +43,9 @@ impl Passes for Tpu {
         let mut pipeline = Pipeline::new(Tpu::NAME);
 
         pipeline
+            .pass::<PreservePrecision>(config)
+            .add(Cse)
+            .add(Simplify { matched: false })
             .pass::<Unsupported>(config)
             .pass::<MergeDotsBackward>(config)
             .pass::<FlashAttention>(config)

@@ -1,26 +1,25 @@
 # graph_compiler
 
 The graph compiler turns a traced `Graph` into a runnable `Plan` for one device. It sits between tracing
-and execution: graph -> frontend passes -> per-device pass pipeline -> codegen (`Device::lower`) -> plan.
+and execution: graph -> the device's pass list -> codegen (`Device::lower`) -> plan.
 
 ## Flow
 
 1. `compile` / `compile_with` take a graph, a `crate::Device` and `Options`.
-2. `frontend` runs the device-independent passes every device sees first: `preserve_precision` (only with
-   that config flag), then `cse`, then `simplify` with `matched: false`.
-3. When the graph moves values between host and device (`ToHost` / `ToDevice`), `stages::compile` splits
+2. When the graph moves values between host and device (`ToHost` / `ToDevice`), `stages::compile` splits
    it into alternating host and device stages, compiles each and joins them into one staged plan.
    Otherwise `stages::without_transfers` drops the transfer nodes and the graph is compiled as one plan.
-4. `device_compile` picks the backend: CUDA runs on the CuTe DSL backend (`Cuda`), or on `Triton` when
+3. `device_compile` picks the backend: CUDA runs on the CuTe DSL backend (`Cuda`), or on `Triton` when
    `use_triton_backend` is set; Apple GPUs on `Mps` (only when MPS is linked); TPUs on `Tpu`; everything
    else on `Cpu`.
-5. `device::compile!` runs the device's pass list (`pipeline::Passes`, in `pipeline/<device>.rs`) on a
-   `DeviceModule` for that device, then calls the device's `Device::lower`, which lives in `codegen` and builds
+4. `device::compile!` runs the device's pass list (`pipeline::Passes`, in `pipeline/<device>.rs`; every list
+   starts with `preserve_precision`, `cse` and `simplify` without structural rewrites) on a `DeviceModule` for that
+   device, then calls the device's `Device::lower`, which lives in `codegen` and builds
    the plan.
 
 ## Files
 
-- `mod.rs` - `compile`, `compile_with`, `Options`, `frontend`, `plan_options`, plus helpers backends share:
+- `mod.rs` - `compile`, `compile_with`, `Options`, `plan_options`, plus helpers backends share:
   `elementwise` (which primitives elementwise fusion merges), `combined`, `constant`, `label`, `positions`.
 - `device.rs` - the `Device` trait (`NAME`, `lower`), `DeviceModule<D>` (the graph plus state passes hand
   to later passes), the `compile!` macro and the CPU device.

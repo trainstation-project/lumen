@@ -7,6 +7,7 @@ use crate::graph_compiler::device::{Device, DeviceModule, Triton};
 use crate::graph_compiler::passes::alone::Alone;
 use crate::graph_compiler::passes::attention::{FlashAttention, FlashAttentionBackward};
 use crate::graph_compiler::passes::chunked_cross_entropy::ChunkedCrossEntropy;
+use crate::graph_compiler::passes::cse::Cse;
 use crate::graph_compiler::passes::diamonds::Diamonds;
 use crate::graph_compiler::passes::dot::{
     split_k::SplitK, strength::DotStrength, wide_rows::WideRows,
@@ -18,6 +19,7 @@ use crate::graph_compiler::passes::linear_reordering::LinearReordering;
 use crate::graph_compiler::passes::merge_dots::{MergeDots, MergeDotsBackward, Target};
 use crate::graph_compiler::passes::place_concats::PlaceConcats;
 use crate::graph_compiler::passes::place_views::PlaceViews;
+use crate::graph_compiler::passes::preserve_precision::PreservePrecision;
 use crate::graph_compiler::passes::simplify::Simplify;
 use crate::graph_compiler::passes::swap_pairs::SwapPairs;
 use crate::graph_compiler::passes::take_along_axis::TakeAlongAxis;
@@ -42,6 +44,9 @@ impl Passes for Triton {
         let mut pipeline = Pipeline::new(Triton::NAME);
 
         pipeline
+            .pass::<PreservePrecision>(config)
+            .add(Cse)
+            .add(Simplify { matched: false })
             .pass::<Unsupported>(config)
             .pass::<TakeAlongAxis>(config)
             .pass::<ChunkedCrossEntropy>(config)

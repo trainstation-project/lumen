@@ -1,6 +1,5 @@
 //! Running passes: the named pipeline running them, each in a profiler range, optionally dumping the graph after each
-//! one; each device's own pass list (`Passes`, in `<device>.rs`); and the plain module the frontend and CPU pipelines
-//! run on.
+//! one; each device's own pass list (`Passes`, in `<device>.rs`); and the plain module tests run single passes on.
 
 mod cpu;
 mod cuda;
@@ -11,12 +10,13 @@ mod triton;
 
 use crate::graph::Graph;
 use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::device::{Cpu, DeviceModule};
+use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::{CompilerPass, Module};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// A graph being compiled with the caller's options and no device's passes (the frontend's, the CPU's).
-pub(crate) type GraphModule<'a> = DeviceModule<'a, Cpu>;
+/// A graph being compiled with the caller's options and no device's own passes, which tests run single passes on.
+#[cfg(test)]
+pub(crate) type GraphModule<'a> = DeviceModule<'a, crate::graph_compiler::device::Cpu>;
 
 /// An ordered list of passes run under one name.
 pub(crate) struct Pipeline<M> {
@@ -24,7 +24,9 @@ pub(crate) struct Pipeline<M> {
     passes: Vec<Box<dyn CompilerPass<M>>>,
 }
 
-/// A device's pass list: the passes the graph compiler runs on its module, in order, under a config.
+/// A device's pass list: the passes the graph compiler runs on its module, in order, under a config. Every list starts
+/// with the same clean-ups: `preserve_precision` (before CSE shares the casts it drops), `cse` and `simplify` without
+/// structural rewrites.
 pub(crate) trait Passes: Sized {
     /// The device's pipeline under `config`.
     fn passes<'a>(config: &CompilerConfig) -> Pipeline<DeviceModule<'a, Self>>;
@@ -124,7 +126,7 @@ pub(crate) fn rewritten<P>(graph: &Graph, pass: P) -> Graph
 where
     P: for<'a> CompilerPass<GraphModule<'a>>,
 {
-    rewritten_on::<Cpu, P>(graph, pass)
+    rewritten_on::<crate::graph_compiler::device::Cpu, P>(graph, pass)
 }
 
 /// `graph` as `pass` leaves it, run on device `D`'s module with default options (a pass implemented for the
