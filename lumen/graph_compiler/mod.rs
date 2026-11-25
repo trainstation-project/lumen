@@ -1,5 +1,5 @@
-//! Graph compiler entry points: runs the frontend passes on a traced graph and lowers it to a
-//! [`Plan`] for the target device, plus helpers shared by the device backends.
+//! Graph compiler entry points: runs a traced graph through the target device's passes and lowers it to a
+//! [`Plan`], plus helpers shared by the device backends.
 
 pub mod config;
 pub(crate) mod device;
@@ -16,11 +16,7 @@ mod tests;
 use crate::Device;
 use crate::graph::{FUSION_SEPARATOR, Graph, Primitive, Var, intern};
 pub(crate) use crate::plan::{Source, Stage, Staged};
-use passes::cse::Cse;
 use passes::merge_dots::Packs;
-use passes::preserve_precision::PreservePrecision;
-use passes::simplify::Simplify;
-use pipeline::{GraphModule, Pipeline};
 
 pub use crate::plan::{Plan, PlanOptions};
 pub use config::CompilerConfig;
@@ -59,16 +55,14 @@ pub fn compile(graph: &Graph, device: Device) -> Result<Box<dyn Plan>, String> {
     compile_with(graph, device, &Options::default())
 }
 
-/// Runs the frontend passes (CSE, simplify) and compiles `graph` for `device`, splitting it into
-/// per-device stages when it moves values between devices.
+/// Compiles `graph` for `device` (its pass list, then codegen), splitting it into per-device stages when it moves
+/// values between devices.
 pub fn compile_with(
     graph: &Graph,
     device: Device,
     options: &Options,
 ) -> Result<Box<dyn Plan>, String> {
     // Graphs with transfers or host-only parts are compiled as stages; otherwise one device plan.
-    let graph = &frontend(graph, options)?;
-
     if device != Device::Cpu(0)
         && let Some(plan) = stages::compile(graph, device, options)?
     {
@@ -76,25 +70,6 @@ pub fn compile_with(
     }
 
     device_compile(&stages::without_transfers(graph), device, options)
-}
-
-/// `graph` after the frontend passes every device runs first: CSE and simplification.
-pub(crate) fn frontend(graph: &Graph, options: &Options) -> Result<Graph, String> {
-    let mut module = GraphModule::new(graph, options);
-
-    let mut frontend = Pipeline::new("frontend");
-
-    // Round trips through another float dtype go first, before CSE shares their casts.
-    if options.config.preserve_precision {
-        frontend.add(PreservePrecision);
-    }
-
-    frontend
-        .add(Cse)
-        .add(Simplify { matched: false })
-        .run(&mut module)?;
-
-    Ok(module.graph)
 }
 
 /// Dispatches a single-device graph to its backend; anything without one runs on the CPU backend.

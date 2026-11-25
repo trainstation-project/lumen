@@ -1411,9 +1411,9 @@ fn triton_gemv_rule_follows_mps() {
     assert!(!gemv(&dot(0), &ty(&[1, 2048]), &ty(&[2048, 3072])));
 }
 
-/// Each device's default pass list (`pipeline/<device>.rs`), in the shared order: every device rejects what it has no
-/// kernel for; the CPU then only simplifies, CuTe merges dots, fuses attention and rotary pair swaps, elementwise work
-/// and GEMM epilogues, Triton and TPU run their own lists.
+/// Each device's default pass list (`pipeline/<device>.rs`), in the shared order: every device first runs CSE and
+/// `simplify`, then rejects what it has no kernel for; the CPU then only simplifies, CuTe merges dots, fuses attention
+/// and rotary pair swaps, elementwise work and GEMM epilogues, Triton and TPU run their own lists.
 #[test]
 fn devices_run_the_passes_they_list() {
     use super::device::{Cpu, Cuda, Tpu, Triton};
@@ -1421,10 +1421,12 @@ fn devices_run_the_passes_they_list() {
 
     let config = super::CompilerConfig::default();
 
-    assert_eq!(Cpu::passes(&config).names(), ["unsupported", "simplify"]);
+    assert_eq!(Cpu::passes(&config).names(), ["cse", "simplify", "unsupported", "simplify"]);
     assert_eq!(
         Cuda::passes(&config).names(),
         [
+            "cse",
+            "simplify",
             "unsupported",
             "take_along_axis",
             "merge_dots_backward",
@@ -1440,6 +1442,8 @@ fn devices_run_the_passes_they_list() {
     assert_eq!(
         Triton::passes(&config).names(),
         [
+            "cse",
+            "simplify",
             "unsupported",
             "take_along_axis",
             "chunked_cross_entropy",
@@ -1465,6 +1469,8 @@ fn devices_run_the_passes_they_list() {
     assert_eq!(
         Tpu::passes(&config).names(),
         [
+            "cse",
+            "simplify",
             "unsupported",
             "merge_dots_backward",
             "flash_attention",

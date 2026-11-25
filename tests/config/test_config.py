@@ -180,7 +180,8 @@ def _read_early_and_late(a, w):
 def test_dump_to_writes_each_pass(compiler, tmp_path, device):
     """``dump_to``: each compiled graph written before its passes and after
     each, a file each, named by its pipeline, step and pass (XLA's
-    ``--xla_dump_to``); the CPU's pipeline checks what it runs, then simplifies; the MPS pipeline's last passes place the slices
+    ``--xla_dump_to``); the CPU's pipeline runs CSE and simplifies, checks what it runs, then simplifies fully; the MPS
+    pipeline's last passes place the slices
     read in place, wrap the lone nodes left in elementwise fusions, then copy the
     concatenations left unable to be written in place, its fusions still awaiting their
     kernels (generated once the plan is laid out); the Triton pipeline's fuses."""
@@ -192,8 +193,8 @@ def test_dump_to_writes_each_pass(compiler, tmp_path, device):
         for d in devices:
             lumen.graph_compiler.Plan(graph, d)
     steps = {p.name.split(".", 1)[1] for p in tmp_path.iterdir()}
-    assert {"frontend.00.input.txt", "frontend.01.cse.txt", "frontend.02.simplify.txt"} <= steps
-    assert {"cpu.01.unsupported.txt", "cpu.02.simplify.txt"} <= steps
+    assert {"cpu.00.input.txt", "cpu.01.cse.txt", "cpu.02.simplify.txt"} <= steps
+    assert {"cpu.03.unsupported.txt", "cpu.04.simplify.txt"} <= steps
     if "mps" in devices:
         mps = sorted(s for s in steps if s.startswith("mps."))
         assert [s.split(".")[2] for s in mps[-3:]] == ["place_views", "alone", "concats"], mps

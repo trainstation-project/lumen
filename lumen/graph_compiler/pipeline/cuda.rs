@@ -6,8 +6,10 @@ use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::{Cuda, Device, DeviceModule};
 use crate::graph_compiler::passes::alone::Alone;
 use crate::graph_compiler::passes::attention::FlashAttention;
+use crate::graph_compiler::passes::cse::Cse;
 use crate::graph_compiler::passes::fusion::Fusion;
 use crate::graph_compiler::passes::merge_dots::{MergeDots, MergeDotsBackward, Target};
+use crate::graph_compiler::passes::preserve_precision::PreservePrecision;
 use crate::graph_compiler::passes::simplify::Simplify;
 use crate::graph_compiler::passes::swap_pairs::SwapPairs;
 use crate::graph_compiler::passes::take_along_axis::TakeAlongAxis;
@@ -27,6 +29,9 @@ impl Passes for Cuda {
         let mut pipeline = Pipeline::new(Cuda::NAME);
 
         pipeline
+            .pass::<PreservePrecision>(config)
+            .add(Cse)
+            .add(Simplify { matched: false })
             .pass::<Unsupported>(config)
             .pass::<TakeAlongAxis>(config)
             .pass_if::<MergeDotsBackward>(fuse, config)
