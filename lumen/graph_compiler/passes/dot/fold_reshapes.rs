@@ -18,7 +18,6 @@
 //!
 //! Devices: TPU runs it, always: its matmul kernel takes the folded dots.
 use crate::graph::{Graph, Primitive, Var};
-use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::{CompilerPass, Module};
 
@@ -26,11 +25,6 @@ use crate::graph_compiler::passes::{CompilerPass, Module};
 pub(crate) struct FoldDotReshapes;
 
 impl<D> CompilerPass<DeviceModule<'_, D>> for FoldDotReshapes {
-    /// Always.
-    fn configured(_: &CompilerConfig) -> Option<Self> {
-        Some(FoldDotReshapes)
-    }
-
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "fold_dot_reshapes"

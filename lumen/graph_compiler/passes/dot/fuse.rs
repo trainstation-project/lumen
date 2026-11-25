@@ -37,9 +37,9 @@
 //! producers write a concatenation's slots): TPU.
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
 use crate::graph_compiler::device::DeviceModule;
+use crate::graph_compiler::elementwise;
 use crate::graph_compiler::passes::CompilerPass;
 use crate::graph_compiler::passes::place_concats::in_place_concats;
-use crate::graph_compiler::{CompilerConfig, elementwise};
 use crate::tensor::contiguous_strides;
 use std::collections::HashMap;
 
@@ -617,11 +617,6 @@ pub(crate) trait FusesDots {
 pub(crate) struct FuseDots;
 
 impl<D: FusesDots> CompilerPass<DeviceModule<'_, D>> for FuseDots {
-    /// Always.
-    fn configured(_: &CompilerConfig) -> Option<Self> {
-        Some(FuseDots)
-    }
-
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "fuse_dots"

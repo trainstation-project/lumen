@@ -19,7 +19,6 @@ mod tpu;
 mod triton;
 
 use crate::graph::{Graph, Node, Primitive, Var};
-use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::passes::CompilerPass;
 
 /// What a device tells the `alone` pass: which lone nodes only a generated kernel computes, which inputs its kernels
@@ -37,11 +36,6 @@ pub(crate) trait Lone: crate::graph_compiler::passes::Module {
 pub(crate) struct Alone;
 
 impl<M: Lone> CompilerPass<M> for Alone {
-    /// Always.
-    fn configured(_: &CompilerConfig) -> Option<Self> {
-        Some(Alone)
-    }
-
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "alone"

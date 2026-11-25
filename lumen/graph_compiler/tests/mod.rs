@@ -11,7 +11,10 @@ use crate::{DType, Scalar, reference};
 
 /// `g` as the `Simplify` pass leaves it, with `matched` as given.
 fn simplified(g: &Graph, matched: bool) -> Graph {
-    super::pass_container::rewritten(g, super::passes::simplify::Simplify { matched })
+    super::pass_container::rewritten::<super::device::Cpu, _>(
+        g,
+        super::passes::simplify::Simplify { matched },
+    )
 }
 
 /// An `f32` tensor type of `shape`.
@@ -728,30 +731,15 @@ fn ops_on_host_and_device_values_raise() {
     );
 }
 
-/// A pipeline runs its passes in order and dumps the graph before and after each to `dump_to`.
+/// A device runs its passes in order and dumps the graph before and after each to `dump_to`: the CPU's CSE shares the
+/// two `exp`s, and its dumps name each of its passes.
 #[test]
 #[cfg_attr(miri, ignore = "file I/O, which Miri isolates")]
-fn a_pipeline_runs_its_passes_in_order_and_dumps_each() {
-    use super::pass_container::{GraphModule, Pass, run};
-    use super::passes::CompilerPass;
-    use super::passes::cse::Cse;
+fn a_device_runs_its_passes_in_order_and_dumps_each() {
+    use super::device::Cpu;
+    use super::device::DeviceModule;
+    use super::pass_container::Passes;
     use super::{CompilerConfig, Options};
-
-    /// Test pass that negates the graph's first output.
-    struct Negate;
-
-    impl CompilerPass<GraphModule<'_>> for Negate {
-        fn name(&self) -> &'static str {
-            "negate"
-        }
-        fn apply(&mut self, m: &mut GraphModule<'_>) -> Result<(), String> {
-            let mut g = m.graph.clone();
-            let out = apply(&mut g, Neg, &[m.graph.outputs()[0]]);
-            g.set_outputs(&[out]).unwrap();
-            m.graph = g;
-            Ok(())
-        }
-    }
 
     let mut g = Graph::new();
     let x = g.input(ty(&[4]));
@@ -769,12 +757,13 @@ fn a_pipeline_runs_its_passes_in_order_and_dumps_each() {
         ..Options::default()
     };
 
-    let mut module = GraphModule::new(&g, &options);
+    let mut module = DeviceModule::<Cpu>::new(&g, &options);
+    Cpu::run(&mut module).unwrap();
 
-    let passes: Vec<Pass<GraphModule<'_>>> = vec![Box::new(Cse), Box::new(Negate)];
-    run("test", passes, &mut module).unwrap();
-
-    assert_eq!(names(&module.graph), ["exp", "add", "neg"]);
+    assert_eq!(
+        names(&module.graph).iter().filter(|&&n| n == "exp").count(),
+        1
+    );
 
     let mut files: Vec<String> = std::fs::read_dir(&dir)
         .unwrap()
@@ -786,10 +775,16 @@ fn a_pipeline_runs_its_passes_in_order_and_dumps_each() {
 
     assert_eq!(
         steps,
-        ["test.00.input.txt", "test.01.cse.txt", "test.02.negate.txt"]
+        [
+            "cpu.00.input.txt",
+            "cpu.01.cse.txt",
+            "cpu.02.simplify.txt",
+            "cpu.03.unsupported.txt",
+            "cpu.04.simplify.txt"
+        ]
     );
 
-    let last = std::fs::read_to_string(dir.join(&files[2])).unwrap();
+    let last = std::fs::read_to_string(dir.join(files.last().unwrap())).unwrap();
     assert_eq!(last, module.graph.to_string());
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -874,12 +869,12 @@ fn row_scaled_matmul(extra_output: bool) -> Graph {
 /// program's to bfloat16 rounding.
 #[test]
 fn row_scale_moves_past_its_matmul() {
-    use super::pass_container::rewritten_on;
+    use super::pass_container::rewritten;
     use super::passes::linear_reordering::LinearReordering;
     use crate::codegen::devices::triton::Triton;
 
     let g = row_scaled_matmul(false);
-    let out = rewritten_on::<Triton, _>(&g, LinearReordering { tile: None });
+    let out = rewritten::<Triton, _>(&g, LinearReordering { tile: None });
     let nodes = out.nodes();
     let dot = nodes
         .iter()
@@ -919,7 +914,7 @@ fn row_scale_moves_past_its_matmul() {
 /// division; the values the traced program's to float32 rounding.
 #[test]
 fn row_division_moves_past_its_matmul() {
-    use super::pass_container::rewritten_on;
+    use super::pass_container::rewritten;
     use super::passes::linear_reordering::LinearReordering;
     use crate::codegen::devices::triton::Triton;
 
@@ -937,7 +932,7 @@ fn row_division_moves_past_its_matmul() {
     let normalized = apply(&mut g, Div, &[x, rms]);
     let y = apply(&mut g, matmul(), &[normalized, w]);
     g.set_outputs(&[y]).unwrap();
-    let out = rewritten_on::<Triton, _>(&g, LinearReordering { tile: None });
+    let out = rewritten::<Triton, _>(&g, LinearReordering { tile: None });
 
     assert_eq!(
         names(&out),
@@ -959,16 +954,13 @@ fn row_division_moves_past_its_matmul() {
 /// and stays.
 #[test]
 fn shared_lhs_and_column_scales_stay() {
-    use super::pass_container::rewritten_on;
+    use super::pass_container::rewritten;
     use super::passes::linear_reordering::LinearReordering;
     use crate::codegen::devices::triton::Triton;
 
     let g = row_scaled_matmul(true);
     assert_eq!(
-        names(&rewritten_on::<Triton, _>(
-            &g,
-            LinearReordering { tile: None }
-        )),
+        names(&rewritten::<Triton, _>(&g, LinearReordering { tile: None })),
         names(&g)
     );
 
@@ -988,10 +980,7 @@ fn shared_lhs_and_column_scales_stay() {
     g.set_outputs(&[y]).unwrap();
 
     assert_eq!(
-        names(&rewritten_on::<Triton, _>(
-            &g,
-            LinearReordering { tile: None }
-        )),
+        names(&rewritten::<Triton, _>(&g, LinearReordering { tile: None })),
         names(&g)
     );
 }
@@ -1001,7 +990,7 @@ fn shared_lhs_and_column_scales_stay() {
 /// rounding.
 #[test]
 fn column_scale_of_the_weight_moves_past_its_matmul() {
-    use super::pass_container::rewritten_on;
+    use super::pass_container::rewritten;
     use super::passes::linear_reordering::LinearReordering;
     use crate::codegen::devices::triton::Triton;
 
@@ -1019,7 +1008,7 @@ fn column_scale_of_the_weight_moves_past_its_matmul() {
     let w = apply(&mut g, Mul, &[q, s]);
     let y = apply(&mut g, matmul(), &[x, w]);
     g.set_outputs(&[y]).unwrap();
-    let out = rewritten_on::<Triton, _>(&g, LinearReordering { tile: None });
+    let out = rewritten::<Triton, _>(&g, LinearReordering { tile: None });
 
     assert_eq!(
         names(&out),
@@ -1150,7 +1139,7 @@ fn assert_reordered(g: &Graph, out: &Graph, shapes: &[Vec<usize>], moved: usize,
 /// size or kept with its operand's rank; the values the traced program's to float32 rounding.
 #[test]
 fn factors_move_past_their_matmul_in_every_layout() {
-    use super::pass_container::rewritten_on;
+    use super::pass_container::rewritten;
     use super::passes::linear_reordering::LinearReordering;
     use crate::codegen::devices::triton::Triton;
 
@@ -1159,7 +1148,7 @@ fn factors_move_past_their_matmul_in_every_layout() {
             for (row, col) in [(true, false), (false, true), (true, true)] {
                 let case = format!("xt {xt} wt {wt} keepdim {keepdim} row {row} col {col}");
                 let (g, shapes) = factored_matmul(xt, wt, keepdim, row, col);
-                let out = rewritten_on::<Triton, _>(&g, LinearReordering { tile: None });
+                let out = rewritten::<Triton, _>(&g, LinearReordering { tile: None });
                 let moved = usize::from(row) + usize::from(col);
                 assert_reordered(&g, &out, &shapes, moved, &case);
             }
@@ -1171,7 +1160,7 @@ fn factors_move_past_their_matmul_in_every_layout() {
 /// `W · t` of `x W`) does not commute with the matmul and stays, on either side in every layout.
 #[test]
 fn contracted_axis_factors_stay_in_every_layout() {
-    use super::pass_container::rewritten_on;
+    use super::pass_container::rewritten;
     use super::passes::linear_reordering::LinearReordering;
     use crate::codegen::devices::triton::Triton;
 
@@ -1202,10 +1191,7 @@ fn contracted_axis_factors_stay_in_every_layout() {
 
             let case = format!("xt {xt} wt {wt} side {side}");
             assert_eq!(
-                names(&rewritten_on::<Triton, _>(
-                    &g,
-                    LinearReordering { tile: None }
-                )),
+                names(&rewritten::<Triton, _>(&g, LinearReordering { tile: None })),
                 names(&g),
                 "{case}"
             );
@@ -1218,7 +1204,7 @@ fn contracted_axis_factors_stay_in_every_layout() {
 /// program's to float32 rounding.
 #[test]
 fn batched_rows_move_past_their_matmul() {
-    use super::pass_container::rewritten_on;
+    use super::pass_container::rewritten;
     use super::passes::linear_reordering::LinearReordering;
     use crate::codegen::devices::triton::Triton;
 
@@ -1250,7 +1236,7 @@ fn batched_rows_move_past_their_matmul() {
                 .iter()
                 .map(|&v| g.type_of(v).shape.clone())
                 .collect();
-            let out = rewritten_on::<Triton, _>(&g, LinearReordering { tile: None });
+            let out = rewritten::<Triton, _>(&g, LinearReordering { tile: None });
             assert_reordered(&g, &out, &shapes, 2, &format!("wt {wt} keepdim {keepdim}"));
         }
     }
@@ -1291,7 +1277,7 @@ fn norm_scaled_matmul() -> Graph {
 /// input (a per-row scale, a weight's dequantization scale); without one, any factor moves.
 #[test]
 fn reordering_moves_only_factors_of_cross_tile_reductions() {
-    use super::pass_container::rewritten_on;
+    use super::pass_container::rewritten;
     use super::passes::linear_reordering::LinearReordering;
     use crate::codegen::devices::triton::Triton;
 
@@ -1299,37 +1285,34 @@ fn reordering_moves_only_factors_of_cross_tile_reductions() {
     let moved = |out: &Graph| names(out).ends_with(&["dot_general", "broadcast_in_dim", "mul"]);
 
     assert!(
-        moved(&rewritten_on::<Triton, _>(
+        moved(&rewritten::<Triton, _>(
             &g,
             LinearReordering { tile: Some(64) }
         )),
         "{g}"
     );
     assert_eq!(
-        names(&rewritten_on::<Triton, _>(
+        names(&rewritten::<Triton, _>(
             &g,
             LinearReordering { tile: Some(256) }
         )),
         names(&g)
     );
-    assert!(moved(&rewritten_on::<Triton, _>(
+    assert!(moved(&rewritten::<Triton, _>(
         &g,
         LinearReordering { tile: None }
     )));
 
     let (g, _) = factored_matmul(false, false, false, true, true);
     assert_eq!(
-        names(&rewritten_on::<Triton, _>(
+        names(&rewritten::<Triton, _>(
             &g,
             LinearReordering { tile: Some(64) }
         )),
         names(&g)
     );
     assert_ne!(
-        names(&rewritten_on::<Triton, _>(
-            &g,
-            LinearReordering { tile: None }
-        )),
+        names(&rewritten::<Triton, _>(&g, LinearReordering { tile: None })),
         names(&g)
     );
 }
@@ -1364,7 +1347,7 @@ fn preserve_precision_drops_forward_round_trips() {
     g.set_backward(false);
 
     g.set_outputs(&[forward, gradient, other]).unwrap();
-    let out = rewritten(&g, PreservePrecision);
+    let out = rewritten::<super::device::Cpu, _>(&g, PreservePrecision);
     let nodes = out.nodes();
     let reads = |name: &str| nodes.iter().find(|n| n.primitive.name() == name).unwrap();
 
@@ -1420,11 +1403,7 @@ fn devices_run_the_passes_they_list() {
 
     /// The names of device `D`'s passes under `config`, in order.
     fn names<D: Passes>(config: &super::CompilerConfig) -> Vec<&'static str> {
-        D::passes(config)
-            .into_iter()
-            .flatten()
-            .map(|p| p.name())
-            .collect()
+        D::passes(config).iter().map(|p| p.name()).collect()
     }
 
     assert_eq!(

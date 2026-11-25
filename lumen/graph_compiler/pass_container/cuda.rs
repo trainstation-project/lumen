@@ -18,7 +18,7 @@ use crate::graph_compiler::passes::unsupported::Unsupported;
 impl Passes for Cuda {
     /// CUDA's passes, in order. Merged dots pack for the GEMM epilogue's 16-byte vectors (8 columns of 16-bit
     /// products), their slices read in place by what CUDA fusion fuses.
-    fn passes<'a>(config: &CompilerConfig) -> Vec<Option<Pass<DeviceModule<'a, Cuda>>>> {
+    fn passes<'a>(config: &CompilerConfig) -> Vec<Pass<DeviceModule<'a, Cuda>>> {
         let fuse = config.fuse;
         let target = Target {
             reads: crate::codegen::fusion::cuda::fusible,
@@ -27,19 +27,35 @@ impl Passes for Cuda {
             columns: 8,
         };
 
-        vec![
-            Self::pass::<PreservePrecision>(true, config),
-            Self::add(Cse),
-            Self::add(Simplify { matched: false }),
-            Self::pass::<Unsupported>(true, config),
-            Self::pass::<TakeAlongAxis>(true, config),
-            Self::pass::<MergeDotsBackward>(fuse, config),
-            Self::maybe(MergeDots::configured_with(config, target).filter(|_| fuse)),
-            Self::pass::<FlashAttention>(fuse, config),
-            Self::add(Simplify { matched: true }),
-            Self::pass::<SwapPairs>(true, config),
-            Self::pass::<Fusion>(fuse, config),
-            Self::pass::<Alone>(true, config),
-        ]
+        let mut passes: Vec<Pass<DeviceModule<'a, Cuda>>> = Vec::new();
+
+        if config.preserve_precision {
+            passes.push(Box::new(PreservePrecision));
+        }
+
+        passes.push(Box::new(Cse));
+        passes.push(Box::new(Simplify { matched: false }));
+        passes.push(Box::new(Unsupported::of::<Self>()));
+        passes.push(Box::new(TakeAlongAxis));
+
+        if fuse && config.merge_dots {
+            passes.push(Box::new(MergeDotsBackward));
+            passes.push(Box::new(MergeDots { target }));
+        }
+
+        if fuse && config.flash_attention {
+            passes.push(Box::new(FlashAttention));
+        }
+
+        passes.push(Box::new(Simplify { matched: true }));
+        passes.push(Box::new(SwapPairs));
+
+        if fuse {
+            passes.push(Box::new(Fusion));
+        }
+
+        passes.push(Box::new(Alone));
+
+        passes
     }
 }

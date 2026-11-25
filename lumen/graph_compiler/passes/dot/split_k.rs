@@ -23,7 +23,6 @@
 //! Triton (tiles of the untuned GEMM config, a target of 128 tiles, matrix-vector products kept whole for the GEMV
 //! kernel; partials always summed by a reduction, so results stay deterministic).
 use crate::graph::{Graph, Primitive, TensorType, Var};
-use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::CompilerPass;
 
@@ -227,11 +226,6 @@ pub(crate) trait SplitsK {
 pub(crate) struct SplitK;
 
 impl<D: SplitsK> CompilerPass<DeviceModule<'_, D>> for SplitK {
-    /// With `split_k`.
-    fn configured(config: &CompilerConfig) -> Option<Self> {
-        (config.split_k).then_some(SplitK)
-    }
-
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "split_k"

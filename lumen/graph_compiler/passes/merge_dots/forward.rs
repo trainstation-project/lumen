@@ -6,7 +6,6 @@ use std::collections::HashMap;
 use crate::DType;
 use crate::graph::ir::primitive::free_dims;
 use crate::graph::{Graph, Node, Primitive, TensorType, Var};
-use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::merge_dots::backward::{
     Interleaving, arrange, interleaved_gradients,
@@ -826,13 +825,6 @@ pub(crate) trait Blocks {
 /// Compiler pass running [`merge_dots`].
 pub(crate) struct MergeDots {
     pub(crate) target: Target,
-}
-
-impl MergeDots {
-    /// The pass with `merge_dots`, packing for a device's `target`.
-    pub(crate) fn configured_with(config: &CompilerConfig, target: Target) -> Option<Self> {
-        config.merge_dots.then_some(MergeDots { target })
-    }
 }
 
 impl<D> CompilerPass<DeviceModule<'_, D>> for MergeDots {

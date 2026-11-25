@@ -32,7 +32,7 @@ impl Passes for Mps {
     /// sliced in a GEMM epilogue. Merged dots pack for the GEMM epilogue's row columns, their slices read in place
     /// by what MPS fusion fuses. Update chains of 2 to 29 fuse: Metal binds 31 buffers, two of them the operand and
     /// output.
-    fn passes<'a>(config: &CompilerConfig) -> Vec<Option<Pass<DeviceModule<'a, Mps>>>> {
+    fn passes<'a>(config: &CompilerConfig) -> Vec<Pass<DeviceModule<'a, Mps>>> {
         let fuse = config.fuse;
         let target = Target {
             reads: crate::codegen::fusion::mps::fusible,
@@ -42,32 +42,75 @@ impl Passes for Mps {
         };
         let row_tile = crate::codegen::dot_general::mps::row::ROW_TILE;
 
-        vec![
-            Self::pass::<PreservePrecision>(true, config),
-            Self::add(Cse),
-            Self::add(Simplify { matched: false }),
-            Self::pass::<Unsupported>(true, config),
-            Self::pass::<TakeAlongAxis>(true, config),
-            Self::pass::<ChunkedCrossEntropy>(true, config),
-            Self::pass::<MergeDotsBackward>(fuse && config.contraction_epilogues, config),
-            Self::maybe(MergeDots::configured_with(config, target).filter(|_| fuse)),
-            Self::pass::<FlashAttention>(fuse, config),
-            Self::pass::<FlashAttentionBackward>(fuse, config),
-            Self::pass::<LinearCrossEntropy>(true, config),
-            Self::add(Simplify { matched: true }),
-            Self::pass::<SwapPairs>(true, config),
-            Self::pass::<DotStrength>(true, config),
-            Self::pass::<NeuralEngine>(true, config),
-            Self::maybe(LinearReordering::configured_with(config, row_tile)),
-            Self::pass::<SplitK>(true, config),
-            Self::pass::<CanonicalizeDots>(true, config),
-            Self::maybe(fuse.then_some(Updates { least: 2, most: 29 })),
-            Self::pass::<Diamonds>(true, config),
-            Self::pass::<PlaceConcats>(fuse, config),
-            Self::pass::<Fusion>(fuse, config),
-            Self::pass::<PlaceViews>(true, config),
-            Self::pass::<Alone>(true, config),
-            Self::pass::<Concats>(true, config),
-        ]
+        let mut passes: Vec<Pass<DeviceModule<'a, Mps>>> = Vec::new();
+
+        if config.preserve_precision {
+            passes.push(Box::new(PreservePrecision));
+        }
+
+        passes.push(Box::new(Cse));
+        passes.push(Box::new(Simplify { matched: false }));
+        passes.push(Box::new(Unsupported::of::<Self>()));
+        passes.push(Box::new(TakeAlongAxis));
+
+        if fuse && config.fused_linear_cross_entropy {
+            passes.push(Box::new(ChunkedCrossEntropy));
+        }
+
+        if fuse && config.contraction_epilogues && config.merge_dots {
+            passes.push(Box::new(MergeDotsBackward));
+        }
+
+        if fuse && config.merge_dots {
+            passes.push(Box::new(MergeDots { target }));
+        }
+
+        if fuse && config.flash_attention {
+            passes.push(Box::new(FlashAttention));
+            passes.push(Box::new(FlashAttentionBackward));
+        }
+
+        if fuse && config.fused_linear_cross_entropy {
+            passes.push(Box::new(LinearCrossEntropy));
+        }
+
+        passes.push(Box::new(Simplify { matched: true }));
+        passes.push(Box::new(SwapPairs));
+        passes.push(Box::new(DotStrength));
+
+        if config.neural_engine {
+            passes.push(Box::new(NeuralEngine));
+        }
+
+        if config.linear_reordering {
+            passes.push(Box::new(LinearReordering {
+                tile: Some(row_tile),
+            }));
+        }
+
+        if config.split_k {
+            passes.push(Box::new(SplitK));
+        }
+
+        passes.push(Box::new(CanonicalizeDots::of::<Self>()));
+
+        if fuse {
+            passes.push(Box::new(Updates { least: 2, most: 29 }));
+        }
+
+        if fuse && config.normalization_diamonds {
+            passes.push(Box::new(Diamonds::of::<Self>()));
+        }
+
+        if fuse {
+            passes.push(Box::new(PlaceConcats));
+            passes.push(Box::new(Fusion));
+        }
+
+        passes.push(Box::new(PlaceViews::of::<Self>()));
+        passes.push(Box::new(Alone));
+        passes.push(Box::new(Concats));
+
+        passes
     }
 }

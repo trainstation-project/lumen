@@ -3,7 +3,6 @@
 
 use super::mil;
 use crate::graph::{FUSION_SEPARATOR, Graph, NEURAL_ENGINE, Primitive, TensorType, Var, intern};
-use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::{DeviceModule, Mps};
 use crate::graph_compiler::passes::CompilerPass;
 use crate::plan::StepBase;
@@ -851,11 +850,6 @@ pub(crate) fn invalidate<'a>(steps: impl IntoIterator<Item = &'a StepBase>) {
 pub(crate) struct NeuralEngine;
 
 impl<'a> CompilerPass<DeviceModule<'a, Mps>> for NeuralEngine {
-    /// With `neural_engine`.
-    fn configured(config: &CompilerConfig) -> Option<Self> {
-        (config.neural_engine).then_some(NeuralEngine)
-    }
-
     fn name(&self) -> &'static str {
         "neural_engine"
     }

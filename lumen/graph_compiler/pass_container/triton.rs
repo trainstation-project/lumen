@@ -29,7 +29,7 @@ use crate::graph_compiler::passes::updates::Updates;
 impl Passes for Triton {
     /// Triton's passes, in order. Merged dots pack for 8-column GEMM tiles, their slices read in place by what
     /// Triton fusion fuses. Update chains of 2 or more fuse: a kernel binds any number of buffers.
-    fn passes<'a>(config: &CompilerConfig) -> Vec<Option<Pass<DeviceModule<'a, Triton>>>> {
+    fn passes<'a>(config: &CompilerConfig) -> Vec<Pass<DeviceModule<'a, Triton>>> {
         let fuse = config.fuse;
         let target = Target {
             reads: crate::codegen::fusion::triton::fusible,
@@ -37,39 +37,79 @@ impl Passes for Triton {
             lanes: 1,
             columns: 8,
         };
+        let row_tile = crate::codegen::dot_general::triton::ROW_TILE;
         let updates = Updates {
             least: 2,
             most: usize::MAX,
         };
 
-        vec![
-            Self::pass::<PreservePrecision>(true, config),
-            Self::add(Cse),
-            Self::add(Simplify { matched: false }),
-            Self::pass::<Unsupported>(true, config),
-            Self::pass::<TakeAlongAxis>(true, config),
-            Self::pass::<ChunkedCrossEntropy>(true, config),
-            Self::pass::<MergeDotsBackward>(fuse, config),
-            Self::maybe(MergeDots::configured_with(config, target).filter(|_| fuse)),
-            Self::pass::<FlashAttention>(fuse, config),
-            Self::pass::<FlashAttentionBackward>(fuse, config),
-            Self::pass::<LinearCrossEntropy>(true, config),
-            Self::add(Simplify { matched: true }),
-            Self::pass::<SwapPairs>(true, config),
-            Self::pass::<DotStrength>(true, config),
-            Self::maybe(LinearReordering::configured_with(
-                config,
-                crate::codegen::dot_general::triton::ROW_TILE,
-            )),
-            Self::pass::<SplitK>(true, config),
-            Self::maybe(fuse.then_some(updates)),
-            Self::pass::<Diamonds>(true, config),
-            Self::pass::<PlaceConcats>(fuse, config),
-            Self::pass::<Fusion>(fuse, config),
-            Self::pass::<WideRows>(true, config),
-            Self::pass::<PlaceViews>(true, config),
-            Self::pass::<Alone>(true, config),
-            Self::pass::<HorizontalFusion>(fuse, config),
-        ]
+        let mut passes: Vec<Pass<DeviceModule<'a, Triton>>> = Vec::new();
+
+        if config.preserve_precision {
+            passes.push(Box::new(PreservePrecision));
+        }
+
+        passes.push(Box::new(Cse));
+        passes.push(Box::new(Simplify { matched: false }));
+        passes.push(Box::new(Unsupported::of::<Self>()));
+        passes.push(Box::new(TakeAlongAxis));
+
+        if fuse && config.fused_linear_cross_entropy {
+            passes.push(Box::new(ChunkedCrossEntropy));
+        }
+
+        if fuse && config.merge_dots {
+            passes.push(Box::new(MergeDotsBackward));
+            passes.push(Box::new(MergeDots { target }));
+        }
+
+        if fuse && config.flash_attention {
+            passes.push(Box::new(FlashAttention));
+            passes.push(Box::new(FlashAttentionBackward));
+        }
+
+        if fuse && config.fused_linear_cross_entropy {
+            passes.push(Box::new(LinearCrossEntropy));
+        }
+
+        passes.push(Box::new(Simplify { matched: true }));
+        passes.push(Box::new(SwapPairs));
+        passes.push(Box::new(DotStrength));
+
+        if config.linear_reordering {
+            passes.push(Box::new(LinearReordering {
+                tile: Some(row_tile),
+            }));
+        }
+
+        if config.split_k {
+            passes.push(Box::new(SplitK));
+        }
+
+        if fuse {
+            passes.push(Box::new(updates));
+        }
+
+        if fuse && config.normalization_diamonds {
+            passes.push(Box::new(Diamonds::of::<Self>()));
+        }
+
+        if fuse {
+            passes.push(Box::new(PlaceConcats));
+            passes.push(Box::new(Fusion));
+        }
+
+        if fuse && config.normalization_diamonds && config.linear_reordering {
+            passes.push(Box::new(WideRows));
+        }
+
+        passes.push(Box::new(PlaceViews::of::<Self>()));
+        passes.push(Box::new(Alone));
+
+        if fuse && config.horizontal_fusion {
+            passes.push(Box::new(HorizontalFusion::of::<Self>()));
+        }
+
+        passes
     }
 }

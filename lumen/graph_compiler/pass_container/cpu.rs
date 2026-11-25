@@ -11,13 +11,18 @@ use crate::graph_compiler::passes::unsupported::Unsupported;
 impl Passes for Cpu {
     /// The shared clean-ups (`preserve_precision`, CSE, `simplify`), then rejects the ops the CPU has no
     /// interpretation for and simplifies fully.
-    fn passes<'a>(config: &CompilerConfig) -> Vec<Option<Pass<DeviceModule<'a, Cpu>>>> {
-        vec![
-            Self::pass::<PreservePrecision>(true, config),
-            Self::add(Cse),
-            Self::add(Simplify { matched: false }),
-            Self::pass::<Unsupported>(true, config),
-            Self::add(Simplify { matched: true }),
-        ]
+    fn passes<'a>(config: &CompilerConfig) -> Vec<Pass<DeviceModule<'a, Cpu>>> {
+        let mut passes: Vec<Pass<DeviceModule<'a, Cpu>>> = Vec::new();
+
+        if config.preserve_precision {
+            passes.push(Box::new(PreservePrecision));
+        }
+
+        passes.push(Box::new(Cse));
+        passes.push(Box::new(Simplify { matched: false }));
+        passes.push(Box::new(Unsupported::of::<Self>()));
+        passes.push(Box::new(Simplify { matched: true }));
+
+        passes
     }
 }

@@ -24,7 +24,6 @@
 
 use super::linear_cross_entropy::{Found, matched, uses};
 use crate::graph::{Graph, Node, Primitive, Var};
-use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::{CompilerPass, Module};
 
@@ -318,11 +317,6 @@ fn of_rows(p: &Primitive, b: usize, c: usize) -> Option<Primitive> {
 pub(crate) struct ChunkedCrossEntropy;
 
 impl<D> CompilerPass<DeviceModule<'_, D>> for ChunkedCrossEntropy {
-    /// With `fuse` and `fused_linear_cross_entropy`.
-    fn configured(config: &CompilerConfig) -> Option<Self> {
-        (config.fuse && config.fused_linear_cross_entropy).then_some(ChunkedCrossEntropy)
-    }
-
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "chunked_cross_entropy"

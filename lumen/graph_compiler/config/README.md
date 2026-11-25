@@ -1,8 +1,8 @@
 # graph_compiler/config
 
 The compiler's settings. Every device's compiler reads one `CompilerConfig`; each backend uses the flags it
-needs and ignores the rest. Passes read their own flags in `CompilerPass::configured` (a pass off under the config is
-left out of the device's list); a device's list reads the ones it gates passes on itself (`fuse`).
+needs and ignores the rest. Each device's pass list (`pass_container/<device>.rs`) reads the flags: it adds a pass only
+when the flags it runs with are set (`flash_attention`, `split_k`, ...), and its own conditions (`fuse` on the GPUs).
 
 ## Files
 

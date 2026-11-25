@@ -16,7 +16,6 @@ mod tpu;
 mod triton;
 
 use crate::graph::Graph;
-use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::{CompilerPass, Module};
 
@@ -31,12 +30,14 @@ pub(crate) struct Unsupported {
     pub(crate) check: fn(&Graph) -> Result<(), String>,
 }
 
-impl<D: Supports> CompilerPass<DeviceModule<'_, D>> for Unsupported {
-    /// Always, with the device's check.
-    fn configured(_: &CompilerConfig) -> Option<Self> {
-        Some(Unsupported { check: D::check })
+impl Unsupported {
+    /// The pass, with device `D`'s check.
+    pub(crate) fn of<D: Supports>() -> Self {
+        Unsupported { check: D::check }
     }
+}
 
+impl<D: Supports> CompilerPass<DeviceModule<'_, D>> for Unsupported {
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "unsupported"

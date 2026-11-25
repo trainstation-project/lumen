@@ -23,7 +23,6 @@ pub(crate) mod tpu;
 mod triton;
 
 use crate::graph::{Graph, Node, Primitive};
-use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::passes::CompilerPass;
 use crate::graph_compiler::passes::alone::wrapped;
 
@@ -153,11 +152,6 @@ pub(crate) trait Rechecks: Slots + crate::graph_compiler::passes::alone::Lone {
 pub(crate) struct PlaceConcats;
 
 impl<M: Slots> CompilerPass<M> for PlaceConcats {
-    /// Always.
-    fn configured(_: &CompilerConfig) -> Option<Self> {
-        Some(PlaceConcats)
-    }
-
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "place_concats"
@@ -185,11 +179,6 @@ impl<M: Slots> CompilerPass<M> for PlaceConcats {
 pub(crate) struct Concats;
 
 impl<M: Rechecks> CompilerPass<M> for Concats {
-    /// Always.
-    fn configured(_: &CompilerConfig) -> Option<Self> {
-        Some(Concats)
-    }
-
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "concats"

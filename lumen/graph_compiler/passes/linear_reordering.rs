@@ -28,7 +28,6 @@
 
 use crate::DType;
 use crate::graph::{Graph, Node, Primitive, Var};
-use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::{CompilerPass, Module};
 
@@ -314,15 +313,6 @@ pub(crate) struct LinearReordering {
     /// The widest row the backend's GEMM tiles hold whole; only factors of wider rows' reductions move. `None`
     /// moves factors of every row.
     pub(crate) tile: Option<usize>,
-}
-
-impl LinearReordering {
-    /// The pass with `linear_reordering`, rows limited to a device's GEMM `tile`.
-    pub(crate) fn configured_with(config: &CompilerConfig, tile: usize) -> Option<Self> {
-        config
-            .linear_reordering
-            .then_some(LinearReordering { tile: Some(tile) })
-    }
 }
 
 impl<D> CompilerPass<DeviceModule<'_, D>> for LinearReordering {

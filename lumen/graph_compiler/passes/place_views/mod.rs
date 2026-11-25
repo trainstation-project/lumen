@@ -20,7 +20,6 @@ mod triton;
 
 use crate::codegen::kinds::gemm_dot;
 use crate::graph::{Graph, Primitive, TensorType, Var};
-use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::{CompilerPass, Module};
 use crate::tensor::contiguous_strides;
@@ -152,14 +151,16 @@ pub(crate) struct PlaceViews {
     pub reads: ReadsSlice,
 }
 
-impl<D: StridedOperands> CompilerPass<DeviceModule<'_, D>> for PlaceViews {
-    /// Always, reading strided operands as the device's GEMMs can.
-    fn configured(_: &CompilerConfig) -> Option<Self> {
-        Some(PlaceViews {
+impl PlaceViews {
+    /// The pass, reading strided operands as device `D`'s GEMMs can.
+    pub(crate) fn of<D: StridedOperands>() -> Self {
+        PlaceViews {
             reads: D::reads_slice,
-        })
+        }
     }
+}
 
+impl<D: StridedOperands> CompilerPass<DeviceModule<'_, D>> for PlaceViews {
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "place_views"

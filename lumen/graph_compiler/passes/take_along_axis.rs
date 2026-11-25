@@ -17,7 +17,6 @@
 //! The gather keeps the original node's label; every other node is copied unchanged.
 
 use crate::graph::{Graph, Primitive, Var};
-use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::{CompilerPass, Module};
 use crate::{DType, Scalar};
@@ -26,11 +25,6 @@ use crate::{DType, Scalar};
 pub(crate) struct TakeAlongAxis;
 
 impl<D> CompilerPass<DeviceModule<'_, D>> for TakeAlongAxis {
-    /// Always.
-    fn configured(_: &CompilerConfig) -> Option<Self> {
-        Some(TakeAlongAxis)
-    }
-
     /// Pass name used in profiler ranges and dumps.
     fn name(&self) -> &'static str {
         "take_along_axis"
