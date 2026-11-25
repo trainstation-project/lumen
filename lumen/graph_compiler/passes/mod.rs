@@ -1,5 +1,5 @@
 //! Graph passes: the interface every pass implements (`CompilerPass`, rewriting a `Module`) and the passes the
-//! backend compilers run (each device's `graph_compiler::pipeline::Passes`).
+//! backend compilers run (each device's `graph_compiler::pass_container::Passes`).
 
 pub(crate) mod alone;
 pub(crate) mod apple_neural_engine;
@@ -45,7 +45,7 @@ pub(crate) trait Module {
     fn config(&self) -> &CompilerConfig;
 }
 
-/// A graph transformation in a device's pass list (`pipeline::Passes`).
+/// A graph transformation in a device's pass list (`pass_container::Passes`).
 pub(crate) trait CompilerPass<M> {
     /// Name used in profiler ranges and dump file names.
     fn name(&self) -> &'static str;

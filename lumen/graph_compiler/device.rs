@@ -1,5 +1,5 @@
 //! The devices the graph compiler targets and the one module every device's passes rewrite: each device is a type
-//! implementing [`Device`], with its own pass list (`pipeline::Passes`, `pipeline/<device>.rs`) and its answers to each
+//! implementing [`Device`], with its own pass list (`pass_container::Passes`, `pass_container/<device>.rs`) and its answers to each
 //! pass beside the pass (`passes/<pass>/<device>.rs`); one `compile!` runs them for every device.
 
 use super::passes::Module;
@@ -84,7 +84,7 @@ impl<D> RowsModule for DeviceModule<'_, D> {
 }
 
 /// A device the graph compiler targets: its name and how its passed graph becomes a plan (its passes are its
-/// `pipeline::Passes` list).
+/// `pass_container::Passes` list).
 pub(crate) trait Device: Sized + 'static {
     /// The device's name, in profiler ranges and dump files.
     const NAME: &'static str;
@@ -105,7 +105,7 @@ macro_rules! compile {
         let options: &$crate::graph_compiler::Options = $options;
         let mut module =
             $crate::graph_compiler::device::DeviceModule::<$device>::new($graph, options);
-        <$device as $crate::graph_compiler::pipeline::Passes>::run(&mut module)?;
+        <$device as $crate::graph_compiler::pass_container::Passes>::run(&mut module)?;
         <$device>::lower(module, $at)
     }};
 }

@@ -1,4 +1,4 @@
-# graph_compiler/pipeline
+# graph_compiler/pass_container
 
 Running passes, and each device's list of them.
 

@@ -15,7 +15,7 @@ later instead, after `Simplify` and `dot_strength`.
   and the backward side of the forward merge's interleaving: `interleaved_gradients` (the gradient concatenates
   and slices to rewrite, an `Interleaving`) and `arrange` (a gradient concatenation in the interleaved layout).
 
-The code is the same on every device; each device's pass list (`graph_compiler/pipeline/<device>.rs`) gives its
+The code is the same on every device; each device's pass list (`graph_compiler/pass_container/<device>.rs`) gives its
 `Target`, where its forward merge runs, and its gates beyond `merge_dots`:
 
 | Device | Gates | Forward merge | `Target` |

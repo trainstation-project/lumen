@@ -11,7 +11,7 @@ use crate::{DType, Scalar, reference};
 
 /// `g` as the `Simplify` pass leaves it, with `matched` as given.
 fn simplified(g: &Graph, matched: bool) -> Graph {
-    super::pipeline::rewritten(g, super::passes::simplify::Simplify { matched })
+    super::pass_container::rewritten(g, super::passes::simplify::Simplify { matched })
 }
 
 /// An `f32` tensor type of `shape`.
@@ -732,9 +732,9 @@ fn ops_on_host_and_device_values_raise() {
 #[test]
 #[cfg_attr(miri, ignore = "file I/O, which Miri isolates")]
 fn a_pipeline_runs_its_passes_in_order_and_dumps_each() {
+    use super::pass_container::{GraphModule, Pass, run};
     use super::passes::CompilerPass;
     use super::passes::cse::Cse;
-    use super::pipeline::{GraphModule, Pass, run};
     use super::{CompilerConfig, Options};
 
     /// Test pass that negates the graph's first output.
@@ -874,8 +874,8 @@ fn row_scaled_matmul(extra_output: bool) -> Graph {
 /// program's to bfloat16 rounding.
 #[test]
 fn row_scale_moves_past_its_matmul() {
+    use super::pass_container::rewritten_on;
     use super::passes::linear_reordering::LinearReordering;
-    use super::pipeline::rewritten_on;
     use crate::codegen::devices::triton::Triton;
 
     let g = row_scaled_matmul(false);
@@ -919,8 +919,8 @@ fn row_scale_moves_past_its_matmul() {
 /// division; the values the traced program's to float32 rounding.
 #[test]
 fn row_division_moves_past_its_matmul() {
+    use super::pass_container::rewritten_on;
     use super::passes::linear_reordering::LinearReordering;
-    use super::pipeline::rewritten_on;
     use crate::codegen::devices::triton::Triton;
 
     let mut g = Graph::new();
@@ -959,8 +959,8 @@ fn row_division_moves_past_its_matmul() {
 /// and stays.
 #[test]
 fn shared_lhs_and_column_scales_stay() {
+    use super::pass_container::rewritten_on;
     use super::passes::linear_reordering::LinearReordering;
-    use super::pipeline::rewritten_on;
     use crate::codegen::devices::triton::Triton;
 
     let g = row_scaled_matmul(true);
@@ -1001,8 +1001,8 @@ fn shared_lhs_and_column_scales_stay() {
 /// rounding.
 #[test]
 fn column_scale_of_the_weight_moves_past_its_matmul() {
+    use super::pass_container::rewritten_on;
     use super::passes::linear_reordering::LinearReordering;
-    use super::pipeline::rewritten_on;
     use crate::codegen::devices::triton::Triton;
 
     let mut g = Graph::new();
@@ -1150,8 +1150,8 @@ fn assert_reordered(g: &Graph, out: &Graph, shapes: &[Vec<usize>], moved: usize,
 /// size or kept with its operand's rank; the values the traced program's to float32 rounding.
 #[test]
 fn factors_move_past_their_matmul_in_every_layout() {
+    use super::pass_container::rewritten_on;
     use super::passes::linear_reordering::LinearReordering;
-    use super::pipeline::rewritten_on;
     use crate::codegen::devices::triton::Triton;
 
     for (xt, wt) in [(false, false), (false, true), (true, false), (true, true)] {
@@ -1171,8 +1171,8 @@ fn factors_move_past_their_matmul_in_every_layout() {
 /// `W · t` of `x W`) does not commute with the matmul and stays, on either side in every layout.
 #[test]
 fn contracted_axis_factors_stay_in_every_layout() {
+    use super::pass_container::rewritten_on;
     use super::passes::linear_reordering::LinearReordering;
-    use super::pipeline::rewritten_on;
     use crate::codegen::devices::triton::Triton;
 
     for (xt, wt) in [(false, false), (false, true), (true, false), (true, true)] {
@@ -1218,8 +1218,8 @@ fn contracted_axis_factors_stay_in_every_layout() {
 /// program's to float32 rounding.
 #[test]
 fn batched_rows_move_past_their_matmul() {
+    use super::pass_container::rewritten_on;
     use super::passes::linear_reordering::LinearReordering;
-    use super::pipeline::rewritten_on;
     use crate::codegen::devices::triton::Triton;
 
     for wt in [false, true] {
@@ -1291,8 +1291,8 @@ fn norm_scaled_matmul() -> Graph {
 /// input (a per-row scale, a weight's dequantization scale); without one, any factor moves.
 #[test]
 fn reordering_moves_only_factors_of_cross_tile_reductions() {
+    use super::pass_container::rewritten_on;
     use super::passes::linear_reordering::LinearReordering;
-    use super::pipeline::rewritten_on;
     use crate::codegen::devices::triton::Triton;
 
     let g = norm_scaled_matmul();
@@ -1339,8 +1339,8 @@ fn reordering_moves_only_factors_of_cross_tile_reductions() {
 /// through a wider dtype (`bf16(f32(y))`) is dropped for both.
 #[test]
 fn preserve_precision_drops_forward_round_trips() {
+    use super::pass_container::rewritten;
     use super::passes::preserve_precision::PreservePrecision;
-    use super::pipeline::rewritten;
 
     let mut g = Graph::new();
     let x = g.input(ty(&[4]));
@@ -1408,13 +1408,13 @@ fn triton_gemv_rule_follows_mps() {
     assert!(!gemv(&dot(0), &ty(&[1, 2048]), &ty(&[2048, 3072])));
 }
 
-/// Each device's default pass list (`pipeline/<device>.rs`), in the shared order: every device first runs CSE and
+/// Each device's default pass list (`pass_container/<device>.rs`), in the shared order: every device first runs CSE and
 /// `simplify`, then rejects what it has no kernel for; the CPU then only simplifies, CuTe merges dots, fuses attention
 /// and rotary pair swaps, elementwise work and GEMM epilogues, Triton and TPU run their own lists.
 #[test]
 fn devices_run_the_passes_they_list() {
     use super::device::{Cpu, Cuda, Tpu, Triton};
-    use super::pipeline::Passes;
+    use super::pass_container::Passes;
 
     let config = super::CompilerConfig::default();
 

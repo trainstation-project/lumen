@@ -3,8 +3,8 @@
 
 pub mod config;
 pub(crate) mod device;
+pub(crate) mod pass_container;
 pub(crate) mod passes;
-pub(crate) mod pipeline;
 #[cfg(feature = "python")]
 pub(crate) mod python;
 pub(crate) mod remat;

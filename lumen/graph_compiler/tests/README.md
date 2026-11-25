@@ -12,9 +12,9 @@ where values matter, its results against the reference interpreter (`crate::refe
     dots, rearranges and casts moving past elementwise and layout ops).
   - Host stages (host values run in a host stage, programs without host values compile to one plan,
     mixing host and device operands is an error).
-  - `pipeline::run` running passes in order and dumping the graph after each one.
+  - `pass_container::run` running passes in order and dumping the graph after each one.
   - Attention operand strides, `linear_reordering` in every operand layout, and `preserve_precision`.
-  - `devices_run_the_passes_they_implement`: the exact pass list each device's pipeline runs under the
+  - `devices_run_the_passes_they_list`: the exact pass list each device runs under the
     default config (CPU, CUDA, Triton, TPU). Update it when a pass is added, removed or reordered.
 - `mps.rs` - MPS pass and codegen tests, compiled only when MPS is linked (`lumen_mps_linked`): fusion of
   elementwise and layout chains, dot merging and packed parameters, dot canonicalization, slices read in
@@ -25,7 +25,7 @@ where values matter, its results against the reference interpreter (`crate::refe
 
 ## Helpers
 
-- `simplified(g, matched)` runs `Simplify` alone through `pipeline::rewritten`, which applies one pass to
+- `simplified(g, matched)` runs `Simplify` alone through `pass_container::rewritten`, which applies one pass to
   a plain module with default options.
 - `apply`, `ty`, `names`, `full` and `matmul` build graphs and list primitive names.
 - MPS tests reuse `plan::tests::mps` (`available`, `check`, `values`) and an MPS `merge_dots::Target`

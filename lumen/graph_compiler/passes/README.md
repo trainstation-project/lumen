@@ -1,7 +1,7 @@
 # graph_compiler/passes
 
 Every graph rewrite the compiler runs between tracing and codegen. Each device lists the passes it runs, in order, in
-its own pass list (`graph_compiler/pipeline/<device>.rs`); the passes are shared.
+its own pass list (`graph_compiler/pass_container/<device>.rs`); the passes are shared.
 
 ## How a pass is written
 
