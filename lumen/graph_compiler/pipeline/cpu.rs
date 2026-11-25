@@ -15,10 +15,10 @@ impl Passes for Cpu {
         let mut pipeline = Pipeline::new(Cpu::NAME);
 
         pipeline
-            .pass::<PreservePrecision>(config)
+            .pass::<PreservePrecision>(true, config)
             .add(Cse)
             .add(Simplify { matched: false })
-            .pass::<Unsupported>(config)
+            .pass::<Unsupported>(true, config)
             .add(Simplify { matched: true });
 
         pipeline

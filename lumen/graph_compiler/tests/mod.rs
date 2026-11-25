@@ -1421,7 +1421,10 @@ fn devices_run_the_passes_they_list() {
 
     let config = super::CompilerConfig::default();
 
-    assert_eq!(Cpu::passes(&config).names(), ["cse", "simplify", "unsupported", "simplify"]);
+    assert_eq!(
+        Cpu::passes(&config).names(),
+        ["cse", "simplify", "unsupported", "simplify"]
+    );
     assert_eq!(
         Cuda::passes(&config).names(),
         [

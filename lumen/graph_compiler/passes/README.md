@@ -16,7 +16,7 @@ its own pass list (`graph_compiler/pipeline/<device>.rs`); the passes are shared
   rewriting and the trait the pass reads its device answers through (what is fusible, kernel names, limits); each
   device implements it in `passes/<pass>/<device>.rs` (`cpu`, `cuda`, `mps`, `triton`, `tpu`; `mps` only when MPS
   is linked). A device runs it where its list adds it, which needs that impl.
-- A condition of a device's own (running a pass only with `fuse`) is in its list (`Pipeline::pass_if`), not the
+- A condition of a device's own (running a pass only with `fuse`) is in its list (`Pipeline::pass`'s `enable`), not the
   pass.
 
 ## Device passes, in order (devices whose lists add it in brackets)

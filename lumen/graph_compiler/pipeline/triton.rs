@@ -44,33 +44,33 @@ impl Passes for Triton {
         let mut pipeline = Pipeline::new(Triton::NAME);
 
         pipeline
-            .pass::<PreservePrecision>(config)
+            .pass::<PreservePrecision>(true, config)
             .add(Cse)
             .add(Simplify { matched: false })
-            .pass::<Unsupported>(config)
-            .pass::<TakeAlongAxis>(config)
-            .pass::<ChunkedCrossEntropy>(config)
-            .pass_if::<MergeDotsBackward>(fuse, config)
+            .pass::<Unsupported>(true, config)
+            .pass::<TakeAlongAxis>(true, config)
+            .pass::<ChunkedCrossEntropy>(true, config)
+            .pass::<MergeDotsBackward>(fuse, config)
             .maybe(MergeDots::configured_with(config, target).filter(|_| fuse))
-            .pass_if::<FlashAttention>(fuse, config)
-            .pass_if::<FlashAttentionBackward>(fuse, config)
-            .pass::<LinearCrossEntropy>(config)
+            .pass::<FlashAttention>(fuse, config)
+            .pass::<FlashAttentionBackward>(fuse, config)
+            .pass::<LinearCrossEntropy>(true, config)
             .add(Simplify { matched: true })
-            .pass::<SwapPairs>(config)
-            .pass::<DotStrength>(config)
+            .pass::<SwapPairs>(true, config)
+            .pass::<DotStrength>(true, config)
             .maybe(LinearReordering::configured_with(
                 config,
                 crate::codegen::dot_general::triton::ROW_TILE,
             ))
-            .pass::<SplitK>(config)
+            .pass::<SplitK>(true, config)
             .maybe(fuse.then_some(updates))
-            .pass::<Diamonds>(config)
-            .pass_if::<PlaceConcats>(fuse, config)
-            .pass_if::<Fusion>(fuse, config)
-            .pass::<WideRows>(config)
-            .pass::<PlaceViews>(config)
-            .pass::<Alone>(config)
-            .pass_if::<HorizontalFusion>(fuse, config);
+            .pass::<Diamonds>(true, config)
+            .pass::<PlaceConcats>(fuse, config)
+            .pass::<Fusion>(fuse, config)
+            .pass::<WideRows>(true, config)
+            .pass::<PlaceViews>(true, config)
+            .pass::<Alone>(true, config)
+            .pass::<HorizontalFusion>(fuse, config);
 
         pipeline
     }

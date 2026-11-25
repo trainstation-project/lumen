@@ -29,18 +29,18 @@ impl Passes for Cuda {
         let mut pipeline = Pipeline::new(Cuda::NAME);
 
         pipeline
-            .pass::<PreservePrecision>(config)
+            .pass::<PreservePrecision>(true, config)
             .add(Cse)
             .add(Simplify { matched: false })
-            .pass::<Unsupported>(config)
-            .pass::<TakeAlongAxis>(config)
-            .pass_if::<MergeDotsBackward>(fuse, config)
+            .pass::<Unsupported>(true, config)
+            .pass::<TakeAlongAxis>(true, config)
+            .pass::<MergeDotsBackward>(fuse, config)
             .maybe(MergeDots::configured_with(config, target).filter(|_| fuse))
-            .pass_if::<FlashAttention>(fuse, config)
+            .pass::<FlashAttention>(fuse, config)
             .add(Simplify { matched: true })
-            .pass::<SwapPairs>(config)
-            .pass_if::<Fusion>(fuse, config)
-            .pass::<Alone>(config);
+            .pass::<SwapPairs>(true, config)
+            .pass::<Fusion>(fuse, config)
+            .pass::<Alone>(true, config);
 
         pipeline
     }

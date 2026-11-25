@@ -59,22 +59,15 @@ impl<M: Module> Pipeline<M> {
         self
     }
 
-    /// Appends pass `P` as `config` configures it (`CompilerPass::configured`), unless that turns it off.
+    /// Appends pass `P` when `enable` (the device's own condition, such as running it only with `fuse`; `true` for
+    /// always), as `config` configures it (`CompilerPass::configured`), unless that turns it off.
     pub(crate) fn pass<P: CompilerPass<M> + 'static>(
         &mut self,
+        enable: bool,
         config: &CompilerConfig,
     ) -> &mut Self {
-        self.maybe(P::configured(config))
-    }
-
-    /// Appends pass `P` as `pass` does when `on` (a device's own condition, such as running it only with `fuse`).
-    pub(crate) fn pass_if<P: CompilerPass<M> + 'static>(
-        &mut self,
-        on: bool,
-        config: &CompilerConfig,
-    ) -> &mut Self {
-        match on {
-            true => self.pass::<P>(config),
+        match enable {
+            true => self.maybe(P::configured(config)),
             false => self,
         }
     }
