@@ -188,18 +188,18 @@ pub(crate) struct Launch {
 }
 
 /// Labels this thread's next device launch with `name` (and its types when recording shapes).
-#[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
+#[cfg_attr(not(any(lumen_mps_linked, lumen_tpu_linked)), allow(dead_code))]
 pub(crate) fn next_launch(name: &'static str, types: impl FnOnce() -> IoTypes) {
     let bits = flags();
 
-    if bits & (MPS | CUDA) != 0 {
+    if bits & (MPS | CUDA | TPU) != 0 {
         let types = (bits & SHAPES != 0).then(types);
         NEXT_LAUNCH.with(|l| *l.borrow_mut() = Some(Launch { name, types }));
     }
 }
 
 /// Drops a pending launch label, for launches that are skipped.
-#[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
+#[cfg_attr(not(any(lumen_mps_linked, lumen_tpu_linked)), allow(dead_code))]
 pub(crate) fn clear_next_launch() {
     NEXT_LAUNCH.with(|l| l.borrow_mut().take());
 }
