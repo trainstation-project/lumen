@@ -23,7 +23,7 @@ and execution: graph -> the device's pass list -> codegen (`Device::lower`) -> p
   `elementwise` (which primitives elementwise fusion merges), `combined`, `constant`, `label`, `positions`.
 - `device.rs` - the `Device` trait (`NAME`, `lower`), `DeviceModule<D>` (the graph plus state passes hand
   to later passes), the `compile!` macro and the CPU device.
-- `pass_container/` - each device's pass list (`Passes`) and `run`, which runs passes in order.
+- `pass_container/` - each device's pass list (`Passes`), which also runs it in order (`Passes::run`).
 - `stages.rs` - splitting host/device programs into stages; a host stage reads each value copied from the device
   through a `device_wait`, since the copy is started without waiting (`runtime/device_transfer/pending.rs`).
 - `schedule.rs` - node schedulers used by `plan/compile.rs`: `list` and `dfs` (keep less memory live) and

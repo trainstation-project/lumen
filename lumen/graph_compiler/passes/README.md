@@ -8,10 +8,11 @@ its own pass list (`graph_compiler/pass_container/<device>.rs`); the passes are 
 - `Module` is what a pass rewrites: a graph, its `Options` and the device's `CompilerConfig`.
 - `CompilerPass<M>` has `name` (used for profiler ranges and dump files), `apply` and `configured(config)`: the pass
   under `config` (its own config flag, and the device answers it takes), or `None` when off. A device list adds a
-  pass by type (`Passes::pass`, through `configured`), or builds it itself (`add`, `maybe`).
+  pass by type (`Passes::pass`, through `configured`), or builds it itself (`Passes::add`).
 - A pass whose code is the same on every device that runs it is one file, `passes/<pass>.rs`, with no trait: the
   device lists that run it add it (`swap_pairs.rs`, `sink_reshapes.rs`). A value a device gives it is a field the
-  list sets (`linear_reordering.rs`'s row tile, `updates.rs`'s chain lengths, `merge_dots`' `Target`).
+  list sets (`linear_reordering.rs`'s row tile, `updates.rs`'s chain lengths, `merge_dots`' `Target`), and such a
+  pass's config flag is in the list's `enable` (`Passes::add(config.merge_dots, ...)`).
 - A pass with code of its own per device is a folder, `passes/<pass>/`: `mod.rs` holds the shared matching and
   rewriting and the trait the pass reads its device answers through (what is fusible, kernel names, limits); each
   device implements it in `passes/<pass>/<device>.rs` (`cpu`, `cuda`, `mps`, `triton`, `tpu`; `mps` only when MPS

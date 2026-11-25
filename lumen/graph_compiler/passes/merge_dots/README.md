@@ -9,8 +9,8 @@ later instead, after `Simplify` and `dot_strength`.
 ## Files
 
 - `mod.rs` — re-exports the pass types.
-- `forward.rs` — `merge_dots`, `MergeDots` (`configured_with(config, target)`: with `merge_dots`, packing for the
-  device's `Target`), `Target`, `Packs` and the `Blocks` trait.
+- `forward.rs` — `merge_dots`, `MergeDots` (packing for the device's `Target`; each list adds it with `merge_dots`),
+  `Target`, `Packs` and the `Blocks` trait.
 - `backward.rs` — `MergeDotsBackward` (with `merge_dots`);
   and the backward side of the forward merge's interleaving: `interleaved_gradients` (the gradient concatenates
   and slices to rewrite, an `Interleaving`) and `arrange` (a gradient concatenation in the interleaved layout).

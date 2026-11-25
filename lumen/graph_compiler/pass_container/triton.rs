@@ -37,6 +37,7 @@ impl Passes for Triton {
             lanes: 1,
             columns: 8,
         };
+        let row_tile = crate::codegen::dot_general::triton::ROW_TILE;
         let updates = Updates {
             least: 2,
             most: usize::MAX,
@@ -44,25 +45,27 @@ impl Passes for Triton {
 
         vec![
             Self::pass::<PreservePrecision>(true, config),
-            Self::add(Cse),
-            Self::add(Simplify { matched: false }),
+            Self::add(true, Cse),
+            Self::add(true, Simplify { matched: false }),
             Self::pass::<Unsupported>(true, config),
             Self::pass::<TakeAlongAxis>(true, config),
             Self::pass::<ChunkedCrossEntropy>(true, config),
             Self::pass::<MergeDotsBackward>(fuse, config),
-            Self::maybe(MergeDots::configured_with(config, target).filter(|_| fuse)),
+            Self::add(fuse && config.merge_dots, MergeDots { target }),
             Self::pass::<FlashAttention>(fuse, config),
             Self::pass::<FlashAttentionBackward>(fuse, config),
             Self::pass::<LinearCrossEntropy>(true, config),
-            Self::add(Simplify { matched: true }),
+            Self::add(true, Simplify { matched: true }),
             Self::pass::<SwapPairs>(true, config),
             Self::pass::<DotStrength>(true, config),
-            Self::maybe(LinearReordering::configured_with(
-                config,
-                crate::codegen::dot_general::triton::ROW_TILE,
-            )),
+            Self::add(
+                config.linear_reordering,
+                LinearReordering {
+                    tile: Some(row_tile),
+                },
+            ),
             Self::pass::<SplitK>(true, config),
-            Self::maybe(fuse.then_some(updates)),
+            Self::add(fuse, updates),
             Self::pass::<Diamonds>(true, config),
             Self::pass::<PlaceConcats>(fuse, config),
             Self::pass::<Fusion>(fuse, config),

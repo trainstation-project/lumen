@@ -12,7 +12,7 @@ where values matter, its results against the reference interpreter (`crate::refe
     dots, rearranges and casts moving past elementwise and layout ops).
   - Host stages (host values run in a host stage, programs without host values compile to one plan,
     mixing host and device operands is an error).
-  - `pass_container::run` running passes in order and dumping the graph after each one.
+  - A device (the CPU) running its passes in order and dumping the graph after each one.
   - Attention operand strides, `linear_reordering` in every operand layout, and `preserve_precision`.
   - `devices_run_the_passes_they_list`: the exact pass list each device runs under the
     default config (CPU, CUDA, Triton, TPU). Update it when a pass is added, removed or reordered.

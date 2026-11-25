@@ -728,30 +728,14 @@ fn ops_on_host_and_device_values_raise() {
     );
 }
 
-/// A pipeline runs its passes in order and dumps the graph before and after each to `dump_to`.
+/// A device runs its passes in order and dumps the graph before and after each to `dump_to`: the CPU's CSE shares the
+/// two `exp`s, and its dumps name each of its passes.
 #[test]
 #[cfg_attr(miri, ignore = "file I/O, which Miri isolates")]
-fn a_pipeline_runs_its_passes_in_order_and_dumps_each() {
-    use super::pass_container::{GraphModule, Pass, run};
-    use super::passes::CompilerPass;
-    use super::passes::cse::Cse;
+fn a_device_runs_its_passes_in_order_and_dumps_each() {
+    use super::device::Cpu;
+    use super::pass_container::{GraphModule, Passes};
     use super::{CompilerConfig, Options};
-
-    /// Test pass that negates the graph's first output.
-    struct Negate;
-
-    impl CompilerPass<GraphModule<'_>> for Negate {
-        fn name(&self) -> &'static str {
-            "negate"
-        }
-        fn apply(&mut self, m: &mut GraphModule<'_>) -> Result<(), String> {
-            let mut g = m.graph.clone();
-            let out = apply(&mut g, Neg, &[m.graph.outputs()[0]]);
-            g.set_outputs(&[out]).unwrap();
-            m.graph = g;
-            Ok(())
-        }
-    }
 
     let mut g = Graph::new();
     let x = g.input(ty(&[4]));
@@ -770,11 +754,12 @@ fn a_pipeline_runs_its_passes_in_order_and_dumps_each() {
     };
 
     let mut module = GraphModule::new(&g, &options);
+    Cpu::run(&mut module).unwrap();
 
-    let passes: Vec<Pass<GraphModule<'_>>> = vec![Box::new(Cse), Box::new(Negate)];
-    run("test", passes, &mut module).unwrap();
-
-    assert_eq!(names(&module.graph), ["exp", "add", "neg"]);
+    assert_eq!(
+        names(&module.graph).iter().filter(|&&n| n == "exp").count(),
+        1
+    );
 
     let mut files: Vec<String> = std::fs::read_dir(&dir)
         .unwrap()
@@ -786,10 +771,16 @@ fn a_pipeline_runs_its_passes_in_order_and_dumps_each() {
 
     assert_eq!(
         steps,
-        ["test.00.input.txt", "test.01.cse.txt", "test.02.negate.txt"]
+        [
+            "cpu.00.input.txt",
+            "cpu.01.cse.txt",
+            "cpu.02.simplify.txt",
+            "cpu.03.unsupported.txt",
+            "cpu.04.simplify.txt"
+        ]
     );
 
-    let last = std::fs::read_to_string(dir.join(&files[2])).unwrap();
+    let last = std::fs::read_to_string(dir.join(files.last().unwrap())).unwrap();
     assert_eq!(last, module.graph.to_string());
     std::fs::remove_dir_all(&dir).unwrap();
 }

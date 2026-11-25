@@ -34,68 +34,58 @@ pub(crate) trait Passes: Device {
         enable: bool,
         config: &CompilerConfig,
     ) -> Option<Pass<DeviceModule<'a, Self>>> {
-        Self::maybe(enable.then(|| P::configured(config)).flatten())
-    }
-
-    /// `pass`, built by the list itself (its settings, or values the device gives it), always run.
-    fn add<'a>(
-        pass: impl CompilerPass<DeviceModule<'a, Self>> + 'static,
-    ) -> Option<Pass<DeviceModule<'a, Self>>> {
-        Some(Box::new(pass))
-    }
-
-    /// `pass`, built by the list itself, when there is one (`None`: it is off).
-    fn maybe<'a>(
-        pass: Option<impl CompilerPass<DeviceModule<'a, Self>> + 'static>,
-    ) -> Option<Pass<DeviceModule<'a, Self>>> {
+        let pass = enable.then(|| P::configured(config)).flatten();
         pass.map(|pass| Box::new(pass) as Pass<_>)
     }
 
-    /// Runs the device's passes on `module` (`run`, under the device's name).
+    /// `pass`, built by the list itself (its settings, or values the device gives it), when `enable` (its config flag
+    /// and the device's own condition; `true` for always).
+    fn add<'a>(
+        enable: bool,
+        pass: impl CompilerPass<DeviceModule<'a, Self>> + 'static,
+    ) -> Option<Pass<DeviceModule<'a, Self>>> {
+        enable.then(|| Box::new(pass) as Pass<_>)
+    }
+
+    /// Runs the device's passes on `module` in order, each in a profiler range `<device>::<pass>`; when the config sets
+    /// a dump directory, writes the graph before the first pass and after each one (`<run>.<device>.<step>.<pass>.txt`).
     fn run(module: &mut DeviceModule<'_, Self>) -> Result<(), String> {
+        let name = Self::NAME;
+
+        let dump = module.config().dump_to().map(str::to_owned).map(|dir| {
+            let id = DUMPED.fetch_add(1, Ordering::Relaxed);
+
+            move |step: usize, pass: &str, graph: &Graph| {
+                let file = format!("{dir}/{id:04}.{name}.{step:02}.{pass}.txt");
+
+                std::fs::create_dir_all(&dir)
+                    .and_then(|()| std::fs::write(&file, graph.to_string()))
+                    .map_err(|e| format!("dumping {file}: {e}"))
+            }
+        });
+
+        if let Some(dump) = &dump {
+            dump(0, "input", module.graph())?;
+        }
+
         let passes = Self::passes(module.config()).into_iter().flatten();
-        run(Self::NAME, passes, module)
+
+        for (step, mut pass) in passes.enumerate() {
+            let range = format!("{name}::{}", pass.name());
+            let _range = crate::profiler::record_function(range);
+            pass.apply(module)?;
+
+            if let Some(dump) = &dump {
+                dump(step + 1, pass.name(), module.graph())?;
+            }
+        }
+
+        Ok(())
     }
 }
 
 /// Counter numbering runs so each run's dump files are distinct.
 static DUMPED: AtomicUsize = AtomicUsize::new(0);
-
-/// Runs `passes` on `module` in order, each in a profiler range `<name>::<pass>`; when the config sets a dump
-/// directory, writes the graph before the first pass and after each one (`<run>.<name>.<step>.<pass>.txt`).
-pub(crate) fn run<M: Module>(
-    name: &str,
-    passes: impl IntoIterator<Item = Pass<M>>,
-    module: &mut M,
-) -> Result<(), String> {
-    let dump = module.config().dump_to().map(str::to_owned).map(|dir| {
-        let id = DUMPED.fetch_add(1, Ordering::Relaxed);
-
-        move |step: usize, pass: &str, graph: &Graph| {
-            let file = format!("{dir}/{id:04}.{name}.{step:02}.{pass}.txt");
-
-            std::fs::create_dir_all(&dir)
-                .and_then(|()| std::fs::write(&file, graph.to_string()))
-                .map_err(|e| format!("dumping {file}: {e}"))
-        }
-    });
-
-    if let Some(dump) = &dump {
-        dump(0, "input", module.graph())?;
-    }
-
-    for (step, mut pass) in passes.into_iter().enumerate() {
-        let range = format!("{name}::{}", pass.name());
-        let _range = crate::profiler::record_function(range);
-        pass.apply(module)?;
-
-        if let Some(dump) = &dump {
-            dump(step + 1, pass.name(), module.graph())?;
-        }
-    }
-
-    Ok(())
-}
 
 /// `graph` as `pass` leaves it, run on a plain module with default options.
 #[cfg(test)]

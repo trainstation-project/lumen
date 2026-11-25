@@ -14,10 +14,10 @@ impl Passes for Cpu {
     fn passes<'a>(config: &CompilerConfig) -> Vec<Option<Pass<DeviceModule<'a, Cpu>>>> {
         vec![
             Self::pass::<PreservePrecision>(true, config),
-            Self::add(Cse),
-            Self::add(Simplify { matched: false }),
+            Self::add(true, Cse),
+            Self::add(true, Simplify { matched: false }),
             Self::pass::<Unsupported>(true, config),
-            Self::add(Simplify { matched: true }),
+            Self::add(true, Simplify { matched: true }),
         ]
     }
 }
