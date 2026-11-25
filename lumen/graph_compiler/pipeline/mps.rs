@@ -2,9 +2,9 @@
 //! epilogues fused, the fusing passes only with `fuse`), plus the Neural Engine and concatenations fusion could not
 //! place.
 
-use super::{Passes, Pipeline};
+use super::{Pass, Passes};
 use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::device::{Device, DeviceModule, Mps};
+use crate::graph_compiler::device::{DeviceModule, Mps};
 use crate::graph_compiler::passes::alone::Alone;
 use crate::graph_compiler::passes::apple_neural_engine::NeuralEngine;
 use crate::graph_compiler::passes::attention::{FlashAttention, FlashAttentionBackward};
@@ -32,7 +32,7 @@ impl Passes for Mps {
     /// sliced in a GEMM epilogue. Merged dots pack for the GEMM epilogue's row columns, their slices read in place
     /// by what MPS fusion fuses. Update chains of 2 to 29 fuse: Metal binds 31 buffers, two of them the operand and
     /// output.
-    fn passes<'a>(config: &CompilerConfig) -> Pipeline<DeviceModule<'a, Mps>> {
+    fn passes<'a>(config: &CompilerConfig) -> Vec<Option<Pass<DeviceModule<'a, Mps>>>> {
         let fuse = config.fuse;
         let target = Target {
             reads: crate::codegen::fusion::mps::fusible,
@@ -41,35 +41,33 @@ impl Passes for Mps {
             columns: crate::codegen::regions::ROW_COLUMNS,
         };
         let row_tile = crate::codegen::dot_general::mps::row::ROW_TILE;
-        let mut pipeline = Pipeline::new(Mps::NAME);
 
-        pipeline
-            .pass::<PreservePrecision>(true, config)
-            .add(Cse)
-            .add(Simplify { matched: false })
-            .pass::<Unsupported>(true, config)
-            .pass::<TakeAlongAxis>(true, config)
-            .pass::<ChunkedCrossEntropy>(true, config)
-            .pass::<MergeDotsBackward>(fuse && config.contraction_epilogues, config)
-            .maybe(MergeDots::configured_with(config, target).filter(|_| fuse))
-            .pass::<FlashAttention>(fuse, config)
-            .pass::<FlashAttentionBackward>(fuse, config)
-            .pass::<LinearCrossEntropy>(true, config)
-            .add(Simplify { matched: true })
-            .pass::<SwapPairs>(true, config)
-            .pass::<DotStrength>(true, config)
-            .pass::<NeuralEngine>(true, config)
-            .maybe(LinearReordering::configured_with(config, row_tile))
-            .pass::<SplitK>(true, config)
-            .pass::<CanonicalizeDots>(true, config)
-            .maybe(fuse.then_some(Updates { least: 2, most: 29 }))
-            .pass::<Diamonds>(true, config)
-            .pass::<PlaceConcats>(fuse, config)
-            .pass::<Fusion>(fuse, config)
-            .pass::<PlaceViews>(true, config)
-            .pass::<Alone>(true, config)
-            .pass::<Concats>(true, config);
-
-        pipeline
+        vec![
+            Self::pass::<PreservePrecision>(true, config),
+            Self::add(Cse),
+            Self::add(Simplify { matched: false }),
+            Self::pass::<Unsupported>(true, config),
+            Self::pass::<TakeAlongAxis>(true, config),
+            Self::pass::<ChunkedCrossEntropy>(true, config),
+            Self::pass::<MergeDotsBackward>(fuse && config.contraction_epilogues, config),
+            Self::maybe(MergeDots::configured_with(config, target).filter(|_| fuse)),
+            Self::pass::<FlashAttention>(fuse, config),
+            Self::pass::<FlashAttentionBackward>(fuse, config),
+            Self::pass::<LinearCrossEntropy>(true, config),
+            Self::add(Simplify { matched: true }),
+            Self::pass::<SwapPairs>(true, config),
+            Self::pass::<DotStrength>(true, config),
+            Self::pass::<NeuralEngine>(true, config),
+            Self::maybe(LinearReordering::configured_with(config, row_tile)),
+            Self::pass::<SplitK>(true, config),
+            Self::pass::<CanonicalizeDots>(true, config),
+            Self::maybe(fuse.then_some(Updates { least: 2, most: 29 })),
+            Self::pass::<Diamonds>(true, config),
+            Self::pass::<PlaceConcats>(fuse, config),
+            Self::pass::<Fusion>(fuse, config),
+            Self::pass::<PlaceViews>(true, config),
+            Self::pass::<Alone>(true, config),
+            Self::pass::<Concats>(true, config),
+        ]
     }
 }

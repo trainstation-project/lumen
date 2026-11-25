@@ -734,7 +734,7 @@ fn ops_on_host_and_device_values_raise() {
 fn a_pipeline_runs_its_passes_in_order_and_dumps_each() {
     use super::passes::CompilerPass;
     use super::passes::cse::Cse;
-    use super::pipeline::{GraphModule, Pipeline};
+    use super::pipeline::{GraphModule, Pass, run};
     use super::{CompilerConfig, Options};
 
     /// Test pass that negates the graph's first output.
@@ -771,11 +771,8 @@ fn a_pipeline_runs_its_passes_in_order_and_dumps_each() {
 
     let mut module = GraphModule::new(&g, &options);
 
-    Pipeline::new("test")
-        .add(Cse)
-        .add(Negate)
-        .run(&mut module)
-        .unwrap();
+    let passes: Vec<Pass<GraphModule<'_>>> = vec![Box::new(Cse), Box::new(Negate)];
+    run("test", passes, &mut module).unwrap();
 
     assert_eq!(names(&module.graph), ["exp", "add", "neg"]);
 
@@ -1421,12 +1418,21 @@ fn devices_run_the_passes_they_list() {
 
     let config = super::CompilerConfig::default();
 
+    /// The names of device `D`'s passes under `config`, in order.
+    fn names<D: Passes>(config: &super::CompilerConfig) -> Vec<&'static str> {
+        D::passes(config)
+            .into_iter()
+            .flatten()
+            .map(|p| p.name())
+            .collect()
+    }
+
     assert_eq!(
-        Cpu::passes(&config).names(),
+        names::<Cpu>(&config),
         ["cse", "simplify", "unsupported", "simplify"]
     );
     assert_eq!(
-        Cuda::passes(&config).names(),
+        names::<Cuda>(&config),
         [
             "cse",
             "simplify",
@@ -1443,7 +1449,7 @@ fn devices_run_the_passes_they_list() {
     );
 
     assert_eq!(
-        Triton::passes(&config).names(),
+        names::<Triton>(&config),
         [
             "cse",
             "simplify",
@@ -1470,7 +1476,7 @@ fn devices_run_the_passes_they_list() {
     );
 
     assert_eq!(
-        Tpu::passes(&config).names(),
+        names::<Tpu>(&config),
         [
             "cse",
             "simplify",

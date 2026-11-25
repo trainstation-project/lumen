@@ -105,8 +105,7 @@ macro_rules! compile {
         let options: &$crate::graph_compiler::Options = $options;
         let mut module =
             $crate::graph_compiler::device::DeviceModule::<$device>::new($graph, options);
-        <$device as $crate::graph_compiler::pipeline::Passes>::passes(&options.config)
-            .run(&mut module)?;
+        <$device as $crate::graph_compiler::pipeline::Passes>::run(&mut module)?;
         <$device>::lower(module, $at)
     }};
 }

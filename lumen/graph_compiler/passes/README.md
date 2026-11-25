@@ -8,7 +8,7 @@ its own pass list (`graph_compiler/pipeline/<device>.rs`); the passes are shared
 - `Module` is what a pass rewrites: a graph, its `Options` and the device's `CompilerConfig`.
 - `CompilerPass<M>` has `name` (used for profiler ranges and dump files), `apply` and `configured(config)`: the pass
   under `config` (its own config flag, and the device answers it takes), or `None` when off. A device list adds a
-  pass by type (`Pipeline::pass`, through `configured`), or builds it itself (`add`, `maybe`).
+  pass by type (`Passes::pass`, through `configured`), or builds it itself (`add`, `maybe`).
 - A pass whose code is the same on every device that runs it is one file, `passes/<pass>.rs`, with no trait: the
   device lists that run it add it (`swap_pairs.rs`, `sink_reshapes.rs`). A value a device gives it is a field the
   list sets (`linear_reordering.rs`'s row tile, `updates.rs`'s chain lengths, `merge_dots`' `Target`).
@@ -16,8 +16,7 @@ its own pass list (`graph_compiler/pipeline/<device>.rs`); the passes are shared
   rewriting and the trait the pass reads its device answers through (what is fusible, kernel names, limits); each
   device implements it in `passes/<pass>/<device>.rs` (`cpu`, `cuda`, `mps`, `triton`, `tpu`; `mps` only when MPS
   is linked). A device runs it where its list adds it, which needs that impl.
-- A condition of a device's own (running a pass only with `fuse`) is in its list (`Pipeline::pass`'s `enable`), not the
-  pass.
+- A condition of a device's own (running a pass only with `fuse`) is in its list (`Passes::pass`'s `enable`), not the pass.
 
 ## Device passes, in order (devices whose lists add it in brackets)
 

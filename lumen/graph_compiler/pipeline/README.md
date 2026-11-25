@@ -4,11 +4,12 @@ Running passes, and each device's list of them.
 
 ## Files
 
-- `mod.rs` - `Pipeline`, a named, ordered list of passes: `add` appends a built pass, `maybe` one that may be off
-  (`None`), `pass::<P>(enable, config)` pass `P` as `CompilerPass::configured` gives it under a config, when `enable` (a
-  condition of the device's own, `true` for always). `run` runs each pass in a profiler range `<pipeline>::<pass>`,
-  dumping the graph after each with `dump_to`. `Passes` is a device's pass list; `GraphModule` the module tests run
-  single passes on; `rewritten` / `rewritten_on` run one pass in tests.
+- `mod.rs` - `Passes`, a device's passes: `passes(config)` is its list (a `None` is a pass that is off), built with
+  `Self::pass::<P>(enable, config)` (pass `P` as `CompilerPass::configured` gives it, when `enable`: a condition of
+  the device's own, `true` for always), `Self::add(pass)` (a pass the list builds) and `Self::maybe(pass)` (one that
+  may be off); `run(module)` runs the list. The free `run(name, passes, module)` runs any passes in order, each in a
+  profiler range `<name>::<pass>`, dumping the graph after each with `dump_to`. `GraphModule` is the module tests
+  run single passes on; `rewritten` / `rewritten_on` run one pass in tests.
 - `cpu.rs`, `cuda.rs`, `mps.rs`, `triton.rs`, `tpu.rs` - each device's `Passes`: the passes it runs, in order, the
   values it gives them (merged dots' `Target`, update chain lengths, the GEMM row tile) and the passes it runs only
   with `fuse` (every GPU's fusing passes; TPU runs all of its always). `mps.rs` builds only when MPS is linked.
