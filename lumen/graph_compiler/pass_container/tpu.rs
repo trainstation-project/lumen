@@ -29,7 +29,7 @@ impl Passes for Tpu {
     /// TPU's passes, in order. Forward dots merge late, once the graph is simplified, packing whole vector lanes
     /// (everything read in place, no views, one column). Update chains of 1 or more fuse: even one update runs as an
     /// `updates` kernel.
-    fn passes<'a>(config: &CompilerConfig) -> Vec<Option<Pass<DeviceModule<'a, Tpu>>>> {
+    fn passes<'a>(config: &CompilerConfig) -> Vec<Pass<DeviceModule<'a, Tpu>>> {
         let target = Target {
             reads: |_, _| true,
             views: false,
@@ -41,32 +41,55 @@ impl Passes for Tpu {
             most: usize::MAX,
         };
 
-        vec![
-            Self::add(config.preserve_precision, PreservePrecision),
-            Self::add(true, Cse),
-            Self::add(true, Simplify { matched: false }),
-            Self::add(true, Unsupported::of::<Self>()),
-            Self::add(config.merge_dots, MergeDotsBackward),
-            Self::add(config.flash_attention, FlashAttention),
-            Self::add(config.flash_attention, FlashAttentionBackward),
-            Self::add(config.flash_attention, AttentionLayouts),
-            Self::add(true, FoldDotReshapes),
-            Self::add(true, Simplify { matched: true }),
-            Self::add(true, SwapPairs),
-            Self::add(true, SinkReshapes),
-            Self::add(true, DotStrength),
-            Self::add(config.merge_dots, MergeDots { target }),
-            Self::add(true, CanonicalizeDots::of::<Self>()),
-            Self::add(config.normalization_diamonds, FusedDiamonds::of::<Self>()),
-            Self::add(config.normalization_diamonds, DotRows),
-            Self::add(true, updates),
-            Self::add(true, FuseDots),
-            Self::add(true, PlaceConcats),
-            Self::add(true, Fusion),
-            Self::add(true, PlaceViews::of::<Self>()),
-            Self::add(true, Alone),
-            Self::add(true, Concats),
-            Self::add(config.horizontal_fusion, HorizontalFusion::of::<Self>()),
-        ]
+        let mut passes: Vec<Pass<DeviceModule<'a, Tpu>>> = Vec::new();
+
+        if config.preserve_precision {
+            passes.push(Box::new(PreservePrecision));
+        }
+
+        passes.push(Box::new(Cse));
+        passes.push(Box::new(Simplify { matched: false }));
+        passes.push(Box::new(Unsupported::of::<Self>()));
+
+        if config.merge_dots {
+            passes.push(Box::new(MergeDotsBackward));
+        }
+
+        if config.flash_attention {
+            passes.push(Box::new(FlashAttention));
+            passes.push(Box::new(FlashAttentionBackward));
+            passes.push(Box::new(AttentionLayouts));
+        }
+
+        passes.push(Box::new(FoldDotReshapes));
+        passes.push(Box::new(Simplify { matched: true }));
+        passes.push(Box::new(SwapPairs));
+        passes.push(Box::new(SinkReshapes));
+        passes.push(Box::new(DotStrength));
+
+        if config.merge_dots {
+            passes.push(Box::new(MergeDots { target }));
+        }
+
+        passes.push(Box::new(CanonicalizeDots::of::<Self>()));
+
+        if config.normalization_diamonds {
+            passes.push(Box::new(FusedDiamonds::of::<Self>()));
+            passes.push(Box::new(DotRows));
+        }
+
+        passes.push(Box::new(updates));
+        passes.push(Box::new(FuseDots));
+        passes.push(Box::new(PlaceConcats));
+        passes.push(Box::new(Fusion));
+        passes.push(Box::new(PlaceViews::of::<Self>()));
+        passes.push(Box::new(Alone));
+        passes.push(Box::new(Concats));
+
+        if config.horizontal_fusion {
+            passes.push(Box::new(HorizontalFusion::of::<Self>()));
+        }
+
+        passes
     }
 }

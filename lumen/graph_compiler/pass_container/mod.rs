@@ -25,17 +25,8 @@ pub(crate) type Pass<M> = Box<dyn CompilerPass<M>>;
 /// Every list starts with the same clean-ups: `preserve_precision` (before CSE shares the casts it drops), `cse` and
 /// `simplify` without structural rewrites.
 pub(crate) trait Passes: Device {
-    /// The device's passes under `config`, in order; a `None` is a pass that is off.
-    fn passes<'a>(config: &CompilerConfig) -> Vec<Option<Pass<DeviceModule<'a, Self>>>>;
-
-    /// `pass` when `enable`: its config flags and the device's own conditions (running it only with `fuse`); `true`
-    /// for always.
-    fn add<'a>(
-        enable: bool,
-        pass: impl CompilerPass<DeviceModule<'a, Self>> + 'static,
-    ) -> Option<Pass<DeviceModule<'a, Self>>> {
-        enable.then(|| Box::new(pass) as Pass<_>)
-    }
+    /// The device's passes under `config`, in order: each pass its list adds, under the config flags it runs with.
+    fn passes<'a>(config: &CompilerConfig) -> Vec<Pass<DeviceModule<'a, Self>>>;
 
     /// Runs the device's passes on `module` in order, each in a profiler range `<device>::<pass>`; when the config sets
     /// a dump directory, writes the graph before the first pass and after each one (`<run>.<device>.<step>.<pass>.txt`).
@@ -58,9 +49,9 @@ pub(crate) trait Passes: Device {
             dump(0, "input", module.graph())?;
         }
 
-        let passes = Self::passes(module.config()).into_iter().flatten();
+        let passes = Self::passes(module.config());
 
-        for (step, mut pass) in passes.enumerate() {
+        for (step, mut pass) in passes.into_iter().enumerate() {
             let range = format!("{name}::{}", pass.name());
             let _range = crate::profiler::record_function(range);
             pass.apply(module)?;

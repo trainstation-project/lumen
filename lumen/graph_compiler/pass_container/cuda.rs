@@ -18,7 +18,7 @@ use crate::graph_compiler::passes::unsupported::Unsupported;
 impl Passes for Cuda {
     /// CUDA's passes, in order. Merged dots pack for the GEMM epilogue's 16-byte vectors (8 columns of 16-bit
     /// products), their slices read in place by what CUDA fusion fuses.
-    fn passes<'a>(config: &CompilerConfig) -> Vec<Option<Pass<DeviceModule<'a, Cuda>>>> {
+    fn passes<'a>(config: &CompilerConfig) -> Vec<Pass<DeviceModule<'a, Cuda>>> {
         let fuse = config.fuse;
         let target = Target {
             reads: crate::codegen::fusion::cuda::fusible,
@@ -27,19 +27,35 @@ impl Passes for Cuda {
             columns: 8,
         };
 
-        vec![
-            Self::add(config.preserve_precision, PreservePrecision),
-            Self::add(true, Cse),
-            Self::add(true, Simplify { matched: false }),
-            Self::add(true, Unsupported::of::<Self>()),
-            Self::add(true, TakeAlongAxis),
-            Self::add(fuse && config.merge_dots, MergeDotsBackward),
-            Self::add(fuse && config.merge_dots, MergeDots { target }),
-            Self::add(fuse && config.flash_attention, FlashAttention),
-            Self::add(true, Simplify { matched: true }),
-            Self::add(true, SwapPairs),
-            Self::add(fuse, Fusion),
-            Self::add(true, Alone),
-        ]
+        let mut passes: Vec<Pass<DeviceModule<'a, Cuda>>> = Vec::new();
+
+        if config.preserve_precision {
+            passes.push(Box::new(PreservePrecision));
+        }
+
+        passes.push(Box::new(Cse));
+        passes.push(Box::new(Simplify { matched: false }));
+        passes.push(Box::new(Unsupported::of::<Self>()));
+        passes.push(Box::new(TakeAlongAxis));
+
+        if fuse && config.merge_dots {
+            passes.push(Box::new(MergeDotsBackward));
+            passes.push(Box::new(MergeDots { target }));
+        }
+
+        if fuse && config.flash_attention {
+            passes.push(Box::new(FlashAttention));
+        }
+
+        passes.push(Box::new(Simplify { matched: true }));
+        passes.push(Box::new(SwapPairs));
+
+        if fuse {
+            passes.push(Box::new(Fusion));
+        }
+
+        passes.push(Box::new(Alone));
+
+        passes
     }
 }

@@ -1411,11 +1411,7 @@ fn devices_run_the_passes_they_list() {
 
     /// The names of device `D`'s passes under `config`, in order.
     fn names<D: Passes>(config: &super::CompilerConfig) -> Vec<&'static str> {
-        D::passes(config)
-            .into_iter()
-            .flatten()
-            .map(|p| p.name())
-            .collect()
+        D::passes(config).iter().map(|p| p.name()).collect()
     }
 
     assert_eq!(
@@ -1495,64 +1491,4 @@ fn devices_run_the_passes_they_list() {
             "horizontal_fusion",
         ]
     );
-}
-
-/// TEMPORARY: every device's pass names under the default config and each boolean flag flipped.
-#[test]
-fn snapshot_pass_lists() {
-    use super::device::{Cpu, Cuda, Mps, Tpu, Triton};
-    use super::pass_container::Passes;
-
-    fn listed<D: Passes>(config: &super::CompilerConfig) -> Vec<&'static str> {
-        D::passes(config)
-            .into_iter()
-            .flatten()
-            .map(|p| p.name())
-            .collect()
-    }
-
-    let mut out = String::new();
-    let flips: Vec<(&str, fn(&mut super::CompilerConfig))> = vec![
-        ("default", |_| {}),
-        ("merge_dots", |c| c.merge_dots ^= true),
-        ("flash_attention", |c| c.flash_attention ^= true),
-        ("preserve_precision", |c| c.preserve_precision ^= true),
-        ("fuse", |c| c.fuse ^= true),
-        ("horizontal_fusion", |c| c.horizontal_fusion ^= true),
-        ("split_k", |c| c.split_k ^= true),
-        ("linear_reordering", |c| c.linear_reordering ^= true),
-        ("normalization_diamonds", |c| {
-            c.normalization_diamonds ^= true
-        }),
-        ("fused_linear_cross_entropy", |c| {
-            c.fused_linear_cross_entropy ^= true
-        }),
-        ("contraction_epilogues", |c| c.contraction_epilogues ^= true),
-        ("neural_engine", |c| c.neural_engine ^= true),
-        ("nofuse_horizontal", |c| {
-            c.fuse = false;
-            c.horizontal_fusion = true;
-        }),
-        ("nofuse_contraction_off", |c| {
-            c.fuse = false;
-            c.contraction_epilogues = false;
-        }),
-        ("all_on", |c| {
-            c.preserve_precision = true;
-            c.linear_reordering = true;
-            c.neural_engine = true;
-        }),
-    ];
-
-    for (name, flip) in flips {
-        let mut config = super::CompilerConfig::default();
-        flip(&mut config);
-        out += &format!("{name} cpu {:?}\n", listed::<Cpu>(&config));
-        out += &format!("{name} cuda {:?}\n", listed::<Cuda>(&config));
-        out += &format!("{name} mps {:?}\n", listed::<Mps>(&config));
-        out += &format!("{name} triton {:?}\n", listed::<Triton>(&config));
-        out += &format!("{name} tpu {:?}\n", listed::<Tpu>(&config));
-    }
-
-    std::fs::write(std::env::var("SNAPSHOT").unwrap(), out).unwrap();
 }

@@ -6,18 +6,18 @@ its own pass list (`graph_compiler/pass_container/<device>.rs`); the passes are 
 ## How a pass is written
 
 - `Module` is what a pass rewrites: a graph, its `Options` and the device's `CompilerConfig`.
-- `CompilerPass<M>` has `name` (used for profiler ranges and dump files), `apply` and `configured(config)`: the pass
-  under `config` (its own config flag, and the device answers it takes), or `None` when off. A device list adds a
-  pass by type (`Passes::pass`, through `configured`), or builds it itself (`Passes::add`).
+- `CompilerPass<M>` has `name` (used for profiler ranges and dump files) and `apply`. A device's list builds each
+  pass it runs and pushes it, inside an `if` on the config flags it runs with; a pass reading its device's answers
+  through a trait is built with `X::of::<Device>()`.
 - A pass whose code is the same on every device that runs it is one file, `passes/<pass>.rs`, with no trait: the
   device lists that run it add it (`swap_pairs.rs`, `sink_reshapes.rs`). A value a device gives it is a field the
-  list sets (`linear_reordering.rs`'s row tile, `updates.rs`'s chain lengths, `merge_dots`' `Target`), and such a
-  pass's config flag is in the list's `enable` (`Passes::add(config.merge_dots, ...)`).
+  list sets (`linear_reordering.rs`'s row tile, `updates.rs`'s chain lengths, `merge_dots`' `Target`).
 - A pass with code of its own per device is a folder, `passes/<pass>/`: `mod.rs` holds the shared matching and
   rewriting and the trait the pass reads its device answers through (what is fusible, kernel names, limits); each
   device implements it in `passes/<pass>/<device>.rs` (`cpu`, `cuda`, `mps`, `triton`, `tpu`; `mps` only when MPS
   is linked). A device runs it where its list adds it, which needs that impl.
-- A condition of a device's own (running a pass only with `fuse`) is in its list (`Passes::pass`'s `enable`), not the pass.
+- The flags a pass runs with, and a device's own conditions (running a pass only with `fuse`), are in each list's
+  `if`s, not the pass.
 
 ## Device passes, in order (devices whose lists add it in brackets)
 
