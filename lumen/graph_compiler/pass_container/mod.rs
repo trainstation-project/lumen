@@ -1,5 +1,5 @@
-//! Each device's passes (`Passes`, its list in `<device>.rs`), running passes in order (`run`: each in a profiler
-//! range, optionally dumping the graph after each one), and the plain module tests run single passes on.
+//! Each device's passes (`Passes`, its list in `<device>.rs`), running them in order (`run`: each in a profiler range,
+//! optionally dumping the graph after each one), and `rewritten`, which runs one pass in tests.
 
 mod cpu;
 mod cuda;
@@ -13,10 +13,6 @@ use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::{Device, DeviceModule};
 use crate::graph_compiler::passes::{CompilerPass, Module};
 use std::sync::atomic::{AtomicUsize, Ordering};
-
-/// A graph being compiled with the caller's options and no device's own passes, which tests run single passes on.
-#[cfg(test)]
-pub(crate) type GraphModule<'a> = DeviceModule<'a, crate::graph_compiler::device::Cpu>;
 
 /// A boxed pass for a module of type `M`.
 pub(crate) type Pass<M> = Box<dyn CompilerPass<M>>;
@@ -68,19 +64,10 @@ pub(crate) trait Passes: Device {
 /// Counter numbering runs so each run's dump files are distinct.
 static DUMPED: AtomicUsize = AtomicUsize::new(0);
 
-/// `graph` as `pass` leaves it, run on a plain module with default options.
-#[cfg(test)]
-pub(crate) fn rewritten<P>(graph: &Graph, pass: P) -> Graph
-where
-    P: for<'a> CompilerPass<GraphModule<'a>>,
-{
-    rewritten_on::<crate::graph_compiler::device::Cpu, P>(graph, pass)
-}
-
 /// `graph` as `pass` leaves it, run on device `D`'s module with default options (a pass implemented for the
 /// devices whose answers it reads).
 #[cfg(test)]
-pub(crate) fn rewritten_on<D, P>(graph: &Graph, mut pass: P) -> Graph
+pub(crate) fn rewritten<D, P>(graph: &Graph, mut pass: P) -> Graph
 where
     P: for<'a> CompilerPass<DeviceModule<'a, D>>,
 {
