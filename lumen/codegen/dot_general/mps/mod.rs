@@ -8,7 +8,7 @@ mod codegen;
 mod gemv;
 mod linear_cross_entropy;
 mod mpp;
-mod row;
+pub(crate) mod row;
 mod skinny;
 mod tiled;
 

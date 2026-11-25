@@ -27,10 +27,3 @@ pub(crate) trait AttentionCodegen {
     /// forward and backward code to call. Fails on a backend whose kernels have no dropout yet.
     fn dropout(d: &Dropout, dtype: DType, sq: usize, sk: usize) -> Result<String, String>;
 }
-
-/// A backend whose attention kernels read and write whole tiles (TPU's): the graph compiler's `attention_layouts`
-/// pass adapts its attention fusions to them.
-pub(crate) trait TiledAttentions {
-    /// Whether the attention kernels take fusion `body` named `name`: the error when not.
-    fn check(name: &str, body: &crate::graph::Graph) -> Result<(), String>;
-}

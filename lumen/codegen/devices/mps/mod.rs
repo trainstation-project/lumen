@@ -21,7 +21,7 @@ use crate::codegen::layout::{LayoutCodegen, transpose_tiling};
 use crate::codegen::reduction::ReductionCodegen;
 use crate::codegen::row::RowCodegen;
 use crate::codegen::store::mps::loads;
-use crate::graph::{Graph, Node, Primitive, TensorType, Var};
+use crate::graph::{Graph, Primitive, TensorType};
 use crate::graph_compiler::device::{Device, DeviceModule};
 use crate::graph_compiler::passes::attention::{self, Strides};
 use crate::graph_compiler::{CompilerConfig, Options};
@@ -473,7 +473,7 @@ impl Device for Mps {
 #[cfg(test)]
 pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<MpsPlan, String> {
     let mut module = DeviceModule::<Mps>::new(graph, options);
-    crate::graph_compiler::pipeline::pipeline!(Mps, &options.config).run(&mut module)?;
+    <Mps as crate::graph_compiler::pipeline::Passes>::passes(&options.config).run(&mut module)?;
     lower(module)
 }
 
@@ -602,94 +602,4 @@ fn feeding(primitive: &Primitive, p: usize, inputs: usize) -> Vec<usize> {
     }
 
     reads
-}
-
-impl crate::codegen::devices::Lone for DeviceModule<'_, Mps> {
-    /// Whether `n` needs its own kernel: a float GEMM, a copying concatenation, a gather, a layout op that
-    /// copies (a broadcast, transpose or slice not placed as a view) or an elementwise op.
-    fn alone(graph: &Graph, n: &Node) -> bool {
-        let float = |v: Var| {
-            matches!(
-                graph.type_of(v).dtype,
-                DType::F16 | DType::BF16 | DType::F32
-            )
-        };
-
-        let gemm = matches!(n.primitive, Primitive::DotGeneral { .. })
-            && n.inputs.iter().all(|&v| float(v))
-            && float(n.output);
-
-        gemm || matches!(
-            n.primitive,
-            Primitive::Concatenate {
-                in_place: false,
-                ..
-            } | Primitive::Gather { .. }
-                | Primitive::BroadcastInDim { .. }
-                | Primitive::Transpose { .. }
-                | Primitive::Slice { view: false, .. }
-        ) || crate::graph_compiler::elementwise(&n.primitive)
-    }
-
-    /// Graph input indices passed to kernels by value.
-    fn scalars(&mut self) -> Option<&mut Vec<usize>> {
-        Some(&mut self.scalars)
-    }
-
-    /// Requests a fusion kernel, returning its pending name; codegen reads its by-value inputs off the plan.
-    fn kernel(&mut self, _: &Graph, _: &[bool]) -> String {
-        request(Kernel::Fusion)
-    }
-}
-
-impl crate::codegen::devices::Supports for Mps {
-    /// Rejects graphs with ops MPS has no kernel for: bfloat16 transcendentals and mixed-dtype dots.
-    fn check(graph: &Graph) -> Result<(), String> {
-        use Primitive::*;
-
-        // Metal has no float64 or float8 type for a kernel to compute or copy them in.
-        let metal = |ty: &TensorType| {
-            !matches!(
-                ty.dtype,
-                DType::F64 | DType::F8E4M3FN | DType::F8E5M2 | DType::F8E4M3B11FNUZ
-            )
-        };
-
-        for node in graph.nodes() {
-            let x = graph.type_of(node.inputs.first().copied().unwrap_or(node.output));
-
-            let typed = node
-                .inputs
-                .iter()
-                .chain([&node.output])
-                .map(|&v| graph.type_of(v));
-
-            if let Some(ty) = typed.into_iter().find(|ty| !metal(ty)) {
-                return Err(format!(
-                    "{}: {} is not supported on MPS",
-                    node.primitive.name(),
-                    ty.dtype.full_name()
-                ));
-            }
-
-            if node.primitive.is_transcendental() && x.dtype == DType::BF16 {
-                return Err(format!(
-                    "{}: has no bfloat16 kernel on MPS, got {x}: convert to float32 first (x.to(dtype=float32))",
-                    node.primitive.name()
-                ));
-            }
-
-            if let DotGeneral { .. } = node.primitive {
-                let y = graph.type_of(node.inputs[1]);
-
-                if x.dtype != y.dtype {
-                    return Err(format!(
-                        "dot_general: has no kernel of two dtypes on MPS, got {x} and {y}: convert them to one first"
-                    ));
-                }
-            }
-        }
-
-        Ok(())
-    }
 }

@@ -1,13 +1,13 @@
 # passes/apple_neural_engine
 
 The Apple Neural Engine pass. On MPS it moves large float16 GEMM regions that read fixed weights out of the
-Metal graph into Core ML programs, which run on the Neural Engine. It runs in the device pipeline after
+Metal graph into Core ML programs, which run on the Neural Engine. It runs in MPS's pass list after
 `simplify` and the late dot merges, before `linear_reordering`, `split_k` and fusion.
 
 ## Files
 
-- `mod.rs` - the `NeuralEngine` slot type. MPS runs `mps::NeuralEngine`; every other device runs the
-  identity pass. Its submodules are compiled only when MPS is linked.
+- `mod.rs` - re-exports `mps::NeuralEngine`, which only MPS's pass list runs. Its submodules are compiled only when
+  MPS is linked.
 - `mps.rs` - the pass, the program registry and the runtime:
   - `NeuralEngine::apply` marks inputs as fixed when they are parameters (or packed blocks) that are never
     donated, then calls `offload`.

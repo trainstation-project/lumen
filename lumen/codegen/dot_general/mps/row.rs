@@ -20,11 +20,6 @@ use crate::graph_compiler::CompilerConfig;
 /// Output columns one threadgroup tile covers; wider rows are reduced across tiles.
 pub(crate) const ROW_TILE: usize = 64;
 
-/// MPS's GEMM tile holds rows up to `ROW_TILE` whole (`linear_reordering`).
-impl crate::codegen::dot_general::RowTile for Mps {
-    const ROW_TILE: usize = ROW_TILE;
-}
-
 /// Rows a threadgroup of the single-tile row matmul (`gemm_rows`) covers for `rows` rows, and its K
 /// step: `ROW_TILE` rows with 16-wide K steps once that makes 512 threadgroups, else half as many with
 /// 32-wide ones (room for which half the rows leave), twice the threadgroups each walking half the K
