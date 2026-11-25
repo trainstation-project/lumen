@@ -27,8 +27,8 @@
 //!
 //! ## Backend answers (`AttentionBackwards` trait, in each backend's codegen)
 //!
-//! It runs, with `flash_attention`, on each device whose module implements `AttentionBackwards` (`fuse` too where
-//! `WITH_FUSE`, every device but TPU).
+//! It runs, with `flash_attention`, on each device whose module implements `AttentionBackwards` (in `<device>.rs`),
+//! with `fuse` too on every device but TPU.
 //!
 //! - MPS - one kernel when `codegen::attention::mps::backward_block_with_dq` finds a block for it and
 //!   `deterministic` is off (dQ is accumulated atomically). Kernel names are requested as
@@ -36,7 +36,7 @@
 //! - Triton - always one kernel adding dQ atomically, unless `deterministic`, which gives a dK/dV kernel
 //!   and a dQ kernel so dQ is summed in a fixed order. Kernel name `flash_attention_backward`.
 //! - TPU - always a dK/dV kernel and a dQ kernel, without `fuse` too.
-//! - CUDA and CPU: identity.
+//! - CUDA and CPU don't run it.
 //!
 //! ## Entry points for codegen
 //!
@@ -526,8 +526,6 @@ impl<'a> Matcher<'a> {
 
 /// A module whose backend can generate flash-attention backward kernels.
 pub(crate) trait AttentionBackwards: Module {
-    /// Whether it fuses attention backwards only with `fuse`; else whenever `flash_attention` is on.
-    const WITH_FUSE: bool = true;
     /// Which backwards run as one kernel computing dK, dV and dQ; the others get a dK/dV kernel and
     /// a dQ kernel.
     fn together(&self) -> impl Fn(&Backward) -> bool + 'static;
@@ -539,9 +537,9 @@ pub(crate) trait AttentionBackwards: Module {
 pub(crate) struct FlashAttentionBackward;
 
 impl<M: AttentionBackwards> CompilerPass<M> for FlashAttentionBackward {
-    /// With `flash_attention` (and `fuse` where `WITH_FUSE`).
+    /// With `flash_attention`.
     fn configured(config: &CompilerConfig) -> Option<Self> {
-        (config.flash_attention && (config.fuse || !M::WITH_FUSE)).then_some(FlashAttentionBackward)
+        config.flash_attention.then_some(FlashAttentionBackward)
     }
 
     /// Pass name used in profiler ranges and dumps.

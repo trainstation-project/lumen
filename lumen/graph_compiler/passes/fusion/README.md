@@ -9,7 +9,7 @@ before `wide_rows`, `place_views`, `alone`, `concats` and `horizontal`; it consu
 ## Files
 
 - `mod.rs` — the `Backend` description, the shared driver `fuse(graph, rows, scalars, backend, kernel)`,
-  and `Fusion`, the slot type the pipeline picks per device.
+  the `Fuses` trait (a device's fusion) and `Fusion`, the pass running it.
 - `analysis.rs` — `Analysis`: producers, users, liveness, which nodes are fusible, and helpers
   (`depends`, `last_read`, `recomputed`) the stages share.
 - `rows.rs` — `extended`: grows each normalization row forward through its first elementwise reader while
@@ -38,16 +38,17 @@ before `wide_rows`, `place_views`, `alone`, `concats` and `horizontal`; it consu
   `row_dots` moves a GEMM and its epilogue into the row fusion reading it when `row_dot` accepts the body
   (reverting otherwise); `emitted` rebuilds the graph with `Fusion` nodes and `FusionOutput`s for hosted
   values, each step after the values it reads.
-- `groups.rs` — fusion by planned groups (TPU's own, not the shared driver): plans groups back to front,
+- `cuda.rs`, `mps.rs`, `triton.rs` — each device's `Fuses`: the shared driver with its `Backend` and kernel names.
+  MPS's also runs horizontal fusion (`horizontal_candidate`, `HORIZONTAL_BUFFERS`) and exports `fuse` for tests.
+- `tpu.rs` — TPU's `Fuses`, fusion by planned groups (TPU's own, not the shared driver): plans groups back to front,
   splitting off layout ops until every group's indexing can be planned, and turns the groups into
   `elementwise` or `reduction` fusions (a reducing member leads). A slice alone in its group stays out, for
   `place_views` to view or `alone` to wrap; so does a reshape alone that keeps every element in its tile (a leading
   unit axis added or dropped), which the plan runs as a view of its operand's buffer.
 
-The `Fusion` pass (in `mod.rs`) runs each device's fusion, `codegen::fusion::Fuses::fuse`, on every device whose codegen
-implements `Fuses`: MPS, Triton and CUDA (with `fuse`) and TPU (always, `WITH_FUSE` off). Each backend's fusion,
-`Backend` and helpers live in `codegen/fusion` (`mps.rs`, `triton.rs`, `cuda.rs`, `tpu.rs`). CPU gets the identity
-pass.
+The `Fusion` pass (in `mod.rs`) runs each device's fusion, `Fuses::fuse`: MPS, Triton and CUDA with `fuse` (their
+lists' condition) and TPU always. Which nodes each backend's kernels fuse (`fusible`) and how they are named live in
+`codegen/fusion`. The CPU doesn't run it.
 
 ## Backend
 
@@ -68,11 +69,9 @@ yes, MPS and CUDA not).
 - Triton: with `fuse`. Ops with Triton dtypes (adds `DynamicSlice`), any number of inputs, reduction and
   contraction epilogues always on, `row_dot` = `dot_row_fits`. Fusions are named by kind (`named`):
   `dot_row`, `row`, `dot_general`, `combine` (a split-K combine, `kinds::combine_root`), `reduction`,
-  `elementwise`. `codegen::fusion::triton` exposes `fusible`, `named`, `horizontal_candidate`, `HORIZONTAL_BUFFERS`
-  and `slot_writes` to other passes.
+  `elementwise` (`codegen::fusion::triton`'s `fusible` and `named`).
 - CUDA: with `fuse`. Elementwise and layout ops (and gathers) with CuTe dtypes only; no reduction epilogues and no rows;
   `dot_epilogue` from `codegen::dot_general::cuda::epilogue`; fusions named `dot_general` or `elementwise`.
-- TPU: always, by planned groups (`groups.rs`). `codegen::fusion::tpu` exposes `horizontal_candidate`,
-  `HORIZONTAL_BUFFERS` and `slot_writes` (used by `place_concats` and `dot/fuse`). TPU's dot fusions live in `passes/dot`.
+- TPU: always, by planned groups (`tpu.rs`). TPU's dot fusions live in `passes/dot`.
 
 In-place concatenations are not fusible (`Analysis::fusible`), so `place_concats` must run first.

@@ -1,13 +1,12 @@
 //! Horizontal fusion: merges small, independent kernels of the same kind into one launch, a multi-output `Fusion` whose
 //! outputs each come from one member. The `horizontal_fusion` slot is the last pass in the pass list.
 //!
-//! Devices: it runs on each device whose codegen implements `codegen::fusion::HorizontallyFuses` (its candidates, grouping and
-//! buffer limit): Triton with `fuse` and `horizontal_fusion` (candidates from `codegen::fusion::triton::horizontal_candidate`,
-//! non-trivial `elementwise` fusions without reductions or matmuls; `Grouping::Tiling`; at most 64 buffers) and TPU
-//! with `horizontal_fusion` (`codegen::fusion::tpu::horizontal_candidate`, non-scalar `elementwise` fusions of TPU-fusible nodes
-//! not written in place into a concat; `Grouping::Shape`; at most 32 buffers). MPS calls `fuse` from inside its own
-//! `fusion` pass instead, with a `Kernels` target of its own (`Grouping::Tiling`, 30 buffers, each merged kernel a
-//! requested `Kernel::Fusion`), so its slot is the identity, as CPU's and CUDA's are.
+//! Devices: it runs on each device implementing `HorizontallyFuses` (its candidates, grouping and buffer limit, in
+//! `<device>.rs`): Triton with `fuse` and `horizontal_fusion` (non-trivial `elementwise` fusions without reductions or
+//! matmuls; `Grouping::Tiling`; at most 64 buffers) and TPU with `horizontal_fusion` (non-scalar `elementwise` fusions
+//! of TPU-fusible nodes not written in place into a concat; `Grouping::Shape`; at most 32 buffers). MPS calls `fuse`
+//! from inside its own `fusion` pass instead (`fusion/mps.rs`), with a `Kernels` target of its own
+//! (`Grouping::Tiling`, 30 buffers, each merged kernel a requested `Kernel::Fusion`). CPU and CUDA don't run it.
 //!
 //! Grouping: `fuse(graph, scalars, target)` walks the graph and puts candidate nodes with equal keys into groups.
 //! - Only nodes whose output has at most `MAX_ELEMENTS` (2^20) elements are candidates; larger kernels fill the
@@ -28,7 +27,9 @@
 //! range of the grid, so one launch can cover several sizes. The MPS, Triton and CUDA elementwise codegen,
 //! `codegen::devices::triton` and the MPS kernel runtime read it.
 
-use crate::codegen::fusion::HorizontallyFuses;
+mod tpu;
+mod triton;
+
 use crate::codegen::layout::{MAX_HEROES, transpose_tiling};
 use crate::graph::{Graph, Node, Primitive, Scope, Var, intern};
 use crate::graph_compiler::CompilerConfig;
@@ -561,6 +562,17 @@ impl Target for Kernels<'_> {
     }
 }
 
+/// A backend merging small independent kernels into one launch (the `horizontal_fusion` pass): which
+/// kernels, grouped how, binding at most how many buffers.
+pub(crate) trait HorizontallyFuses {
+    /// How it groups the kernels it merges.
+    const GROUPING: crate::graph_compiler::passes::horizontal::Grouping;
+    /// Most buffers one merged kernel binds.
+    const BUFFERS: usize;
+    /// Whether `node` of `graph` may be merged.
+    fn candidate(graph: &crate::graph::Graph, node: &crate::graph::Node) -> bool;
+}
+
 /// Compiler pass merging a backend's small independent `candidate` kernels as `Kernels` does, each merged
 /// kernel named `name` (its source generated later, per step).
 pub(crate) struct HorizontalFusion {
@@ -571,11 +583,9 @@ pub(crate) struct HorizontalFusion {
 }
 
 impl<D: HorizontallyFuses> CompilerPass<DeviceModule<'_, D>> for HorizontalFusion {
-    /// With `horizontal_fusion` (and `fuse` where `WITH_FUSE`), grouping as the device does.
+    /// With `horizontal_fusion`, grouping as the device does.
     fn configured(config: &CompilerConfig) -> Option<Self> {
-        let on = config.horizontal_fusion && (config.fuse || !D::WITH_FUSE);
-
-        on.then_some(HorizontalFusion {
+        config.horizontal_fusion.then_some(HorizontalFusion {
             candidate: D::candidate,
             grouping: D::GROUPING,
             buffers: D::BUFFERS,

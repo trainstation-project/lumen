@@ -33,7 +33,7 @@ fn ty(dtype: DType, shape: &[usize]) -> TensorType {
 fn fuse(g: &Graph) -> Graph {
     let config = CompilerConfig::default();
 
-    fusion::fuse(
+    crate::graph_compiler::passes::fusion::mps::fuse(
         g,
         &crate::graph_compiler::passes::diamonds::diamonds(g, fusion::fusible),
         &[],
@@ -368,7 +368,7 @@ fn dot_operands_are_put_in_matmul_form_by_a_transpose_step() {
             &g,
             crate::graph_compiler::passes::dot::canonicalize::CanonicalizeDots {
                 readable:
-                    <crate::codegen::devices::mps::Mps as crate::codegen::dot_general::DotLayouts>::readable,
+                    <crate::codegen::devices::mps::Mps as crate::graph_compiler::passes::dot::canonicalize::DotLayouts>::readable,
             },
         );
 
@@ -405,7 +405,7 @@ fn dot_operands_are_put_in_matmul_form_by_a_transpose_step() {
             &g,
             crate::graph_compiler::passes::dot::canonicalize::CanonicalizeDots {
                 readable:
-                    <crate::codegen::devices::mps::Mps as crate::codegen::dot_general::DotLayouts>::readable,
+                    <crate::codegen::devices::mps::Mps as crate::graph_compiler::passes::dot::canonicalize::DotLayouts>::readable,
             },
         )),
         ["dot_general"]
@@ -1343,7 +1343,7 @@ fn dots_fuse_their_epilogue() {
         ..CompilerConfig::default()
     };
 
-    let unfused = fusion::fuse(
+    let unfused = crate::graph_compiler::passes::fusion::mps::fuse(
         &g,
         &crate::graph_compiler::passes::diamonds::diamonds(&g, fusion::fusible),
         &[],

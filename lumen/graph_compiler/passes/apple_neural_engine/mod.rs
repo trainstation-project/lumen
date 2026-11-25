@@ -10,7 +10,3 @@ pub(crate) mod proto;
 
 #[cfg(lumen_mps_linked)]
 pub(crate) use mps::NeuralEngine;
-
-/// The Neural Engine pass's slot without MPS: no device implements it, so it is the identity pass.
-#[cfg(not(lumen_mps_linked))]
-pub(crate) struct NeuralEngine;

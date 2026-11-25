@@ -29,18 +29,22 @@
 //!
 //! ## Devices
 //!
-//! - `Diamonds` runs, with `fuse` and `normalization_diamonds`, on each device whose codegen implements
-//!   `codegen::row::NormalizationRows` (the nodes its fusion fuses into a row, and its row kernels' `Partials`):
-//!   MPS and Triton, finding the same rows.
-//! - `FusedDiamonds` runs, with `normalization_diamonds`, on each device whose codegen implements
-//!   `codegen::row::FusedRows` (the nodes its row kernel takes and the bodies that fit it): TPU.
-//! - CUDA and CPU: identity for both passes.
+//! - `Diamonds` runs, with `fuse` and `normalization_diamonds`, on each device implementing `NormalizationRows` (the
+//!   nodes its fusion fuses into a row, and its row kernels' `Partials`, in `<device>.rs`): MPS and Triton, finding the
+//!   same rows.
+//! - `FusedDiamonds` runs, with `normalization_diamonds`, on each device implementing `FusedRows` (the nodes its row
+//!   kernel takes and the bodies that fit it): TPU.
+//! - CUDA and CPU run neither.
 //!
 //! `depends_on`, `softmax_pair` (`sum(exp(x - max(x)))` over the same axes) and `tile_reductions` (which leading row
 //! reductions a tiled pass may take partially; used by Triton `wide_rows` and the MPS GEMM row kernels) are helpers
 //! codegen uses.
 
-use crate::codegen::{row::FusedRows, row::NormalizationRows};
+#[cfg(lumen_mps_linked)]
+mod mps;
+mod tpu;
+mod triton;
+
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
@@ -1268,6 +1272,15 @@ pub(crate) trait RowsModule: Module {
     fn rows_mut(&mut self) -> &mut Vec<Row>;
 }
 
+/// A backend whose fusion fuses normalization rows (the `normalization_diamonds` pass, `Diamonds`):
+/// the nodes it fuses into a row, and how its row kernels take column sums along.
+pub(crate) trait NormalizationRows {
+    /// Its row kernels' bounds on column sums riding along a row as per-group partials.
+    const PARTIALS: crate::graph_compiler::passes::diamonds::Partials;
+    /// Whether its fusion can put `node` of `graph` in a row.
+    fn fusible(graph: &crate::graph::Graph, node: &crate::graph::Node) -> bool;
+}
+
 /// Compiler pass finding each normalization row the backend's fusion can merge (`fusible`), with column
 /// sums over the same rows riding along as per-group partials within `partials`, and keeping them for its
 /// fusion.
@@ -1298,6 +1311,15 @@ impl<D: NormalizationRows> CompilerPass<DeviceModule<'_, D>> for Diamonds {
         *m.rows_mut() = rows;
         Ok(())
     }
+}
+
+/// A backend fusing each normalization row into a `row` fusion of its own (the graph compiler's
+/// `normalization_diamonds` pass, `FusedDiamonds`; TPU's): the nodes its row kernel takes and the bodies that fit it.
+pub(crate) trait FusedRows {
+    /// Whether the row kernel takes `node` of `graph`.
+    fn fusible(graph: &crate::graph::Graph, node: &crate::graph::Node) -> bool;
+    /// Whether a row body fits the row kernel.
+    fn fits(body: &crate::graph::Graph) -> bool;
 }
 
 /// Compiler pass replacing each normalization row the backend's row kernel can take (`fusible` nodes, a

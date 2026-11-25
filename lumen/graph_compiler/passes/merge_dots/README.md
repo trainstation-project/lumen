@@ -3,31 +3,29 @@
 Merges dots that share an operand into one dot against a packed block. The forward merge turns, e.g.,
 the Q, K and V projections of one activation into one matmul against a block of their weights, slicing
 each result back out; the backward merge does the same for their gradients' dots. Both run early, right
-after `chunked_cross_entropy`: `merge_dots_backward` first, then `merge_dots`. TPU merges later instead,
-in the `merge_dots_late` slot after `Simplify` and `dot_strength`.
+after `chunked_cross_entropy`: `merge_dots_backward` first, then `merge_dots`. TPU's list merges forward dots
+later instead, after `Simplify` and `dot_strength`.
 
 ## Files
 
-- `mod.rs` — re-exports the pass types and declares `MergeDotsLate`, the slot type of the late merge.
-- `forward.rs` — `merge_dots`, `MergeDots`, `Target`, `Packs` and the `Blocks` trait; `MergeDots` and
-  `MergeDotsLate` run on each device whose codegen implements `codegen::dot_general::MergesDots`.
-- `backward.rs` — `MergeDotsBackward`, run on each device whose codegen implements `codegen::dot_general::MergesDots`;
+- `mod.rs` — re-exports the pass types.
+- `forward.rs` — `merge_dots`, `MergeDots` (`configured_with(config, target)`: with `merge_dots`, packing for the
+  device's `Target`), `Target`, `Packs` and the `Blocks` trait.
+- `backward.rs` — `MergeDotsBackward` (with `merge_dots`);
   and the backward side of the forward merge's interleaving: `interleaved_gradients` (the gradient concatenates
   and slices to rewrite, an `Interleaving`) and `arrange` (a gradient concatenation in the interleaved layout).
 
-Each device's rules are its `MergesDots` (in its codegen): `merge_dots` gates every merge; `WITH_FUSE` (default)
-adds `fuse`, `BACKWARD_EPILOGUES` adds `contraction_epilogues` to the backward merge, `LATE` moves the forward
-merge to `merge_dots_late`, and `target()` is the packing `Target`.
+The code is the same on every device; each device's pass list (`graph_compiler/pipeline/<device>.rs`) gives its
+`Target`, where its forward merge runs, and its gates beyond `merge_dots`:
 
-| Device | Gates | Forward slot | `Target` |
+| Device | Gates | Forward merge | `Target` |
 |---|---|---|---|
-| MPS | `fuse`; backward also `contraction_epilogues` | `merge_dots` | what MPS fusion fuses, views, lanes 1, `ROW_COLUMNS` columns (the GEMM epilogue's row columns) |
-| Triton | `fuse` | `merge_dots` | Triton's `fusible`, views, lanes 1, 8 columns |
-| CUDA | `fuse` | `merge_dots` | CUDA's `fusible`, views, lanes 1, 8 columns (16-byte vectors of 16-bit products) |
-| TPU | none | `merge_dots_late` | everything read in place, no views, `LANES` lanes (whole vector lanes), 1 column |
+| MPS | `fuse`; backward also `contraction_epilogues` | early | what MPS fusion fuses, views, lanes 1, `ROW_COLUMNS` columns (the GEMM epilogue's row columns) |
+| Triton | `fuse` | early | Triton's `fusible`, views, lanes 1, 8 columns |
+| CUDA | `fuse` | early | CUDA's `fusible`, views, lanes 1, 8 columns (16-byte vectors of 16-bit products) |
+| TPU | none | late | everything read in place, no views, `LANES` lanes (whole vector lanes), 1 column |
 
-CPU gets the identity pass in all three slots; MPS, Triton and CUDA leave `merge_dots_late` empty, and TPU
-leaves the early `merge_dots` slot empty.
+The CPU merges nothing.
 
 ## Forward merge
 

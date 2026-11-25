@@ -69,9 +69,6 @@ pub(crate) fn swap_block(body: &crate::graph::Graph) -> usize {
         .unwrap_or(1)
 }
 
-/// TPU kernels swap pairs within a block's last axis (two lane rotations and a select, in `kernels::pallas::mosaic`).
-impl crate::codegen::emitter::SwapsPairs for Tpu {}
-
 /// The JSON node `{"name", "params", "args"}` the Python kernels rebuild `p` from, with `args` indexing earlier values.
 pub(crate) fn node(p: &Primitive, args: &[usize]) -> String {
     let params = match p {
@@ -182,86 +179,5 @@ impl Device for Tpu {
 
         #[cfg(not(lumen_tpu_linked))]
         Ok(Box::new(plan))
-    }
-}
-
-/// TPU's lone kernels: each concatenation not written in place, copied by a `CONCATENATE` fusion of its own, and each
-/// slice fusion left out and `place_views` made no view, copied by an `elementwise` one when that plans; TPU passes no
-/// input by value.
-impl crate::codegen::devices::Lone for DeviceModule<'_, Tpu> {
-    /// Whether `node` is a concatenation not written in place, or a slice that is no view whose elementwise kernel
-    /// plans (others stay as fusion left them).
-    fn alone(graph: &crate::graph::Graph, node: &crate::graph::Node) -> bool {
-        let planned = || {
-            let i = graph
-                .nodes()
-                .iter()
-                .position(|n| std::ptr::eq(n, node))
-                .expect("a node of the graph");
-
-            let (body, _) = crate::graph_compiler::passes::elementwise::body(graph, &[i], i, &[]);
-            crate::codegen::elementwise::tpu::grid::plan(&body, 0).is_ok()
-        };
-
-        match node.primitive {
-            Primitive::Concatenate {
-                in_place: false, ..
-            } => true,
-            Primitive::Slice { view: false, .. } => planned(),
-            _ => false,
-        }
-    }
-
-    /// None: TPU kernels read every input from memory.
-    fn scalars(&mut self) -> Option<&mut Vec<usize>> {
-        None
-    }
-
-    /// `CONCATENATE` for a concatenation, else `elementwise`.
-    fn kernel(&mut self, body: &crate::graph::Graph, _: &[bool]) -> String {
-        let concatenation = body
-            .nodes()
-            .iter()
-            .any(|n| matches!(n.primitive, Primitive::Concatenate { .. }));
-
-        match concatenation {
-            true => CONCATENATE.into(),
-            false => "elementwise".into(),
-        }
-    }
-}
-
-/// What TPU kernels run: no float16 (Mosaic's TPU kernels have no float16), and no cumsum, scatter-add or random
-/// bits (no TPU kernel computes them yet).
-impl crate::codegen::devices::Supports for Tpu {
-    /// Rejects graphs with a float16 value or an op no TPU kernel computes.
-    fn check(graph: &crate::graph::Graph) -> Result<(), String> {
-        use crate::DType;
-
-        for node in graph.nodes() {
-            let half = node
-                .inputs
-                .iter()
-                .chain([&node.output])
-                .any(|&v| graph.type_of(v).dtype == DType::F16);
-
-            if half {
-                return Err(format!(
-                    "{}: float16 does not run on TPU yet",
-                    node.primitive.name()
-                ));
-            }
-
-            if matches!(
-                node.primitive,
-                Primitive::Cumsum { .. }
-                    | Primitive::ScatterAdd { .. }
-                    | Primitive::RandomBits { .. }
-            ) {
-                return Err(format!("{} does not run on TPU yet", node.primitive.name()));
-            }
-        }
-
-        Ok(())
     }
 }

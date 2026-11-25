@@ -1,9 +1,9 @@
 //! Lowering each `take_along_axis` to a flat `gather`, so no backend needs a kernel of its own for it. It is the second
 //! pass in the list, right after `unsupported`.
 //!
-//! Devices: it runs on each device whose codegen implements `codegen::emitter::Gathers` (its kernels compute `Gather`): CUDA,
-//! MPS and Triton. The CPU interprets `take_along_axis` and TPU runs it as its own kernel (`codegen::gather::tpu`,
-//! reading the operand in its tiles, which a flat view would move between), so both get the identity pass.
+//! Devices: it runs on the devices whose kernels compute a fused `Gather`: CUDA, MPS and Triton. The CPU interprets
+//! `take_along_axis` and TPU runs it as its own kernel (`codegen::gather::tpu`, reading the operand in its tiles,
+//! which a flat view would move between), so neither runs it.
 //!
 //! The rewrite, for `take_along_axis(x, indices, axis)`:
 //! 1. The index dtype is int64 when the indices are 64-bit (`I64` or `U64`), int32 otherwise; the indices are cast to it
@@ -16,7 +16,6 @@
 //!
 //! The gather keeps the original node's label; every other node is copied unchanged.
 
-use crate::codegen::emitter::Gathers;
 use crate::graph::{Graph, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
@@ -26,7 +25,7 @@ use crate::{DType, Scalar};
 /// Compiler pass lowering `take_along_axis` to a flat `gather`.
 pub(crate) struct TakeAlongAxis;
 
-impl<D: Gathers> CompilerPass<DeviceModule<'_, D>> for TakeAlongAxis {
+impl<D> CompilerPass<DeviceModule<'_, D>> for TakeAlongAxis {
     /// Always.
     fn configured(_: &CompilerConfig) -> Option<Self> {
         Some(TakeAlongAxis)

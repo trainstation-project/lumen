@@ -3,10 +3,9 @@
 //! (`in_place = true`) before `fusion`, right after the dot passes; `concats` runs after `fusion`, `place_views` and
 //! `alone` and unmarks the ones fusion made invalid, each then copied by a kernel of its own.
 //!
-//! Devices: `place_concats` runs on each device whose module implements `codegen::fusion::Slots` (what its kernels can write
-//! through a slot's strides): MPS and Triton with `fuse`, TPU always (`Slots::WITH_FUSE`). `concats` runs where the
-//! module implements `codegen::fusion::Rechecks` (the slot rule after fusion): MPS and TPU. CPU and CUDA get the identity
-//! pass in both.
+//! Devices: each device implementing `Slots` (what its kernels can write through a slot's strides, in `<device>.rs`)
+//! runs `place_concats`: MPS and Triton with `fuse`, TPU always. `concats` runs on those implementing `Rechecks` (the
+//! slot rule after fusion): MPS and TPU. CPU and CUDA run neither.
 //!
 //! The rule: `in_place_concats(graph, writes, worth)` returns the live concatenations where every operand is read only
 //! by that concatenation (ignoring `FusionOutput` readers), exactly once, is no program output, and is made by a
@@ -18,7 +17,11 @@
 //! `passes/fusion` treats in-place concatenations as unfusible, and `dot/fuse/tpu.rs` calls `in_place_concats` to avoid
 //! building a placed concat inside a dot fusion.
 
-use crate::codegen::{fusion::Rechecks, fusion::Slots};
+#[cfg(lumen_mps_linked)]
+mod mps;
+pub(crate) mod tpu;
+mod triton;
+
 use crate::graph::{Graph, Node, Primitive};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::passes::CompilerPass;
@@ -106,13 +109,53 @@ pub(crate) fn in_place_concats(
     concats
 }
 
+/// A module whose backend's kernels may write a concatenation's operands into their slots, which the `place_concats`
+/// pass marks in place. Operand `k` of
+/// `concat` is made by `producer`, the fusion itself when the operand is its output `index`.
+pub(crate) trait Slots: crate::graph_compiler::passes::Module {
+    /// Whether the kernel making operand `k` of `concat` can write it into its slot.
+    fn writes(
+        &self,
+        concat: &crate::graph::Node,
+        k: usize,
+        producer: &crate::graph::Node,
+        index: usize,
+    ) -> bool;
+
+    /// Whether writing operand `k` into its slot is worth placing `concat` for; a concatenation is placed
+    /// when some operand is. By default, `worth`'s rule (MPS's and Triton's).
+    fn worth(
+        &self,
+        _concat: &crate::graph::Node,
+        _k: usize,
+        producer: &crate::graph::Node,
+        _index: usize,
+    ) -> bool {
+        crate::graph_compiler::passes::place_concats::worth(producer)
+    }
+}
+
+/// A module whose fusion may leave a concatenation it was to write in place unable to be (the graph compiler's
+/// `concats` pass, after fusion): `written` is the slot rule then; each concatenation unmarked gets a kernel of its own,
+/// named as `Lone::kernel` names one-node fusions.
+pub(crate) trait Rechecks: Slots + crate::graph_compiler::passes::alone::Lone {
+    /// Whether, after fusion, the kernel making operand `k` of `concat` writes it into its slot.
+    fn written(
+        &self,
+        concat: &crate::graph::Node,
+        k: usize,
+        producer: &crate::graph::Node,
+        index: usize,
+    ) -> bool;
+}
+
 /// Compiler pass marking the concatenations `in_place_concats` accepts with the module's `Slots::writes`.
 pub(crate) struct PlaceConcats;
 
 impl<M: Slots> CompilerPass<M> for PlaceConcats {
-    /// With `fuse` where `WITH_FUSE`, else always.
-    fn configured(config: &CompilerConfig) -> Option<Self> {
-        (config.fuse || !M::WITH_FUSE).then_some(PlaceConcats)
+    /// Always.
+    fn configured(_: &CompilerConfig) -> Option<Self> {
+        Some(PlaceConcats)
     }
 
     /// Pass name used in profiler ranges and dumps.

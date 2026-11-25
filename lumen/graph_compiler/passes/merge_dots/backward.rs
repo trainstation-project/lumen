@@ -4,7 +4,6 @@
 //! product, the merged dot rounded by one cast.
 
 use crate::DType;
-use crate::codegen::dot_general::MergesDots;
 use crate::graph::ir::primitive::free_dims;
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
 use crate::graph_compiler::CompilerConfig;
@@ -309,12 +308,10 @@ fn through(dot: &Primitive, lhs: bool, permutation: &[usize]) -> Option<Primitiv
 /// Compiler pass running [`merge_dots_backward`].
 pub(crate) struct MergeDotsBackward;
 
-impl<D: MergesDots> CompilerPass<DeviceModule<'_, D>> for MergeDotsBackward {
-    /// With `merge_dots` (and `fuse` where `WITH_FUSE`; `contraction_epilogues` where `BACKWARD_EPILOGUES`).
+impl<D> CompilerPass<DeviceModule<'_, D>> for MergeDotsBackward {
+    /// With `merge_dots`.
     fn configured(config: &CompilerConfig) -> Option<Self> {
-        let fused = config.fuse || !D::WITH_FUSE;
-        let epilogues = config.contraction_epilogues || !D::BACKWARD_EPILOGUES;
-        (config.merge_dots && fused && epilogues).then_some(MergeDotsBackward)
+        config.merge_dots.then_some(MergeDotsBackward)
     }
 
     /// Pass name used in profiler ranges and dumps.

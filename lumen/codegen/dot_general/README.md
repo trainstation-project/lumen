@@ -9,8 +9,8 @@ steps, and the autotuner times its configs.
 
 - `mod.rs` — the `GemmCodegen` trait: `gemm(body, dot, by_value, options)` returns a backend's `Code` for a GEMM
   fusion, with backend-specific `Options` (MPS tile configs, Triton operand/output layouts, TPU's step).
-  Also `RowTile`: the widest row one GEMM tile holds whole (`ROW_TILE`), which MPS and Triton implement and
-  `graph_compiler::passes::linear_reordering` reads. It also defines the graph compiler's dot pass traits each backend implements in its device folder: `StridedOperands`, `MergesDots`, `LinearCrossEntropies`, `InnerProducts`, `FoldsDotReshapes`, `DotLayouts`, `SplitsK`, `PartialRows`, `FusesDots` and `RowTile`.
+  The graph compiler's dot passes read each backend's GEMM facts here (MPS's and Triton's `ROW_TILE`, the widest
+  row one GEMM tile holds whole, for `linear_reordering`); their traits and impls live in `graph_compiler/passes`.
 - `cuda/` — CUDA (CuTe DSL) GEMM.
 - `triton/` — Triton GEMM, row-epilogue GEMMs and linear cross entropy.
 - `mps/` — Metal GEMMs (tiled, MPP, skinny, GEMV, integer), row matmuls and linear cross entropy.
@@ -90,7 +90,7 @@ steps, and the autotuner times its configs.
 ## tpu
 
 - `mod.rs`: `block` and `caps` choose block sizes; `kernel` builds the step's `codegen::devices::tpu::Kernel` for module
-  `lumen.codegen.dot_general.tpu.gemm_kernel`. `slice_view` is which slices the GEMM reads in place (`StridedOperands`,
+  `lumen.codegen.dot_general.tpu.gemm_kernel`. `slice_view` is which slices the GEMM reads in place (TPU's `StridedOperands`,
   for `place_views`): leading dims whole (a prefix of the first), columns whole or in whole 128-lane tiles, rows whole
   or in whole tiles of rows (a matrix's first rows too). It gives the `SliceView` the kernel steps through.
 - `codegen.rs`: `GemmCodegen for Tpu`, `Epilogue` (concatenated lhs, output slices, epilogue nodes) and `spec`,

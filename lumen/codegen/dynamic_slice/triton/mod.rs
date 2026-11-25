@@ -8,12 +8,6 @@ use crate::codegen::devices::triton::*;
 use crate::graph::{Graph, TensorType};
 use crate::tensor::contiguous_strides;
 
-/// Triton fuses chains of 2 or more updates under `fuse`: a kernel binds any number of buffers.
-impl super::UpdateChains for Triton {
-    const LEAST: usize = 2;
-    const MOST: usize = usize::MAX;
-}
-
 /// Triton dynamic slices: the fixed `dynamic_update_slice_kernel` runs a generated `BODY` over the update's
 /// elements, loading and storing through helpers for its tensors' layouts.
 impl DynamicSliceCodegen for Triton {

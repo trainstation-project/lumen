@@ -1,9 +1,8 @@
-//! Wide matmul rows (Triton's, on each device whose codegen implements `codegen::dot_general::PartialRows`): a normalization `row` fusion whose rows a GEMM (alone or with its
-//! epilogue) makes, too wide for one GEMM tile to hold them whole, gets its GEMM writing the row's first
-//! reductions' partials over each `tile`-column block of a row as well (`dot_partials`); those are
+//! Wide matmul rows (Triton's, on each device implementing `PartialRows`): a normalization `row` fusion whose rows a
+//! GEMM (alone or with its epilogue) makes, too wide for one GEMM tile to hold them whole, gets its GEMM writing the
+//! row's first reductions' partials over each `tile`-column block of a row as well (`dot_partials`); those are
 //! reduced and the row reads them instead of reducing its rows again, so the product is read once less.
 
-use crate::codegen::dot_general::PartialRows;
 use crate::codegen::kinds::gemm_dot;
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
 use crate::graph_compiler::device::DeviceModule;
@@ -294,6 +293,15 @@ fn finished_body(rows: &Graph, split: &[Var]) -> Graph {
     let outputs: Vec<Var> = rows.outputs().iter().map(|&v| map[v]).collect();
     out.set_outputs(&outputs).expect("the row's values");
     out
+}
+
+/// A backend whose GEMM can write a wide row's reductions' partials (Triton's): the `wide_rows` pass
+/// has it do so for rows too wide for one GEMM tile.
+pub(crate) trait PartialRows {
+    /// The column tile of a row `n` wide that the GEMM writes partials over, when it splits one.
+    fn partial_tile(n: usize) -> Option<usize>;
+    /// Whether GEMM body `body` runs on a matrix-vector kernel, which writes no partials.
+    fn gemv(body: &crate::graph::Graph) -> bool;
 }
 
 /// Compiler pass splitting wide GEMM-fed rows into `dot_partials`, their partials' reduction and the row.

@@ -655,9 +655,3 @@ impl<'a> Emit<'a> for Emitter<'a> {
         name
     }
 }
-
-/// CuTe kernels gather (a fused `Gather`, read through the emitter).
-impl crate::codegen::emitter::Gathers for Cuda {}
-
-/// CuTe kernels read each element's partner at `j ^ distance` (in an elementwise kernel; no GEMM epilogue swaps).
-impl crate::codegen::emitter::SwapsPairs for Cuda {}

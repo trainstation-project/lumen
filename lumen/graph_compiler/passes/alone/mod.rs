@@ -2,9 +2,8 @@
 //! single-node `Fusion` kernels. It runs near the end of the device pipeline, after `fusion` and `place_views`,
 //! so codegen compiles every remaining kernel the same way; it is always on, with no config flag.
 //!
-//! Devices: it runs on each device whose codegen implements `codegen::devices::Lone` (which lone nodes only a generated
-//! kernel computes, which inputs kernels take by value, each kernel's name): CUDA (`codegen/devices/cuda`), MPS
-//! (`codegen/devices/mps`) and Triton (`codegen/devices/triton`). TPU and CPU get the identity pass.
+//! Devices: it runs on each device implementing `Lone` (which lone nodes only a generated kernel computes, which inputs
+//! kernels take by value, each kernel's name, in `<device>.rs`): CUDA, MPS, Triton and TPU. The CPU doesn't run it.
 //!
 //! The rewrite:
 //! - Each node the backend's `Lone::alone` accepts becomes a `Fusion` whose body is that node alone; an operand
@@ -13,10 +12,26 @@
 //!   graph output; otherwise they are dropped from the list, since an unfused reader needs them as buffers.
 //! - `wrapped` is the rewrite on its own; other code calls it with any predicate.
 
-use crate::codegen::devices::Lone;
+mod cuda;
+#[cfg(lumen_mps_linked)]
+mod mps;
+mod tpu;
+mod triton;
+
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::passes::CompilerPass;
+
+/// What a device tells the `alone` pass: which lone nodes only a generated kernel computes, which inputs its kernels
+/// take by value, and each kernel's name.
+pub(crate) trait Lone: crate::graph_compiler::passes::Module {
+    /// Whether lone `node` of `graph` runs only as a generated kernel.
+    fn alone(graph: &crate::graph::Graph, node: &crate::graph::Node) -> bool;
+    /// Graph input indices passed to kernels by value, when the backend passes any.
+    fn scalars(&mut self) -> Option<&mut Vec<usize>>;
+    /// Names the kernel of the one-node fusion `body`, given whether each input is by value.
+    fn kernel(&mut self, body: &crate::graph::Graph, by_value: &[bool]) -> String;
+}
 
 /// Compiler pass wrapping every lone node the backend has no other kernel for in its own one-node fusion.
 pub(crate) struct Alone;

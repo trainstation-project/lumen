@@ -5,10 +5,9 @@
 //! backend's kernels can't take its operands heads-major (`heads_major`), and checks the backend's attention kernels
 //! take every attention fusion.
 //!
-//! Devices: it runs, with `flash_attention`, on each device whose codegen implements `codegen::attention::TiledAttentions`
-//! (its attention-kernel check): TPU.
+//! Devices: it runs, with `flash_attention`, on each device implementing `TiledAttentions` (its attention-kernel
+//! check, in `attention/<device>.rs`): TPU.
 
-use crate::codegen::attention::TiledAttentions;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
@@ -412,6 +411,13 @@ fn attentions<D: TiledAttentions>(graph: &Graph) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// A backend whose attention kernels read and write whole tiles (TPU's): the `attention_layouts`
+/// pass adapts its attention fusions to them.
+pub(crate) trait TiledAttentions {
+    /// Whether the attention kernels take fusion `body` named `name`: the error when not.
+    fn check(name: &str, body: &crate::graph::Graph) -> Result<(), String>;
 }
 
 /// Folds the flash-attention fusions' output layout chains and the backward's `delta` dot into the fusions, and

@@ -16,11 +16,6 @@ use crate::codegen::devices::mps::*;
 use crate::graph::{Graph, TensorType, UPDATES};
 use crate::graph_compiler::passes::updates::{overlaps, starts};
 
-/// MPS fuses chains of 2 to 29 updates under `fuse`: Metal binds 31 buffers, two of them the operand and output.
-impl super::UpdateChains for crate::codegen::devices::mps::Mps {
-    const LEAST: usize = 2;
-    const MOST: usize = 29;
-}
 use crate::runtime::kernel::mps::{elementwise_grid, u32_arg};
 use crate::tensor::contiguous_strides;
 

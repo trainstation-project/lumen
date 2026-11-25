@@ -2,9 +2,8 @@
 //! of `h`, to run per chunk on the chunked logits, so the full logits are no longer needed. It runs early in the device
 //! pipeline, after `take_along_axis` and before the dot merges and `linear_cross_entropy`.
 //!
-//! Devices: it runs, with `fuse` and `fused_linear_cross_entropy`, on each device whose codegen implements
-//! `codegen::dot_general::LinearCrossEntropies` (a fused linear cross-entropy kernel, which each chunk then becomes): MPS and
-//! Triton. CPU, CUDA and TPU get the identity pass.
+//! Devices: it runs, with `fuse` and `fused_linear_cross_entropy`, on the devices with a fused linear cross-entropy
+//! kernel (which each chunk then becomes): MPS and Triton.
 //!
 //! The pattern:
 //! - The cross entropy is the one `linear_cross_entropy::matched` finds on dot node `h @ w`: a max-shifted `logsumexp`
@@ -24,7 +23,6 @@
 //!   pass repeats until no match is left.
 
 use super::linear_cross_entropy::{Found, matched, uses};
-use crate::codegen::dot_general::LinearCrossEntropies;
 use crate::graph::{Graph, Node, Primitive, Var};
 use crate::graph_compiler::CompilerConfig;
 use crate::graph_compiler::device::DeviceModule;
@@ -319,7 +317,7 @@ fn of_rows(p: &Primitive, b: usize, c: usize) -> Option<Primitive> {
 /// Compiler pass running [`chunked_cross_entropy`].
 pub(crate) struct ChunkedCrossEntropy;
 
-impl<D: LinearCrossEntropies> CompilerPass<DeviceModule<'_, D>> for ChunkedCrossEntropy {
+impl<D> CompilerPass<DeviceModule<'_, D>> for ChunkedCrossEntropy {
     /// With `fuse` and `fused_linear_cross_entropy`.
     fn configured(config: &CompilerConfig) -> Option<Self> {
         (config.fuse && config.fused_linear_cross_entropy).then_some(ChunkedCrossEntropy)

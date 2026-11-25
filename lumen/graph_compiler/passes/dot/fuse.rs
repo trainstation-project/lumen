@@ -11,7 +11,7 @@
 //!   slices are rebuilt inside the body.
 //! - A stacked lhs: when the lhs is a `Concatenate` along one of its last two axes of lane-aligned parts,
 //!   read only by dots as their lhs, not a graph output, and not an in-place concatenation (checked with
-//!   `place_concats::in_place_concats` and `codegen::fusion::tpu::slot_writes`). The fusion reads the concat's parts.
+//!   `place_concats::in_place_concats` and `place_concats::tpu::slot_writes`). The fusion reads the concat's parts.
 //! - Elementwise epilogues, only with `contraction_epilogues`: later elementwise readers of the dot (or of a
 //!   slice, or of an earlier epilogue), and pair swaps within a block of `LANES` lanes, claimed greedily in node
 //!   order. Each must have its part's shape; its
@@ -33,9 +33,8 @@
 //! Its label is the dot's label, prefixed `Nx` when an unlabelled dot stands for N slices or N stacked parts,
 //! followed by the absorbed nodes' labels.
 //!
-//! Devices: it runs, always, on each device whose codegen implements `codegen::dot_general::FusesDots` (its vector lanes and which
+//! Devices: it runs, always, on each device implementing `FusesDots` (its vector lanes and which
 //! producers write a concatenation's slots): TPU.
-use crate::codegen::dot_general::FusesDots;
 use crate::graph::{FUSION_SEPARATOR, Graph, Node, Primitive, Var, intern};
 use crate::graph_compiler::device::DeviceModule;
 use crate::graph_compiler::passes::CompilerPass;
@@ -598,6 +597,20 @@ fn fused<D: FusesDots>(graph: &Graph, epilogues: bool) -> Vec<Option<Fused>> {
     }
 
     found
+}
+
+/// A backend fusing matmuls with their slices, stacked lhs and epilogues (TPU's): the `fuse_dots`
+/// pass, with its vector lanes and which producers write a concatenation's slots.
+pub(crate) trait FusesDots {
+    /// Lanes a vector holds: stacked and split parts are whole multiples of it.
+    const LANES: usize;
+    /// Whether `producer` can write operand `k` of `concat` into its slot.
+    fn slot_writes(
+        graph: &crate::graph::Graph,
+        concat: &crate::graph::Node,
+        k: usize,
+        producer: &crate::graph::Node,
+    ) -> bool;
 }
 
 /// Fuses dots with their splitting slices, stacked lhs and, when enabled, elementwise epilogues.

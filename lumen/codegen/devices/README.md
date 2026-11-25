@@ -2,13 +2,13 @@
 
 Each backend's home: the backend marker type every codegen and pass trait is implemented on (`Cuda`, `Triton`, `Mps`,
 `Tpu`), its dispatcher (`codegen`, `kernel_of` and its `Device` impl, picking every step's kernel across the kernel
-families), what the backend supports as a whole (`Supports`, `Lone`, dtype maps), helpers its generators share (dtype
+families), dtype maps, helpers its generators share (dtype
 names, bit-exact constants, kernel naming), and the Python side that compiles and launches generated code. What one
 kernel family needs lives in that family (`codegen/<family>/<device>`).
 
 ## Files
 
-- `mod.rs` — declares the backends. `mps` compiles only when MPS is linked (`lumen_mps_linked`). It defines the backend-wide pass traits: `Supports` (`unsupported`) and `Lone` (`alone`).
+- `mod.rs` — declares the backends. `mps` compiles only when MPS is linked (`lumen_mps_linked`). The backend-wide pass answers (`Supports`, `Lone`) are in `graph_compiler/passes/unsupported` and `alone`.
 - `cuda/mod.rs` — `Cuda`, the CuTe DSL code generator type. `cute_type` gives a dtype's CuTe numeric type (`None` when there are no kernels for it). `unsigned` gives the unsigned type of a bit width. `constant` writes a value as its bits so it is exact in every dtype. It also holds CUDA's `codegen` (each planned step's kernel, generated per layout and kept in the step's memo) and its `Device` impl.
 - `cuda/__init__.py` — Python side of the CUDA backend. `compile` compiles a generated module's `launch` for its tensors' CuTe types, 16-byte alignment and launch shape, loads it, and returns launch info (`CUfunction`, warps, shared bytes, parameter types) for Rust to launch. `compiled_cubin` dumps each compile into its own directory, because lumen kernels share names and concurrent processes would otherwise read each other's cubins.
 - `triton/mod.rs` — `Triton`, the Triton code generator type. It provides `triton_type`, `params` (the parameter list of a generated kernel), the `fill` kernel source, `Tensors` (the layouts a template kernel's `BODY` is generated for), `body_function` (builds a template's `BODY(EXTRA, ...)` with its `LOAD{k}`/`STORE{k}` helpers), `bits`/`constant` (bit-exact scalars), `named` and `indented`. It also holds Triton's `codegen`: the generated loop kernel type (`Kernel`, `Template`, `Constexpr`), `loop_kernel`, and the `Device` impl.
@@ -19,10 +19,9 @@ kernel family needs lives in that family (`codegen/<family>/<device>`).
   - `fusible`: what a plain elementwise kernel runs.
   - `node`: the JSON `{name, params, args}` that Python kernels rebuild a primitive from.
   - `window`/`window_at`: an output written into a column window of a wider matrix.
-  - `LANES` (128).
-  - `Lone`: `alone` wraps each concatenation not written in place into a `CONCATENATE` fusion
-    (`layout::tpu::concatenate`) and each slice `place_views` made no view into an `elementwise` one.
-  The fusion and dot passes in `graph_compiler/passes` use these too.
+  - `LANES` (128) and `CONCATENATE`, the fusion `alone` wraps each concatenation not written in place into
+    (`layout::tpu::concatenate`).
+  The fusion, dot and `alone` passes in `graph_compiler/passes` use these too.
 - `tpu/kernel.rs` — TPU (Pallas) codegen, built only with the TPU linked and re-exported from `tpu`: the per-step `Kernel` spec, the kernel each step runs (`kernel`), and the `Pallas` and `Nothing` kernels.
 - `tpu/lowering.rs` — lowers TPU kernels to Mosaic by calling `lumen.codegen.devices.tpu.pallas`, cached per (module, spec) and per device. It fails without Python.
 - `tpu/pallas.py` — `lower` and `lower_source` trace a kernel module's `program(spec)` or a generated `program(device)` on a device's memory. `view` gives a ref into device memory in its TPU layout.

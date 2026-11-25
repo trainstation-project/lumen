@@ -9,6 +9,7 @@ pub(crate) mod codegen;
 #[cfg(lumen_tpu_linked)]
 pub(crate) mod row;
 
+#[cfg(lumen_tpu_linked)]
 use crate::codegen::devices::tpu::Tpu;
 #[cfg(lumen_tpu_linked)]
 use crate::codegen::devices::tpu::{Kernel, Rows};
@@ -75,80 +76,6 @@ pub(crate) fn kernel(step: &StepBase) -> Result<Option<Kernel>, String> {
         spec,
         Rows::Split,
     )))
-}
-
-/// TPU merges without `fuse`, late (once the graph is simplified), packing whole vector lanes: everything read in place,
-/// no views, `LANES` lanes, 1 column.
-impl crate::codegen::dot_general::MergesDots for Tpu {
-    const WITH_FUSE: bool = false;
-    const LATE: bool = true;
-
-    /// Everything read in place; no views; `LANES` lanes; 1 column.
-    fn target() -> crate::graph_compiler::passes::merge_dots::Target {
-        crate::graph_compiler::passes::merge_dots::Target {
-            reads: |_, _| true,
-            views: false,
-            lanes: crate::codegen::devices::tpu::LANES,
-            columns: 1,
-        }
-    }
-}
-
-/// TPU runs batched inner products as elementwise and reduction fusions.
-impl crate::codegen::dot_general::InnerProducts for Tpu {}
-
-/// TPU's matmul kernel takes dots with their operands' reshapes folded in.
-impl crate::codegen::dot_general::FoldsDotReshapes for Tpu {}
-
-/// TPU's matmul kernel reads its batch dims leading, the lhs as batch, free dims then one contracting one (or batch,
-/// contracting, free), the rhs as batch, then one contracting and one free dim in either order.
-impl crate::codegen::dot_general::DotLayouts for Tpu {
-    /// Whether the TPU matmul kernel reads operand `k` of `dot` over `operands` as laid out.
-    fn readable(
-        dot: &crate::graph::Primitive,
-        operands: [&crate::graph::TensorType; 2],
-        k: usize,
-    ) -> bool {
-        let crate::graph::Primitive::DotGeneral {
-            lhs_contracting,
-            rhs_contracting,
-            lhs_batch,
-            rhs_batch,
-            ..
-        } = dot
-        else {
-            unreachable!("a dot_general")
-        };
-
-        let leads = |batch: &[usize]| batch.iter().enumerate().all(|(i, &d)| d == i);
-        let nb = lhs_batch.len();
-        let rank = operands[k].shape.len();
-
-        match k {
-            0 => {
-                let last = *lhs_contracting == [rank - 1];
-                let transposed = rank == nb + 2 && *lhs_contracting == [nb];
-                leads(lhs_batch) && rank >= nb + 2 && (last || transposed)
-            }
-            _ => leads(rhs_batch) && rank == nb + 2 && rhs_contracting.len() == 1,
-        }
-    }
-}
-
-/// TPU fuses matmuls with their slices, stacked lhs and epilogues, in whole vector lanes, a producer writing a
-/// concatenation's slot as `fusion::tpu::slot_writes` accepts.
-impl crate::codegen::dot_general::FusesDots for Tpu {
-    const LANES: usize = crate::codegen::devices::tpu::LANES;
-
-    /// `fusion::tpu::slot_writes`.
-    fn slot_writes(
-        graph: &crate::graph::Graph,
-        concat: &crate::graph::Node,
-        k: usize,
-        producer: &crate::graph::Node,
-    ) -> bool {
-        crate::codegen::fusion::tpu::slot_writes(graph, concat, k, producer)
-    }
 }
 
 /// How the TPU GEMM reads an operand that is a slice of a value: the `[slabs, rows, columns]` view of the value its
@@ -219,29 +146,4 @@ pub(crate) fn slice_view(
         row,
         column,
     })
-}
-
-/// The TPU GEMM reads slices `slice_view` takes, in a step of its own or a `dot_general` fusion.
-impl crate::codegen::dot_general::StridedOperands for Tpu {
-    /// None: it reads a slice in place only knowing where the slice starts (`reads_slice`).
-    fn reads_strided(
-        _: &crate::graph::Primitive,
-        _: [&crate::graph::TensorType; 2],
-        _: usize,
-        _: &[usize],
-    ) -> bool {
-        false
-    }
-
-    /// Whether `kernel` is the GEMM's (`dot_general`) and `slice_view` takes the slice.
-    fn reads_slice(
-        kernel: &str,
-        _: &crate::graph::Primitive,
-        operands: [&crate::graph::TensorType; 2],
-        k: usize,
-        strides: &[usize],
-        starts: &[usize],
-    ) -> bool {
-        kernel == "dot_general" && slice_view(operands[k], strides, starts).is_some()
-    }
 }
