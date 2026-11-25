@@ -7,7 +7,7 @@
 //! traced program's in the last bits; `linear_reordering` (off by default) turns it on. It runs after
 //! `neural_engine` and before `split_k`, so the later fusion passes see the factor after the matmul.
 //!
-//! Devices: MPS and Triton run it, each list (`graph_compiler::pipeline`) giving the widest row one of its GEMM tiles
+//! Devices: MPS and Triton run it, each list (`graph_compiler::pass_container`) giving the widest row one of its GEMM tiles
 //! holds whole as its `tile`: MPS's `codegen/dot_general/mps/row.rs` `ROW_TILE`, Triton's `codegen/dot_general/triton`
 //! `ROW_TILE`.
 //!

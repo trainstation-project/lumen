@@ -364,7 +364,7 @@ fn dot_operands_are_put_in_matmul_form_by_a_transpose_step() {
     let y = apply(&mut g, dot, &[a, b]);
     g.set_outputs(&[y]).unwrap();
     let canonical =
-        crate::graph_compiler::pipeline::rewritten_on::<crate::codegen::devices::mps::Mps, _>(
+        crate::graph_compiler::pass_container::rewritten_on::<crate::codegen::devices::mps::Mps, _>(
             &g,
             crate::graph_compiler::passes::dot::canonicalize::CanonicalizeDots {
                 readable:
@@ -398,7 +398,7 @@ fn dot_operands_are_put_in_matmul_form_by_a_transpose_step() {
     let y = apply(&mut g, mm, &[a, b]);
     g.set_outputs(&[y]).unwrap();
     assert_eq!(
-        names(&crate::graph_compiler::pipeline::rewritten_on::<
+        names(&crate::graph_compiler::pass_container::rewritten_on::<
             crate::codegen::devices::mps::Mps,
             _,
         >(
@@ -2161,11 +2161,13 @@ fn vector_dots_are_reduced() {
 
     let d = apply(&mut g, dot, &[a, b]);
     g.set_outputs(&[d]).unwrap();
-    let reduced =
-        crate::graph_compiler::pipeline::rewritten_on::<crate::codegen::devices::mps::Mps, _>(
-            &g,
-            crate::graph_compiler::passes::dot::strength::DotStrength,
-        );
+    let reduced = crate::graph_compiler::pass_container::rewritten_on::<
+        crate::codegen::devices::mps::Mps,
+        _,
+    >(
+        &g,
+        crate::graph_compiler::passes::dot::strength::DotStrength,
+    );
     let names: Vec<&str> = reduced.nodes().iter().map(|n| n.primitive.name()).collect();
     assert_eq!(names, ["mul", "reduce_sum"], "{reduced}");
     let inputs = [data(&[4, 6, 16], 1), data(&[4, 6, 16], 2)];

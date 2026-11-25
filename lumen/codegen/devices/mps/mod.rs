@@ -473,7 +473,7 @@ impl Device for Mps {
 #[cfg(test)]
 pub(crate) fn compile(graph: &Graph, options: &Options) -> Result<MpsPlan, String> {
     let mut module = DeviceModule::<Mps>::new(graph, options);
-    <Mps as crate::graph_compiler::pipeline::Passes>::passes(&options.config).run(&mut module)?;
+    <Mps as crate::graph_compiler::pass_container::Passes>::run(&mut module)?;
     lower(module)
 }
 

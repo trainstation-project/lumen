@@ -12,7 +12,7 @@ and execution: graph -> the device's pass list -> codegen (`Device::lower`) -> p
 3. `device_compile` picks the backend: CUDA runs on the CuTe DSL backend (`Cuda`), or on `Triton` when
    `use_triton_backend` is set; Apple GPUs on `Mps` (only when MPS is linked); TPUs on `Tpu`; everything
    else on `Cpu`.
-4. `device::compile!` runs the device's pass list (`pipeline::Passes`, in `pipeline/<device>.rs`; every list
+4. `device::compile!` runs the device's pass list (`pass_container::Passes`, in `pass_container/<device>.rs`; every list
    starts with `preserve_precision`, `cse` and `simplify` without structural rewrites) on a `DeviceModule` for that
    device, then calls the device's `Device::lower`, which lives in `codegen` and builds
    the plan.
@@ -23,7 +23,7 @@ and execution: graph -> the device's pass list -> codegen (`Device::lower`) -> p
   `elementwise` (which primitives elementwise fusion merges), `combined`, `constant`, `label`, `positions`.
 - `device.rs` - the `Device` trait (`NAME`, `lower`), `DeviceModule<D>` (the graph plus state passes hand
   to later passes), the `compile!` macro and the CPU device.
-- `pipeline/` - `Pipeline` (named, ordered list of passes) and each device's pass list (`Passes`).
+- `pass_container/` - each device's pass list (`Passes`) and `run`, which runs passes in order.
 - `stages.rs` - splitting host/device programs into stages; a host stage reads each value copied from the device
   through a `device_wait`, since the copy is started without waiting (`runtime/device_transfer/pending.rs`).
 - `schedule.rs` - node schedulers used by `plan/compile.rs`: `list` and `dfs` (keep less memory live) and
@@ -45,5 +45,5 @@ and execution: graph -> the device's pass list -> codegen (`Device::lower`) -> p
 - `plan_options` treats packed blocks as parameters and keeps each member input alive while its block is
   read.
 - A device runs only the passes its list adds, so the CPU's is just `unsupported` and `simplify`.
-- With `dump_to` set, each pipeline run writes the graph before the first pass and after every pass to
-  `<dir>/<run>.<pipeline>.<step>.<pass>.txt`. Each pass runs inside a profiler range `<pipeline>::<pass>`.
+- With `dump_to` set, each run of a device's passes writes the graph before the first pass and after every pass to
+  `<dir>/<run>.<device>.<step>.<pass>.txt`. Each pass runs inside a profiler range `<device>::<pass>`.

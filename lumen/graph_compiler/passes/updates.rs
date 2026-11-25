@@ -2,7 +2,7 @@
 //! each update written into the previous one's result: one kernel writing every update into the operand. It runs
 //! after `dot_rows` and before `diamonds`.
 //!
-//! Devices: each device's pass list (`graph_compiler::pipeline`) gives its chain lengths: MPS (2 to 29 updates, Metal
+//! Devices: each device's pass list (`graph_compiler::pass_container`) gives its chain lengths: MPS (2 to 29 updates, Metal
 //! binding 31 buffers, two of them the operand and the output) and Triton (2 or more) under `fuse`, TPU (1 or more)
 //! always. CPU and CUDA don't run it.
 //!

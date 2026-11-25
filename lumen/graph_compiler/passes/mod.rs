@@ -1,5 +1,5 @@
 //! Graph passes: the interface every pass implements (`CompilerPass`, rewriting a `Module`) and the passes the
-//! backend compilers run (in a `graph_compiler::pipeline::Pipeline`).
+//! backend compilers run (each device's `graph_compiler::pass_container::Passes`).
 
 pub(crate) mod alone;
 pub(crate) mod apple_neural_engine;
@@ -45,13 +45,13 @@ pub(crate) trait Module {
     fn config(&self) -> &CompilerConfig;
 }
 
-/// A graph transformation run by a [`Pipeline`].
+/// A graph transformation in a device's pass list (`pass_container::Passes`).
 pub(crate) trait CompilerPass<M> {
     /// Name used in profiler ranges and dump file names.
     fn name(&self) -> &'static str;
     /// Rewrites `module` in place.
     fn apply(&mut self, module: &mut M) -> Result<(), String>;
-    /// This pass as a device's pass list adds it by type under `config` (`Pipeline::pass`: its gate, and the
+    /// This pass as a device's pass list adds it by type under `config` (`Passes::pass`: its gate, and the
     /// device's answers it takes), or `None` when off. By default `None`: a pass a list builds itself (`add`).
     fn configured(config: &CompilerConfig) -> Option<Self>
     where

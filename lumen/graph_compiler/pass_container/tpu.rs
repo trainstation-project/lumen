@@ -1,9 +1,9 @@
 //! TPU's passes: every pass whether or not `fuse` is set (its kernels are its fusions), attention and matmuls fitted
 //! to its tiled layout, dots merged once the graph is simplified, rows and matmuls fused into its own kernels.
 
-use super::{Passes, Pipeline};
+use super::{Pass, Passes};
 use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::device::{Device, DeviceModule, Tpu};
+use crate::graph_compiler::device::{DeviceModule, Tpu};
 use crate::graph_compiler::passes::alone::Alone;
 use crate::graph_compiler::passes::attention::layouts::AttentionLayouts;
 use crate::graph_compiler::passes::attention::{FlashAttention, FlashAttentionBackward};
@@ -29,7 +29,7 @@ impl Passes for Tpu {
     /// TPU's passes, in order. Forward dots merge late, once the graph is simplified, packing whole vector lanes
     /// (everything read in place, no views, one column). Update chains of 1 or more fuse: even one update runs as an
     /// `updates` kernel.
-    fn passes<'a>(config: &CompilerConfig) -> Pipeline<DeviceModule<'a, Tpu>> {
+    fn passes<'a>(config: &CompilerConfig) -> Vec<Option<Pass<DeviceModule<'a, Tpu>>>> {
         let target = Target {
             reads: |_, _| true,
             views: false,
@@ -40,35 +40,33 @@ impl Passes for Tpu {
             least: 1,
             most: usize::MAX,
         };
-        let mut pipeline = Pipeline::new(Tpu::NAME);
 
-        pipeline
-            .pass::<PreservePrecision>(config)
-            .add(Cse)
-            .add(Simplify { matched: false })
-            .pass::<Unsupported>(config)
-            .pass::<MergeDotsBackward>(config)
-            .pass::<FlashAttention>(config)
-            .pass::<FlashAttentionBackward>(config)
-            .pass::<AttentionLayouts>(config)
-            .pass::<FoldDotReshapes>(config)
-            .add(Simplify { matched: true })
-            .pass::<SwapPairs>(config)
-            .pass::<SinkReshapes>(config)
-            .pass::<DotStrength>(config)
-            .maybe(MergeDots::configured_with(config, target))
-            .pass::<CanonicalizeDots>(config)
-            .pass::<FusedDiamonds>(config)
-            .pass::<DotRows>(config)
-            .add(updates)
-            .pass::<FuseDots>(config)
-            .pass::<PlaceConcats>(config)
-            .pass::<Fusion>(config)
-            .pass::<PlaceViews>(config)
-            .pass::<Alone>(config)
-            .pass::<Concats>(config)
-            .pass::<HorizontalFusion>(config);
-
-        pipeline
+        vec![
+            Self::pass::<PreservePrecision>(true, config),
+            Self::add(Cse),
+            Self::add(Simplify { matched: false }),
+            Self::pass::<Unsupported>(true, config),
+            Self::pass::<MergeDotsBackward>(true, config),
+            Self::pass::<FlashAttention>(true, config),
+            Self::pass::<FlashAttentionBackward>(true, config),
+            Self::pass::<AttentionLayouts>(true, config),
+            Self::pass::<FoldDotReshapes>(true, config),
+            Self::add(Simplify { matched: true }),
+            Self::pass::<SwapPairs>(true, config),
+            Self::pass::<SinkReshapes>(true, config),
+            Self::pass::<DotStrength>(true, config),
+            Self::maybe(MergeDots::configured_with(config, target)),
+            Self::pass::<CanonicalizeDots>(true, config),
+            Self::pass::<FusedDiamonds>(true, config),
+            Self::pass::<DotRows>(true, config),
+            Self::add(updates),
+            Self::pass::<FuseDots>(true, config),
+            Self::pass::<PlaceConcats>(true, config),
+            Self::pass::<Fusion>(true, config),
+            Self::pass::<PlaceViews>(true, config),
+            Self::pass::<Alone>(true, config),
+            Self::pass::<Concats>(true, config),
+            Self::pass::<HorizontalFusion>(true, config),
+        ]
     }
 }

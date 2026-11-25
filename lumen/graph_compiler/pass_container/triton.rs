@@ -1,9 +1,9 @@
 //! Triton's passes: MPS's GPU pass list (see `mps.rs`) without the Neural Engine or a canonical dot layout, plus
 //! partial row reductions in GEMMs and horizontal fusion.
 
-use super::{Passes, Pipeline};
+use super::{Pass, Passes};
 use crate::graph_compiler::CompilerConfig;
-use crate::graph_compiler::device::{Device, DeviceModule, Triton};
+use crate::graph_compiler::device::{DeviceModule, Triton};
 use crate::graph_compiler::passes::alone::Alone;
 use crate::graph_compiler::passes::attention::{FlashAttention, FlashAttentionBackward};
 use crate::graph_compiler::passes::chunked_cross_entropy::ChunkedCrossEntropy;
@@ -29,7 +29,7 @@ use crate::graph_compiler::passes::updates::Updates;
 impl Passes for Triton {
     /// Triton's passes, in order. Merged dots pack for 8-column GEMM tiles, their slices read in place by what
     /// Triton fusion fuses. Update chains of 2 or more fuse: a kernel binds any number of buffers.
-    fn passes<'a>(config: &CompilerConfig) -> Pipeline<DeviceModule<'a, Triton>> {
+    fn passes<'a>(config: &CompilerConfig) -> Vec<Option<Pass<DeviceModule<'a, Triton>>>> {
         let fuse = config.fuse;
         let target = Target {
             reads: crate::codegen::fusion::triton::fusible,
@@ -41,37 +41,35 @@ impl Passes for Triton {
             least: 2,
             most: usize::MAX,
         };
-        let mut pipeline = Pipeline::new(Triton::NAME);
 
-        pipeline
-            .pass::<PreservePrecision>(config)
-            .add(Cse)
-            .add(Simplify { matched: false })
-            .pass::<Unsupported>(config)
-            .pass::<TakeAlongAxis>(config)
-            .pass::<ChunkedCrossEntropy>(config)
-            .pass_if::<MergeDotsBackward>(fuse, config)
-            .maybe(MergeDots::configured_with(config, target).filter(|_| fuse))
-            .pass_if::<FlashAttention>(fuse, config)
-            .pass_if::<FlashAttentionBackward>(fuse, config)
-            .pass::<LinearCrossEntropy>(config)
-            .add(Simplify { matched: true })
-            .pass::<SwapPairs>(config)
-            .pass::<DotStrength>(config)
-            .maybe(LinearReordering::configured_with(
+        vec![
+            Self::pass::<PreservePrecision>(true, config),
+            Self::add(Cse),
+            Self::add(Simplify { matched: false }),
+            Self::pass::<Unsupported>(true, config),
+            Self::pass::<TakeAlongAxis>(true, config),
+            Self::pass::<ChunkedCrossEntropy>(true, config),
+            Self::pass::<MergeDotsBackward>(fuse, config),
+            Self::maybe(MergeDots::configured_with(config, target).filter(|_| fuse)),
+            Self::pass::<FlashAttention>(fuse, config),
+            Self::pass::<FlashAttentionBackward>(fuse, config),
+            Self::pass::<LinearCrossEntropy>(true, config),
+            Self::add(Simplify { matched: true }),
+            Self::pass::<SwapPairs>(true, config),
+            Self::pass::<DotStrength>(true, config),
+            Self::maybe(LinearReordering::configured_with(
                 config,
                 crate::codegen::dot_general::triton::ROW_TILE,
-            ))
-            .pass::<SplitK>(config)
-            .maybe(fuse.then_some(updates))
-            .pass::<Diamonds>(config)
-            .pass_if::<PlaceConcats>(fuse, config)
-            .pass_if::<Fusion>(fuse, config)
-            .pass::<WideRows>(config)
-            .pass::<PlaceViews>(config)
-            .pass::<Alone>(config)
-            .pass_if::<HorizontalFusion>(fuse, config);
-
-        pipeline
+            )),
+            Self::pass::<SplitK>(true, config),
+            Self::maybe(fuse.then_some(updates)),
+            Self::pass::<Diamonds>(true, config),
+            Self::pass::<PlaceConcats>(fuse, config),
+            Self::pass::<Fusion>(fuse, config),
+            Self::pass::<WideRows>(true, config),
+            Self::pass::<PlaceViews>(true, config),
+            Self::pass::<Alone>(true, config),
+            Self::pass::<HorizontalFusion>(fuse, config),
+        ]
     }
 }
