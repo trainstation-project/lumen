@@ -2,6 +2,7 @@
 //! touches, and whether the touched region can stay resident in VMEM.
 #[cfg(lumen_tpu_linked)]
 use crate::DType;
+#[cfg(lumen_tpu_linked)]
 use crate::codegen::devices::tpu::Tpu;
 #[cfg(lumen_tpu_linked)]
 use crate::codegen::devices::tpu::{Kernel, Rows};
@@ -350,11 +351,4 @@ pub(crate) fn kernel(step: &StepBase) -> Result<Option<Kernel>, String> {
     kernel.scalars = p.scalars;
     kernel.context = Some(step.label.to_string());
     Ok(Some(kernel))
-}
-
-/// TPU fuses chains of 1 or more updates, always: even one update runs as an `updates` kernel.
-impl crate::codegen::dynamic_slice::UpdateChains for Tpu {
-    const LEAST: usize = 1;
-    const MOST: usize = usize::MAX;
-    const WITH_FUSE: bool = false;
 }
