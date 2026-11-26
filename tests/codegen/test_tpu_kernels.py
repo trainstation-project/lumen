@@ -797,6 +797,41 @@ def _rms(x, w):
     return x / np.sqrt((x * x).mean(-1, keepdims=True) + np.finfo(np.float32).eps) * w
 
 
+@pytest.mark.parametrize("flat", [False, True], ids=["ids", "flattened ids"])
+@pytest.mark.parametrize("dtype", ["float32", "bfloat16"])
+@pytest.mark.parametrize("ids", [[1, 1], [1, 42], [1, 64]])
+def test_an_embedding_lookup_joins_the_norm_reading_it(ids, dtype, flat):
+    """An embedding lookup feeding an RMS norm (a transformer's first) runs in the norm's row kernel, which fetches
+    the table's rows itself: one step, the looked-up rows still returned bit for bit (the residual stream) and the
+    norm as numpy's. A lookup at flattened ids reshaped back (Llama's) joins too."""
+    vocab, width = 1000, 256
+    rng = np.random.default_rng(len(ids) + ids[-1])
+    table = rng.standard_normal([vocab, width], dtype=np.float32)
+    table[:2, :2] = [[-0.0, np.inf], [1e-40, -1e-40]]
+    index = rng.integers(0, vocab, ids).astype(np.int32)
+    index.flat[:2] = [0, 1][: index.size]
+    weight = rng.standard_normal([width], dtype=np.float32)
+
+    def f(t, i, w):
+        """The looked-up rows and their RMS norm in float32."""
+        h = t[i.reshape(-1)].reshape(*i.shape, -1) if flat else t[i]
+        return h, F.rms_norm(h.float(), width, w)
+
+    meta = (
+        lumen.empty([vocab, width], dtype, "meta"),
+        lumen.empty(ids, "int32", "meta"),
+        lumen.empty([width], "float32", "meta"),
+    )
+    (step,) = lumen.graph_compiler.Plan(lumen.make_graph(f)(*meta), "tpu").steps()
+    assert step["label"].startswith("gather"), step["label"]
+    t = lumen.from_numpy(table).to(dtype=dtype).to("tpu")
+    h, y = lumen.compile(f)(t, lumen.from_numpy(index).to("tpu"), lumen.from_numpy(weight).to("tpu"))
+    rows = lumen.to_numpy(t.to("cpu").to(dtype="float32"))[index]
+    np.testing.assert_array_equal(lumen.to_numpy(h.to("cpu").to(dtype="float32")).view(np.uint8), rows.view(np.uint8))
+    finite = np.isfinite(rows).all(-1)
+    np.testing.assert_allclose(lumen.to_numpy(y.to("cpu"))[finite], _rms(rows, weight)[finite], rtol=1e-5, atol=1e-5)
+
+
 @pytest.mark.parametrize(
     "f, expected, dtype, shapes",
     [

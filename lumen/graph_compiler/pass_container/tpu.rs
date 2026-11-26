@@ -14,6 +14,7 @@ use crate::graph_compiler::passes::dot::{
     strength::DotStrength,
 };
 use crate::graph_compiler::passes::fusion::Fusion;
+use crate::graph_compiler::passes::gather_rows::GatherRows;
 use crate::graph_compiler::passes::horizontal::HorizontalFusion;
 use crate::graph_compiler::passes::merge_dots::{MergeDots, MergeDotsBackward, Target};
 use crate::graph_compiler::passes::place_concats::{Concats, PlaceConcats};
@@ -76,6 +77,9 @@ impl Passes for Tpu {
         if config.normalization_diamonds {
             passes.push(Box::new(FusedDiamonds::of::<Self>()));
             passes.push(Box::new(DotRows));
+            passes.push(Box::new(GatherRows {
+                fits: crate::codegen::row::tpu::fits,
+            }));
         }
 
         passes.push(Box::new(updates));

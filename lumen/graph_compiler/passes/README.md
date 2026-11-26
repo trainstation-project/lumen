@@ -48,22 +48,25 @@ its own pass list (`graph_compiler/pass_container/<device>.rs`); the passes are 
 22. `canonicalize_dots` - transpose dot operands into the layout the matmul kernels read [mps, tpu].
 23. `normalization_diamonds` (`FusedDiamonds`) - replace normalization rows with `row` fusions [tpu].
 24. `dot_rows` - fuse a matmul into the `row` fusion that reads its whole rows [tpu].
-25. `dynamic_update_slices` (`Updates`) - chains of `dynamic_update_slice` become one in-place fusion [mps, triton, tpu].
-26. `normalization_diamonds` (`Diamonds`) - find normalization rows and keep them for fusion [mps, triton].
-27. `fuse_dots` - fuse TPU matmuls with their slices, stacked lhs and epilogues [tpu].
-28. `place_concats` - let producers write directly into their concatenation slot [mps, triton, tpu].
-29. `fusion` - group elementwise chains, reductions, rows and epilogues into `Fusion` kernels [cuda, mps, triton, tpu].
-30. `wide_rows` - GEMMs feeding rows wider than a tile also write the row's partial reductions [triton].
-31. `place_views` - slices read only by GEMMs become strided views [mps, triton, tpu].
-32. `alone` - wrap leftover nodes that only a generated kernel can compute into one-node fusions [cuda, mps, triton, tpu].
-33. `concats` - copy the concatenations fusion could not place in place [mps, tpu].
-34. `horizontal_fusion` - merge independent small kernels of the same kind into one launch [triton, tpu].
+25. `gather_rows` - join a row gather (an embedding lookup) with the `row` fusion reading its rows, whose kernel
+    fetches them itself; the gathered value an extra output when the residual reads it [tpu].
+26. `dynamic_update_slices` (`Updates`) - chains of `dynamic_update_slice` become one in-place fusion [mps, triton, tpu].
+27. `normalization_diamonds` (`Diamonds`) - find normalization rows and keep them for fusion [mps, triton].
+28. `fuse_dots` - fuse TPU matmuls with their slices, stacked lhs and epilogues [tpu].
+29. `place_concats` - let producers write directly into their concatenation slot [mps, triton, tpu].
+30. `fusion` - group elementwise chains, reductions, rows and epilogues into `Fusion` kernels [cuda, mps, triton, tpu].
+31. `wide_rows` - GEMMs feeding rows wider than a tile also write the row's partial reductions [triton].
+32. `place_views` - slices read only by GEMMs become strided views [mps, triton, tpu].
+33. `alone` - wrap leftover nodes that only a generated kernel can compute into one-node fusions [cuda, mps, triton, tpu].
+34. `concats` - copy the concatenations fusion could not place in place [mps, tpu].
+35. `horizontal_fusion` - merge independent small kernels of the same kind into one launch [triton, tpu].
 
 ## Other files
 
 - `mod.rs` - the `Module` and `CompilerPass` traits.
 - `elementwise.rs` - building elementwise fusion bodies from node groups (used by fusion).
 - `multi_output.rs` - `Readers`: a fusion also writes a value other fusions read as an extra output.
+- `gather_rows.rs` - the `gather_rows` pass (a single file: its code is the same wherever it runs).
 - `rms_norm.rs` - `rms_norms` detects RMS norms written as primitives, so autograd can differentiate
   them from saved `1 / rms` (called from `graph/ir/python.rs`, not a pipeline pass).
 - `dot/` - the dot passes (`canonicalize`, `fold_reshapes`, `fuse`, `rows`, `split_k`, `strength`, `wide_rows`) and

@@ -31,6 +31,9 @@ have no gather kernel; they gather inside their elementwise fusions (`take_along
   - The TensorCore program: it DMAs the tile holding each wanted row, double-buffering the next block's
     fetches, and picks the row's sublane (and its half-word, for packed 16-bit rows) out of the tile.
 
+A row gather feeding a TPU norm usually doesn't run here: `passes::gather_rows` joins it with the norm's `row`
+fusion when the row kernel (`codegen/row/tpu`) can fetch the rows itself.
+
 ## How it runs
 
 - The SparseCore or TensorCore choice depends on the buffers' layout, which is known only at launch. For that
