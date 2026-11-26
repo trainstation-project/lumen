@@ -1473,6 +1473,7 @@ fn devices_run_the_passes_they_list() {
             "canonicalize_dots",
             "normalization_diamonds",
             "dot_rows",
+            "gather_rows",
             "dynamic_update_slices",
             "fuse_dots",
             "place_concats",

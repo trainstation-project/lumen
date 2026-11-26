@@ -13,6 +13,7 @@ pub(crate) mod diamonds;
 pub(crate) mod dot;
 pub(crate) mod elementwise;
 pub(crate) mod fusion;
+pub(crate) mod gather_rows;
 pub(crate) mod horizontal;
 #[cfg_attr(not(lumen_mps_linked), allow(dead_code))]
 pub(crate) mod linear_cross_entropy;

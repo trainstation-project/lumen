@@ -5,6 +5,7 @@
 #[cfg(lumen_tpu_linked)]
 use std::collections::HashMap;
 
+use crate::DType;
 #[cfg(lumen_tpu_linked)]
 use crate::codegen::devices::tpu::Tpu;
 #[cfg(lumen_tpu_linked)]
@@ -14,14 +15,109 @@ use crate::codegen::dot_general::tpu::block;
 #[cfg(lumen_tpu_linked)]
 use crate::codegen::row::RowCodegen;
 use crate::device::tpu::layout::Layout;
-#[cfg(lumen_tpu_linked)]
-use crate::graph::Var;
-use crate::graph::{Graph, Node, Primitive, TensorType};
+use crate::graph::{Graph, Node, Primitive, TensorType, Var};
 #[cfg(lumen_tpu_linked)]
 use crate::plan::StepBase;
 
 /// Most bytes a minimal float32 block of rows (16 rows of `n`) may take.
 pub(crate) const ROW_BYTES: usize = 1 << 21;
+
+/// Most bytes of table tiles a block of gathered rows fetches (one tile a row).
+const GATHER_BYTES: usize = 4 << 20;
+
+/// Most indices a gathered row fusion reads into scalar memory.
+const GATHER_IDS: usize = 8192;
+
+/// A row body opening with a row gather (`passes::gather_rows`): `body` reads the gathered rows as its first input in
+/// place of the table and ids (inputs 0 and 1 of the whole body), `table` and `count` (the indices) the gather's, `flat`
+/// whether the ids are one dimension (stored flat; else a tiled `[1, s]` row).
+pub(crate) struct Gathered {
+    pub(crate) body: Graph,
+    pub(crate) table: TensorType,
+    pub(crate) count: usize,
+    #[cfg_attr(not(lumen_tpu_linked), allow(dead_code))]
+    pub(crate) flat: bool,
+}
+
+impl Gathered {
+    /// Table rows one TPU tile holds (8 for 32-bit, 16 for 16-bit).
+    fn tile(&self) -> Option<usize> {
+        Layout::new(self.table.dtype, &[1, 1]).ok().map(|l| l.rows)
+    }
+
+    /// Bytes of table tiles one gathered row fetches.
+    fn row_bytes(&self) -> usize {
+        self.tile().unwrap_or(8) * self.table.shape[1] * self.table.dtype.size_of()
+    }
+}
+
+/// `body` split into its opening row gather and the rest, when it opens with one: a `Gather { axis: 0 }` of inputs 0
+/// (a `[vocab, n]` table) and 1 (int32 indices, all dims 1 but the last), then a reshape keeping its rows when only
+/// that reads it, and no other gather.
+pub(crate) fn gathered(body: &Graph) -> Option<Gathered> {
+    let nodes = body.nodes();
+    let first = nodes.first()?;
+    let inputs = body.inputs();
+
+    // A reshape of the rows alone, keeping each one whole, is what the rest reads.
+    let reshaped = nodes.get(1).is_some_and(|n| {
+        matches!(n.primitive, Primitive::Reshape { .. })
+            && n.inputs == [first.output]
+            && body.type_of(n.output).shape.last() == body.type_of(first.output).shape.last()
+            && !body.outputs().contains(&first.output)
+            && nodes[2..].iter().all(|m| !m.inputs.contains(&first.output))
+    });
+
+    let (rows, more) = match reshaped {
+        true => (nodes[1].output, nodes[2..].iter()),
+        false => (first.output, nodes[1..].iter()),
+    };
+
+    let opens = matches!(first.primitive, Primitive::Gather { axis: 0 })
+        && inputs.len() >= 2
+        && first.inputs == inputs[..2]
+        && !more
+            .clone()
+            .any(|n| matches!(n.primitive, Primitive::Gather { .. }));
+
+    if !opens {
+        return None;
+    }
+
+    let (table, ids) = (body.type_of(inputs[0]), body.type_of(inputs[1]));
+    let rank = ids.shape.len();
+
+    if table.shape.len() != 2
+        || ids.dtype != DType::I32
+        || rank == 0
+        || ids.shape[..rank - 1].iter().any(|&d| d != 1)
+    {
+        return None;
+    }
+
+    let mut rest = Graph::new();
+    let mut map: Vec<Var> = vec![usize::MAX; body.types.len()];
+    map[rows] = rest.input(body.type_of(rows).clone());
+
+    for &v in &inputs[2..] {
+        map[v] = rest.input(body.type_of(v).clone());
+    }
+
+    for node in more {
+        let args: Vec<Var> = node.inputs.iter().map(|&v| map[v]).collect();
+        map[node.output] = rest.apply(node.primitive.clone(), &args).ok()?;
+    }
+
+    let outputs: Vec<Var> = body.outputs().iter().map(|&v| map[v]).collect();
+    rest.set_outputs(&outputs).ok()?;
+
+    Some(Gathered {
+        body: rest,
+        table: table.clone(),
+        count: ids.numel(),
+        flat: rank == 1,
+    })
+}
 
 /// How a row fusion value lines up with its `rows x n` operand.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -260,6 +356,14 @@ pub(crate) fn readable(t: &TensorType, kind: Kind) -> bool {
 /// Whether the row fusion `body` runs on TPU: whole-row operands, row-shaped outputs and a
 /// minimal block within `ROW_BYTES`.
 pub(crate) fn fits(body: &Graph) -> bool {
+    if body
+        .nodes()
+        .iter()
+        .any(|n| matches!(n.primitive, Primitive::Gather { .. }))
+    {
+        return gathered(body).is_some_and(|g| gather_fits(&g) && fits(&g.body));
+    }
+
     let Some((rows, n)) = rows(body) else {
         return false;
     };
@@ -277,6 +381,22 @@ pub(crate) fn fits(body: &Graph) -> bool {
             .iter()
             .all(|&v| matches!(kinds[v], Kind::Full | Kind::PerRow))
         && unit * n * 4 <= ROW_BYTES
+}
+
+/// Whether the row kernel fetches `g`'s rows itself: a float32, bfloat16 or int32 table of whole lanes, the indices
+/// within `GATHER_IDS`, its rows the row fusion's (the gathered value a `Full` operand) and one row's tiles within
+/// `GATHER_BYTES`.
+fn gather_fits(g: &Gathered) -> bool {
+    let n = g.table.shape[1];
+
+    let full = kinds(&g.body).is_some_and(|k| k[g.body.inputs()[0]] == Kind::Full)
+        && rows(&g.body) == Some((g.count, n));
+
+    matches!(g.table.dtype, DType::F32 | DType::BF16 | DType::I32)
+        && n.is_multiple_of(128)
+        && g.count <= GATHER_IDS
+        && full
+        && g.row_bytes() <= GATHER_BYTES
 }
 
 /// The JSON node for `node` in a row kernel, tagged with its value's `kind`.
@@ -319,9 +439,12 @@ impl RowCodegen for Tpu {
     type Code = (String, String);
     type Options = ();
 
-    /// The spec of the row fusion `body`. Inputs are read as their buffers.
+    /// The spec of the row fusion `body`. Inputs are read as their buffers; a body opening with a row gather fetches
+    /// its first operand's rows from the table at the ids (`gather`), the rest following them.
     fn row(body: &Graph, _: &[bool], _: &()) -> Result<(String, String), String> {
         let failed = |why: &str| format!("a row fusion on TPU: {why}");
+        let gather = gathered(body);
+        let body = gather.as_ref().map_or(body, |g| &g.body);
         let (rows, n) = rows(body).ok_or_else(|| failed("no reduction over rows"))?;
         let kinds = kinds(body).ok_or_else(|| failed("values not of whole rows"))?;
 
@@ -373,32 +496,52 @@ impl RowCodegen for Tpu {
             .max()
             .unwrap_or(8);
 
-        let bm = block_rows(rows, n, unit).map_err(|e| failed(&e))?;
+        // A block's gathered rows fetch a table tile each.
+        let most = gather
+            .as_ref()
+            .map_or(usize::MAX, |g| (GATHER_BYTES / g.row_bytes()).max(1));
+
+        let bm = block_rows(rows, n, unit, most).map_err(|e| failed(&e))?;
+
+        let fetched = gather.as_ref().map(|g| {
+            format!(
+                ", \"gather\": {{\"vocab\": {}, \"dtype\": \"{}\", \"flat\": {}}}",
+                g.table.shape[0],
+                g.table.dtype.full_name(),
+                g.flat,
+            )
+        });
 
         let spec = format!(
-            "\"height\": {rows}, \"n\": {n}, \"block\": {bm}, \"inputs\": [{}], \"nodes\": [{}], \"outputs\": [{}]",
+            "\"height\": {rows}, \"n\": {n}, \"block\": {bm}, \"inputs\": [{}], \"nodes\": [{}], \"outputs\": [{}]{}",
             operands.join(", "),
             nodes.join(", "),
             outputs.join(", "),
+            fetched.as_deref().unwrap_or(""),
         );
 
-        Ok((format!("row_{rows}x{n}_{bm}"), spec))
+        let kernel = match gather {
+            Some(_) => format!("row_gather_{rows}x{n}_{bm}"),
+            None => format!("row_{rows}x{n}_{bm}"),
+        };
+
+        Ok((kernel, spec))
     }
 }
 
 /// Picks how many of `rows` rows of `n` elements a step holds: a multiple of `unit` dividing `rows` within the
-/// ROW_BYTES budget (counted at 4 bytes an element), or all rows when there are fewer than `unit` or no such multiple
-/// divides them and they fit twice the budget.
+/// ROW_BYTES budget (counted at 4 bytes an element) and `most` rows, or all rows when there are fewer than `unit` or
+/// no such multiple divides them and they fit twice both.
 #[cfg(lumen_tpu_linked)]
-pub(crate) fn block_rows(rows: usize, n: usize, unit: usize) -> Result<usize, String> {
+pub(crate) fn block_rows(rows: usize, n: usize, unit: usize, most: usize) -> Result<usize, String> {
     if rows < unit {
         return Ok(rows);
     }
 
-    let cap = (ROW_BYTES / (n * 4)).max(unit);
+    let cap = (ROW_BYTES / (n * 4)).min(most).max(unit);
 
     block(rows, unit, cap)
-        .or_else(|| (rows * n * 4 <= 2 * ROW_BYTES).then_some(rows))
+        .or_else(|| (rows * n * 4 <= 2 * ROW_BYTES && rows <= 2 * most).then_some(rows))
         .ok_or_else(|| "its rows have no block of whole tiles".into())
 }
 

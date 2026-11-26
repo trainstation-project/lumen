@@ -520,7 +520,9 @@ impl Kernel {
         Ok(self.push(Op::Reshape(shape), &[src], vec![ty])[0])
     }
 
-    /// Ref `src` reinterpreted as a same-width `dtype`.
+    /// Ref `src` reinterpreted as `dtype`: of the same width, or (a ref of rank 2 or more) of another, its
+    /// second-to-last dimension scaled by the widths' ratio (`pltpu.bitcast`: an int32 `[p, n]` is a bfloat16 `[2p, n]`,
+    /// two rows a word).
     pub fn ref_bitcast(&mut self, src: Var, dtype: DType) -> Result<Var, String> {
         self.check(&[src])?;
 
@@ -529,12 +531,26 @@ impl Kernel {
         }
 
         let (t, space) = self.reference(src)?;
+        let (from, to) = (t.dtype.bits(), dtype.bits());
+        let mut shape = t.shape.clone();
+        let rank = shape.len();
+        let cannot = || format!("a ref of {t} cannot be read as {dtype}");
 
-        if dtype.bits() != t.dtype.bits() {
-            return Err(format!("a ref of {} cannot be read as {dtype}", t.dtype));
+        if from != to {
+            if rank < 2 || to == 0 || from == 0 {
+                return Err(cannot());
+            }
+
+            let rows = shape[rank - 2] * from;
+
+            if !rows.is_multiple_of(to) {
+                return Err(cannot());
+            }
+
+            shape[rank - 2] = rows / to;
         }
 
-        let ty = Type::Ref(TensorType::new(dtype, &t.shape), space);
+        let ty = Type::Ref(TensorType::new(dtype, &shape), space);
         Ok(self.push(Op::RefBitcast(dtype), &[src], vec![ty])[0])
     }
 

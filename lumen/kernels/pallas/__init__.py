@@ -371,7 +371,8 @@ class Ref:
         return Ref(self.kernel, self.kernel.reshape(self.var, list(shape)))
 
     def bitcast(self, dtype):
-        """Its bits as ``dtype``, of its width."""
+        """Its bits as ``dtype``: of its width, or of another, its second-to-last dimension scaled by their ratio (an
+        int32 ``[p, n]`` ref is a bfloat16 ``[2p, n]`` one, as ``pltpu.bitcast`` reads refs)."""
         return Ref(self.kernel, self.kernel.ref_bitcast(self.var, dtype))
 
 
@@ -598,7 +599,7 @@ def async_copy(src, dst, sem):
 
 
 def bitcast(x, dtype):
-    """A value's or ref's bits as ``dtype``, of its width (``pltpu.bitcast``)."""
+    """A value's bits as ``dtype``, of its width, or a ref's (``Ref.bitcast``, ``pltpu.bitcast``)."""
     if isinstance(x, Ref):
         return x.bitcast(dtype)
     return TracedTensor(x.graph, x.graph.bits("bitcast", [x.var], dtype=dtype))

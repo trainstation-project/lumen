@@ -47,13 +47,18 @@ describe its launch. `elementwise/triton` uses them. The per-reduction emit help
 functions are used outside this folder:
 
 - `fusible` and `fits`: the diamonds and fusion passes call them to decide what may join a row fusion
-  (dtypes of 32 bits or less, a minimal block within `ROW_BYTES`).
+  (dtypes of 32 bits or less, a minimal block within `ROW_BYTES`). `fits` also takes a body opening with a row
+  gather (`gathered`: `passes::gather_rows` joins an embedding lookup with the norm reading it) of a float32,
+  bfloat16 or int32 table of whole lanes, at most `GATHER_IDS` ids, a block's table tiles within `GATHER_BYTES`.
 - `block_rows`: picks the rows per step.
 - `kernel(step)`: wraps the spec as module `lumen.codegen.row.tpu.kernel` with `Rows::Split`.
 - `rows`, `readable` and `row_node`: reused by `dot_general/tpu/row.rs` and the TPU dot-rows pass.
 
 `kernel.py::program(spec)` streams blocks of whole rows through VMEM and replays the spec's nodes, each
-tagged with its kind (`full`, `row`, `lanes`, `scalar`).
+tagged with its kind (`full`, `row`, `lanes`, `scalar`). With a `gather`, the first operand isn't streamed: each
+step reads its ids from SMEM, DMAs the table tile holding each row as 32-bit words, picks the row's word by an
+integer sum over the tile (a 16-bit row's half shifted out and paired with its neighbor's), and reads the words back
+in the table's dtype (`Ref.bitcast`), so the rows arrive bit for bit, subnormals included.
 
 ## Column partials
 
